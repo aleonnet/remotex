@@ -355,6 +355,12 @@ pub struct Round {
 }
 
 impl Round {
+    /// Whether this round's access unit will be a keyframe: one is owed, or the
+    /// stream has not produced one yet.
+    pub fn keyframe(&self) -> bool {
+        self.live.keyframe_owed
+    }
+
     /// The quality the encoder is running at — which can sit below
     /// [`DesktopStream::quality`] while a stream that refused a retune waits for
     /// [`DesktopStream::put_back`] to try again.
