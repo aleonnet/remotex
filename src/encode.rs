@@ -25,6 +25,8 @@ use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
+use wlshare_vp9::walk::{LAG_CLEAR, QualityWalk};
+
 use crate::config::{Chroma, RenderPlan};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{Held, ServerMsg, Tile, VideoUnit};
@@ -84,151 +86,6 @@ const SETTLE_IDLE: Duration = Duration::from_millis(500);
 /// is for.
 const SETTLE_TICK: Duration = Duration::from_millis(250);
 
-/// How long queueing an access unit may block before the frame counts as one the link
-/// could not keep up with.
-///
-/// More than half a frame at 30 Hz. The queues between here and the socket are
-/// deliberately shallow ([`crate::session::FRAME_BUFFER`]), so
-/// this stays at zero while the link has room and becomes obvious the moment it does
-/// not — which is the whole reason those queues are shallow.
-const BEHIND_BLOCK: Duration = Duration::from_millis(20);
-
-/// Consecutive slow frames before quality is given up. Two rather than one, so a
-/// single unlucky frame — a keyframe going out, a scheduler hiccup — is not a verdict
-/// about the link.
-const BEHIND_FRAMES: u32 = 2;
-
-/// How long the link must have been clear before quality is taken back, and the
-/// fewest clear frames that span must hold: deliberately far more than
-/// [`BEHIND_FRAMES`]. Quick to give up, slow to reclaim, so a link that is
-/// intermittently bad settles at a quality it can hold instead of oscillating
-/// around one it cannot. A span rather than a count of frames, because the frames
-/// come as slowly as the link has been slowed to: thirty of them at four a second
-/// was a wait no burst of motion ever finished, and a walk slowed to the floor by
-/// its first keyframe stayed there for the session.
-const CLEAR_SPAN: Duration = Duration::from_secs(1);
-/// See [`CLEAR_SPAN`].
-const CLEAR_FRAMES: u32 = 4;
-
-/// How long after a keyframe the verdicts wait. A keyframe is the whole picture and
-/// no verdict itself, but the frames behind it queue behind its transmission, and
-/// that queue says how big the keyframe was, not what the link bears: read as lag,
-/// the first keyframe of a 5 Mbit/s session put the walk on the floor at a quarter
-/// of the frames within two seconds. Twice [`ADJUST_COOLDOWN`], for a keyframe that
-/// takes a second and a half to cross a 2 Mbit/s link.
-const KEYFRAME_HOLD: Duration = Duration::from_secs(2);
-
-/// The least time between two adjustments, so a burst of slow frames is one decision
-/// rather than one per frame.
-const ADJUST_COOLDOWN: Duration = Duration::from_secs(1);
-
-/// The least time between a step up and the step down that walks it back. Far
-/// shorter than [`ADJUST_COOLDOWN`]: a step up the link refuses shows in the next
-/// few frames, and every frame it is left in place is queue — at 5 Mbit/s a step
-/// from 61 to 85 left in place for the full cooldown put the picture a second
-/// behind before it was walked back.
-const REFUSAL_COOLDOWN: Duration = Duration::from_millis(300);
-
-/// How much the lag must have fallen since the last step down for the queue to
-/// count as draining, as a fraction of what it was: a fifth. A step down that put
-/// the stream under the link leaves the queue it built to drain, and the lag stays
-/// high while it does — for seconds, on a link only a little wider than the
-/// stream — without saying the step was too small. A second step on that lag is
-/// the overshoot measured at 5 Mbit/s, 69 to the floor in three seconds for a link
-/// that carried 55; so while the lag is falling this fast the walk waits, and
-/// steps again only when it has stopped falling.
-const DRAIN_FRACTION: u32 = 5;
-
-/// How much of the dial one step down gives up on a link that is a little behind
-/// ([`LAG_BEHIND`]), and how much the first step back up reclaims. Bigger down than
-/// up, for the same reason [`CLEAR_FRAMES`] is bigger than [`BEHIND_FRAMES`].
-///
-/// The loop speaks quality rather than a quantizer because a quantizer is the codec's
-/// own scale — VP9's is 0–63 — while the dial is the gateway's; the mapping is
-/// [`crate::vp9`]'s. Ten points down and three back is roughly four quantizer steps
-/// against one, on the dial's scale.
-const QUALITY_STEP_DOWN: u8 = 10;
-/// See [`QUALITY_STEP_DOWN`].
-const QUALITY_STEP_UP: u8 = 3;
-
-/// The most one step back up reclaims. Every step up the link takes doubles the next,
-/// from [`QUALITY_STEP_UP`] to this, and a step down puts it back: a link that has
-/// recovered is on the dial again within a few seconds of motion, where three points
-/// a second took twenty-three seconds from the floor to a dial of 90 — most of a
-/// session, on a link that only stumbled.
-const QUALITY_STEP_UP_MAX: u8 = 24;
-
-/// How long a quality the link refused stays out of reach.
-///
-/// A step down within [`REFUSAL_WINDOW`] of a step up says the link would not take
-/// the quality it was just given, and the walk keeps under that quality for this long
-/// before it probes there again, with the smallest step — TCP's slow-start threshold,
-/// on the dial. Without it a walk whose steps double on the way up would spend a
-/// session bouncing off the same quality: measured at 5 Mbit/s, plain steps of three
-/// already cycled 47 → 59 → 49 → 59 every ten seconds.
-const REFUSAL_HOLD: Duration = Duration::from_secs(15);
-/// See [`REFUSAL_HOLD`].
-const REFUSAL_WINDOW: Duration = Duration::from_secs(4);
-
-/// Queueing lag past which an *adaptive* plan counts a frame as one the link
-/// could not keep up with, beside [`BEHIND_BLOCK`] — the paint window's own
-/// signal, measured by [`crate::feedback::LinkFeedback`] as how long the oldest
-/// unacknowledged batch has been owed beyond the link's floor.
-///
-/// Well under [`crate::ws`]'s 150 ms lag gate on purpose: by the time that gate
-/// parks the window the backpressure chain will reach [`BEHIND_BLOCK`] on its
-/// own, so a threshold up there would never fire first. This one moves quality
-/// while the window is still open — before the stall, which is the point of
-/// asking for `render_adaptive` at all.
-const LAG_BEHIND: Duration = Duration::from_millis(60);
-
-/// Lag that is not a little behind but a lot. A step down taken at [`LAG_HEAVY`]
-/// gives up twice [`QUALITY_STEP_DOWN`], and one at [`LAG_SEVERE`] three times and
-/// halves the frame rate besides, whatever the quality: a link this far behind has
-/// a queue growing by the frame, and ten points a second was measured to take seven
-/// seconds to reach the floor while the picture fell a second behind its desktop.
-/// Both are read from the same signal as [`LAG_BEHIND`], or from how long the push
-/// blocked where that is the larger.
-const LAG_HEAVY: Duration = Duration::from_millis(150);
-/// See [`LAG_HEAVY`].
-const LAG_SEVERE: Duration = Duration::from_millis(400);
-
-/// Queueing lag below which an adaptive plan counts a frame as clear. The gap
-/// between this and [`LAG_BEHIND`] is hysteresis: a link hovering between the
-/// two earns neither a coarser picture nor its quality back.
-const LAG_CLEAR: Duration = Duration::from_millis(30);
-
-/// The coarsest a moving picture is coded at before the frames go: the walk's
-/// floor, and the point where it hands off to the frame rate. Fixed rather than
-/// configured, as every adaptive stream's is — WebRTC's quality scaler hands off
-/// to resolution and frame rate at an internal quantizer threshold in the
-/// coarsest fifth of VP9's range, TigerVNC's AutoSelect has a built-in bottom
-/// rung — because past it a finer quantizer step buys nothing a viewer can see,
-/// and the settle sharpens a quiet desktop at the dial whatever the walk holds.
-/// A dial below it is on the floor from the start and gives up frames alone.
-const QUALITY_FLOOR: u8 = 20;
-
-/// How many times the frame interval may be doubled — 30 Hz down to 3.75 — for a
-/// link still behind once the quality is on the floor.
-///
-/// Bytes on the wire are bytes per frame times frames per second, and the floor
-/// bounds only the first: on a 2 Mbit/s link the picture ran 0.7 s behind at the
-/// floor with nothing left to give up, the engine stalled a fifth of the session,
-/// and the frames that did arrive were both coarse and late. Fewer frames are
-/// fresh frames. The quality goes first because a coarser picture of every
-/// movement reads better than a sharp one of every fourth, and comes back last
-/// for the same reason.
-const SLOW_MAX: u8 = 3;
-
-/// The verdicts a step down is judged on: the last four frames, of which
-/// [`BEHIND_FRAMES`] behind, the latest among them, give quality up.
-///
-/// A window rather than a run of consecutive behind frames, because the queueing a
-/// link that is barely too small shows is intermittent — a batch acknowledged
-/// between two that were owed too long — and a run that a single clear frame reset
-/// took eleven seconds per step on a 5 Mbit/s link that was plainly behind.
-const VERDICT_WINDOW: u32 = 4;
-
 /// The shortest gap between two access units.
 ///
 /// The engines' frame boundaries are not a frame *rate*: RDP's is one `outputs`
@@ -247,260 +104,21 @@ const VERDICT_WINDOW: u32 = 4;
 /// 33_333 µs is the interval `VIDEO_FRAME_US` in `frontend/src/videoDecoder.ts`
 /// already stamps access units with, so the timestamps stop being a fiction. It is
 /// the interval a link with room gets; one that is behind on the floor gets it
-/// doubled, up to [`SLOW_MAX`] times ([`Congestion::interval`]).
+/// doubled, up to three times ([`QualityWalk::interval`]).
 const VIDEO_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
 
-/// What the link will bear, on the 1–100 dial and in frames per second.
-///
-/// One-directional by construction, and that is the whole design rather than a
-/// simplification: `dial` is a *ceiling*, so this can only ever make the picture
-/// coarser than the operator asked for and never finer. What TCP hides is headroom —
-/// you can tell you are behind, never how far ahead you could be — and this never needs
-/// to know, because exceeding the configured quality was never a goal. The worst it can
-/// do is coarsen a link that was already struggling.
-///
-/// Two knobs, in a fixed order. Quality goes down first, by more the further behind
-/// the link is ([`LAG_HEAVY`], [`LAG_SEVERE`]), to [`QUALITY_FLOOR`]; then the frame
-/// interval doubles, to [`SLOW_MAX`] times. On the way back the frame rate comes
-/// first and the quality after, in steps that double while the link keeps taking
-/// them ([`QUALITY_STEP_UP_MAX`]) and stop short of a quality it refused
-/// ([`REFUSAL_HOLD`]).
-///
-/// What the walk holds is what a *moving* picture is coded at. A desktop that goes
-/// quiet below the dial is sharpened once at the dial ([`settle_stream`]), and the
-/// walk keeps its place through that: the link did not get any wider because the
-/// screen stopped, and starting every burst of motion from the dial was measured to
-/// put the picture half a second behind at every one.
-///
-/// In dial units rather than a quantizer: a quantizer is the codec module's own scale
-/// (VP9's runs 0–63), and the mapping lives there, so nothing here knows one.
-///
-/// Pure, and takes `now` rather than reading a clock, so every one of its decisions is
-/// testable without waiting for one.
-struct Congestion {
-    /// The configured quality: the finest this will ever ask for.
-    dial: u8,
-    /// Whether the client's lag is a signal this walk listens to. Only an
-    /// adaptive plan's; without it the walk keeps its historical shape, pressure
-    /// only, and the lag handed to [`Self::observe`] is ignored.
-    lag_aware: bool,
-    /// The quality in force for a moving picture.
-    quality: u8,
-    /// How many times the frame interval is doubled, at most [`SLOW_MAX`].
-    slow: u8,
-    /// The last [`VERDICT_WINDOW`] verdicts, newest in the low bit, a set bit for
-    /// a frame the link was behind on.
-    recent: u8,
-    /// The clear frames since the link was last behind: when the first came, and
-    /// how many.
-    clear: Option<(tokio::time::Instant, u32)>,
-    /// When the walk last moved, for [`ADJUST_COOLDOWN`]. `None` before it ever
-    /// has, so the first verdict does not have to wait out a cooldown that never ran.
-    changed_at: Option<tokio::time::Instant>,
-    /// Until when the verdicts wait, after a keyframe ([`KEYFRAME_HOLD`]).
-    held_until: Option<tokio::time::Instant>,
-    /// What the next step up reclaims: [`QUALITY_STEP_UP`], doubling with every step
-    /// up the link takes, to [`QUALITY_STEP_UP_MAX`].
-    reclaim: u8,
-    /// When the last step up was taken and the quality it left, while it is the
-    /// last move made: a step down within [`REFUSAL_WINDOW`] of it is a refusal,
-    /// walked back to that quality.
-    reclaimed: Option<(u8, tokio::time::Instant)>,
-    /// The highest quality the walk may reach while a refusal holds, and when it
-    /// was refused: halfway between the quality the link bore and the one it would
-    /// not take, for [`REFUSAL_HOLD`].
-    refused: Option<(u8, tokio::time::Instant)>,
-    /// The lag the last step down was taken on, while no step up has followed:
-    /// what the next step down waits to see stop falling ([`DRAIN_FRACTION`]).
-    stepped_on: Option<Duration>,
-}
-
-/// Where the walk stands after a move: what to code the next round at, and how long
-/// to wait before it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Pace {
-    quality: u8,
-    interval: Duration,
-}
-
-impl Congestion {
-    fn new(dial: u8, adaptive: bool) -> Self {
-        Self {
-            dial,
-            lag_aware: adaptive,
-            quality: dial,
-            slow: 0,
-            recent: 0,
-            clear: None,
-            changed_at: None,
-            held_until: None,
-            reclaim: QUALITY_STEP_UP,
-            reclaimed: None,
-            refused: None,
-            stepped_on: None,
-        }
-    }
-
-    /// The gap the next round waits for: [`VIDEO_FRAME_INTERVAL`], doubled once per
-    /// step the link has been slowed.
-    fn interval(&self) -> Duration {
-        VIDEO_FRAME_INTERVAL * (1u32 << self.slow)
-    }
-
-    fn pace(&self) -> Pace {
-        Pace { quality: self.quality, interval: self.interval() }
-    }
-
-    /// A settle went out: one frame at the dial for a desktop that went quiet
-    /// ([`settle_stream`]). The walk keeps its quality — the screen stopping says
-    /// nothing about the link — and starts its verdicts over from here, with the
-    /// cooldown restarted like any other move, so the frames queued behind that one
-    /// large picture are not read as the link giving way. The clear run starts
-    /// over too: the quiet is no evidence of room, and a run that spanned it would
-    /// take quality back on the first frame of every burst. And a step up before
-    /// the settle is no longer the last move: lag behind the settle's frame is
-    /// that frame's, not a refusal of the step.
-    fn settle(&mut self, now: tokio::time::Instant) {
-        self.recent = 0;
-        self.clear = None;
-        self.changed_at = Some(now);
-        self.stepped_on = None;
-        self.reclaimed = None;
-    }
-
-    /// A keyframe went out: the verdicts wait [`KEYFRAME_HOLD`] for it to cross
-    /// the link, and start over after it.
-    fn keyframe(&mut self, now: tokio::time::Instant) {
-        self.recent = 0;
-        self.clear = None;
-        self.stepped_on = None;
-        self.held_until = Some(now + KEYFRAME_HOLD);
-    }
-
-    /// Record how long queueing a frame blocked and how far behind the client's
-    /// paint window is, and return where the walk now stands if that moved it.
-    fn observe(&mut self, blocked: Duration, lag: Duration, now: tokio::time::Instant) -> Option<Pace> {
-        let lag = if self.lag_aware { lag } else { Duration::ZERO };
-        if self.held_until.is_some_and(|until| now < until) {
-            return None;
-        }
-        self.held_until = None;
-        let behind = blocked >= BEHIND_BLOCK || lag >= LAG_BEHIND;
-        self.recent = ((self.recent << 1) | u8::from(behind)) & ((1 << VERDICT_WINDOW) - 1);
-        if behind {
-            self.clear = None;
-        } else if lag <= LAG_CLEAR {
-            // Between the two lag thresholds a frame neither counts nor ends the
-            // run: not evidence of room, not evidence against it either.
-            self.clear = Some(self.clear.map_or((now, 1), |(since, count)| (since, count + 1)));
-        }
-        let lag = lag.max(blocked);
-        // Walking back a step up the link refused does not wait out the full
-        // cooldown: the refusal is in the next few frames, and every one is queue.
-        // Only while that step is the last move, though: a settle after it is a
-        // move too, and the frames behind its picture are owed the full cooldown.
-        let cooldown = if behind && self.reclaimed.is_some_and(|(_, at)| self.changed_at == Some(at)) {
-            REFUSAL_COOLDOWN
-        } else {
-            ADJUST_COOLDOWN
-        };
-        if self.changed_at.is_some_and(|at| now.saturating_duration_since(at) < cooldown) {
-            return None;
-        }
-        let clear = self
-            .clear
-            .is_some_and(|(since, count)| count >= CLEAR_FRAMES && now.saturating_duration_since(since) >= CLEAR_SPAN);
-        let moved = if behind && self.recent.count_ones() >= BEHIND_FRAMES {
-            // The queue the last step left behind is still draining: the step was
-            // enough, and the verdicts wait for the lag to stop falling.
-            if self.stepped_on.is_some_and(|on| lag + on / DRAIN_FRACTION < on) {
-                // Looked at again a cooldown from now, against the lag as it is.
-                self.stepped_on = Some(lag);
-                self.changed_at = Some(now);
-                return None;
-            }
-            self.give_up(lag, now)
-        } else if clear {
-            self.take_back(now)
-        } else {
-            return None;
-        };
-        if !moved {
-            return None;
-        }
-        self.recent = 0;
-        self.clear = None;
-        self.changed_at = Some(now);
-        Some(self.pace())
-    }
-
-    /// Give quality up, or frames once there is no quality left to give. `false`
-    /// when there is nothing left of either.
-    fn give_up(&mut self, lag: Duration, now: tokio::time::Instant) -> bool {
-        let steps = if lag >= LAG_SEVERE {
-            3
-        } else if lag >= LAG_HEAVY {
-            2
-        } else {
-            1
-        };
-        let mut moved = false;
-        let on_floor = self.quality <= QUALITY_FLOOR;
-        if let Some((from, _)) = self.reclaimed.filter(|(_, at)| now.saturating_duration_since(*at) <= REFUSAL_WINDOW) {
-            // A step up the link refused: back to the quality it bore, and the
-            // walk may come halfway back up towards the one it would not take.
-            // A link that is still behind there steps down from it as usual.
-            let cap = from + (self.quality - from) / 2;
-            self.refused = Some((cap, now));
-            if self.quality > from {
-                self.quality = from;
-                moved = true;
-            }
-        } else if !on_floor {
-            self.quality = self.quality.saturating_sub(QUALITY_STEP_DOWN * steps).max(QUALITY_FLOOR);
-            moved = true;
-        }
-        if (on_floor || steps == 3) && self.slow < SLOW_MAX {
-            self.slow += 1;
-            moved = true;
-        }
-        self.reclaim = QUALITY_STEP_UP;
-        self.reclaimed = None;
-        self.stepped_on = Some(lag);
-        moved
-    }
-
-    /// Take frames back first, then quality: a step that doubles while the link
-    /// keeps taking them, held under a quality the link refused, and never past
-    /// the dial. `false` when there is nothing to take back.
-    fn take_back(&mut self, now: tokio::time::Instant) -> bool {
-        if self.slow > 0 {
-            self.slow -= 1;
-            self.stepped_on = None;
-            return true;
-        }
-        if self.refused.is_some_and(|(_, at)| now.saturating_duration_since(at) >= REFUSAL_HOLD) {
-            self.refused = None;
-        }
-        let ceiling = self.refused.map_or(self.dial, |(cap, _)| cap).min(self.dial);
-        let wanted = self.quality.saturating_add(self.reclaim).min(ceiling);
-        if wanted <= self.quality {
-            return false;
-        }
-        // A step the refusal cut short is the last of its run: the probe past the
-        // refused quality, once the hold is over, starts small again.
-        self.reclaim = if wanted == ceiling && ceiling < self.dial { QUALITY_STEP_UP } else { self.reclaim.saturating_mul(2).min(QUALITY_STEP_UP_MAX) };
-        self.reclaimed = Some((self.quality, now));
-        self.quality = wanted;
-        self.stepped_on = None;
-        true
-    }
-}
 
 /// The stream, and what the link will bear.
 struct Video {
     stream: DesktopStream,
-    congestion: Congestion,
+    /// wlshare's walk of the dial, with the plan's quality as its ceiling and
+    /// [`VIDEO_FRAME_INTERVAL`] as the frame it slows from. Its verdicts are the
+    /// push's blocking ([`VideoSink::adjust`]) and, on an adaptive plan, the paint
+    /// window's lag ([`LinkFeedback::lag`]) — whose threshold sits well under
+    /// [`crate::ws`]'s 150 ms lag gate on purpose: by the time that gate parks the
+    /// window the backpressure chain blocks the push on its own, so the walk
+    /// moves quality while the window is still open, before the stall.
+    congestion: QualityWalk,
     /// The earliest the next round may be encoded — see [`VIDEO_FRAME_INTERVAL`].
     /// `None` before the first one, so a freshly connected desktop paints without
     /// waiting out an interval.
@@ -612,7 +230,7 @@ struct Shared {
     /// Frames the encoder produced no bitstream for. Must stay zero.
     skipped: AtomicU64,
     /// Frames sent coarser than the dial asked for, and the lowest quality the link
-    /// ever forced. The whole measurement of [`Congestion`].
+    /// ever forced. The whole measurement of the walk.
     coarsened: AtomicU64,
     /// Starts at [`video::QUALITY_MAX`] and only ever falls, because "the worst" is a
     /// minimum on this scale.
@@ -644,7 +262,7 @@ impl Shared {
             failure: Mutex::default(),
             video: tokio::sync::Mutex::new(Video {
                 stream: DesktopStream::new(quality, chroma),
-                congestion: Congestion::new(quality, adaptive),
+                congestion: QualityWalk::new(quality, VIDEO_FRAME_INTERVAL, adaptive),
                 due_at: None,
                 coarse_at: None,
             }),
@@ -824,19 +442,19 @@ impl VideoSink {
         // refused a retune is still coarse, and the settle it owes must not be
         // cleared by a table that has already reached the dial.
         let quality = round.quality();
-        video.coarse_at = (quality < video.congestion.dial).then_some(now);
+        video.coarse_at = video.congestion.coarse(quality).then_some(now);
         // A round above what the walk holds is the settle's one frame at the dial
         // ([`settle_stream`]): the rounds after it go back to what the link bears.
         // There is no encoder home to refuse this — the round has it — and
         // `put_back` brings the returning one to it.
-        let walk = video.congestion.quality;
+        let walk = video.congestion.quality();
         let settling = quality > walk;
         if settling && let Err(e) = video.stream.set_quality(walk) {
             warn!("{}: could not return the video quality to {walk} after a settle: {e:#}", self.engine);
         }
         let keyframe = round.keyframe();
         if keyframe {
-            video.congestion.keyframe(now);
+            video.congestion.keyframe(now.into_std());
         }
         // Dropped before the spawn and the push: the whole point is that `damage`
         // gets the lock back while the worker encodes.
@@ -916,25 +534,25 @@ impl VideoSink {
     async fn adjust(&self, blocked: Duration, quality: u8, exempt: bool) {
         self.shared.worst_quality.fetch_min(u64::from(quality), Ordering::Relaxed);
         let mut video = self.shared.video.lock().await;
-        if quality < video.congestion.dial {
+        if video.congestion.coarse(quality) {
             self.shared.coarsened.fetch_add(1, Ordering::Relaxed);
         }
         if exempt {
             return;
         }
-        let dial = video.congestion.dial;
+        let dial = video.congestion.ceiling();
         let now = tokio::time::Instant::now();
         // The client's own half of the verdict. Free to read whether or not the
         // walk is lag-aware; `observe` is what knows.
         let lag = self.shared.feedback.lag(now);
-        let before = video.congestion.quality;
-        let Some(pace) = video.congestion.observe(blocked, lag, now) else {
+        let before = video.congestion.quality();
+        let Some(pace) = video.congestion.observe(blocked, lag, now.into_std()) else {
             return;
         };
         if pace.quality != before && let Err(e) = video.stream.set_quality(pace.quality) {
             // The stream kept the quality it had, so the walk does too: its next
             // verdict starts from what is actually in force.
-            video.congestion.quality = before;
+            video.congestion.stays_at(before);
             warn!("{}: could not move the video quality to {}: {e:#}", self.engine, pace.quality);
         } else {
             debug!(
@@ -1221,11 +839,11 @@ async fn settle_stream(engine: &'static str, shared: &Shared) {
     if video.stream.round_out()
         || video.stream.dirty()
         || now.saturating_duration_since(coarse_at) < SETTLE_IDLE
-        || (video.congestion.lag_aware && shared.feedback.lag(now) > LAG_CLEAR)
+        || (video.congestion.lag_aware() && shared.feedback.lag(now) > LAG_CLEAR)
     {
         return;
     }
-    let dial = video.congestion.dial;
+    let dial = video.congestion.ceiling();
     // The encoder first and the walk only after it: on failure nothing is recorded,
     // the settle stays owed, and the next tick tries again. The picture on screen is
     // still a good one, only a coarser one.
@@ -1233,10 +851,10 @@ async fn settle_stream(engine: &'static str, shared: &Shared) {
         warn!("{engine}: could not take the video quality back to {dial}: {e:#}");
         return;
     }
-    video.congestion.settle(now);
+    video.congestion.settle(now.into_std());
     video.stream.refresh();
     video.coarse_at = None;
-    let walk = video.congestion.quality;
+    let walk = video.congestion.quality();
     drop(video);
     debug!("{engine}: the desktop went quiet below the dial; settling it at {dial} (motion stays at {walk})");
     shared.round_returned.notify_one();
@@ -2045,7 +1663,7 @@ mod tests {
     /// the way [`VideoSink::adjust`] leaves it.
     async fn coarsen(sink: &VideoSink, quality: u8) {
         let mut video = sink.shared.video.lock().await;
-        video.congestion.quality = quality;
+        video.congestion.stays_at(quality);
         video.stream.set_quality(quality).expect("a live encoder takes a new quality");
     }
 
@@ -2120,7 +1738,7 @@ mod tests {
             let mut video = sink.shared.video.lock().await;
             video.stream.refuse_retunes(1);
             let round = video.stream.take_round().unwrap().expect("damage makes a round");
-            video.congestion.quality = 60;
+            video.congestion.stays_at(60);
             video.stream.set_quality(60).expect("a table with its streams out takes anything");
             video.stream.put_back(round);
             assert_eq!(video.stream.quality(), 60, "the table is at the dial");
@@ -2269,407 +1887,13 @@ mod tests {
         assert_eq!(format!("{error}"), "frame channel closed");
     }
 
-    // ---- congestion ---------------------------------------------------------
-
-    const FRAME: Duration = Duration::from_millis(33);
-    /// Clear frames an interval apart that make up a [`CLEAR_SPAN`], and then one.
-    const CLEAR_RUN: u32 = 32;
-
-    /// Feed `count` clear frames, one an interval apart from `at`, returning the last
-    /// move the walk made and where time ended up.
-    fn clear_frames(
-        congestion: &mut Congestion,
-        count: u32,
-        mut at: tokio::time::Instant,
-    ) -> (Option<Pace>, tokio::time::Instant) {
-        let mut moved = None;
-        for _ in 0..count {
-            at += FRAME;
-            if let Some(pace) = congestion.observe(Duration::ZERO, Duration::ZERO, at) {
-                moved = Some(pace);
-            }
-        }
-        (moved, at)
-    }
-
-    /// A link with room to spare never moves the dial. The dial is a ceiling, so there
-    /// is nothing above it to reclaim.
-    #[test]
-    fn a_clear_link_stays_on_the_dial() {
-        let mut congestion = Congestion::new(30, false);
-        let start = tokio::time::Instant::now();
-        let (moved, _) = clear_frames(&mut congestion, CLEAR_RUN * 4, start);
-        assert_eq!(moved, None);
-        assert_eq!(congestion.quality, 30);
-        assert_eq!(congestion.interval(), VIDEO_FRAME_INTERVAL);
-    }
-
-    #[test]
-    fn a_backlog_gives_up_quality_and_a_clear_link_takes_it_back() {
-        let mut congestion = Congestion::new(40, false);
-        let start = tokio::time::Instant::now();
-
-        // One slow frame is not a verdict.
-        assert_eq!(congestion.observe(BEHIND_BLOCK, Duration::ZERO, start), None);
-        assert_eq!(
-            congestion.observe(BEHIND_BLOCK, Duration::ZERO, start),
-            Some(Pace { quality: 30, interval: VIDEO_FRAME_INTERVAL })
-        );
-
-        // The cooldown holds the next ones off however bad the link is — but it does
-        // not stop them being *counted*, so a link that never recovered acts the
-        // moment it expires rather than starting its case over.
-        assert_eq!(congestion.observe(BEHIND_BLOCK, Duration::ZERO, start), None);
-        assert_eq!(congestion.observe(BEHIND_BLOCK, Duration::ZERO, start), None);
-        let later = start + ADJUST_COOLDOWN;
-        assert_eq!(congestion.observe(BEHIND_BLOCK, Duration::ZERO, later).map(|pace| pace.quality), Some(20));
-
-        // Now a link that has recovered: a step back per spell of clear frames,
-        // doubling while the link keeps taking them, and it stops at the dial rather
-        // than going past it.
-        let mut at = later + ADJUST_COOLDOWN;
-        let mut seen = Vec::new();
-        for _ in 0..6 {
-            let (moved, then) = clear_frames(&mut congestion, CLEAR_RUN, at);
-            seen.extend(moved.map(|pace| pace.quality));
-            at = then + ADJUST_COOLDOWN;
-        }
-        assert_eq!(seen, [23, 29, 40], "the link recovered past the quality that was asked for");
-    }
-
-    /// Past the floor there is still the frame rate to give, and past that nothing:
-    /// the walk stops rather than wrapping.
-    #[test]
-    fn quality_bottoms_out_on_the_floor_and_then_the_frame_rate_goes() {
-        let mut congestion = Congestion::new(QUALITY_FLOOR + 3 * QUALITY_STEP_DOWN, false);
-        let start = tokio::time::Instant::now();
-        let mut at = start;
-        let mut intervals = Vec::new();
-        for _ in 0..40 {
-            at += ADJUST_COOLDOWN;
-            for _ in 0..BEHIND_FRAMES {
-                if let Some(pace) = congestion.observe(BEHIND_BLOCK, Duration::ZERO, at) {
-                    intervals.push(pace.interval);
-                }
-            }
-        }
-        assert_eq!(congestion.quality, QUALITY_FLOOR);
-        assert_eq!(congestion.slow, SLOW_MAX);
-        assert_eq!(congestion.interval(), VIDEO_FRAME_INTERVAL * 8);
-        // Quality first, all the way down, and only then the frames.
-        assert_eq!(intervals[..3], [VIDEO_FRAME_INTERVAL; 3]);
-        assert_eq!(intervals.last(), Some(&(VIDEO_FRAME_INTERVAL * 8)));
-    }
-
-    /// The frames come back before the quality does.
-    #[test]
-    fn the_frame_rate_is_taken_back_before_the_quality() {
-        // A dial one step above the floor: the first verdict puts the walk on it,
-        // the next two take the frames.
-        let mut congestion = Congestion::new(QUALITY_FLOOR + QUALITY_STEP_DOWN, true);
-        let start = tokio::time::Instant::now();
-        let mut at = start;
-        for _ in 0..3 {
-            at += ADJUST_COOLDOWN;
-            for _ in 0..BEHIND_FRAMES {
-                congestion.observe(Duration::ZERO, LAG_BEHIND, at);
-            }
-        }
-        assert_eq!((congestion.quality, congestion.slow), (QUALITY_FLOOR, 2));
-        at += ADJUST_COOLDOWN;
-        let (moved, at) = clear_frames(&mut congestion, CLEAR_RUN, at);
-        assert_eq!(moved, Some(Pace { quality: QUALITY_FLOOR, interval: VIDEO_FRAME_INTERVAL * 2 }));
-        let (moved, at) = clear_frames(&mut congestion, CLEAR_RUN, at + ADJUST_COOLDOWN);
-        assert_eq!(moved, Some(Pace { quality: QUALITY_FLOOR, interval: VIDEO_FRAME_INTERVAL }));
-        let (moved, _) = clear_frames(&mut congestion, CLEAR_RUN, at + ADJUST_COOLDOWN);
-        assert_eq!(moved, Some(Pace { quality: QUALITY_FLOOR + QUALITY_STEP_UP, interval: VIDEO_FRAME_INTERVAL }));
-    }
-
-    // ---- the adaptive walk ---------------------------------------------------
-
-    /// Without `render_adaptive`, the client's lag is not a signal at all: the
-    /// walk keeps its historical shape, pressure only.
-    #[test]
-    fn a_walk_that_is_not_lag_aware_ignores_lag() {
-        let mut congestion = Congestion::new(30, false);
-        let start = tokio::time::Instant::now();
-        let mut at = start;
-        for _ in 0..40 {
-            at += FRAME;
-            assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND * 4, at), None);
-        }
-        assert_eq!(congestion.quality, 30);
-    }
-
-    /// An adaptive walk gives quality up on the client's lag alone — the queue
-    /// behind the socket never blocked, which is exactly the video case the paint
-    /// window measured (222 ms behind, 7 batches in flight, nothing parked).
-    #[test]
-    fn an_adaptive_walk_gives_up_quality_on_lag_alone() {
-        let mut congestion = Congestion::new(30, true);
-        let start = tokio::time::Instant::now();
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, start), None);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, start).map(|pace| pace.quality), Some(20));
-    }
-
-    /// A link a lot behind gives up more at once: twice the step at [`LAG_HEAVY`],
-    /// three times and half the frames at [`LAG_SEVERE`].
-    #[test]
-    fn a_link_far_behind_gives_up_more_at_once() {
-        let start = tokio::time::Instant::now();
-        let mut heavy = Congestion::new(90, true);
-        heavy.observe(Duration::ZERO, LAG_HEAVY, start);
-        assert_eq!(heavy.observe(Duration::ZERO, LAG_HEAVY, start), Some(Pace { quality: 70, interval: VIDEO_FRAME_INTERVAL }));
-
-        let mut severe = Congestion::new(90, true);
-        severe.observe(Duration::ZERO, LAG_SEVERE, start);
-        assert_eq!(
-            severe.observe(Duration::ZERO, LAG_SEVERE, start),
-            Some(Pace { quality: 60, interval: VIDEO_FRAME_INTERVAL * 2 })
-        );
-
-        // The push blocking that long is the same verdict, on a walk that is not
-        // lag-aware too.
-        let mut blocked = Congestion::new(90, false);
-        blocked.observe(LAG_SEVERE, Duration::ZERO, start);
-        assert_eq!(
-            blocked.observe(LAG_SEVERE, Duration::ZERO, start),
-            Some(Pace { quality: 60, interval: VIDEO_FRAME_INTERVAL * 2 })
-        );
-    }
-
-    /// Two behind frames among the last four are a verdict: a clear frame between
-    /// them does not start the case over.
-    #[test]
-    fn intermittent_lag_is_still_a_verdict() {
-        let mut congestion = Congestion::new(90, true);
-        let start = tokio::time::Instant::now();
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, start), None);
-        assert_eq!(congestion.observe(Duration::ZERO, Duration::ZERO, start + FRAME), None);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, start + FRAME * 2).map(|pace| pace.quality), Some(80));
-        // But one behind frame four ago is forgotten.
-        let mut once = Congestion::new(90, true);
-        once.observe(Duration::ZERO, LAG_BEHIND, start);
-        for i in 1..=VERDICT_WINDOW {
-            once.observe(Duration::ZERO, Duration::ZERO, start + FRAME * i);
-        }
-        assert_eq!(once.observe(Duration::ZERO, LAG_BEHIND, start + FRAME * 5), None);
-    }
-
-    /// A step up the link refuses right after it was given goes back where it came
-    /// from, and for [`REFUSAL_HOLD`] the walk climbs no further than halfway back
-    /// towards the refused quality.
-    #[test]
-    fn a_refused_quality_is_held_out_of_reach() {
-        let mut congestion = Congestion::new(90, true);
-        let start = tokio::time::Instant::now();
-        // Down to 60, then back up in doubling steps: 63, 69, 81, 90.
-        for i in 0..3 {
-            let at = start + ADJUST_COOLDOWN * i;
-            congestion.observe(Duration::ZERO, LAG_BEHIND, at);
-            congestion.observe(Duration::ZERO, LAG_BEHIND, at);
-        }
-        assert_eq!(congestion.quality, 60);
-        let mut at = start + ADJUST_COOLDOWN * 4;
-        let (moved, then) = clear_frames(&mut congestion, CLEAR_RUN, at);
-        assert_eq!(moved.map(|pace| pace.quality), Some(63));
-        at = then + ADJUST_COOLDOWN;
-        let (moved, then) = clear_frames(&mut congestion, CLEAR_RUN, at);
-        assert_eq!(moved.map(|pace| pace.quality), Some(69));
-        // 69 is refused: the link falls behind within the window of that step, and
-        // the walk goes back to the 63 the link bore.
-        at = then + ADJUST_COOLDOWN;
-        congestion.observe(Duration::ZERO, LAG_BEHIND, at);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, at).map(|pace| pace.quality), Some(63));
-        assert_eq!(congestion.refused.map(|(cap, _)| cap), Some(66));
-        // Back up to 66, halfway, and no further, however clear the link — five
-        // spells, well inside the hold.
-        let mut seen = Vec::new();
-        for _ in 0..5 {
-            at += ADJUST_COOLDOWN;
-            let (moved, then) = clear_frames(&mut congestion, CLEAR_RUN, at);
-            seen.extend(moved.map(|pace| pace.quality));
-            at = then;
-        }
-        assert_eq!(seen, [66]);
-        assert_eq!(congestion.quality, 66);
-        // Once the hold is over the walk probes past it, small first.
-        at += REFUSAL_HOLD;
-        let (moved, _) = clear_frames(&mut congestion, CLEAR_RUN, at);
-        assert_eq!(moved.map(|pace| pace.quality), Some(69));
-    }
-
-    /// A step down whose queue is still draining is not followed by another: the
-    /// lag falling is the step working. Once it stops falling, it is.
-    #[test]
-    fn a_draining_queue_is_not_stepped_on_again() {
-        let mut congestion = Congestion::new(90, true);
-        let start = tokio::time::Instant::now();
-        congestion.observe(Duration::ZERO, LAG_SEVERE, start);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_SEVERE, start).map(|pace| pace.quality), Some(60));
-        // Still well behind a second later, but a third less than it was.
-        let draining = LAG_SEVERE * 2 / 3;
-        let at = start + ADJUST_COOLDOWN;
-        assert_eq!(congestion.observe(Duration::ZERO, draining, at), None);
-        assert_eq!(congestion.observe(Duration::ZERO, draining, at), None);
-        // Then the drain stalls: the same lag a second on is a step.
-        let at = at + ADJUST_COOLDOWN;
-        assert_eq!(congestion.observe(Duration::ZERO, draining, at).map(|pace| pace.quality), Some(40));
-    }
-
-    /// A step up the link refuses is walked back within [`REFUSAL_COOLDOWN`], not
-    /// [`ADJUST_COOLDOWN`].
-    #[test]
-    fn a_refused_step_up_is_walked_back_quickly() {
-        let mut congestion = Congestion::new(90, true);
-        let start = tokio::time::Instant::now();
-        congestion.observe(Duration::ZERO, LAG_BEHIND, start);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, start).map(|pace| pace.quality), Some(80));
-        let (moved, at) = clear_frames(&mut congestion, CLEAR_RUN, start + ADJUST_COOLDOWN);
-        assert_eq!(moved.map(|pace| pace.quality), Some(83));
-        // Behind within the ordinary cooldown of that step: walked back anyway, to
-        // where the step came from.
-        let soon = at + REFUSAL_COOLDOWN;
-        congestion.observe(Duration::ZERO, LAG_BEHIND, soon);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, soon).map(|pace| pace.quality), Some(80));
-        assert_eq!(congestion.refused.map(|(cap, _)| cap), Some(81));
-    }
-
-    /// A settle after a step up is the last move: the frames behind its picture
-    /// wait out the full cooldown, not the refusal's.
-    #[test]
-    fn a_settle_after_a_step_up_restores_the_full_cooldown() {
-        let mut congestion = Congestion::new(90, true);
-        let start = tokio::time::Instant::now();
-        congestion.observe(Duration::ZERO, LAG_BEHIND, start);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, start).map(|pace| pace.quality), Some(80));
-        let (moved, at) = clear_frames(&mut congestion, CLEAR_RUN, start + ADJUST_COOLDOWN);
-        assert_eq!(moved.map(|pace| pace.quality), Some(83));
-        congestion.settle(at + FRAME);
-        let soon = at + FRAME + REFUSAL_COOLDOWN;
-        congestion.observe(Duration::ZERO, LAG_BEHIND, soon);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, soon), None, "the settle's frames were walked back on the refusal's cooldown");
-        assert_eq!(congestion.quality, 83);
-        // After the full cooldown, still inside the refusal window of the step up:
-        // an ordinary step down from the settle, not a refusal of the step.
-        let later = at + FRAME + ADJUST_COOLDOWN;
-        assert!(later.saturating_duration_since(at) <= REFUSAL_WINDOW);
-        // The two behind frames above are still in the window: this one is the verdict.
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, later).map(|pace| pace.quality), Some(73), "the step up was refused across a settle");
-        assert_eq!(congestion.refused, None, "a refusal cap was installed across a settle");
-    }
-
-    /// Between the two lag thresholds nothing accumulates: not evidence the link
-    /// is behind, not proof of room either.
-    #[test]
-    fn lag_between_the_thresholds_earns_neither_direction() {
-        let mut congestion = Congestion::new(30, true);
-        let start = tokio::time::Instant::now();
-        // Walk down once so there is something to reclaim.
-        congestion.observe(BEHIND_BLOCK, Duration::ZERO, start);
-        assert_eq!(congestion.observe(BEHIND_BLOCK, Duration::ZERO, start).map(|pace| pace.quality), Some(20));
-        // A link hovering between LAG_CLEAR and LAG_BEHIND, long past the cooldown.
-        let hover = LAG_CLEAR + (LAG_BEHIND - LAG_CLEAR) / 2;
-        let mut at = start;
-        for _ in 0..CLEAR_RUN * 4 {
-            at += ADJUST_COOLDOWN;
-            assert_eq!(congestion.observe(Duration::ZERO, hover, at), None);
-        }
-        assert_eq!(congestion.quality, 20, "a hovering link earned quality back");
-    }
-
-    /// A keyframe holds the verdicts while it crosses the link: the queue behind it
-    /// is its size, not the link's.
-    #[test]
-    fn a_keyframe_holds_the_verdicts_while_it_crosses() {
-        let mut congestion = Congestion::new(90, true);
-        let start = tokio::time::Instant::now();
-        congestion.keyframe(start);
-        let mut at = start;
-        while at + FRAME < start + KEYFRAME_HOLD {
-            at += FRAME;
-            assert_eq!(congestion.observe(Duration::ZERO, LAG_SEVERE, at), None, "a verdict inside the hold");
-        }
-        assert_eq!(congestion.quality, 90);
-        // Past the hold the case starts over: two behind frames are a verdict.
-        at += FRAME;
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_SEVERE, at), None);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_SEVERE, at).map(|pace| pace.quality), Some(60));
-    }
-
-    /// A slowed link takes its frames back after a second of clear ones, however
-    /// few that is: the span is the evidence, not a count the slowed frames cannot
-    /// reach.
-    #[test]
-    fn a_second_of_clear_frames_is_enough_however_slow_they_come() {
-        let mut congestion = Congestion::new(90, true);
-        let start = tokio::time::Instant::now();
-        congestion.observe(Duration::ZERO, LAG_SEVERE, start);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_SEVERE, start), Some(Pace { quality: 60, interval: VIDEO_FRAME_INTERVAL * 2 }));
-        // Four clear frames a quarter second apart, the last past the cooldown.
-        let mut at = start + ADJUST_COOLDOWN;
-        let mut moved = None;
-        for _ in 0..CLEAR_FRAMES + 1 {
-            at += Duration::from_millis(250);
-            moved = congestion.observe(Duration::ZERO, Duration::ZERO, at).or(moved);
-        }
-        assert_eq!(moved, Some(Pace { quality: 60, interval: VIDEO_FRAME_INTERVAL }));
-        // But four inside a quarter second are not a second of evidence.
-        let mut fresh = Congestion::new(90, true);
-        fresh.observe(Duration::ZERO, LAG_BEHIND, start);
-        fresh.observe(Duration::ZERO, LAG_BEHIND, start);
-        let mut at = start + ADJUST_COOLDOWN;
-        for _ in 0..CLEAR_FRAMES * 2 {
-            at += Duration::from_millis(20);
-            assert_eq!(fresh.observe(Duration::ZERO, Duration::ZERO, at), None);
-        }
-    }
-
-    /// A settle keeps the walk where the link put it: the screen stopping is no
-    /// evidence about the link, only a chance to sharpen what it holds.
-    #[test]
-    fn a_settle_keeps_the_walks_place() {
-        let mut congestion = Congestion::new(90, true);
-        let start = tokio::time::Instant::now();
-        congestion.observe(Duration::ZERO, LAG_SEVERE, start);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_SEVERE, start).map(|pace| pace.quality), Some(60));
-        congestion.settle(start + ADJUST_COOLDOWN * 2);
-        assert_eq!(congestion.pace(), Pace { quality: 60, interval: VIDEO_FRAME_INTERVAL * 2 });
-        // And the frames right behind the settle's are not read as the link giving way.
-        let at = start + ADJUST_COOLDOWN * 2 + FRAME;
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_SEVERE, at), None);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_SEVERE, at), None);
-    }
-
-    /// The clear frames before a desktop went quiet do not span the quiet: a burst
-    /// of motion after a settle earns its step back up from its own frames.
-    #[test]
-    fn a_settle_starts_the_clear_run_over() {
-        let mut congestion = Congestion::new(90, true);
-        let start = tokio::time::Instant::now();
-        congestion.observe(Duration::ZERO, LAG_SEVERE, start);
-        assert_eq!(congestion.observe(Duration::ZERO, LAG_SEVERE, start).map(|pace| pace.quality), Some(60));
-        // Three clear frames, the cooldown over, and then the desktop goes quiet.
-        let (moved, at) = clear_frames(&mut congestion, CLEAR_FRAMES - 1, start + ADJUST_COOLDOWN);
-        assert_eq!(moved, None);
-        congestion.settle(at + Duration::from_secs(5));
-        // The first frame of the next burst, a clear span and more after those
-        // three, does not make the fourth.
-        let at = at + Duration::from_secs(5) + ADJUST_COOLDOWN;
-        assert_eq!(congestion.observe(Duration::ZERO, Duration::ZERO, at), None, "the quiet was counted as clear");
-        // Its own run is what takes the frames back.
-        let (moved, _) = clear_frames(&mut congestion, CLEAR_RUN, at);
-        assert_eq!(moved, Some(Pace { quality: 60, interval: VIDEO_FRAME_INTERVAL }));
-    }
-
-    /// An adaptive plan reaches the walk, which becomes lag-aware and starts on the
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
         let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_hevc: false };
         let shared = Shared::new(plan, feedback(), TileSupport::None);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
-        assert!(video.congestion.lag_aware, "the walk ignores lag");
-        assert_eq!(video.congestion.quality, 60, "the walk starts on the dial");
+        assert!(video.congestion.lag_aware(), "the walk ignores lag");
+        assert_eq!(video.congestion.quality(), 60, "the walk starts on the dial");
     }
 }

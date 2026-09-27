@@ -110,7 +110,7 @@ impl Stream {
 
     /// Move the dial on the live encoder, without a keyframe.
     ///
-    /// This is how a congested link gives up quality (see `Congestion` in [`crate::encode`]), and
+    /// This is how a congested link gives up quality (the walk in `wlshare_vp9::walk`), and
     /// "without a keyframe" is the whole reason it is a retune rather than a rebuild — which
     /// would force a keyframe on the next frame, spending a few hundred KB at the exact moment
     /// the link has run out of room.
