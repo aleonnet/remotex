@@ -2351,7 +2351,6 @@ dependencies = [
  "hmac",
  "libavcodec-hevc-prebuilt-sys",
  "libc",
- "libvpx-prebuilt-sys",
  "log",
  "md-5 0.11.0",
  "num-bigint 0.4.8",
@@ -2381,6 +2380,7 @@ dependencies = [
  "toml",
  "tower",
  "uuid",
+ "wlshare-vp9",
  "yuv",
 ]
 
@@ -3806,6 +3806,17 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
+
+[[package]]
+name = "wlshare-vp9"
+version = "0.0.40"
+source = "git+https://github.com/andrewtheguy/wlshare?rev=f92ce53b06debe794716843c5fb442626338db89#f92ce53b06debe794716843c5fb442626338db89"
+dependencies = [
+ "libvpx-prebuilt-sys",
+ "log",
+ "thiserror",
+ "yuv",
+]
 
 [[package]]
 name = "writeable"

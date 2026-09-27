@@ -4,75 +4,19 @@
 //! which is exactly the property that gets it into every browser build: a Chromium built
 //! without proprietary codecs still decodes it.
 //!
-//! What is not libvpx's — the mirror, the picture limits, the RGB→YUV conversion, the
-//! 1–100 dial — is [`crate::video`]'s, and the chroma sampling is the config's
-//! ([`Chroma`]). This module is only libvpx.
-//!
-//! Two things about libvpx's shape are worth knowing before reading:
-//!
-//! - **It returns error codes rather than asserting**, so under this binary's
-//!   `panic = "abort"` no containment argument is needed: every call goes through `vpx!`,
-//!   which turns a bad code into an `anyhow::Error` carrying libvpx's own explanation, and a
-//!   failure ends one session instead of the process.
-//! - **Its C API is entirely `unsafe` and largely out-parameters.** The invariants are stated at
-//!   each call. Two are easy to get wrong and neither announces itself: the image built by
-//!   `vpx_img_wrap` borrows the caller's planes and must never reach `vpx_img_free`, and
-//!   `vpx_codec_control_` is variadic, so passing the wrong argument type for a control id
-//!   compiles and corrupts the stack.
+//! The coding is `wlshare-vp9`'s, the crate wlshare's own stream is coded with, pulled
+//! from that repository by git: the one place libvpx is spoken to for either side, so a
+//! passed wlshare frame and one encoded here are the same stream by construction. What
+//! this module owns is the stream over the mirror: the picture limits, the keyframe
+//! owed until a frame carries it, and the WebCodecs string the browser is configured
+//! with. When a round is taken is [`crate::encode`]'s business.
 
-use std::os::raw::{c_int, c_ulong};
-
-use vpx_sys as vpx;
+use anyhow::Context as _;
 
 use crate::config::Chroma;
-use crate::video::{AccessUnit, Mirror, QUALITY_MAX, QUALITY_MIN, Yuv, check_picture};
+use crate::video::{AccessUnit, Mirror, check_picture};
 
-/// Turn a libvpx return code into an `anyhow::Error` naming the call and libvpx's own explanation.
-///
-/// A macro rather than a function so the call site reads as the C does, and so `what` is a literal
-/// at every use. libvpx's `vpx_codec_err_to_string` takes only the code, which is what makes this
-/// usable for the calls that have no context yet. Declared before its uses because that is how
-/// `macro_rules!` scoping works, and spelled `vpx_sys::` inside rather than through the alias so
-/// the expansion does not depend on what the calling scope imported.
-macro_rules! vpx {
-    ($call:expr, $what:expr) => {{
-        let err = $call;
-        if err == vpx_sys::vpx_codec_err_t_VPX_CODEC_OK {
-            Ok(())
-        } else {
-            Err(anyhow::anyhow!("vp9 {}: {} ({err})", $what, crate::vp9::detail(err)))
-        }
-    }};
-}
-
-/// libvpx's own words for an error code.
-///
-/// A safe function rather than an `unsafe` block inside [`vpx!`], because every use of that macro
-/// is already inside one and a nested block is a warning that teaches nothing.
-fn detail(err: vpx::vpx_codec_err_t) -> String {
-    // SAFETY: `vpx_codec_err_to_string` takes a code rather than a context — so any code is
-    // valid — and returns a pointer to a static string constant compiled into the archive.
-    let detail = unsafe { std::ffi::CStr::from_ptr(vpx::vpx_codec_err_to_string(err)) };
-    detail.to_string_lossy().into_owned()
-}
-
-/// The quantizer the dial spans. VP9's range is 0–63, coarsest last — a scale of libvpx's own,
-/// which is why the congestion loop speaks the dial and not a quantizer.
-///
-/// The fine end is 8 rather than 0 because VP9 below about 8 is visually lossless on screen
-/// content and costs several times the bytes to be so: a dial that mapped past it would have a
-/// top third where turning the knob bought nothing but bandwidth. Settled by measurement — see
-/// `video::measure_the_encoders`.
-const Q_FINEST: u32 = 8;
-/// See [`Q_FINEST`]. 63 is VP9's coarsest.
-const Q_COARSEST: u32 = 63;
-
-/// libvpx's encoder speed, 0–9, higher being faster and worse.
-///
-/// 7 is inside the 5–8 band libvpx's own live-encoding guidance names, and is where the one other
-/// real-time desktop encoder to consult sits. Measured rather than inherited: see
-/// `video::measure_the_encoders`, which sweeps it.
-const CPU_USED: c_int = 7;
+pub use wlshare_vp9::{FrameHeader, frame_header};
 
 /// The frame rate the level of a stream this gateway encodes is figured at.
 ///
@@ -83,111 +27,13 @@ const CPU_USED: c_int = 7;
 /// at its own rate ([`crate::stream::pass_444`]).
 pub const ENCODED_FPS: u64 = 30;
 
-/// The 1–100 quality dial as a VP9 quantizer.
-///
-/// The two scales run opposite ways: [`QUALITY_MIN`] is the coarsest picture and becomes
-/// [`Q_COARSEST`], [`QUALITY_MAX`] the finest and becomes [`Q_FINEST`]. Out-of-range input is
-/// clamped rather than refused — `config` is what rejects a bad dial.
-fn q_for(quality: u8) -> u32 {
-    let quality = u32::from(quality.clamp(QUALITY_MIN, QUALITY_MAX));
-    let span = Q_COARSEST - Q_FINEST;
-    Q_COARSEST - ((quality - 1) * span / 99)
-}
-
-/// VP9's levels, as `(level, max_luma_sample_rate, max_luma_picture_size, max_luma_breadth)`.
-///
-/// Transcribed from `vp9_level_defs[]` in libvpx's own `vp9/encoder/vp9_encoder.c` at the commit
-/// `libvpx-prebuilt` pins, and not from memory: the table is the normative one, the rows are not
-/// evenly spaced, and 4K30 lands on level 5.0 rather than the 5.1 a plausible guess gives. Only
-/// the three fields a picture size can violate are kept — the rest of each row is about bitrate,
-/// buffer size and tiling, none of which decides the level of a stream whose quantizer is pinned.
-///
-/// The lowest row a picture fits is the level announced, which matters because a level is a
-/// ceiling: a decoder that accepts 5.0 accepts every stream below it, so announcing the smallest
-/// true level is the widest claim that is honest.
-const LEVELS: [(u8, u64, u32, u16); 14] = [
-    (10, 829_440, 36_864, 512),
-    (11, 2_764_800, 73_728, 768),
-    (20, 4_608_000, 122_880, 960),
-    (21, 9_216_000, 245_760, 1_344),
-    (30, 20_736_000, 552_960, 2_048),
-    (31, 36_864_000, 983_040, 2_752),
-    (40, 83_558_400, 2_228_224, 4_160),
-    (41, 160_432_128, 2_228_224, 4_160),
-    (50, 311_951_360, 8_912_896, 8_384),
-    (51, 588_251_136, 8_912_896, 8_384),
-    (52, 1_176_502_272, 8_912_896, 8_384),
-    (60, 1_176_502_272, 35_651_584, 16_832),
-    (61, 2_353_004_544, 35_651_584, 16_832),
-    (62, 4_706_009_088, 35_651_584, 16_832),
-];
-
-/// The WebCodecs codec string for a `w`×`h` VP9 stream, every field of it:
-/// `vp09.<profile>.<level>.<depth>.<chroma>.<primaries>.<transfer>.<matrix>.<range>`.
-///
-/// Eight-bit, because that is what this encoder produces, and the profile is the chroma's:
-/// VP9 profile 0 is 4:2:0 and profile 1 is 4:4:4, and a decoder is asked for the one the
-/// bitstream will be. The optional fields are spelled out rather than left to their
-/// defaults because the defaults are wrong for this stream on both counts: an omitted
-/// chroma field means 4:2:0, which Chromium reads as 4:2:2 on a profile 1 string since
-/// 4:2:0 is not a profile 1 picture, and omitted colour fields mean BT.709 where the
-/// keyframe header says BT.601 (SMPTE 170M primaries, transfer and matrix — code 6 each,
-/// what Chromium's own VP9 parser maps that header flag to) at studio swing. The level
-/// comes from `LEVELS` at `fps` frames a second. `None` for a picture no VP9 level covers, which
-/// [`crate::video::check_picture`] has already refused long before this is reached; it is `Option`
-/// rather than a panic because this runs on the session's own path and the whole module's premise
-/// is that nothing here aborts the process.
-///
-/// This is what `ServerMsg::VideoFormat` carries, and it is derived here rather than in the
-/// client because VP9 has no in-band parameter sets at all: there is nothing in the bitstream for
-/// a client to read a codec string out of.
+/// The WebCodecs codec string for a `w`×`h` stream at `chroma` and `fps` — what
+/// `ServerMsg::VideoFormat` carries, derived here rather than in the client because VP9
+/// has no in-band parameter sets for a client to read one out of. `None` for a picture no
+/// VP9 level covers, which [`check_picture`] has already refused long before this is
+/// reached.
 pub fn codec_string(w: u16, h: u16, chroma: Chroma, fps: u64) -> Option<String> {
-    let (profile, sampling) = match chroma {
-        Chroma::Subsampled => ("00", "01"),
-        Chroma::Full => ("01", "03"),
-    };
-    let size = u32::from(w) * u32::from(h);
-    let rate = u64::from(size) * fps;
-    let breadth = w.max(h);
-    let (level, ..) = LEVELS
-        .iter()
-        .find(|(_, max_rate, max_size, max_breadth)| {
-            rate <= *max_rate && size <= *max_size && breadth <= *max_breadth
-        })
-        .copied()?;
-    Some(format!("vp09.{profile}.{level:02}.08.{sampling}.06.06.06.00"))
-}
-
-/// What the opening bits of a VP9 frame say about it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct FrameHeader {
-    /// 0 for 4:2:0, 1 for 4:4:4 at the eight bits every stream here has.
-    pub profile: u8,
-    /// Whether a decoder that has seen nothing before this frame can start here.
-    pub keyframe: bool,
-}
-
-/// Read the first fields of a frame's uncompressed header (VP9 bitstream §6.2):
-/// `frame_marker` (two bits, always 2), `profile_low_bit`, `profile_high_bit`, a
-/// reserved zero bit on profile 3, `show_existing_frame`, and `frame_type`, where 0 is
-/// a keyframe. A frame that only shows an earlier one is not a keyframe.
-///
-/// For a stream this gateway did not encode, whose keyframe bit is therefore not the
-/// encoder's to report. `None` for bytes that do not start a VP9 frame.
-pub fn frame_header(frame: &[u8]) -> Option<FrameHeader> {
-    let mut bits = frame.iter().take(2).flat_map(|byte| (0..8).rev().map(move |i| byte >> i & 1));
-    let mut bit = || bits.next();
-    if (bit()? << 1 | bit()?) != 2 {
-        return None;
-    }
-    let low = bit()?;
-    let profile = bit()? << 1 | low;
-    if profile == 3 && bit()? != 0 {
-        return None;
-    }
-    let show_existing = bit()? == 1;
-    let keyframe = !show_existing && bit()? == 0;
-    Some(FrameHeader { profile, keyframe })
+    wlshare_vp9::codec_string(w, h, chroma.into(), fps)
 }
 
 /// One VP9 stream over a [`Mirror`]'s coded picture.
@@ -196,31 +42,19 @@ pub fn frame_header(frame: &[u8]) -> Option<FrameHeader> {
 /// stream mean anything: every frame is expressed as a change from the last one. A desktop that
 /// is resized gets a *new* stream.
 pub struct Stream {
-    ctx: vpx::vpx_codec_ctx_t,
-    /// The configuration libvpx is running on, kept so [`Self::set_quality`] can hand back the
-    /// same struct with two fields changed rather than rebuild one and risk disagreeing with the
-    /// encoder about a field it never meant to touch.
-    cfg: vpx::vpx_codec_enc_cfg_t,
-    /// An image that *borrows* the conversion buffer's planes. Built once, its pointers replaced
-    /// on every frame. Never freed: `vpx_img_wrap` allocated nothing.
-    img: vpx::vpx_image_t,
+    encoder: wlshare_vp9::Encoder,
+    /// The conversion in front of the encoder, reused across frames.
+    picture: wlshare_vp9::Picture,
     /// The picture encoded: the mirror's coded size, the desktop grown to even sides.
     coded: (u16, u16),
-    /// The conversion in front of the encoder, reused across frames.
-    yuv: Yuv,
-    /// The 1–100 dial in force, which [`Self::set_quality`] moves and the totals report.
-    quality: u8,
     /// Whether the next frame must be one a decoder can start from.
     keyframe_owed: bool,
     /// The WebCodecs codec string for this stream's picture, computed once at construction:
     /// VP9 carries no parameter sets, so the string follows from the picture size, which is
     /// fixed for the stream's life.
     decode: Option<String>,
-    /// Where this stream's timestamps are measured from. Real elapsed time rather than a frame
-    /// counter, so a pts is a millisecond on the `g_timebase` set below.
-    started: std::time::Instant,
-    /// How many retunes [`Self::set_quality`] still refuses, for a test that needs libvpx to
-    /// say no.
+    /// How many retunes [`Self::set_quality`] still refuses, for a test that needs the
+    /// encoder to say no.
     #[cfg(test)]
     refusals: u32,
 }
@@ -228,194 +62,30 @@ pub struct Stream {
 impl Stream {
     /// A stream over a mirror whose coded size is `coded`, at `quality` (1–100) and `chroma`.
     ///
-    /// The refusal of a picture too large is [`check_picture`]'s. VP9 does not need even sides
-    /// and is held to them anyway — see the note there.
+    /// The refusal of a picture too large is [`check_picture`]'s. VP9 does not need even
+    /// sides and is held to them anyway — see the note there.
     pub fn new(coded: (u16, u16), quality: u8, chroma: Chroma) -> anyhow::Result<Self> {
         check_picture(coded)?;
-        let q = q_for(quality);
-
-        // SAFETY: `vpx_codec_vp9_cx` takes no arguments and returns a pointer to a static
-        // interface descriptor compiled into the archive.
-        let iface = unsafe { vpx::vpx_codec_vp9_cx() };
-        anyhow::ensure!(!iface.is_null(), "this libvpx has no VP9 encoder");
-
-        // SAFETY: zeroed before libvpx is given a pointer to it, and `vpx_codec_enc_config_default`
-        // writes through that pointer rather than reading it. A failure here is returned rather
-        // than ignored, so nothing below reads a half-initialised config.
-        let mut cfg: vpx::vpx_codec_enc_cfg_t = unsafe { std::mem::zeroed() };
-        unsafe {
-            vpx!(vpx::vpx_codec_enc_config_default(iface, &mut cfg, 0), "config_default")?;
-        }
-
-        cfg.g_w = u32::from(coded.0);
-        cfg.g_h = u32::from(coded.1);
-        // The profile is the chroma sampling and nothing else at eight bits: 0 is 4:2:0,
-        // 1 is 4:4:4. It has to match the image format handed to `vpx_img_wrap` below, and
-        // `codec_string` tells the decoder the same number.
-        cfg.g_profile = match chroma {
-            Chroma::Subsampled => 0,
-            Chroma::Full => 1,
-        };
-        // Milliseconds, so a pts is elapsed wall-clock rather than a frame index: the remote
-        // decides when a frame happens, and a counter would tell the encoder they all arrived
-        // on schedule.
-        cfg.g_timebase.num = 1;
-        cfg.g_timebase.den = 1000;
-        // **0, not libvpx's default of 25.** The default holds 25 frames inside the encoder
-        // before emitting anything, which on a desktop is most of a second of latency. RustDesk
-        // works around the default by flushing after every frame; setting it to zero is the same
-        // thing without the second code path, and it is what makes one encode mean one packet.
-        cfg.g_lag_in_frames = 0;
-        cfg.g_pass = vpx::vpx_enc_pass_VPX_RC_ONE_PASS;
-        // No error resilience. Nothing here is ever lost in transit — the link is TCP — so it
-        // would cost compression to protect against loss that cannot happen. The same argument
-        // removes the periodic keyframe below.
-        cfg.g_error_resilient = 0;
+        let sampling = chroma.into();
+        let picture = wlshare_vp9::Picture::new(coded.0, coded.1, sampling)?;
         // Every core but one for the one stream, which has nothing to overlap with. See
         // `video::threads`.
-        let threads = crate::video::threads();
-        cfg.g_threads = threads as u32;
-        // No fixed keyframe interval; every keyframe is one somebody asked for — a repaint, a
-        // resize, a client coming back.
-        cfg.kf_mode = vpx::vpx_kf_mode_VPX_KF_DISABLED;
-        // Disabling them is not enough: libvpx 1.16's one-pass rate control still counts
-        // down `kf_max_dist`, 128 by default, and codes a keyframe when it runs out.
-        // Measured, at frames 128 and 256 of a changing picture. Out of reach instead.
-        cfg.kf_max_dist = i32::MAX as u32;
-        // Constant quality with the quantizer pinned top and bottom. `VPX_Q` plus the `CQ_LEVEL`
-        // control below is what decides it; min == max is what makes that a guarantee rather
-        // than a preference, and it is why nothing here sets a bitrate — the quantizer *is* the
-        // dial and the bytes land wherever the picture puts them.
-        cfg.rc_end_usage = vpx::vpx_rc_mode_VPX_Q;
-        cfg.rc_min_quantizer = q;
-        cfg.rc_max_quantizer = q;
-        // Zero, explicitly, and this one is load-bearing rather than tidy: `crate::shadow::Shadow`
-        // records source pixels as delivered the moment they are blitted into the mirror, so a
-        // frame libvpx decided to drop is permanently wrong pixels that nothing re-sends. It is
-        // also libvpx's default, and a default is a thing that can change.
-        cfg.rc_dropframe_thresh = 0;
-        // Likewise: an encoder that resized itself would change the picture size mid-stream,
-        // while the stream has one picture size for its whole life and a client crops the
-        // decoded picture to the desktop.
-        cfg.rc_resize_allowed = 0;
-
-        // SAFETY: `ctx` is zeroed and written through by `enc_init_ver`, `cfg` is the struct
-        // libvpx just filled in and this function then edited by name, and the ABI version is
-        // the one the linked archive's headers declared — which is what makes a Rust-side layout
-        // disagreement a named error here rather than memory corruption later.
-        let mut ctx: vpx::vpx_codec_ctx_t = unsafe { std::mem::zeroed() };
-        unsafe {
-            vpx!(
-                vpx::vpx_codec_enc_init_ver(
-                    &mut ctx,
-                    iface,
-                    &cfg,
-                    0,
-                    vpx::VPX_ENCODER_ABI_VERSION as c_int,
-                ),
-                "enc_init_ver"
-            )
-            .map_err(|e| {
-                anyhow::anyhow!("vp9 encoder for a {}x{} picture: {e}", coded.0, coded.1)
-            })?;
-        }
-
-        // Everything from here on has a context to destroy, so the error paths go through a
-        // constructed `Self` rather than returning: `Drop` is what releases the encoder, and an
-        // early `?` between `enc_init_ver` and the struct would leak it.
-        let mut stream = Self {
-            ctx,
-            cfg,
-            // SAFETY: zeroed, then filled in by `vpx_img_wrap` below.
-            img: unsafe { std::mem::zeroed() },
+        let encoder = wlshare_vp9::Encoder::new(coded.0, coded.1, sampling, quality, crate::video::threads())
+            .with_context(|| format!("vp9 encoder for a {}x{} picture", coded.0, coded.1))?;
+        Ok(Self {
+            encoder,
+            picture,
             coded,
-            // Even by construction — the mirror is held at even sides — which is what keeps the
-            // conversion from asserting on an odd chroma plane.
-            yuv: Yuv::new(coded.0, coded.1, chroma),
-            quality: quality.clamp(QUALITY_MIN, QUALITY_MAX),
             keyframe_owed: false,
             decode: codec_string(coded.0, coded.1, chroma, ENCODED_FPS),
-            started: std::time::Instant::now(),
             #[cfg(test)]
             refusals: 0,
-        };
-
-        // SAFETY: `ctx` is live and each control's argument really is an `int` — the one thing
-        // `vpx_codec_control_`'s variadic signature cannot check.
-        unsafe {
-            // In `VPX_Q` mode this is the value that actually decides the quantizer. A *control*,
-            // not a config field, which is the easiest thing about libvpx's rate control to get
-            // wrong: setting only `rc_min/max_quantizer` leaves `cq_level` at its default and the
-            // dial half-connected.
-            stream.control(vpx::vp8e_enc_control_id_VP8E_SET_CQ_LEVEL, q as c_int, "cq_level")?;
-            // What this encoder is actually looking at. Screen content is mostly flat colour,
-            // hard edges and text, none of which a camera preset expects.
-            stream.control(
-                vpx::vp8e_enc_control_id_VP9E_SET_TUNE_CONTENT,
-                vpx::vp9e_tune_content_VP9E_CONTENT_SCREEN as c_int,
-                "tune_content",
-            )?;
-            stream.control(vpx::vp8e_enc_control_id_VP8E_SET_CPUUSED, CPU_USED, "cpuused")?;
-            // Say in the bitstream what the conversion did: BT.601 matrix, studio swing.
-            // libvpx writes *unknown* unless told, and a decoder given unknown guesses —
-            // Chromium picks BT.709 for anything HD — so without these two controls a
-            // 1080p desktop is converted with one matrix and displayed with another,
-            // and every saturated colour lands a little off. The decoder reads this off
-            // the keyframe header; nothing on the wire has to carry it.
-            stream.control(
-                vpx::vp8e_enc_control_id_VP9E_SET_COLOR_SPACE,
-                vpx::vpx_color_space_VPX_CS_BT_601 as c_int,
-                "color_space",
-            )?;
-            stream.control(
-                vpx::vp8e_enc_control_id_VP9E_SET_COLOR_RANGE,
-                vpx::vpx_color_range_VPX_CR_STUDIO_RANGE as c_int,
-                "color_range",
-            )?;
-            // Off: adaptive quantization would move the quantizer off the dial that was just
-            // pinned.
-            stream.control(vpx::vp8e_enc_control_id_VP9E_SET_AQ_MODE, 0, "aq_mode")?;
-            // Tile columns for the threads to have separate work — as many as the width is
-            // wide enough for and the threads can fill, see `video::tile_columns_log2`.
-            // Set whatever the thread count: libvpx's default is 6, every column the
-            // width allows, which one thread would code one after another for the bytes
-            // and nothing else.
-            stream.control(
-                vpx::vp8e_enc_control_id_VP9E_SET_TILE_COLUMNS,
-                crate::video::tile_columns_log2(coded.0, threads) as c_int,
-                "tile_columns",
-            )?;
-            if threads > 1 {
-                // What turns `g_threads` into actual parallelism inside a tile: row-based
-                // multithreading. Inert at one thread.
-                stream.control(vpx::vp8e_enc_control_id_VP9E_SET_ROW_MT, 1, "row_mt")?;
-            }
-
-            // An image that *wraps* the conversion buffer rather than owning one. A non-null
-            // pointer that is never dereferenced is libvpx's own idiom for "compute the layout,
-            // allocate nothing" — ffmpeg passes a literal `1` — and it is why `vpx_img_free` must
-            // never be called on this image: the planes it ends up pointing at belong to `yuv`.
-            let fmt = match chroma {
-                Chroma::Subsampled => vpx::vpx_img_fmt_VPX_IMG_FMT_I420,
-                Chroma::Full => vpx::vpx_img_fmt_VPX_IMG_FMT_I444,
-            };
-            let wrapped = vpx::vpx_img_wrap(
-                &mut stream.img,
-                fmt,
-                cfg.g_w,
-                cfg.g_h,
-                1,
-                std::ptr::dangling_mut::<u8>(),
-            );
-            anyhow::ensure!(!wrapped.is_null(), "vpx_img_wrap refused a {}x{} picture", cfg.g_w, cfg.g_h);
-        }
-
-        Ok(stream)
+        })
     }
 
     /// The dial this stream is currently encoding at.
     pub fn quality(&self) -> u8 {
-        self.quality
+        self.encoder.quality()
     }
 
     /// The WebCodecs codec string for this stream, known from construction.
@@ -425,13 +95,13 @@ impl Stream {
 
     /// Make the next access unit one a decoder can start from.
     ///
-    /// Recorded rather than done, because libvpx takes it as a flag on the next `encode` call —
+    /// Recorded rather than done, because libvpx takes it as a flag on the next encode —
     /// there is nothing to tell the encoder in advance.
     pub fn force_keyframe(&mut self) {
         self.keyframe_owed = true;
     }
 
-    /// Make the next `count` retunes that would change the quantizer fail, as a libvpx refusal
+    /// Make the next `count` retunes that would change the dial fail, as a libvpx refusal
     /// would.
     #[cfg(test)]
     pub fn refuse_retunes(&mut self, count: u32) {
@@ -441,50 +111,25 @@ impl Stream {
     /// Move the dial on the live encoder, without a keyframe.
     ///
     /// This is how a congested link gives up quality (see `Congestion` in [`crate::encode`]), and
-    /// "without a keyframe" is the whole reason it is written this way rather than by rebuilding
-    /// the encoder — which would force a keyframe on the next frame, spending a few hundred KB at
-    /// the exact moment the link has run out of room.
-    ///
-    /// `vpx_codec_enc_config_set` is libvpx's own mechanism for it, and both halves are needed:
-    /// the config carries the quantizer bounds and the control carries the value `VPX_Q` mode
-    /// actually reads.
+    /// "without a keyframe" is the whole reason it is a retune rather than a rebuild — which
+    /// would force a keyframe on the next frame, spending a few hundred KB at the exact moment
+    /// the link has run out of room.
     pub fn set_quality(&mut self, quality: u8) -> anyhow::Result<()> {
-        let quality = quality.clamp(QUALITY_MIN, QUALITY_MAX);
-        let q = q_for(quality);
         #[cfg(test)]
-        if q != q_for(self.quality) && self.refusals > 0 {
+        if quality.clamp(crate::video::QUALITY_MIN, crate::video::QUALITY_MAX) != self.encoder.quality() && self.refusals > 0 {
             self.refusals -= 1;
             anyhow::bail!("a retune refused on the test's orders");
         }
-        // Against the committed quality rather than `cfg`: a `cq_level` refused after the config
-        // was accepted leaves `cfg` already at `q`, and the retry must still send the control.
-        if q == q_for(self.quality) {
-            self.quality = quality;
-            return Ok(());
-        }
-        // Edited on a copy and kept only once libvpx has accepted it, so a refusal leaves
-        // `cfg` describing the encoder as it still is.
-        let mut cfg = self.cfg;
-        cfg.rc_min_quantizer = q;
-        cfg.rc_max_quantizer = q;
-        // SAFETY: `cfg` is the struct libvpx validated at init with two fields changed, and `ctx`
-        // is live. libvpx re-validates it and returns a code rather than accepting nonsense.
-        unsafe {
-            vpx!(vpx::vpx_codec_enc_config_set(&mut self.ctx, &cfg), "enc_config_set")?;
-            self.cfg = cfg;
-            self.control(vpx::vp8e_enc_control_id_VP8E_SET_CQ_LEVEL, q as c_int, "cq_level")?;
-        }
-        self.quality = quality;
-        Ok(())
+        self.encoder.set_quality(quality).context("retuning the VP9 encoder")
     }
 
     /// Encode `mirror` as it stands.
     ///
     /// `None` means the encoder produced no bitstream. The caller must then leave its dirty flag
     /// set, so those pixels ride on the next frame — which is what keeps a frame that produced
-    /// nothing from becoming pixels the client never gets. With `rc_dropframe_thresh = 0` and
-    /// `g_lag_in_frames = 0` it should be unreachable; it is a return value rather than an
-    /// assertion because the caller has to be ready for it anyway.
+    /// nothing from becoming pixels the client never gets. With no lag and no dropped frames it
+    /// should be unreachable; it is a return value rather than an assertion because the caller
+    /// has to be ready for it anyway.
     ///
     /// The mirror must have been padded ([`Mirror::pad_edges`]), which is the caller's job.
     pub fn encode(&mut self, mirror: &Mirror) -> anyhow::Result<Option<AccessUnit>> {
@@ -496,119 +141,15 @@ impl Stream {
             mirror.coded().0,
             mirror.coded().1
         );
-        self.yuv.read_rgb(mirror.picture())?;
-
-        let (y, u, v) = self.yuv.planes();
-        let (sy, su, sv) = self.yuv.strides();
-        // `vpx_enc_frame_flags_t` is a C `long`: 64 bits on Linux and macOS, 32 on Windows.
-        // A cast rather than `From`, because no `From<u32>` exists for the 32-bit case.
-        let flags: vpx::vpx_enc_frame_flags_t =
-            if self.keyframe_owed { vpx::VPX_EFLAG_FORCE_KF as vpx::vpx_enc_frame_flags_t } else { 0 };
-        let pts = self.started.elapsed().as_millis() as i64;
-
-        // SAFETY: the three planes outlive this call — they belong to `self.yuv`, which nothing
-        // touches until the next `encode` — and the strides are the ones the conversion reports
-        // for exactly this picture. Casting away const is what the C API requires; libvpx does not
-        // write to an input image. The packets drained below point into the encoder and are copied
-        // before it is called again, which is the lifetime libvpx documents for them.
-        let unit = unsafe {
-            self.img.planes[0] = y.as_ptr().cast_mut();
-            self.img.planes[1] = u.as_ptr().cast_mut();
-            self.img.planes[2] = v.as_ptr().cast_mut();
-            self.img.stride[0] = sy as c_int;
-            self.img.stride[1] = su as c_int;
-            self.img.stride[2] = sv as c_int;
-
-            vpx!(
-                vpx::vpx_codec_encode(
-                    &mut self.ctx,
-                    &self.img,
-                    pts,
-                    // Duration: one tick of `g_timebase`, so one millisecond — deliberately a
-                    // constant rather than the gap since the last frame. libvpx reads it for
-                    // rate control, and there is no rate control here to read it: `VPX_Q` with
-                    // `rc_min == rc_max` pins the quantizer, no bitrate is set, and
-                    // `rc_dropframe_thresh = 0` forbids the one decision a duration could
-                    // otherwise drive. What must stay true is `pts`, which is real elapsed
-                    // time — a decoder and a `VideoDecoder` timestamp read that, not this.
-                    1,
-                    flags,
-                    vpx::VPX_DL_REALTIME as c_ulong,
-                ),
-                "encode"
-            )?;
-
-            let mut data: Vec<u8> = Vec::new();
-            let mut keyframe = false;
-            let mut packets = 0usize;
-            let mut iter: vpx::vpx_codec_iter_t = std::ptr::null();
-            loop {
-                let pkt = vpx::vpx_codec_get_cx_data(&mut self.ctx, &mut iter);
-                if pkt.is_null() {
-                    break;
-                }
-                if (*pkt).kind != vpx::vpx_codec_cx_pkt_kind_VPX_CODEC_CX_FRAME_PKT {
-                    continue;
-                }
-                let frame = &(*pkt).data.frame;
-                data.extend_from_slice(std::slice::from_raw_parts(frame.buf.cast::<u8>(), frame.sz));
-                keyframe |= frame.flags & vpx::VPX_FRAME_IS_KEY != 0;
-                packets += 1;
-            }
-            // More than one packet is a superframe, which is a legal thing to concatenate and
-            // hand to a decoder as one unit — but it also means `g_lag_in_frames = 0` is not doing
-            // what this module assumes, so it is logged rather than silently absorbed.
-            if packets > 1 {
-                log::warn!("vp9: one encode produced {packets} packets; expected one");
-            }
-            if data.is_empty() { None } else { Some(AccessUnit { data, keyframe }) }
-        };
-
-        // Cleared only on success, and only when something came out: a frame that produced no
-        // bitstream still owes its keyframe, and the caller's dirty flag is what brings it back.
-        if unit.is_some() {
+        self.picture.read_rgb(mirror.picture())?;
+        let mut data = Vec::new();
+        let keyframe = self.encoder.encode(&self.picture, self.keyframe_owed, &mut data).context("encoding a VP9 frame")?;
+        // Cleared only when something came out: a frame that produced no bitstream still
+        // owes its keyframe, and the caller's dirty flag is what brings it back.
+        Ok(keyframe.map(|keyframe| {
             self.keyframe_owed = false;
-        }
-        Ok(unit)
-    }
-
-    /// One `vpx_codec_control_` call with an `int` argument, checked.
-    ///
-    /// # Safety
-    ///
-    /// `id` must be a control whose argument really is an `int`. The call is variadic, so passing
-    /// the wrong type compiles and corrupts the stack.
-    unsafe fn control(
-        &mut self,
-        id: vpx::vp8e_enc_control_id,
-        value: c_int,
-        what: &str,
-    ) -> anyhow::Result<()> {
-        unsafe { vpx!(vpx::vpx_codec_control_(&mut self.ctx, id as c_int, value), what) }
-    }
-}
-
-// SAFETY: a `Stream` owns its encoder exclusively — it is not `Clone`, `encode` and `set_quality`
-// take `&mut self`, and libvpx keeps no thread-local state for an encoder instance, so moving one
-// between threads is sound. It is needed because [`crate::encode`]'s round carries the stream
-// onto a `spawn_blocking` worker for the encode and back afterwards.
-//
-// Deliberately **not** `Sync`. Two threads calling `vpx_codec_encode` on one context concurrently
-// is undefined behaviour, and nothing here needs to: the round holds the stream exclusively for
-// as long as it is encoding it.
-//
-// `img`'s plane pointers borrow `yuv`, which moves with the struct — they are overwritten at the
-// top of every `encode` before libvpx reads them, so a stale pointer is never dereferenced.
-unsafe impl Send for Stream {}
-
-impl Drop for Stream {
-    fn drop(&mut self) {
-        // SAFETY: destroyed exactly once — `Stream` is not `Clone` and holds the only handle. The
-        // wrapped image is deliberately *not* freed: `vpx_img_wrap` allocated nothing, and its
-        // planes belong to `self.yuv`.
-        unsafe {
-            vpx::vpx_codec_destroy(&mut self.ctx);
-        }
+            AccessUnit { data, keyframe }
+        }))
     }
 }
 
@@ -624,142 +165,18 @@ mod tests {
 
     /// `w`×`h` of one colour.
     fn flat(w: u16, h: u16, colour: [u8; 3]) -> Vec<u8> {
-        colour
-            .iter()
-            .copied()
-            .cycle()
-            .take(usize::from(w) * usize::from(h) * 3)
-            .collect()
+        colour.iter().copied().cycle().take(usize::from(w) * usize::from(h) * 3).collect()
     }
 
     /// A mirror and the stream over it.
     fn whole(w: u16, h: u16, quality: u8) -> (Mirror, Stream) {
         let mirror = Mirror::new(w, h).expect("a mirror");
-        let stream = Stream::new(mirror.coded(), quality, Chroma::Subsampled)
-            .expect("a stream");
+        let stream = Stream::new(mirror.coded(), quality, Chroma::Subsampled).expect("a stream");
         (mirror, stream)
     }
 
-    /// One decoded picture: the planes as tight rows, and what the header said about them.
-    struct Decoded {
-        y: Vec<u8>,
-        u: Vec<u8>,
-        v: Vec<u8>,
-        /// Width and height of a chroma plane.
-        chroma: (usize, usize),
-        cs: vpx::vpx_color_space_t,
-        range: vpx::vpx_color_range_t,
-    }
-
-    impl Decoded {
-        /// The pixel at `(x, y)` as RGB, undoing the BT.601 studio swing with the chroma
-        /// sample nearest to the pixel — a decoder's plainest reconstruction.
-        fn rgb(&self, w: usize, x: usize, y: usize) -> [u8; 3] {
-            let (cx, cy) = if self.chroma.0 == w { (x, y) } else { (x / 2, y / 2) };
-            let yy = 1.164_383 * (f32::from(self.y[y * w + x]) - 16.0);
-            let u = f32::from(self.u[cy * self.chroma.0 + cx]) - 128.0;
-            let v = f32::from(self.v[cy * self.chroma.0 + cx]) - 128.0;
-            let clamp = |c: f32| c.round().clamp(0.0, 255.0) as u8;
-            [
-                clamp(yy + 1.596_027 * v),
-                clamp(yy - 0.391_762 * u - 0.812_968 * v),
-                clamp(yy + 2.017_232 * u),
-            ]
-        }
-    }
-
-    /// The other half of the archive, so a test's claim is a round trip and not a byte
-    /// count. One decoder per call: every unit these tests decode is a keyframe.
-    fn decode(unit: &AccessUnit) -> Decoded {
-        decode_chain(std::slice::from_ref(unit))
-    }
-
-    /// A chain of units through one decoder, keyframe first, and the picture the last
-    /// one leaves on screen.
-    fn decode_chain(units: &[AccessUnit]) -> Decoded {
-        // SAFETY: the same contract as the encoder's calls — zeroed context written through
-        // by `dec_init_ver`, `unit.data` outlives the decode, and the frame libvpx hands back
-        // is copied out before the context is destroyed.
-        unsafe {
-            let iface = vpx::vpx_codec_vp9_dx();
-            assert!(!iface.is_null(), "this libvpx has no VP9 decoder");
-            let cfg = vpx::vpx_codec_dec_cfg_t { threads: 1, w: 0, h: 0 };
-            let mut ctx: vpx::vpx_codec_ctx_t = std::mem::zeroed();
-            vpx!(
-                vpx::vpx_codec_dec_init_ver(
-                    &mut ctx,
-                    iface,
-                    &cfg,
-                    0,
-                    vpx::VPX_DECODER_ABI_VERSION as c_int
-                ),
-                "dec_init_ver"
-            )
-            .expect("a decoder");
-            let mut img: *mut vpx::vpx_image_t = std::ptr::null_mut();
-            for unit in units {
-                vpx!(
-                    vpx::vpx_codec_decode(
-                        &mut ctx,
-                        unit.data.as_ptr(),
-                        unit.data.len() as std::os::raw::c_uint,
-                        std::ptr::null_mut(),
-                        0
-                    ),
-                    "decode"
-                )
-                .expect("a decode");
-                let mut iter: vpx::vpx_codec_iter_t = std::ptr::null();
-                img = vpx::vpx_codec_get_frame(&mut ctx, &mut iter);
-                assert!(!img.is_null(), "the unit decoded to no frame");
-            }
-            assert!(!img.is_null(), "no unit to decode");
-            let img = &*img;
-            let (w, h) = (img.d_w as usize, img.d_h as usize);
-            let (cw, ch) = (
-                (w + img.x_chroma_shift as usize) >> img.x_chroma_shift,
-                (h + img.y_chroma_shift as usize) >> img.y_chroma_shift,
-            );
-            let plane = |i: usize, w: usize, h: usize| -> Vec<u8> {
-                let stride = img.stride[i] as usize;
-                (0..h)
-                    .flat_map(|row| {
-                        std::slice::from_raw_parts(img.planes[i].add(row * stride), w).to_vec()
-                    })
-                    .collect()
-            };
-            let decoded = Decoded {
-                y: plane(0, w, h),
-                u: plane(1, cw, ch),
-                v: plane(2, cw, ch),
-                chroma: (cw, ch),
-                cs: img.cs,
-                range: img.range,
-            };
-            vpx::vpx_codec_destroy(&mut ctx);
-            decoded
-        }
-    }
-
-    /// A dark terminal with one-pixel coloured glyph stems: the picture 4:2:0 cannot
-    /// carry. Every stem is at an odd column and shares its 2×2 chroma group with three
-    /// pixels of background.
-    fn stems(w: u16, h: u16) -> (Vec<u8>, Vec<(usize, usize)>) {
-        let (w, h) = (usize::from(w), usize::from(h));
-        let mut rgb = flat(w as u16, h as u16, [30, 30, 30]);
-        let mut at = Vec::new();
-        for y in (0..h).filter(|y| y % 2 == 0) {
-            for x in (1..w).step_by(4) {
-                rgb[(y * w + x) * 3..][..3].copy_from_slice(&[255, 121, 198]);
-                at.push((x, y));
-            }
-        }
-        (rgb, at)
-    }
-
     /// Blit a moving block and encode, so there is something for the quantizer to be coarse
-    /// about — a stream of identical frames costs nearly nothing at any quality and would
-    /// compare two zeroes.
+    /// about.
     fn moving(mirror: &mut Mirror, stream: &mut Stream, step: u16) -> AccessUnit {
         let mut picture = flat(320, 240, [30, 60, 90]);
         let stride = 320 * 3;
@@ -771,165 +188,52 @@ mod tests {
         stream.encode(mirror).expect("an encode").expect("an access unit")
     }
 
-    #[test]
-    fn the_quality_dial_maps_onto_the_encoders_whole_range() {
-        assert_eq!(q_for(QUALITY_MIN), Q_COARSEST);
-        assert_eq!(q_for(QUALITY_MAX), Q_FINEST);
-        for quality in 0..=u8::MAX {
-            let q = q_for(quality);
-            assert!(
-                (Q_FINEST..=Q_COARSEST).contains(&q),
-                "quality {quality} gave q {q}, outside VP9's range"
-            );
-        }
-        // Monotone: a higher dial is never a coarser picture.
-        for quality in 1..100u8 {
-            assert!(q_for(quality) >= q_for(quality + 1));
-        }
-    }
-
-    #[test]
-    fn a_lower_quality_makes_a_smaller_stream() {
-        let bytes = |quality| {
-            let (mut mirror, mut stream) = whole(320, 240, quality);
-            (0..5u16).map(|step| moving(&mut mirror, &mut stream, step).data.len()).sum::<usize>()
-        };
-        let (coarse, fine) = (bytes(5), bytes(90));
-        assert!(
-            coarse < fine,
-            "quality 5 encoded {coarse} bytes and quality 90 encoded {fine}; the dial is not \
-             reaching the encoder"
-        );
-    }
-
+    /// The keyframe is owed until a frame carries it, and not a frame longer.
     #[test]
     fn the_first_frame_is_a_keyframe_and_another_can_be_asked_for() {
         let (mut mirror, mut stream) = whole(320, 240, 60);
-        assert!(
-            moving(&mut mirror, &mut stream, 0).keyframe,
-            "a decoder has to be able to start somewhere"
-        );
+        assert!(moving(&mut mirror, &mut stream, 0).keyframe, "a decoder has to be able to start somewhere");
         assert!(!moving(&mut mirror, &mut stream, 1).keyframe, "an unasked-for keyframe is bytes for nothing");
         assert!(!moving(&mut mirror, &mut stream, 2).keyframe);
         stream.force_keyframe();
-        assert!(
-            moving(&mut mirror, &mut stream, 3).keyframe,
-            "force_keyframe did not reach the encoder"
-        );
+        let asked = moving(&mut mirror, &mut stream, 3);
+        assert!(asked.keyframe, "force_keyframe did not reach the encoder");
+        assert_eq!(frame_header(&asked.data), Some(FrameHeader { profile: 0, keyframe: true }));
         // And it is not sticky: the frame after a forced keyframe is an ordinary one.
-        assert!(!moving(&mut mirror, &mut stream, 4).keyframe);
+        let after = moving(&mut mirror, &mut stream, 4);
+        assert!(!after.keyframe);
+        assert_eq!(frame_header(&after.data), Some(FrameHeader { profile: 0, keyframe: false }));
     }
 
-    /// What a whole-desktop stream's settle frame rests on: re-encoding a picture that has not
-    /// changed, at a finer quantizer, sharpens the *unchanged* blocks — as an ordinary inter frame,
-    /// with no keyframe. Were libvpx to skip blocks whose source had not moved, a desktop sent
-    /// coarse under congestion would stay coarse until it next changed, and the settle in
-    /// [`crate::encode`] would have to spend a keyframe instead.
+    /// The dial reaches the running encoder without a keyframe, and the test's refusal
+    /// hook stands in for libvpx's.
     #[test]
-    fn no_keyframe_comes_unasked() {
-        let (w, h) = (64u16, 48u16);
-        for chroma in [Chroma::Subsampled, Chroma::Full] {
-            let mut mirror = Mirror::new(w, h).expect("a mirror");
-            let mut stream = Stream::new(mirror.coded(), 60, chroma).expect("a stream");
-            for step in 0..300u32 {
-                let colour = [step as u8, (step * 7) as u8, (step * 13) as u8];
-                mirror.blit(rect(((step * 3) % 48) as u16, 8, 16, 16), &flat(16, 16, colour)).expect("a blit");
-                let unit = stream.encode(&mirror).expect("an encode").expect("a unit");
-                assert_eq!(unit.keyframe, step == 0, "{chroma:?} frame {step}");
-            }
-        }
-    }
-
-    #[test]
-    fn a_frame_header_says_what_the_encoder_made() {
-        let (w, h) = (320u16, 240u16);
-        for (chroma, profile) in [(Chroma::Subsampled, 0), (Chroma::Full, 1)] {
-            let mut mirror = Mirror::new(w, h).expect("a mirror");
-            let mut stream = Stream::new(mirror.coded(), 60, chroma).expect("a stream");
-            mirror.blit(rect(0, 0, w, h), &flat(w, h, [200, 40, 40])).expect("a blit");
-            let first = stream.encode(&mirror).expect("an encode").expect("a unit");
-            mirror.blit(rect(10, 10, 40, 40), &flat(40, 40, [20, 200, 20])).expect("a blit");
-            let second = stream.encode(&mirror).expect("an encode").expect("a unit");
-            for unit in [&first, &second] {
-                assert_eq!(
-                    frame_header(&unit.data),
-                    Some(FrameHeader { profile, keyframe: unit.keyframe }),
-                    "{chroma:?}"
-                );
-            }
-            assert!(first.keyframe && !second.keyframe);
-        }
-        assert_eq!(frame_header(&[]), None);
-        assert_eq!(frame_header(&[0x00, 0x00]), None, "no frame marker");
-    }
-
-    #[test]
-    fn a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe() {
-        let (w, h) = (320u16, 240u16);
-        // Speckle, so a coarse quantizer has detail to lose.
-        let mut picture = flat(w, h, [240, 240, 240]);
-        let mut seed = 12_345u32;
-        for px in picture.chunks_mut(3) {
-            seed = seed.wrapping_mul(1_103_515_245).wrapping_add(12_345);
-            if (seed >> 16).is_multiple_of(5) {
-                px.copy_from_slice(&[20, 20, 20]);
-            }
-        }
-        let mut source = Yuv::new(w, h, Chroma::Subsampled);
-        source.read_rgb(&picture).expect("a conversion");
-        let luma = source.planes().0.to_vec();
-        let error = |decoded: &Decoded| {
-            let sum: u64 = decoded
-                .y
-                .iter()
-                .zip(&luma)
-                .map(|(a, b)| u64::from(a.abs_diff(*b)))
-                .sum();
-            sum as f64 / luma.len() as f64
-        };
-
-        let (mut mirror, mut stream) = whole(w, h, QUALITY_MIN);
-        mirror.blit(rect(0, 0, w, h), &picture).expect("a full-screen blit");
-        let mut units = vec![stream.encode(&mirror).expect("an encode").expect("a unit")];
-        let coarse = error(&decode_chain(&units));
-
-        stream.set_quality(90).expect("the encoder to accept a new quantizer");
-        let settle = stream.encode(&mirror).expect("an encode").expect("a unit");
-        assert!(!settle.keyframe, "the settle frame cost a keyframe");
-        units.push(settle);
-        let settled = error(&decode_chain(&units));
-
-        let (_, mut fresh) = whole(w, h, 90);
-        let fine = error(&decode(&fresh.encode(&mirror).expect("an encode").expect("a unit")));
-        assert!(
-            settled < coarse / 4.0 && settled < fine * 2.0,
-            "one frame at quality 90 left the unchanged picture at error {settled:.2} (coarse \
-             {coarse:.2}, a quality-90 keyframe {fine:.2}): the encoder skipped blocks that did not move"
-        );
-    }
-
-    /// The mechanism the congestion loop rests on: quality can be given up mid-stream without
-    /// spending a keyframe to do it.
-    #[test]
-    fn the_quality_moves_on_a_live_encoder_without_a_keyframe() {
+    fn the_quality_moves_on_a_live_encoder_and_a_refusal_leaves_it_where_it_was() {
         let (mut mirror, mut stream) = whole(320, 240, 90);
         assert_eq!(stream.quality(), 90);
-
         moving(&mut mirror, &mut stream, 0);
         let fine: usize = (1..5).map(|step| moving(&mut mirror, &mut stream, step).data.len()).sum();
-
-        stream.set_quality(QUALITY_MIN).expect("the encoder to accept a new quantizer");
-        assert_eq!(stream.quality(), QUALITY_MIN);
+        stream.set_quality(crate::video::QUALITY_MIN).expect("the encoder to accept a new quantizer");
+        assert_eq!(stream.quality(), crate::video::QUALITY_MIN);
         let coarse: Vec<_> = (5..9).map(|step| moving(&mut mirror, &mut stream, step)).collect();
+        assert!(coarse.iter().map(|unit| unit.data.len()).sum::<usize>() < fine, "the quantizer did not reach the running encoder");
+        assert!(!coarse.iter().any(|unit| unit.keyframe), "moving the quantizer cost a keyframe");
 
-        assert!(
-            coarse.iter().map(|unit| unit.data.len()).sum::<usize>() < fine,
-            "the quantizer did not reach the running encoder"
-        );
-        assert!(
-            !coarse.iter().any(|unit| unit.keyframe),
-            "moving the quantizer cost a keyframe, which is what this avoids"
-        );
+        stream.refuse_retunes(1);
+        assert!(stream.set_quality(60).is_err(), "the refusal did not fire");
+        assert_eq!(stream.quality(), crate::video::QUALITY_MIN, "a refused retune moved the dial");
+        stream.set_quality(60).expect("the refusal was one retune's");
+        assert_eq!(stream.quality(), 60);
+    }
+
+    /// The stream's profile and colour fields follow the config's chroma into the string
+    /// the browser is configured with, at the rate this gateway paces to.
+    #[test]
+    fn the_codec_string_follows_the_chroma() {
+        assert_eq!(codec_string(1920, 1080, Chroma::Subsampled, ENCODED_FPS).as_deref(), Some("vp09.00.40.08.01.06.06.06.00"));
+        assert_eq!(codec_string(1920, 1080, Chroma::Full, ENCODED_FPS).as_deref(), Some("vp09.01.40.08.03.06.06.06.00"));
+        let (_, stream) = whole(1920, 1080, 60);
+        assert_eq!(stream.decode_string(), Some("vp09.00.40.08.01.06.06.06.00"));
     }
 
     /// The odd case, which is where a chroma plane would be half a pixel wide if the mirror
@@ -937,128 +241,15 @@ mod tests {
     #[test]
     fn an_odd_desktop_is_padded_and_still_encodes() {
         let (mut mirror, mut stream) = whole(1919, 1079, 60);
-        mirror
-            .blit(rect(0, 0, 1919, 1079), &flat(1919, 1079, [90, 90, 90]))
-            .expect("a full-screen blit");
+        mirror.blit(rect(0, 0, 1919, 1079), &flat(1919, 1079, [90, 90, 90])).expect("a full-screen blit");
         mirror.pad_edges();
-        assert!(stream.encode(&mirror).expect("an encode").is_some());
-    }
-
-    /// The level table, at the rows a desktop actually lands on. The numbers are libvpx's own;
-    /// what is tested is that the *lowest* fitting row is chosen, since a level is a ceiling and
-    /// announcing a higher one narrows the set of decoders that will accept the stream.
-    #[test]
-    fn the_codec_string_names_the_lowest_level_that_fits() {
-        let codec_string = |w, h| super::codec_string(w, h, Chroma::Subsampled, ENCODED_FPS);
-        // 1280x800 at 30: 1_024_000 samples. Level 3.1 allows only 983_040 of them, so this is
-        // level 4 — the *picture size* binds here, not the sample rate, which at 30_720_000 is
-        // well inside 3.1's 36_864_000. That is the trap in this table: the two limits do not
-        // move together, and a level chosen from the frame rate alone is wrong for the default
-        // desktop size in this gateway's own config.
-        assert_eq!(codec_string(1280, 800).as_deref(), Some("vp09.00.40.08.01.06.06.06.00"));
-        // 1920x1080: 2_073_600 samples, inside level 4's picture size of 2_228_224, and
-        // 62_208_000 per second inside its 83_558_400.
-        assert_eq!(codec_string(1920, 1080).as_deref(), Some("vp09.00.40.08.01.06.06.06.00"));
-        // 3840x2160: 8_294_400 samples — past 4.1's picture size, inside 5.0's 8_912_896 — and
-        // 248_832_000 per second, inside 5.0's 311_951_360. Level 5.0, not the 5.1 a guess gives.
-        assert_eq!(codec_string(3840, 2160).as_deref(), Some("vp09.00.50.08.01.06.06.06.00"));
-        // 3840x2400: 9_216_000 samples, past every level 5's 8_912_896 picture size by the
-        // 16:10 panel's extra 240 rows — level 6.0, the first that holds it. The ceiling in
-        // `video.rs` admits this picture, so the string has to exist for it.
-        assert_eq!(codec_string(3840, 2400).as_deref(), Some("vp09.00.60.08.01.06.06.06.00"));
-        // Small, but not level 1: 76_800 samples is already past level 1.1's 73_728. Level 1 is
-        // 256x144, which no desktop is.
-        assert_eq!(codec_string(320, 240).as_deref(), Some("vp09.00.20.08.01.06.06.06.00"));
-        // The bit depth is fixed — eight, whatever the size — and the profile and chroma
-        // field are the chroma's: 4:4:4 is profile 1 with sampling 03 at the same level,
-        // since a level is about luma samples. The colour fields never move: BT.601 at
-        // studio swing is what every keyframe header declares, and a string that left them
-        // out would be read as BT.709.
-        for (w, h) in [(320u16, 240u16), (1920, 1080), (3840, 2160), (3840, 2400)] {
-            let string = codec_string(w, h).expect("a level for a real desktop");
-            assert!(string.starts_with("vp09.00."), "not profile 0: {string}");
-            assert!(string.ends_with(".08.01.06.06.06.00"), "not 8-bit 4:2:0 BT.601: {string}");
-            let full = super::codec_string(w, h, Chroma::Full, ENCODED_FPS).expect("a level for a real desktop");
-            assert!(full.ends_with(".08.03.06.06.06.00"), "not 8-bit 4:4:4 BT.601: {full}");
-            assert_eq!(
-                full,
-                string.replacen("vp09.00.", "vp09.01.", 1).replacen(".08.01.", ".08.03.", 1),
-                "{w}x{h}"
-            );
-        }
-        // At 60 frames a second the sample rate binds where the picture size did not: 1080p60
-        // is 124_416_000 samples a second, past 4.0's 83_558_400, and 4K60 497_664_000, past
-        // 5.0's 311_951_360.
-        let at_60 = |w, h| super::codec_string(w, h, Chroma::Full, 60);
-        assert_eq!(at_60(1920, 1080).as_deref(), Some("vp09.01.41.08.03.06.06.06.00"));
-        assert_eq!(at_60(3840, 2160).as_deref(), Some("vp09.01.51.08.03.06.06.06.00"));
-    }
-
-    /// **Where the picture loss on a desktop stream is.** At the dial's finest quantizer
-    /// a 4:2:0 stream returns a one-pixel coloured glyph stem at a fraction of its colour,
-    /// because the stem's one chroma sample is an average with three background pixels
-    /// — and a 4:4:4 stream returns it as it was. The quantizer is the same in both, so
-    /// the difference is the sampling and nothing else. Measured across a whole rendered
-    /// desktop on 2026-09-01: 28.5 dB against 42.8, and lossless 4:2:0 no better than
-    /// its finest quantizer — see `config::Chroma`.
-    #[test]
-    fn a_444_stream_keeps_the_colour_420_averages_away() {
-        let (rgb, at) = stems(64, 64);
-        let worst = |chroma: Chroma| -> u8 {
-            let mut mirror = Mirror::new(64, 64).expect("a mirror");
-            let mut stream = Stream::new(mirror.coded(), QUALITY_MAX, chroma)
-                .expect("a stream");
-            mirror.blit(rect(0, 0, 64, 64), &rgb).expect("a full-screen blit");
-            let unit = stream.encode(&mirror).expect("an encode").expect("a unit");
-            let decoded = decode(&unit);
-            at.iter()
-                .map(|&(x, y)| {
-                    let got = decoded.rgb(64, x, y);
-                    got.iter().zip([255u8, 121, 198]).map(|(a, b)| a.abs_diff(b)).max().unwrap()
-                })
-                .max()
-                .unwrap()
-        };
-        let (subsampled, full) = (worst(Chroma::Subsampled), worst(Chroma::Full));
-        assert!(
-            subsampled >= 40,
-            "4:2:0 returned the stems within {subsampled} code values — the picture is not \
-             the one this test is about"
-        );
-        assert!(
-            full <= 24,
-            "4:4:4 returned a stem pixel {full} code values off at the finest quantizer"
-        );
-        assert!(full * 2 < subsampled, "4:4:4 ({full}) is not clearly better than 4:2:0 ({subsampled})");
-    }
-
-    /// The keyframe header says which matrix and range the pixels were converted with, so
-    /// a decoder does not guess — and guesses BT.709 for an HD picture, which is not
-    /// what the conversion did.
-    #[test]
-    fn the_bitstream_declares_bt601_studio_swing() {
-        for chroma in [Chroma::Subsampled, Chroma::Full] {
-            let mut mirror = Mirror::new(64, 64).expect("a mirror");
-            let mut stream =
-                Stream::new(mirror.coded(), 60, chroma).expect("a stream");
-            mirror.blit(rect(0, 0, 64, 64), &flat(64, 64, [200, 30, 30])).expect("a blit");
-            let unit = stream.encode(&mirror).expect("an encode").expect("a unit");
-            let decoded = decode(&unit);
-            assert_eq!(decoded.cs, vpx::vpx_color_space_VPX_CS_BT_601, "{chroma:?}");
-            assert_eq!(decoded.range, vpx::vpx_color_range_VPX_CR_STUDIO_RANGE, "{chroma:?}");
-            let expected = match chroma {
-                Chroma::Subsampled => (32, 32),
-                Chroma::Full => (64, 64),
-            };
-            assert_eq!(decoded.chroma, expected, "{chroma:?}: the profile did not reach the bitstream");
-        }
+        let unit = stream.encode(&mirror).expect("an encode").expect("a unit");
+        assert_eq!(frame_header(&unit.data).map(|header| header.profile), Some(0));
     }
 
     #[test]
     fn a_picture_too_large_is_refused_by_name() {
-        let Err(refused) =
-            Stream::new((5120, 2880), 60, Chroma::Subsampled)
-        else {
+        let Err(refused) = Stream::new((5120, 2880), 60, Chroma::Subsampled) else {
             panic!("a 5K picture was accepted");
         };
         let message = format!("{refused:#}");

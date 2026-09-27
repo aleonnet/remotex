@@ -93,7 +93,10 @@ documentation.
 
 ## Media paths
 
-- The gateway encodes video as VP9 only: one encoder to maintain. Do not add a
+- The gateway encodes video as VP9 only: one encoder to maintain, and it is
+  wlshare's `wlshare-vp9` crate, pinned by git in `Cargo.toml` — a libvpx
+  setting, the conversion in front of it or the codec string changes there, in
+  the wlshare repository, and reaches here as a pin bump. Do not add a
   second encoder (H.264, AV1 or any other), a codec probe, or a codec key that
   selects one. A stream a remote codes itself may be passed to the browser
   untouched where a rule below allows it; transcoded, it is only ever to VP9. The
