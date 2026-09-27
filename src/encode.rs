@@ -357,12 +357,15 @@ impl Congestion {
     /// cooldown restarted like any other move, so the frames queued behind that one
     /// large picture are not read as the link giving way. The clear run starts
     /// over too: the quiet is no evidence of room, and a run that spanned it would
-    /// take quality back on the first frame of every burst.
+    /// take quality back on the first frame of every burst. And a step up before
+    /// the settle is no longer the last move: lag behind the settle's frame is
+    /// that frame's, not a refusal of the step.
     fn settle(&mut self, now: tokio::time::Instant) {
         self.recent = 0;
         self.clear = None;
         self.changed_at = Some(now);
         self.stepped_on = None;
+        self.reclaimed = None;
     }
 
     /// A keyframe went out: the verdicts wait [`KEYFRAME_HOLD`] for it to cross
@@ -966,7 +969,7 @@ impl VideoSink {
     /// None of the stream's own machinery applies. There is no mirror, round,
     /// interval, quality walk or settle: the remote paces, codes and sharpens its
     /// stream itself, and learns how the browser is keeping up from the fences the
-    /// engine echoes once [`Self::drained`] says so. What is shared is the queue: the
+    /// engine echoes once [`Self::fence_hold`] says so. What is shared is the queue: the
     /// frame takes its size out of [`QUEUE_BUDGET`] like an encoded unit, and goes out
     /// in order with the messages around it.
     ///
@@ -2541,6 +2544,13 @@ mod tests {
         congestion.observe(Duration::ZERO, LAG_BEHIND, soon);
         assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, soon), None, "the settle's frames were walked back on the refusal's cooldown");
         assert_eq!(congestion.quality, 83);
+        // After the full cooldown, still inside the refusal window of the step up:
+        // an ordinary step down from the settle, not a refusal of the step.
+        let later = at + FRAME + ADJUST_COOLDOWN;
+        assert!(later.saturating_duration_since(at) <= REFUSAL_WINDOW);
+        // The two behind frames above are still in the window: this one is the verdict.
+        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, later).map(|pace| pace.quality), Some(73), "the step up was refused across a settle");
+        assert_eq!(congestion.refused, None, "a refusal cap was installed across a settle");
     }
 
     /// Between the two lag thresholds nothing accumulates: not evidence the link

@@ -460,8 +460,9 @@ from the bitstream.
 
 The dial is a **ceiling**, and that framing is what makes adaptation tractable here.
 `Congestion` in `src/encode.rs` watches one local signal — how long queueing an
-access unit blocked — and walks the 1–100 dial down towards 1 when the link is behind,
-back up towards the configured quality when it is not; never past it. It moves the
+access unit blocked — and walks the 1–100 dial down to its floor of 20 when the link is
+behind, then the frame rate, and back up towards the configured quality when it is
+not; never past it. It moves the
 dial rather than a quantizer because a quantizer is the codec module's own scale
 and never leaves it. What TCP hides is
 *headroom*, and this never needs headroom, because exceeding the operator's setting
