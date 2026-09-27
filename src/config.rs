@@ -14,7 +14,7 @@ use bytes::Bytes;
 use serde::Deserialize;
 
 use crate::audio::PcmFormat;
-#[cfg(all(feature = "embedded-gateway", unix))]
+#[cfg(feature = "embedded-gateway")]
 use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
 use crate::protocol::HostDisplay;
@@ -875,6 +875,10 @@ pub enum ListenAddr {
     Tcp(String),
     /// The path of a Unix socket to create.
     Unix(PathBuf),
+    /// A managed worker's named pipe on Windows, where there are no Unix sockets.
+    /// Never read from a config: `src/embedded/transport.rs` names it at launch.
+    #[cfg(all(feature = "embedded-gateway", windows))]
+    Pipe(String),
 }
 
 impl std::fmt::Display for ListenAddr {
@@ -884,6 +888,8 @@ impl std::fmt::Display for ListenAddr {
         match self {
             Self::Tcp(addr) => f.write_str(addr),
             Self::Unix(path) => write!(f, "{UNIX_LISTEN_PREFIX}{}", path.display()),
+            #[cfg(all(feature = "embedded-gateway", windows))]
+            Self::Pipe(name) => write!(f, "pipe:{name}"),
         }
     }
 }
@@ -1176,7 +1182,8 @@ pub struct AppConfig {
     /// Where the web server binds, already validated by `parse_listen`.
     ///
     /// A served gateway uses the configured TCP or Unix address. A managed local
-    /// worker uses the private Unix socket supplied by its control plane.
+    /// worker uses its private endpoint: a Unix socket in its instance directory, or
+    /// a named pipe on Windows.
     pub listen: ListenAddr,
     /// Every target profile this process serves; the post-login picker selects
     /// one. Non-empty for [`Audience::Served`]; possibly empty for an embedded
@@ -1264,10 +1271,10 @@ impl ConfigFile {
         if audience == Audience::Embedded {
             // Refused rather than ignored, and named as a whole block rather than
             // key by key: every one of them is a decision the launcher has already
-            // made for this gateway — a private Unix socket under the instance and
-            // a token instead of a login. A key that is quietly overridden is worse
-            // than one that is refused: it reads as configuration and behaves as
-            // decoration.
+            // made for this gateway — a private endpoint the control plane proxies
+            // to and a token instead of a login. A key that is quietly overridden is
+            // worse than one that is refused: it reads as configuration and behaves
+            // as decoration.
             anyhow::ensure!(
                 config.server.is_none(),
                 "an embedded instance config may not have a [server] block: \
@@ -1564,7 +1571,7 @@ impl ConfigFile {
     }
 
     /// Resolve the runtime configuration of a managed local instance: its private
-    /// Unix socket and a freshly minted token.
+    /// endpoint and a freshly minted token.
     ///
     /// Both are arguments here rather than a default that
     /// `[server]` could override, which is what [`Audience::Embedded`] enforces on
@@ -1573,18 +1580,18 @@ impl ConfigFile {
     /// easier to tell apart if they can be called different things.
     ///
     /// `state_dir` is the instance directory, where `[meter]` keeps its database.
-    #[cfg(all(feature = "embedded-gateway", unix))]
+    #[cfg(feature = "embedded-gateway")]
     pub fn resolve_embedded(
         self,
         token: EmbeddedToken,
-        socket_path: PathBuf,
+        endpoint: ListenAddr,
         state_dir: &Path,
     ) -> anyhow::Result<AppConfig> {
         let branding = Self::resolve_branding(self.branding.as_ref())?;
         Ok(AppConfig {
             // Only the native control plane reaches this listener. It owns the TCP
             // origin a browser addresses and proxies both HTTP and WebSockets here.
-            listen: ListenAddr::Unix(socket_path),
+            listen: endpoint,
             targets: self.targets,
             auth: GatewayAuth::Token(token),
             branding,

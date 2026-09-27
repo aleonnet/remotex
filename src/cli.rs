@@ -79,13 +79,14 @@ pub enum Commands {
         instances_dir: Option<PathBuf>,
     },
 
-    /// Start one managed worker on <instance-dir>/gateway.sock, printing its
-    /// socket and launch token on stdout for the TUI that started it.
+    /// Start one managed worker on its private endpoint — <instance-dir>/gateway.sock,
+    /// or a named pipe on Windows — printing the endpoint and launch token on stdout
+    /// for the TUI that started it.
     ///
     /// Not for interactive use. It serves the one client it was started by, reads
     /// only <instance-dir>/remotex.toml, and stops when its stdin closes — which
     /// is how it dies with its manager.
-    #[cfg(all(feature = "embedded-gateway", unix))]
+    #[cfg(feature = "embedded-gateway")]
     #[command(hide = true)]
     ServeEmbedded {
         /// The managed instance directory. Nothing outside it is read.
@@ -184,9 +185,9 @@ mod tests {
     }
 
     /// The managed worker takes the one path only its supervisor knows — the
-    /// instance it owns — and nothing else: the socket path and secret are the
+    /// instance it owns — and nothing else: the endpoint and secret are the
     /// gateway's to decide, and the SPA is in the binary.
-    #[cfg(all(feature = "embedded-gateway", unix))]
+    #[cfg(feature = "embedded-gateway")]
     #[test]
     fn serve_embedded_takes_the_one_path_the_launcher_knows() {
         let cli = Cli::try_parse_from(["remotex", "serve-embedded", "--instance-dir", "/i"])

@@ -1,9 +1,10 @@
-//! A managed local gateway: one browser instance, one Unix socket, one token.
+//! A managed local gateway: one browser instance, one private socket, one token.
 //!
 //! `remotex serve-embedded --instance-dir <dir>` is not a deployment. It is
 //! started by an instance manager, serves that browser instance alone, and dies
 //! with its parent. Everything that makes a `serve` gateway configurable is
-//! therefore decided here instead: the socket is `<instance-dir>/gateway.sock`
+//! therefore decided here instead: it listens on its private transport —
+//! `<instance-dir>/gateway.sock`, or a named pipe on Windows, see [`transport`] —
 //! and there is no login to offer — see [`crate::config::Audience::Embedded`].
 //!
 //! The SPA it serves is the same browser client as `remotex serve`. The token below
@@ -15,10 +16,11 @@
 //! Two pipes carry the whole arrangement, in opposite directions, and neither one
 //! carries the other's job:
 //!
-//! - **stdout, once**: the [`Handshake`] line, printed after the socket is bound so
-//!   its path in it is a fact rather than an intention. It is how the parent learns
-//!   the socket is ready and receives the token, and it is the only thing this
-//!   process writes to stdout — logging goes to stderr for the parent to retain.
+//! - **stdout, once**: the [`Handshake`] line, printed after the endpoint is bound
+//!   so its name in it is a fact rather than an intention. It is how the parent
+//!   learns the endpoint is ready and receives the token, and it is the only thing
+//!   this process writes to stdout — logging goes to stderr for the parent to
+//!   retain.
 //! - **stdin, never**: nothing is written to it in either direction. It exists so
 //!   this process can notice that its parent is gone; see [`parent_closed`].
 //!
@@ -30,7 +32,7 @@
 
 use std::io::Read as _;
 use std::io::Write as _;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use anyhow::Context as _;
 use log::info;
@@ -41,6 +43,10 @@ use crate::config::{Audience, ConfigFile};
 
 #[doc(hidden)]
 pub mod manager;
+#[cfg(windows)]
+mod owner_only;
+#[doc(hidden)]
+pub mod transport;
 
 pub use manager::{TuiOptions, default_instances_dir, run_tui};
 
@@ -52,8 +58,9 @@ pub use manager::{TuiOptions, default_instances_dir, run_tui};
 /// coming" from "this build does not send it".
 #[derive(Serialize, Deserialize, PartialEq, Eq)]
 pub struct Handshake {
-    /// The private Unix socket the control plane proxies to.
-    pub socket: String,
+    /// The private endpoint the control plane proxies to: the Unix socket's path,
+    /// or the named pipe's name on Windows.
+    pub endpoint: String,
     /// The token the master listener seeds in the browser's `remotex_session`
     /// cookie, which then carries it to every request and `/ws` upgrade.
     pub token: String,
@@ -66,7 +73,7 @@ pub struct Handshake {
 impl std::fmt::Debug for Handshake {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         f.debug_struct("Handshake")
-            .field("socket", &self.socket)
+            .field("endpoint", &self.endpoint)
             .finish_non_exhaustive()
     }
 }
@@ -74,7 +81,7 @@ impl std::fmt::Debug for Handshake {
 impl Handshake {
     /// The line to print, newline included.
     ///
-    /// Never fails in practice — a socket path and base64 string always serialize — and
+    /// Never fails in practice — an endpoint and base64 string always serialize — and
     /// a handshake that could not be built is a gateway the parent cannot reach, so
     /// the error is returned rather than swallowed into an empty line.
     pub fn line(&self) -> anyhow::Result<String> {
@@ -108,11 +115,6 @@ impl Instance {
         self.dir.join("remotex.toml")
     }
 
-    /// `<dir>/gateway.sock` — private transport between the supervisor and child.
-    pub fn socket_path(&self) -> PathBuf {
-        self.dir.join("gateway.sock")
-    }
-
     /// Read and check this instance's config.
     ///
     /// The error carries the path so a manager can put the right file in front of
@@ -128,14 +130,14 @@ impl Instance {
 
 /// Serve an instance until something stops us, printing the handshake to `stdout`.
 ///
-/// The order is the contract: bind, *then* announce. A socket announced before it is
-/// bound is a promise this process might not keep, and the parent would race a
+/// The order is the contract: bind, *then* announce. An endpoint announced before it
+/// is bound is a promise this process might not keep, and the parent would race a
 /// connection against a listener that does not exist yet.
 pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
     let file = instance.load()?;
     let token = EmbeddedToken::generate();
-    let socket_path = instance.socket_path();
-    let config = file.resolve_embedded(token.clone(), socket_path.clone(), &instance.dir)?;
+    let endpoint = transport::endpoint(&instance.dir);
+    let config = file.resolve_embedded(token.clone(), transport::listen_addr(&endpoint), &instance.dir)?;
 
     // Before the handshake too, so a throughput database the gateway cannot use is a refused
     // start the launcher reports rather than a gateway that silently records nothing.
@@ -145,19 +147,15 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
     )
         .context("cannot record websocket throughput ([meter].database)")?;
 
-    let crate::config::ListenAddr::Unix(configured_socket) = &config.listen else {
-        anyhow::bail!("the embedded gateway must listen on its private Unix socket");
-    };
-    anyhow::ensure!(configured_socket == &socket_path, "embedded socket path changed during resolution");
-    let listener = bind_instance_socket(&socket_path)?;
-    let _socket_file = InstanceSocket(socket_path.clone());
+    // Removes a Unix socket file when it is dropped, whichever way this returns.
+    let listener = transport::WorkerListener::bind(&endpoint)?;
 
     let handshake = Handshake {
-        socket: socket_path.to_string_lossy().into_owned(),
+        endpoint: endpoint.clone(),
         token: token.as_str().to_owned(),
     };
-    // Written and flushed before the runtime is handed the socket: the parent is
-    // blocked on this line, and a buffered stdout would deadlock the pair of us.
+    // Written and flushed before serving: the parent is blocked on this line, and
+    // a buffered stdout would deadlock the pair of us.
     let mut stdout = std::io::stdout().lock();
     stdout
         .write_all(handshake.line()?.as_bytes())
@@ -165,7 +163,7 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
         .context("cannot write the handshake to stdout")?;
     drop(stdout);
 
-    info!("embedded gateway listening on unix:{}", socket_path.display());
+    info!("embedded gateway listening on {}", config.listen);
     info!("config: {}", instance.config_path().display());
     info!("{} target(s) available in the picker:", config.targets.len());
     for target in &config.targets {
@@ -176,81 +174,10 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
     }
 
     let app = crate::server::router(config, throughput);
-    listener
-        .set_nonblocking(true)
-        .context("cannot make the listening socket non-blocking")?;
-    let listener = tokio::net::UnixListener::from_std(listener)
-        .context("cannot hand the listening socket to the runtime")?;
     axum::serve(listener, app)
         .await
         .context("server error")?;
     Ok(())
-}
-
-fn bind_instance_socket(path: &std::path::Path) -> anyhow::Result<std::os::unix::net::UnixListener> {
-    use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-    use std::os::unix::net::{UnixListener, UnixStream};
-
-    // The directory before the socket. There is no bind that takes a mode, so the
-    // socket exists at whatever the umask says for the few microseconds before the
-    // `0600` below — and behind that window is a gateway that asks for no login at
-    // all. A `0700` parent makes it unreachable rather than merely short. The
-    // supervisor already creates instance directories this way; a directory made
-    // by hand, or before that was true, is brought up to it here.
-    let dir = match path.parent() {
-        Some(dir) if !dir.as_os_str().is_empty() => dir,
-        _ => std::path::Path::new("."),
-    };
-    std::fs::set_permissions(dir, std::fs::Permissions::from_mode(0o700))
-        .with_context(|| format!("cannot make {} private", dir.display()))?;
-
-    let listener = match UnixListener::bind(path) {
-        Ok(listener) => listener,
-        Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-            let stale = std::fs::symlink_metadata(path)
-                .with_context(|| format!("cannot inspect {}", path.display()))?;
-            anyhow::ensure!(
-                UnixStream::connect(path).is_err(),
-                "{} is already served by another gateway",
-                path.display()
-            );
-            // Between that refused connection and this removal, another gateway may
-            // have reached the same verdict and bound the path itself — and removing
-            // *that* socket would leave it listening on a name nothing can reach.
-            // Only the exact file the verdict was reached about is removed; a path
-            // that changed underneath is a takeover this start loses rather than
-            // wins, and says so.
-            let current = std::fs::symlink_metadata(path)
-                .with_context(|| format!("cannot inspect {}", path.display()))?;
-            anyhow::ensure!(
-                (current.dev(), current.ino()) == (stale.dev(), stale.ino()),
-                "{} was replaced while its leftover was being taken over",
-                path.display()
-            );
-            std::fs::remove_file(path)
-                .with_context(|| format!("cannot remove stale socket {}", path.display()))?;
-            UnixListener::bind(path)
-                .with_context(|| format!("cannot bind {}", path.display()))?
-        }
-        Err(error) => {
-            return Err(error).with_context(|| format!("cannot bind {}", path.display()));
-        }
-    };
-    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-        .with_context(|| format!("cannot make {} private", path.display()))?;
-    Ok(listener)
-}
-
-struct InstanceSocket(PathBuf);
-
-impl Drop for InstanceSocket {
-    fn drop(&mut self) {
-        match std::fs::remove_file(&self.0) {
-            Ok(()) => {}
-            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
-            Err(error) => log::warn!("cannot remove {}: {error}", self.0.display()),
-        }
-    }
 }
 
 /// Resolve when the process that started us is gone.
@@ -262,7 +189,8 @@ impl Drop for InstanceSocket {
 /// requiring its shutdown code to run.
 ///
 /// This is the layer the "the gateway always stops with its manager" guarantee
-/// rests on. It is portable across the platforms a future manager may run on.
+/// rests on, and it is the same on every platform: on Windows a read from a pipe
+/// whose writer is gone ends too.
 ///
 /// On a `serve-embedded` run started by hand from a terminal, stdin is that
 /// terminal and this simply never fires — which is the right answer for a run
@@ -309,13 +237,13 @@ pub async fn parent_closed() {
 pub fn check(text: &str) -> anyhow::Result<()> {
     let file = ConfigFile::parse_with(text, Audience::Embedded)?;
     // Parsing alone would accept a file the gateway then refuses to start on, so
-    // the check goes all the way through resolution. The socket is the launcher's
-    // to place and is not in the file, so any path is sufficient here, and so is
+    // the check goes all the way through resolution. The endpoint is the worker's
+    // to place and is not in the file, so any one is sufficient here, and so is
     // any instance directory: nothing is opened in it.
     file.resolve_embedded(
         EmbeddedToken::generate(),
-        PathBuf::from("gateway.sock"),
-        std::path::Path::new(""),
+        transport::listen_addr(&transport::endpoint(Path::new(""))),
+        Path::new(""),
     )
         .map(|_| ())
 }
@@ -328,7 +256,7 @@ mod tests {
     #[test]
     fn a_handshake_is_one_parseable_line() {
         let handshake = Handshake {
-            socket: "/tmp/remotex/gateway.sock".to_owned(),
+            endpoint: "/tmp/remotex/gateway.sock".to_owned(),
             token: "abc-123".to_owned(),
         };
         let line = handshake.line().unwrap();
@@ -340,14 +268,14 @@ mod tests {
         );
         // The field names the parent reads, spelled out so renaming one here fails
         // here rather than at launch.
-        assert!(line.contains("\"socket\":\"/tmp/remotex/gateway.sock\""), "{line}");
+        assert!(line.contains("\"endpoint\":\"/tmp/remotex/gateway.sock\""), "{line}");
         assert!(line.contains("\"token\":\"abc-123\""), "{line}");
     }
 
     #[test]
     fn an_instance_names_its_config_beside_itself() {
         let instance = Instance::new("/tmp/inst");
-        assert_eq!(instance.config_path(), PathBuf::from("/tmp/inst/remotex.toml"));
+        assert_eq!(instance.config_path(), Path::new("/tmp/inst").join("remotex.toml"));
     }
 
     /// An embedded config is `[branding]` and `[[targets]]`, and an empty one is a
@@ -386,8 +314,8 @@ mod tests {
         let resolved = file
             .resolve_embedded(
                 EmbeddedToken::generate(),
-                PathBuf::from("/i/gateway.sock"),
-                std::path::Path::new("/i"),
+                transport::listen_addr(&transport::endpoint(Path::new("/i"))),
+                Path::new("/i"),
             )
             .unwrap();
         assert_eq!(resolved.branding.text, "work laptop");

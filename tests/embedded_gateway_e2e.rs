@@ -4,24 +4,24 @@
 //!
 //! The real binary, spawned as a child the way a manager spawns it — because every
 //! one of those is a property of the *process*, not of a router built in-process.
-//! The handshake has to arrive on a pipe, the Unix socket has to be bound,
-//! and the shutdown is the whole point: none of that can be observed from inside.
+//! The handshake has to arrive on a pipe, the private endpoint has to be bound —
+//! a Unix socket, or a named pipe on Windows — and the shutdown is the whole
+//! point: none of that can be observed from inside.
 //!
 //! No engine ever connects, so the targets point at a port nothing listens on.
-
-#![cfg(unix)]
 
 mod common;
 
 use std::io::{BufRead as _, BufReader};
-use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
+
+use remotex::embedded::transport;
 
 /// A running embedded gateway, its handshake already read.
 struct Embedded {
     child: Child,
-    socket: PathBuf,
+    endpoint: String,
     token: String,
     dir: common::ScratchDir,
 }
@@ -78,12 +78,14 @@ impl Embedded {
         if let Some(mut stderr) = child.stderr.take() {
             std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
         }
-        let socket = PathBuf::from(handshake["socket"].as_str().expect("a socket path"));
-        assert_eq!(socket, dir.path().join("gateway.sock"));
+        let endpoint = handshake["endpoint"].as_str().expect("an endpoint").to_owned();
+        transport::check_endpoint(dir.path(), &endpoint).expect("the instance's own endpoint");
+        #[cfg(unix)]
+        assert_eq!(std::path::Path::new(&endpoint), dir.path().join("gateway.sock"));
         let token = handshake["token"].as_str().expect("a token").to_owned();
         Self {
             child,
-            socket,
+            endpoint,
             token,
             dir,
         }
@@ -98,7 +100,7 @@ impl Embedded {
         let req = format!(
             "GET {path} HTTP/1.1\r\nHost: embedded.remotex.localhost\r\n{header}Connection: close\r\n\r\n"
         );
-        let (status, _head, body) = unix_http_request(&self.socket, &req).await;
+        let (status, _head, body) = endpoint_http_request(&self.endpoint, &req).await;
         (status, body)
     }
 
@@ -133,10 +135,10 @@ impl Embedded {
 
 /// Send raw HTTP over the child's private transport. The browser-facing TCP hop
 /// belongs to the master control plane and is tested with its router.
-async fn unix_http_request(path: &std::path::Path, request: &str) -> (u16, String, String) {
+async fn endpoint_http_request(endpoint: &str, request: &str) -> (u16, String, String) {
     use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
-    let mut stream = tokio::net::UnixStream::connect(path).await.unwrap();
+    let mut stream = transport::connect(endpoint).await.unwrap();
     stream.write_all(request.as_bytes()).await.unwrap();
     let mut raw = Vec::new();
     stream.read_to_end(&mut raw).await.unwrap();
@@ -159,14 +161,18 @@ fn one_target() -> &'static str {
      port = 9\n"
 }
 
-/// The handshake is the parent's only way in, so it has to be complete, and the socket
-/// in it has to be the one that answers — a path printed before the bind would
-/// pass a parse and fail a connection.
+/// The handshake is the parent's only way in, so it has to be complete, and the
+/// endpoint in it has to be the one that answers — a name printed before the bind
+/// would pass a parse and fail a connection.
 #[tokio::test]
-async fn the_handshake_names_a_socket_that_answers_and_a_token_that_works() {
+async fn the_handshake_names_an_endpoint_that_answers_and_a_token_that_works() {
     let embedded = Embedded::start(one_target());
 
-    assert!(embedded.socket.exists(), "the socket is bound before the handshake");
+    #[cfg(unix)]
+    assert!(
+        std::path::Path::new(&embedded.endpoint).exists(),
+        "the socket is bound before the handshake"
+    );
     assert_eq!(embedded.token.len(), 43, "32 bytes of base64url: {}", embedded.token);
 
     let (status, body) = embedded.get_authorized("/api/health").await;
@@ -207,7 +213,7 @@ async fn nothing_but_the_token_gets_past_the_guard() {
          Connection: close\r\n\r\n",
         embedded.token
     );
-    let (status, _, _) = unix_http_request(&embedded.socket, &req).await;
+    let (status, _, _) = endpoint_http_request(&embedded.endpoint, &req).await;
     assert_eq!(status, 401, "the credential lives in the cookie now");
 }
 
@@ -224,7 +230,7 @@ async fn the_login_routes_refuse_rather_than_vanish() {
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
-    let (status, head, _) = unix_http_request(&embedded.socket, &req).await;
+    let (status, head, _) = endpoint_http_request(&embedded.endpoint, &req).await;
     assert_eq!(status, 403, "there is no login to attempt");
     assert!(
         !head.to_lowercase().contains("set-cookie"),
@@ -264,7 +270,7 @@ async fn the_socket_upgrade_takes_the_cookie() {
     let embedded = Embedded::start(one_target());
     let url = "ws://embedded.remotex.localhost/ws?session=not-a-claim&chroma=444&hevc=false";
 
-    let stream = tokio::net::UnixStream::connect(&embedded.socket).await.unwrap();
+    let stream = transport::connect(&embedded.endpoint).await.unwrap();
     let err = tokio_tungstenite::client_async(url, stream)
         .await
         .expect_err("an upgrade with no credential must be refused");
@@ -283,7 +289,7 @@ async fn the_socket_upgrade_takes_the_cookie() {
     request
         .headers_mut()
         .insert("Cookie", embedded.cookie().parse().unwrap());
-    let stream = tokio::net::UnixStream::connect(&embedded.socket).await.unwrap();
+    let stream = transport::connect(&embedded.endpoint).await.unwrap();
     let (_socket, response) = tokio_tungstenite::client_async(request, stream)
         .await
         .expect("the token must get the upgrade past require_auth");
@@ -341,9 +347,16 @@ async fn closing_the_liveness_pipe_stops_the_gateway() {
         embedded.exited_within(Duration::from_secs(3)),
         "the gateway must not outlive the parent that started it"
     );
+    #[cfg(unix)]
     assert!(
-        !embedded.socket.exists(),
+        !std::path::Path::new(&embedded.endpoint).exists(),
         "a graceful liveness-pipe exit removes the private socket"
+    );
+    // A pipe has no file to leave behind; what is left to check is that nothing
+    // answers at its name.
+    assert!(
+        transport::connect(&embedded.endpoint).await.is_err(),
+        "nothing answers at a stopped gateway's endpoint"
     );
 }
 
@@ -439,14 +452,14 @@ fn check_config_agrees_with_what_the_gateway_would_do() {
     assert!(stderr.to_lowercase().contains("toml"), "{stderr}");
 }
 
-/// Two instances are two gateways: separate directories, separate sockets, separate
-/// tokens. Nothing is shared, which is what makes a second one safe to start.
+/// Two instances are two gateways: separate directories, separate endpoints,
+/// separate tokens. Nothing is shared, which is what makes a second one safe to start.
 #[tokio::test]
 async fn two_instances_share_nothing() {
     let a = Embedded::start(one_target());
     let b = Embedded::start(one_target());
 
-    assert_ne!(a.socket, b.socket);
+    assert_ne!(a.endpoint, b.endpoint);
     assert_ne!(a.token, b.token);
     assert_ne!(a.dir.path(), b.dir.path());
 

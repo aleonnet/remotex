@@ -1,7 +1,6 @@
 //! The native control plane as one process graph: two real gateway children,
-//! private Unix sockets, and one browser-facing TCP port routed by subdomain.
-
-#![cfg(unix)]
+//! their private endpoints — Unix sockets, or named pipes on Windows — and one
+//! browser-facing TCP port routed by subdomain.
 
 mod common;
 
@@ -48,10 +47,14 @@ async fn instances_start_stop_and_share_the_master_port() {
     assert!(stopped.starts_with("HTTP/1.1 503 Service Unavailable"), "{stopped}");
     let still_running = request(router.port(), "two", "/api/config", Some(&two_cookie)).await;
     assert!(still_running.contains("\"branding\":\"two\""), "{still_running}");
+    #[cfg(unix)]
     assert!(!root.path().join("one/gateway.sock").exists());
 
     supervisor.shutdown().await;
+    #[cfg(unix)]
     assert!(!root.path().join("two/gateway.sock").exists());
+    let gone = request(router.port(), "two", "/api/config", Some(&two_cookie)).await;
+    assert!(gone.starts_with("HTTP/1.1 503 Service Unavailable"), "{gone}");
 }
 
 /// A port nothing is listening on, found by taking one and letting it go. The

@@ -35,7 +35,7 @@ async fn main() -> anyhow::Result<()> {
             let config = file.resolve_with(listen.as_deref(), &remotex::config::state_dir(&path))?;
             serve(config).await?;
         }
-        #[cfg(all(feature = "embedded-gateway", unix))]
+        #[cfg(feature = "embedded-gateway")]
         Commands::Tui { port, instances_dir } => {
             anyhow::ensure!(port != 0, "--port must be between 1 and 65535");
             remotex::embedded::run_tui(remotex::embedded::TuiOptions {
@@ -46,15 +46,7 @@ async fn main() -> anyhow::Result<()> {
             })
             .await?;
         }
-        // The control plane is a Unix process graph — private `AF_UNIX` sockets and a
-        // stdin liveness pipe per worker — and none of it has been ported. On the
-        // command line so `--help` says it exists; honest about the rest.
-        #[cfg(all(feature = "embedded-gateway", not(unix)))]
-        Commands::Tui { .. } => {
-            eprintln!("remotex tui is not supported on Windows yet");
-            std::process::exit(1);
-        }
-        #[cfg(all(feature = "embedded-gateway", unix))]
+        #[cfg(feature = "embedded-gateway")]
         Commands::ServeEmbedded { instance_dir } => {
             serve_embedded(&remotex::embedded::Instance::new(instance_dir)).await?;
         }
@@ -68,15 +60,9 @@ async fn main() -> anyhow::Result<()> {
             // file. `{:#}` keeps the whole `anyhow` chain, which
             // is what names the target the complaint is about.
             let text = remotex::config::read_candidate(config.as_deref())?;
-            #[cfg(all(feature = "embedded-gateway", unix))]
+            #[cfg(feature = "embedded-gateway")]
             let result = if embedded {
                 remotex::embedded::check(&text)
-            } else {
-                remotex::config::check(&text)
-            };
-            #[cfg(all(feature = "embedded-gateway", not(unix)))]
-            let result = if embedded {
-                Err(anyhow::anyhow!("check-config --embedded is not supported on Windows yet"))
             } else {
                 remotex::config::check(&text)
             };
@@ -120,7 +106,7 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
 /// end of our stdin closing, which happens however the parent ended — see
 /// [`remotex::embedded::parent_closed`]. The signal handler is for a run started by
 /// hand, and the server arm only completes by failing.
-#[cfg(all(feature = "embedded-gateway", unix))]
+#[cfg(feature = "embedded-gateway")]
 async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Result<()> {
     tokio::select! {
         // In order, and the order is the point. `serve` reads and checks the config
@@ -224,6 +210,9 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
             "unix:{} — Unix sockets are not supported on Windows",
             path.display()
         ),
+        // Only `resolve_embedded` names a pipe, and `serve-embedded` serves it.
+        #[cfg(all(feature = "embedded-gateway", windows))]
+        ListenAddr::Pipe(name) => anyhow::bail!("{name} is an embedded worker's private pipe"),
     }
 
     info!("{} target(s) available in the post-login picker:", config.targets.len());
