@@ -7866,7 +7866,7 @@ mod tests {
         let (frame_tx, frame_rx) = mpsc::channel(8);
         let plan = crate::config::RenderPlan {
             quality: 60,
-            adaptive: None,
+            adaptive: false,
             chroma: crate::config::Chroma::Subsampled,
             apple_hevc: false,
         };
@@ -10369,7 +10369,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: None, chroma: Chroma::Full, apple_hevc: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: Chroma::Full, apple_hevc: false };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::Rects);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();

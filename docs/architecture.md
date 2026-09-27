@@ -106,10 +106,12 @@ A target's stream keys are per target, and every one has a default:
   stream's picture goes, and [choosing a chroma](#choosing-a-chroma) for when to
   take the decision away from the browser.
 - `render_adaptive` (on unless a target writes `false`) lets VP9 encoded in the
-  gateway track the measured link down to `render_adaptive_min` (default 20, or
-  the dial itself where that is lower) — see
+  gateway track the measured link — see
   [what the link will bear](#choosing-a-chroma) for the signal and the walk.
-  Turned off, the walk is the pressure-only one floored at 1.
+  There is no floor key: the walk's floor is a constant of the encoder's, where
+  it hands off from quality to frame rate as WebRTC's quality scaler does at its
+  own quantizer threshold, and the settle sharpens a quiet desktop back at the
+  dial. Turned off, the walk is the pressure-only one.
 - `hevc_passthrough` (off unless a target writes `true`, and only on
   `ard-high-performance`) passes the Mac's HEVC to a browser that takes it, which
   none of the keys above then reach.
@@ -120,7 +122,7 @@ The engines never see the config keys. They collapse to one `RenderPlan`
 `VideoSink` in `src/encode.rs`:
 
 ```text
-video_quality / render_chroma / render_adaptive* / hevc_passthrough
+video_quality / render_chroma / render_adaptive / hevc_passthrough
   → TargetConfig::render_plan(browser decoders) → RenderPlan → vnc::run / rdp::run
   → VideoSink::new(engine, frame_tx, plan, feedback, tiles)
   → DesktopStream (src/stream.rs) → vp9::Stream
@@ -322,7 +324,7 @@ the browser as it came: no ZRLE on either side, and no encode here.
   wlshare starts over at a keyframe.
 
 The target's quality keys do not reach a passed stream, which is coded at wlshare's
-`vp9_quality` and `vp9_quality_min` — see the [roadmap](roadmap.md#the-targets-quality-keys-on-wlshares-own-stream).
+`vp9_quality` — see the [roadmap](roadmap.md#the-targets-quality-keys-on-wlshares-own-stream).
 
 #### Apple's HEVC, passed through
 
@@ -497,8 +499,8 @@ steps of three, 5 Mbit/s already cycled 47 → 59 → 49 every ten seconds, and 
 that stepped ten down from a refusal and climbed to one under it cycled 43 → 49 →
 39 → 48 → 38 every few seconds, the ceiling dropping a point a cycle.
 
-`render_adaptive` gives the same walk a second signal and an operator's floor on
-every VP9 picture encoded here, unless its target turned the walk off. On a
+`render_adaptive` gives the same walk a second signal on every VP9 picture
+encoded here, unless its target turned the walk off. On a
 decoded High Performance session that is the whole picture; on a passed one it
 is only the VP9 picture between HEVC stretches. The signal is the client's own lag: the paint window already tracks how
 long the oldest unacknowledged batch has been owed, and `LinkFeedback`
@@ -515,9 +517,8 @@ wanted, a pong takes the queue ahead of it to return, and one that answered a
 displaced ping measured nothing. Sixty milliseconds of queueing lag
 counts as a behind frame even when nothing local blocked, which is exactly the
 case the paint window measured a VP9 attachment falling 222 ms behind at 7
-batches in flight while every queue stayed shallow. The walk's floor moves from
-1 to `render_adaptive_min`. Under `render_adaptive = false` the walk is
-pressure-only.
+batches in flight while every queue stayed shallow. Under `render_adaptive =
+false` the walk is pressure-only.
 
 The walk only runs when a round is taken, and a round is only taken when something
 changed, so a desktop that stops moving right after the link coarsened it would keep

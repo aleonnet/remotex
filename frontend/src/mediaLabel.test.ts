@@ -87,7 +87,7 @@ test("the video row waits for the format, then names it", () => {
 });
 
 test("the Render row says tiles while the desktop is past what video carries", () => {
-  const plan = "video q90 4:4:4 · adaptive ≥20";
+  const plan = "video q90 4:4:4 · adaptive";
   assert.equal(renderLabel("", false), "Waiting for the target");
   assert.equal(renderLabel(plan, false), plan);
   assert.equal(
