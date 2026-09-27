@@ -281,9 +281,16 @@ pub fn init_logging() {
 /// desktop ones.
 #[allow(dead_code)]
 pub async fn connect_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
+    connect_ws_as(addr, token, cookie, "444").await
+}
+
+/// [`connect_ws`] as a browser whose decoder takes `chroma` — `444` or `420`, the
+/// two answers the socket takes.
+#[allow(dead_code)]
+pub async fn connect_ws_as(addr: SocketAddr, token: &str, cookie: &str, chroma: &str) -> Ws {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
-    let mut request = format!("ws://{addr}/ws?session={token}&chroma=444&hevc=false")
+    let mut request = format!("ws://{addr}/ws?session={token}&chroma={chroma}&hevc=false")
         .into_client_request()
         .unwrap();
     request

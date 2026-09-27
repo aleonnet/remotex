@@ -24,7 +24,7 @@ pub use wlshare_vp9::{FrameHeader, frame_header};
 /// defined over a *sample rate*, so a number is needed to turn a picture size into one. 30 is
 /// what `VIDEO_FRAME_INTERVAL` in [`crate::encode`] paces access units to, so it is the rate a
 /// stream cannot exceed rather than a guess. A passed stream is paced by its server and figured
-/// at its own rate ([`crate::stream::pass_444`]).
+/// at its own rate ([`crate::stream::pass`]).
 pub const ENCODED_FPS: u64 = 30;
 
 /// The WebCodecs codec string for a `w`×`h` stream at `chroma` and `fps` — what

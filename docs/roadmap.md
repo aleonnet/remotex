@@ -108,16 +108,6 @@ delivered bytes and arrival timing added to that contract, for example — plus 
 explicit upper-bound policy. It is a separate feature whose value should be argued
 from `video`'s measurements rather than assumed.
 
-### The target's quality keys on wlshare's own stream
-
-A browser that decodes 4:4:4 watching wlshare is sent wlshare's VP9 as it comes
-([wlshare's stream, passed through](architecture.md#wlshares-stream-passed-through)),
-and that stream is coded at wlshare's `vp9_quality`: the target's `video_quality`
-and `render_adaptive` do not reach it. The plan is one message of wlshare's VP9
-encoding, client to server, naming the dial, which the gateway sends from the
-target's keys when it lists the encoding, so that the keys mean on a passed stream
-what they mean on one coded here.
-
 ### The first keyframe on a slow link
 
 Every stream starts at the dial, and its first keyframe is the whole desktop at

@@ -260,26 +260,39 @@ is size: a PNG of a changing region is far larger than a delta frame of it — a
 #### wlshare's stream, passed through
 
 wlshare has a VP9 encoding of its own, `WLSV` (`0x574c5356`), made for its desktop
-clients: every update one rectangle over the whole desktop, a `u32` length and one
-frame of a single stream. That stream is the one this gateway encodes for a browser
-that decodes profile 1 — 8-bit 4:4:4, BT.601 at studio swing declared in its
-keyframes, coded by the same `wlshare-vp9` crate at the same speed, screen tuning
-and dial, so the two are one stream by construction — so for such a browser the
-gateway lists it, and each frame goes to the browser as it came: no ZRLE on either
-side, and no encode here.
+clients and for this gateway: every update one rectangle over the whole desktop, a
+`u32` length and one frame of a single stream. That stream is the one this gateway
+would encode from the same pixels — coded by the same `wlshare-vp9` crate at the
+same speed, screen tuning and dial, 8-bit at either chroma, BT.601 at studio swing
+declared in its keyframes, so the two are one stream by construction — so on a
+generic VNC target the gateway lists it for every browser, tells wlshare what the
+plan resolved to, and each frame goes to the browser as it came: no ZRLE on either
+side, and no encode here. Any server that is not wlshare ignores the listing and
+sends what it always did, which is encoded here.
 
-- **Listed when the plan is 4:4:4.** `render_chroma` resolving to `444`, by the
-  browser's answer or the target's, puts the encoding at the head of a generic
-  server's `SetEncodings` for a desktop within the ceiling; `420` never lists it, and that browser is sent the stream
-  encoded here from ZRLE as before. The plan is fixed for an engine, and a takeover
-  by a browser that resolves otherwise rebuilds the engine
-  ([choosing a chroma](#choosing-a-chroma)), so a session never changes carriage
-  mid-stream. wlshare announces nothing: it sends the encoding in place of ZRLE, and
-  any other server ignores it and sends what it always did.
+- **Listed for every browser, with the plan beside it.** The encoding goes at
+  the head of a generic server's `SetEncodings` for a desktop within the ceiling,
+  and next to it, as pseudo-encodings the way Tight's quality levels ride the same
+  list, what wlshare is to code: `WLQ` plus the target's `video_quality` as the
+  ceiling wlshare's walk never goes above, `WLS0` for a plan whose chroma resolved
+  to 4:2:0, and `WLSD` for one without `render_adaptive`, which holds the dial
+  there rather than walking it on the browser's lag. So a browser whose decoder
+  takes only profile 0 is passed a 4:2:0 stream rather than one encoded here, and
+  the target's keys mean on a passed stream what they mean on one coded here.
+  Pseudo-encodings rather than a client message because a server that is not
+  wlshare ignores an encoding it does not know where a message it does not know
+  ends the connection, and because they ride the list that names the encoding, so
+  wlshare's first frame is already the plan's. The plan is fixed for an engine, and
+  a takeover by a browser that resolves otherwise rebuilds the engine
+  ([choosing a chroma](#choosing-a-chroma)), so a session never changes carriage or
+  chroma mid-stream. wlshare announces nothing: it sends the encoding in place of
+  ZRLE.
 - **Passed as it came** (`VideoSink::pass`). The frame's opening bits are read for
-  its profile, which must be 1, and whether it is a keyframe; its size is held to the
-  ceiling a stream encoded here is; the configuration announced ahead of it is the
-  4:4:4 string for its size, its level figured at 60 frames a second, wlshare's
+  its profile, which must be the plan's chroma's — a server that did not code what
+  it was asked is refused by name rather than handed to a decoder configured for
+  the other — and whether it is a keyframe; its size is held to the ceiling a
+  stream encoded here is; the configuration announced ahead of it is the plan's
+  chroma's string for its size, its level figured at 60 frames a second, wlshare's
   default `max_fps`, since wlshare rather than the gateway paces it. Its bytes take their share
   of `QUEUE_BUDGET` and go out in order with the messages around them. The mirror,
   the rounds, the interval, the quality walk and the settle do not run: wlshare
@@ -323,9 +336,6 @@ side, and no encode here.
   `resize`, where a frame already on its way is dropped, and for the ceiling's
   refusal on one with it. Back within the ceiling, the encoding is listed again and
   wlshare starts over at a keyframe.
-
-The target's quality keys do not reach a passed stream, which is coded at wlshare's
-`vp9_quality` — see the [roadmap](roadmap.md#the-targets-quality-keys-on-wlshares-own-stream).
 
 #### Apple's HEVC, passed through
 

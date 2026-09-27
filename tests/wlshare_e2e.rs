@@ -119,6 +119,8 @@ struct View {
     sizes: Vec<Size>,
     /// The last `displays` message: the active id and each entry's id and label.
     displays: Option<(u64, Vec<(u64, String)>)>,
+    /// The last `videoFormat` announcement: the decoder configuration string.
+    decode: Option<String>,
     /// Whether a keyframe of the last announced size has arrived.
     painted: bool,
 }
@@ -129,6 +131,7 @@ impl View {
             size: None,
             sizes: Vec::new(),
             displays: None,
+            decode: None,
             painted: false,
         }
     }
@@ -182,6 +185,7 @@ impl View {
                     .collect();
                 self.displays = Some((msg["active"].as_u64().unwrap(), entries));
             }
+            Some("videoFormat") => self.decode = Some(msg["decode"].as_str().unwrap().to_owned()),
             _ => {}
         }
     }
@@ -298,10 +302,47 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
         "the output left behind keeps what it was set to"
     );
     // The socket states a 4:4:4 decoder, so every access unit above was wlshare's own
-    // VP9 passed through, across a density change, a resize and an output switch.
+    // VP9 passed through at 4:4:4, across a density change, a resize and an output
+    // switch.
     assert!(
         container.logs().contains("asked for VP9"),
         "wlshare was not asked for its VP9 encoding:\n{}",
+        container.logs()
+    );
+    assert!(
+        container.logs().contains("asked for VP9, 4:4:4"),
+        "wlshare was not asked for 4:4:4:\n{}",
+        container.logs()
+    );
+    let decode = view.decode.as_deref().expect("a video format was announced");
+    assert!(decode.starts_with("vp09.01."), "a 4:4:4 browser was announced {decode}");
+}
+
+/// A browser whose decoder takes only profile 0 is passed wlshare's stream as well,
+/// coded at 4:2:0 because the gateway asked for it: the announcement is the profile
+/// 0 string, and wlshare says what it was asked for.
+#[tokio::test]
+#[ignore = "requires Docker or Podman"]
+async fn a_420_browser_is_passed_wlshares_stream_at_420() {
+    common::init_logging();
+    let (container, vnc_port) = start_wlshare().await;
+
+    let addr = spawn_app(vnc_port).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = common::connect_ws_as(addr, &token, &cookie, "420").await;
+    let mut view = View::new();
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}}}}"#
+    )))
+    .await
+    .unwrap();
+    view.until(&mut ws, "the desktop's first keyframe", |v| v.decode.is_some()).await;
+    let decode = view.decode.as_deref().unwrap();
+    assert!(decode.starts_with("vp09.00."), "a 4:2:0 browser was announced {decode}");
+    assert!(
+        container.logs().contains("asked for VP9, 4:2:0"),
+        "wlshare was not asked for 4:2:0:\n{}",
         container.logs()
     );
 }

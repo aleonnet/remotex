@@ -25,7 +25,7 @@ use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use crate::config::RenderPlan;
+use crate::config::{Chroma, RenderPlan};
 use crate::feedback::LinkFeedback;
 use crate::protocol::{Held, ServerMsg, Tile, VideoUnit};
 use crate::stream::{DesktopStream, Produced, Round};
@@ -555,6 +555,9 @@ enum Pending {
 /// line the task logged on its own way out would be cancelled before it printed.
 struct Shared {
     tile_support: TileSupport,
+    /// The plan's chroma: what a frame passed through ([`VideoSink::pass`]) is held
+    /// to, since wlshare was asked to code at it.
+    chroma: Chroma,
     /// Whether the desktop is past the ceiling and carried as tiles — see
     /// [`TileSupport`]. Decided by each `Resize` ([`VideoSink::msg`]).
     tiling: AtomicBool,
@@ -635,6 +638,7 @@ impl Shared {
         let RenderPlan { quality, adaptive, chroma, .. } = plan;
         Self {
             tile_support,
+            chroma,
             tiling: AtomicBool::new(false),
             rects: Mutex::default(),
             failure: Mutex::default(),
@@ -963,8 +967,8 @@ impl VideoSink {
     }
 
     /// Queue a `w`×`h` frame the remote encoded itself as the next access unit,
-    /// untouched: wlshare's VP9 encoding, which is the 4:4:4 stream this gateway would
-    /// have encoded from the same pixels ([`crate::stream::pass_444`]).
+    /// untouched: wlshare's VP9 encoding, which is the stream this gateway would have
+    /// encoded from the same pixels at the plan's chroma ([`crate::stream::pass`]).
     ///
     /// None of the stream's own machinery applies. There is no mirror, round,
     /// interval, quality walk or settle: the remote paces, codes and sharpens its
@@ -977,7 +981,7 @@ impl VideoSink {
     /// keyframe, which the full update the engine asks for at the same moment brings,
     /// and the keyframe goes out behind a fresh announcement.
     pub async fn pass(&self, w: u16, h: u16, frame: Vec<u8>) -> anyhow::Result<()> {
-        let passed = crate::stream::pass_444(w, h, &frame)?;
+        let passed = crate::stream::pass(w, h, &frame, self.shared.chroma)?;
         self.forward(w, h, frame, passed).await.map(drop)
     }
 
@@ -1558,11 +1562,12 @@ mod tests {
         (sink, frame_rx)
     }
 
-    /// The opening byte of a profile 1 VP9 frame: `frame_marker` 2, profile 1, not a
-    /// repeat, then `frame_type`. What `pass` reads; the rest is the remote's.
+    /// The opening byte of a profile 0 VP9 frame — the 4:2:0 these sinks' plan asks
+    /// wlshare for: `frame_marker` 2, profile 0, not a repeat, then `frame_type`.
+    /// What `pass` reads; the rest is the remote's.
     fn passed_frame(keyframe: bool, len: usize) -> Vec<u8> {
         let mut frame = vec![0u8; len];
-        frame[0] = if keyframe { 0xa0 } else { 0xa4 };
+        frame[0] = if keyframe { 0x80 } else { 0x84 };
         frame
     }
 
@@ -1580,7 +1585,7 @@ mod tests {
 
         let out = drain(&mut frame_rx, 3).await;
         assert!(
-            matches!(&out[0], ServerMsg::VideoFormat { decode } if decode == "vp09.01.40.08.03.06.06.06.00"),
+            matches!(&out[0], ServerMsg::VideoFormat { decode } if decode == "vp09.00.40.08.01.06.06.06.00"),
             "{:?}",
             out[0]
         );
@@ -1668,14 +1673,15 @@ mod tests {
         assert!(frame_rx.try_recv().is_err());
     }
 
-    /// Only the 4:4:4 stream the announcement describes is passed.
+    /// Only the stream at the chroma wlshare was asked for — the one the
+    /// announcement describes — is passed.
     #[tokio::test]
     async fn a_passed_frame_of_another_profile_is_refused() {
         let (sink, _frame_rx) = video_sink(1280, 800).await;
         let mut frame = passed_frame(true, 10);
-        frame[0] = 0x80; // profile 0
+        frame[0] = 0xa0; // profile 1
         let error = sink.pass(1280, 800, frame).await.unwrap_err();
-        assert!(format!("{error:#}").contains("profile 0"), "{error:#}");
+        assert!(format!("{error:#}").contains("profile 1, not the 4:2:0"), "{error:#}");
     }
 
     /// Past the ceiling, a source with rectangles has each one sent as it came:
