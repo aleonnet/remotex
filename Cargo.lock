@@ -3809,8 +3809,8 @@ checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
 
 [[package]]
 name = "wlshare-vp9"
-version = "0.0.40"
-source = "git+https://github.com/andrewtheguy/wlshare?rev=634f2d95a82c1d209a976d3fbfcedbc693f6fe27#634f2d95a82c1d209a976d3fbfcedbc693f6fe27"
+version = "0.0.41"
+source = "git+https://github.com/andrewtheguy/wlshare?tag=v0.0.41#65392fcda1fd6276880143c345e96a8f8bd82c04"
 dependencies = [
  "libvpx-prebuilt-sys",
  "log",

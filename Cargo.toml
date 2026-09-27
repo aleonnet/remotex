@@ -79,7 +79,7 @@ png = "0.18"
 rusqlite = { version = "0.40", features = ["bundled"] }
 # VP9 — the video codec every desktop is streamed with (src/vp9.rs) — as wlshare codes
 # it: the one crate that speaks to libvpx for this gateway and for wlshare's own
-# stream, pulled from that repository by git, so a passed wlshare frame and one encoded
+# stream, pulled from that repository at a release tag, so a passed wlshare frame and one encoded
 # here are the same stream by construction and a libvpx setting changes in one place.
 # VP9 is BSD-3-Clause with a patent grant, so every browser build decodes it,
 # proprietary-codec-free ones included.
@@ -90,7 +90,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # a thing no check of this gateway should have to have. Do not restore a source build,
 # a vcpkg dependency, or bindgen. libvpx asserts nothing — it returns error codes —
 # which is why the encoder is a plain `?` path under `panic = "abort"`.
-wlshare-vp9 = { git = "https://github.com/andrewtheguy/wlshare", rev = "634f2d95a82c1d209a976d3fbfcedbc693f6fe27" }
+wlshare-vp9 = { git = "https://github.com/andrewtheguy/wlshare", tag = "v0.0.41" }
 # YUV→RGB for the HEVC pictures High Performance's media stream decodes to
 # (src/vnc_apple_media.rs). Pure Rust with AVX2 and NEON paths chosen at run time —
 # no C, no assembler, the same bargain as above.
