@@ -90,7 +90,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # a thing no check of this gateway should have to have. Do not restore a source build,
 # a vcpkg dependency, or bindgen. libvpx asserts nothing — it returns error codes —
 # which is why the encoder is a plain `?` path under `panic = "abort"`.
-wlshare-vp9 = { git = "https://github.com/andrewtheguy/wlshare", rev = "13a8b034efa3c15349ad5a9fe57313543d662b53" }
+wlshare-vp9 = { git = "https://github.com/andrewtheguy/wlshare", rev = "634f2d95a82c1d209a976d3fbfcedbc693f6fe27" }
 # YUV→RGB for the HEVC pictures High Performance's media stream decodes to
 # (src/vnc_apple_media.rs). Pure Rust with AVX2 and NEON paths chosen at run time —
 # no C, no assembler, the same bargain as above.
