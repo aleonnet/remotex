@@ -470,7 +470,8 @@ saturated colour a little off. Nothing on the wire carries it; the decoder reads
 from the bitstream.
 
 The dial is a **ceiling**, and that framing is what makes adaptation tractable here.
-`Congestion` in `src/encode.rs` watches one local signal — how long queueing an
+The walk is wlshare's — `QualityWalk` in the `wlshare-vp9` crate, the one walk both
+run, driven from `src/encode.rs`. It watches one local signal — how long queueing an
 access unit blocked — and walks the 1–100 dial down to its floor of 20 when the link is
 behind, then the frame rate, and back up towards the configured quality when it is
 not; never past it. It moves the
