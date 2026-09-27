@@ -395,7 +395,13 @@ impl Congestion {
         let lag = lag.max(blocked);
         // Walking back a step up the link refused does not wait out the full
         // cooldown: the refusal is in the next few frames, and every one is queue.
-        let cooldown = if behind && self.reclaimed.is_some() { REFUSAL_COOLDOWN } else { ADJUST_COOLDOWN };
+        // Only while that step is the last move, though: a settle after it is a
+        // move too, and the frames behind its picture are owed the full cooldown.
+        let cooldown = if behind && self.reclaimed.is_some_and(|(_, at)| self.changed_at == Some(at)) {
+            REFUSAL_COOLDOWN
+        } else {
+            ADJUST_COOLDOWN
+        };
         if self.changed_at.is_some_and(|at| now.saturating_duration_since(at) < cooldown) {
             return None;
         }
@@ -2517,6 +2523,23 @@ mod tests {
         congestion.observe(Duration::ZERO, LAG_BEHIND, soon);
         assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, soon).map(|pace| pace.quality), Some(80));
         assert_eq!(congestion.refused.map(|(cap, _)| cap), Some(81));
+    }
+
+    /// A settle after a step up is the last move: the frames behind its picture
+    /// wait out the full cooldown, not the refusal's.
+    #[test]
+    fn a_settle_after_a_step_up_restores_the_full_cooldown() {
+        let mut congestion = Congestion::new(90, Some(20));
+        let start = tokio::time::Instant::now();
+        congestion.observe(Duration::ZERO, LAG_BEHIND, start);
+        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, start).map(|pace| pace.quality), Some(80));
+        let (moved, at) = clear_frames(&mut congestion, CLEAR_RUN, start + ADJUST_COOLDOWN);
+        assert_eq!(moved.map(|pace| pace.quality), Some(83));
+        congestion.settle(at + FRAME);
+        let soon = at + FRAME + REFUSAL_COOLDOWN;
+        congestion.observe(Duration::ZERO, LAG_BEHIND, soon);
+        assert_eq!(congestion.observe(Duration::ZERO, LAG_BEHIND, soon), None, "the settle's frames were walked back on the refusal's cooldown");
+        assert_eq!(congestion.quality, 83);
     }
 
     /// The adaptive floor is the operator's, not [`video::QUALITY_MIN`] — and a
