@@ -443,20 +443,24 @@ pub struct Passed {
 /// the most it will be asked for, so the rate the remote may reach is the one to name.
 const PASSED_FPS: u64 = 60;
 
-/// Check a `w`×`h` frame of wlshare's VP9 encoding, which is the 4:4:4 stream this
-/// gateway would otherwise have encoded from the same pixels: profile 1, BT.601 at
-/// studio swing, declared in its keyframes. The profile is read and held to that, so
-/// the configuration announced for it is the one the frame needs.
-pub fn pass_444(w: u16, h: u16, frame: &[u8]) -> anyhow::Result<Passed> {
+/// Check a `w`×`h` frame of wlshare's VP9 encoding, which is the stream this gateway
+/// would otherwise have encoded from the same pixels at the plan's `chroma`: its
+/// profile, BT.601 at studio swing, declared in its keyframes. The profile is read
+/// and held to the chroma wlshare was asked for, so the configuration announced for
+/// it is the one the frame needs.
+pub fn pass(w: u16, h: u16, frame: &[u8], chroma: Chroma) -> anyhow::Result<Passed> {
     let header = crate::vp9::frame_header(frame)
         .ok_or_else(|| anyhow::anyhow!("the server's VP9 frame does not start with a VP9 header"))?;
+    let asked = wlshare_vp9::Chroma::from(chroma);
     anyhow::ensure!(
-        header.profile == 1,
-        "the server's VP9 frame is profile {}, not the 4:4:4 profile 1 this session announces",
-        header.profile
+        header.profile == asked.profile(),
+        "the server's VP9 frame is profile {}, not the {} profile {} this session asked for",
+        header.profile,
+        asked.name(),
+        asked.profile()
     );
     crate::video::check_picture((w, h))?;
-    let decode = crate::vp9::codec_string(w, h, Chroma::Full, PASSED_FPS)
+    let decode = crate::vp9::codec_string(w, h, chroma, PASSED_FPS)
         .ok_or_else(|| anyhow::anyhow!("no VP9 level covers a {w}x{h} picture"))?;
     Ok(Passed { decode, keyframe: header.keyframe })
 }
@@ -470,11 +474,31 @@ mod tests {
     #[test]
     fn a_passed_frame_past_the_ceiling_is_refused() {
         let keyframe = [0xa0u8, 0, 0, 0];
-        assert!(pass_444(1920, 1080, &keyframe).is_ok());
-        let refused = pass_444(5376, 2288, &keyframe).expect_err("a 5376x2288 frame was passed");
+        assert!(pass(1920, 1080, &keyframe, Chroma::Full).is_ok());
+        let refused = pass(5376, 2288, &keyframe, Chroma::Full).expect_err("a 5376x2288 frame was passed");
         assert_eq!(
             refused.to_string(),
             crate::video::check_picture((5376, 2288)).unwrap_err().to_string()
+        );
+    }
+
+    /// A passed frame is announced at the chroma wlshare was asked for, and one of
+    /// the other profile — a server that did not do as asked — is refused by name
+    /// rather than handed to a decoder configured for something else.
+    #[test]
+    fn a_passed_frame_is_held_to_the_chroma_asked_for() {
+        let (profile_0, profile_1) = ([0x80u8, 0, 0, 0], [0xa0u8, 0, 0, 0]);
+        let subsampled = pass(1920, 1080, &profile_0, Chroma::Subsampled).expect("a 4:2:0 frame for a 4:2:0 plan");
+        assert!(subsampled.decode.starts_with("vp09.00."), "{}", subsampled.decode);
+        let full = pass(1920, 1080, &profile_1, Chroma::Full).expect("a 4:4:4 frame for a 4:4:4 plan");
+        assert!(full.decode.starts_with("vp09.01."), "{}", full.decode);
+        assert_eq!(
+            pass(1920, 1080, &profile_1, Chroma::Subsampled).unwrap_err().to_string(),
+            "the server's VP9 frame is profile 1, not the 4:2:0 profile 0 this session asked for"
+        );
+        assert_eq!(
+            pass(1920, 1080, &profile_0, Chroma::Full).unwrap_err().to_string(),
+            "the server's VP9 frame is profile 0, not the 4:4:4 profile 1 this session asked for"
         );
     }
 
