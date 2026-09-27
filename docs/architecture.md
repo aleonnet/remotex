@@ -63,7 +63,7 @@ see [Camera frames](#camera-frames).
 | `aac_eld.rs` | the AAC-ELD decoder for that stream's sound |
 | `shadow.rs` | change detection: what the client already has |
 | `encode.rs`, `stream.rs`, `video.rs` | the ordered, paced, congestion-aware stream: its mirror, its rounds, and the picture limits |
-| `vp9.rs` | the VP9 stream over the mirror, coded by wlshare's `wlshare-vp9` crate — the one place libvpx is spoken to for either side |
+| `vp9.rs` | the VP9 stream over the mirror, coded by the `desktop-vp9` crate wlshare shares — the one place libvpx is spoken to for either side |
 | `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding, resampling |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
@@ -208,7 +208,7 @@ string it announces is `vp09.01.…` instead of `vp09.00.…`. The cost is the
 decoder: no hardware VP9 decoder takes profile 1, so it always decodes in software
 — Chromium does — and a browser with no software VP9 at all, which is iOS and
 iPadOS, refuses the configuration by name the way it would refuse any other.
-`a_444_stream_keeps_the_colour_420_averages_away` in `wlshare-vp9` is the round
+`a_444_stream_keeps_the_colour_420_averages_away` in `desktop-vp9` is the round
 trip that pins the difference, through the archive's own decoder.
 
 #### Tiles past the ceiling
@@ -262,7 +262,7 @@ is size: a PNG of a changing region is far larger than a delta frame of it — a
 wlshare has a VP9 encoding of its own, `WLSV` (`0x574c5356`), made for its desktop
 clients and for this gateway: every update one rectangle over the whole desktop, a
 `u32` length and one frame of a single stream. That stream is the one this gateway
-would encode from the same pixels — coded by the same `wlshare-vp9` crate at the
+would encode from the same pixels — coded by the same `desktop-vp9` crate at the
 same speed, screen tuning and dial, 8-bit at either chroma, BT.601 at studio swing
 declared in its keyframes, so the two are one stream by construction — so on a
 generic VNC target the gateway lists it for every browser, tells wlshare what the
@@ -470,7 +470,7 @@ saturated colour a little off. Nothing on the wire carries it; the decoder reads
 from the bitstream.
 
 The dial is a **ceiling**, and that framing is what makes adaptation tractable here.
-The walk is wlshare's — `QualityWalk` in the `wlshare-vp9` crate, the one walk both
+The walk is shared with wlshare — `QualityWalk` in the `desktop-vp9` crate, the one walk both
 run, driven from `src/encode.rs`. It watches one local signal — how long queueing an
 access unit blocked — and walks the 1–100 dial down to its floor of 20 when the link is
 behind, then the frame rate, and back up towards the configured quality when it is
@@ -613,9 +613,9 @@ would not take.
 #### The codec
 
 The gateway **encodes VP9 only** (`src/vp9.rs`), and there is no codec key: one
-encoder is one to maintain. The encoder is wlshare's `wlshare-vp9` crate, pulled
-from that repository by git and the one place libvpx is spoken to for this gateway
-and for wlshare's own stream: the quantizer pinned to the dial, screen-content
+encoder is one to maintain. The encoder is the `desktop-vp9` crate, its own
+repository pinned by release tag here and in wlshare, and the one place libvpx is
+spoken to for this gateway and for wlshare's own stream: the quantizer pinned to the dial, screen-content
 tuning, no lag, no dropped frames, no keyframe unasked, the colour declared in the
 bitstream, the retune without a keyframe, and the RGB→YUV conversion in front of it
 all live there, proved once by tests that read every frame back with the archive's

@@ -30,7 +30,7 @@ pub const AUDIO_QUEUE_DEPTH: usize = 16;
 
 /// How long sending one packet batch to the audio socket may block before it
 /// counts as one the link could not keep up with — the audio walk's analogue of
-/// the video walk's `BEHIND_BLOCK` (`wlshare_vp9::walk`), and the same reasoning: the socket's queue
+/// the video walk's `BEHIND_BLOCK` (`desktop_vp9::walk`), and the same reasoning: the socket's queue
 /// is deliberately two deep ([`crate::session::AUDIO_SOCKET_BUFFER`]), so this
 /// stays at zero while the link has room and becomes obvious the moment it does
 /// not.
@@ -420,7 +420,7 @@ impl AudioSignals {
     }
 }
 
-/// What the audio link will bear — the video walk (`wlshare_vp9::walk`) for sound,
+/// What the audio link will bear — the video walk (`desktop_vp9::walk`) for sound,
 /// owned by whatever task sends the packets, with the verdicts published
 /// through [`AudioSignals`].
 ///
