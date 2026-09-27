@@ -1716,6 +1716,7 @@ mod tests {
             render_adaptive: None,
             audio_bitrate: None,
             hevc_passthrough: false,
+            virtual_display: false,
             audio_adaptive: None,
             audio_adaptive_min: None,
         }
