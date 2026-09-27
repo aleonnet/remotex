@@ -41,54 +41,26 @@ impl Embedded {
     fn start(config: &str) -> Self {
         let dir = common::ScratchDir::new("embedded");
         dir.write("remotex.toml", config);
-        let mut child = Command::new(env!("CARGO_BIN_EXE_remotex"))
-            .arg("serve-embedded")
-            .arg("--instance-dir")
-            .arg(dir.path())
-            // stdin is the liveness pipe: closing our end is how the parent tells this
-            // process to stop, so it must be a pipe and not this test's terminal.
-            .stdin(Stdio::piped())
-            .stdout(Stdio::piped())
-            .stderr(Stdio::piped())
-            .spawn()
-            .expect("the gateway binary must be built");
-
-        // Taken rather than borrowed, so the reader below owns what is left of stdout
-        // after the handshake line.
-        let mut stdout = BufReader::new(child.stdout.take().expect("a piped stdout"));
-        let mut line = String::new();
-        stdout
-            .read_line(&mut line)
-            .expect("the gateway must print a handshake line");
-        let handshake: serde_json::Value =
-            serde_json::from_str(line.trim_end()).unwrap_or_else(|e| {
-                panic!("the handshake must be one line of JSON, got {line:?}: {e}")
-            });
-
-        // Both pipes are drained for the rest of the child's life. Nothing reads what
-        // arrives — the assertions are all made over HTTP — but a pipe nobody empties
-        // fills at 64 KiB and then blocks the gateway inside a `write`, which is a
-        // test that hangs rather than fails. Today's output is nowhere near that; the
-        // first test to drive real traffic through one of these would find out the
-        // hard way, at which point the failure looks like anything but this.
-        //
-        // Detached deliberately: each thread ends by itself when its pipe closes, and
-        // the child is killed on `Drop`.
-        std::thread::spawn(move || std::io::copy(&mut stdout, &mut std::io::sink()));
-        if let Some(mut stderr) = child.stderr.take() {
-            std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
-        }
-        let endpoint = handshake["endpoint"].as_str().expect("an endpoint").to_owned();
-        transport::check_endpoint(dir.path(), &endpoint).expect("the instance's own endpoint");
-        #[cfg(unix)]
-        assert_eq!(std::path::Path::new(&endpoint), dir.path().join("gateway.sock"));
-        let token = handshake["token"].as_str().expect("a token").to_owned();
+        let (child, endpoint, token) = launch(dir.path());
         Self {
             child,
             endpoint,
             token,
             dir,
         }
+    }
+
+    /// Kill the gateway outright, with no chance to clean up, and start another
+    /// in the same instance directory.
+    fn kill_and_relaunch(&mut self) {
+        self.child.kill().unwrap();
+        self.child.wait().unwrap();
+        #[cfg(unix)]
+        assert!(
+            self.dir.path().join("gateway.sock").exists(),
+            "a killed gateway runs no cleanup, so its socket is left behind"
+        );
+        (self.child, self.endpoint, self.token) = launch(self.dir.path());
     }
 
     /// A `GET` carrying `cookie` verbatim as the `Cookie` header, or none.
@@ -131,6 +103,54 @@ impl Embedded {
         }
         false
     }
+}
+
+/// Start a gateway in `dir` and read its handshake: the child, its endpoint
+/// and its token.
+fn launch(dir: &std::path::Path) -> (Child, String, String) {
+    let mut child = Command::new(env!("CARGO_BIN_EXE_remotex"))
+        .arg("serve-embedded")
+        .arg("--instance-dir")
+        .arg(dir)
+        // stdin is the liveness pipe: closing our end is how the parent tells this
+        // process to stop, so it must be a pipe and not this test's terminal.
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .expect("the gateway binary must be built");
+
+    // Taken rather than borrowed, so the reader below owns what is left of stdout
+    // after the handshake line.
+    let mut stdout = BufReader::new(child.stdout.take().expect("a piped stdout"));
+    let mut line = String::new();
+    stdout
+        .read_line(&mut line)
+        .expect("the gateway must print a handshake line");
+    let handshake: serde_json::Value =
+        serde_json::from_str(line.trim_end()).unwrap_or_else(|e| {
+            panic!("the handshake must be one line of JSON, got {line:?}: {e}")
+        });
+
+    // Both pipes are drained for the rest of the child's life. Nothing reads what
+    // arrives — the assertions are all made over HTTP — but a pipe nobody empties
+    // fills at 64 KiB and then blocks the gateway inside a `write`, which is a
+    // test that hangs rather than fails. Today's output is nowhere near that; the
+    // first test to drive real traffic through one of these would find out the
+    // hard way, at which point the failure looks like anything but this.
+    //
+    // Detached deliberately: each thread ends by itself when its pipe closes, and
+    // the child is killed on `Drop`.
+    std::thread::spawn(move || std::io::copy(&mut stdout, &mut std::io::sink()));
+    if let Some(mut stderr) = child.stderr.take() {
+        std::thread::spawn(move || std::io::copy(&mut stderr, &mut std::io::sink()));
+    }
+    let endpoint = handshake["endpoint"].as_str().expect("an endpoint").to_owned();
+    transport::check_endpoint(dir, &endpoint).expect("the instance's own endpoint");
+    #[cfg(unix)]
+    assert_eq!(std::path::Path::new(&endpoint), dir.join("gateway.sock"));
+    let token = handshake["token"].as_str().expect("a token").to_owned();
+    (child, endpoint, token)
 }
 
 /// Send raw HTTP over the child's private transport. The browser-facing TCP hop
@@ -358,6 +378,39 @@ async fn closing_the_liveness_pipe_stops_the_gateway() {
         transport::connect(&embedded.endpoint).await.is_err(),
         "nothing answers at a stopped gateway's endpoint"
     );
+}
+
+/// One gateway per instance, on every platform: a second is refused before it
+/// binds or prints anything, and the first goes on serving.
+#[tokio::test]
+async fn a_second_gateway_for_the_same_instance_is_refused() {
+    let embedded = Embedded::start(one_target());
+
+    // No stdin to hold it: were it let through, it would stop by itself rather
+    // than hang the test.
+    let second = Command::new(env!("CARGO_BIN_EXE_remotex"))
+        .arg("serve-embedded")
+        .arg("--instance-dir")
+        .arg(embedded.dir.path())
+        .output()
+        .unwrap();
+    let stderr = String::from_utf8_lossy(&second.stderr);
+    assert!(!second.status.success(), "{stderr}");
+    assert!(second.stdout.is_empty(), "no handshake from a refused gateway");
+    assert!(stderr.contains("already served by another gateway"), "{stderr}");
+
+    let (status, _) = embedded.get_authorized("/api/health").await;
+    assert_eq!(status, 200, "the first gateway still serves");
+}
+
+/// A gateway killed outright cleans nothing up. Its lock goes with the process,
+/// and on Unix the next start takes over the socket file it left.
+#[tokio::test]
+async fn a_killed_gateway_leaves_nothing_that_blocks_the_next() {
+    let mut embedded = Embedded::start(one_target());
+    embedded.kill_and_relaunch();
+    let (status, _) = embedded.get_authorized("/api/health").await;
+    assert_eq!(status, 200);
 }
 
 /// A first launch has nothing configured, and that is a state to be served rather

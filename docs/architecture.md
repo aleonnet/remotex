@@ -1572,7 +1572,13 @@ reach, and `SharedPort::bind` refuses `0` on every path, tests included.
 Each hidden worker binds its private endpoint, prints one JSON readiness line —
 `{"endpoint","token"}` — after binding, reads only that instance's
 `remotex.toml`, and stops when its parent's stdin closes (`src/embedded.rs`,
-`Audience::Embedded`). On Unix the endpoint is `<instance>/gateway.sock` at mode
+`Audience::Embedded`). Before any of that it claims the instance: an exclusive
+lock on `<instance>/gateway.lock` through std's `File::try_lock`, the same on
+every platform and released by the operating system however the worker ends. A
+second worker for the same instance — another TUI on the same directory, or one
+started by hand — is refused before it binds, and the TUI asks the same lock
+before it spawns, so it can say why. A killed worker leaves no lock to clear,
+and on Unix its leftover socket is simply replaced. On Unix the endpoint is `<instance>/gateway.sock` at mode
 `0600` in a `0700` directory. On Windows it is a named pipe
 (`src/embedded/transport.rs`): a random `\\.\pipe\remotex-<random>` per
 launch, because pipe names are one machine-wide namespace any user may create

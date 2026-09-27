@@ -46,6 +46,8 @@ mod unix {
 
     use anyhow::Context as _;
 
+    use super::super::Claim;
+
     pub type WorkerStream = tokio::net::UnixStream;
 
     /// `<dir>/gateway.sock`: in the instance directory, so the directory's mode
@@ -74,7 +76,7 @@ mod unix {
     }
 
     impl WorkerListener {
-        pub fn bind(endpoint: &str) -> anyhow::Result<Self> {
+        pub fn bind(endpoint: &str, _claim: &Claim) -> anyhow::Result<Self> {
             let path = PathBuf::from(endpoint);
             let listener = bind_instance_socket(&path)?;
             match listener
@@ -113,9 +115,11 @@ mod unix {
         }
     }
 
+    /// Bound with the instance claimed, so a socket already at `path` is a
+    /// leftover of a gateway that died: no other can be serving it.
     fn bind_instance_socket(path: &Path) -> anyhow::Result<std::os::unix::net::UnixListener> {
-        use std::os::unix::fs::{MetadataExt as _, PermissionsExt as _};
-        use std::os::unix::net::{UnixListener, UnixStream};
+        use std::os::unix::fs::PermissionsExt as _;
+        use std::os::unix::net::UnixListener;
 
         // The directory before the socket. There is no bind that takes a mode, so the
         // socket exists at whatever the umask says for the few microseconds before the
@@ -129,37 +133,14 @@ mod unix {
         };
         super::make_private(dir)?;
 
-        let listener = match UnixListener::bind(path) {
-            Ok(listener) => listener,
-            Err(error) if error.kind() == std::io::ErrorKind::AddrInUse => {
-                let stale = std::fs::symlink_metadata(path)
-                    .with_context(|| format!("cannot inspect {}", path.display()))?;
-                anyhow::ensure!(
-                    UnixStream::connect(path).is_err(),
-                    "{} is already served by another gateway",
-                    path.display()
-                );
-                // Between that refused connection and this removal, another gateway may
-                // have reached the same verdict and bound the path itself — and removing
-                // *that* socket would leave it listening on a name nothing can reach.
-                // Only the exact file the verdict was reached about is removed; a path
-                // that changed underneath is a takeover this start loses rather than
-                // wins, and says so.
-                let current = std::fs::symlink_metadata(path)
-                    .with_context(|| format!("cannot inspect {}", path.display()))?;
-                anyhow::ensure!(
-                    (current.dev(), current.ino()) == (stale.dev(), stale.ino()),
-                    "{} was replaced while its leftover was being taken over",
-                    path.display()
-                );
-                std::fs::remove_file(path)
-                    .with_context(|| format!("cannot remove stale socket {}", path.display()))?;
-                UnixListener::bind(path).with_context(|| format!("cannot bind {}", path.display()))?
-            }
+        match std::fs::remove_file(path) {
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(error).with_context(|| format!("cannot bind {}", path.display()));
+                return Err(error).with_context(|| format!("cannot remove stale socket {}", path.display()));
             }
-        };
+        }
+        let listener = UnixListener::bind(path).with_context(|| format!("cannot bind {}", path.display()))?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
             .with_context(|| format!("cannot make {} private", path.display()))?;
         Ok(listener)
@@ -177,6 +158,7 @@ mod windows {
     use tokio::sync::mpsc;
     use windows_sys::Win32::Foundation::ERROR_PIPE_BUSY;
 
+    use super::super::Claim;
     use super::super::owner_only::SecurityDescriptor;
 
     pub type WorkerStream = NamedPipeClient;
@@ -238,7 +220,7 @@ mod windows {
     }
 
     impl WorkerListener {
-        pub fn bind(endpoint: &str) -> anyhow::Result<Self> {
+        pub fn bind(endpoint: &str, _claim: &Claim) -> anyhow::Result<Self> {
             let security = Arc::new(
                 SecurityDescriptor::pipe().context("cannot build the pipe's owner-only descriptor")?,
             );

@@ -153,8 +153,9 @@ serving refuses the start rather than answering on half of it.
 Open <http://remotex.localhost:52380>; each
 running instance has its own origin at
 `http://<instance>.remotex.localhost:52380`. Press `n` to create an instance,
-`e` to edit its `remotex.toml`, Enter to start or stop it, `r` to restart it,
-and `q` to stop every child and quit.
+`e` to edit its `remotex.toml`, `s` to start it, `x` to stop it, `r` to restart
+it, `a` to start every stopped one, `o` to open a running one in your browser,
+Enter to see its settings, and `q` to stop every child and quit.
 
 Each immediate subdirectory is one instance. The default root is
 `~/.local/share/remotex/instances` on Linux (or

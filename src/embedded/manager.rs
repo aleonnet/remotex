@@ -91,16 +91,16 @@ pub fn default_instances_dir() -> anyhow::Result<PathBuf> {
     }
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var_os("HOME").context("HOME is not set; pass --instances-dir")?;
-        Ok(PathBuf::from(home).join("Library/Application Support/remotex/instances"))
+        let home = std::env::home_dir().context("cannot find the home directory; pass --instances-dir")?;
+        Ok(home.join("Library/Application Support/remotex/instances"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
             return Ok(PathBuf::from(data).join("remotex/instances"));
         }
-        let home = std::env::var_os("HOME").context("HOME is not set; pass --instances-dir")?;
-        Ok(PathBuf::from(home).join(".local/share/remotex/instances"))
+        let home = std::env::home_dir().context("cannot find the home directory; pass --instances-dir")?;
+        Ok(home.join(".local/share/remotex/instances"))
     }
 }
 
@@ -260,6 +260,19 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                             };
                         }
                     }
+                    KeyCode::Char('o') => {
+                        if let Some(instance) = instances.get(selected) {
+                            let url = instance_url(&instance.name, router.port());
+                            message = if instance.status != InstanceStatus::Running {
+                                format!("{} is {}; s starts it", instance.name, instance.status.label())
+                            } else {
+                                match open_browser(&url) {
+                                    Ok(()) => format!("opening {url}"),
+                                    Err(error) => format!("cannot open {url}: {error:#}"),
+                                }
+                            };
+                        }
+                    }
                     KeyCode::Char('e') => {
                         if let Some(instance) = instances.get(selected) {
                             let name = instance.name.clone();
@@ -336,6 +349,48 @@ fn editor_command(editor: &str, path: &Path) -> Command {
 fn editor_command(editor: &str, path: &Path) -> Command {
     let mut command = Command::new("cmd.exe");
     command.raw_arg(format!("/d /s /c \"{editor} \"{}\"\"", path.display()));
+    command
+}
+
+/// The instance's origin on the shared port. Its `/` seeds the login cookie, so
+/// a browser sent here lands in the SPA already signed in.
+fn instance_url(name: &str, port: u16) -> String {
+    format!("http://{name}.{MASTER_HOST}:{port}")
+}
+
+/// Hands `url` to the desktop's default browser without waiting for it: some
+/// launchers stay until the browser exits. None of them gets the terminal, which
+/// the TUI is drawing on.
+fn open_browser(url: &str) -> anyhow::Result<()> {
+    browser_command(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("cannot start the browser launcher")?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn browser_command(url: &str) -> Command {
+    let mut command = Command::new("open");
+    command.arg(url);
+    command
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn browser_command(url: &str) -> Command {
+    let mut command = Command::new("xdg-open");
+    command.arg(url);
+    command
+}
+
+/// `start`, whose first quoted word is a window title, so the empty one keeps
+/// the URL from being taken for it.
+#[cfg(windows)]
+fn browser_command(url: &str) -> Command {
+    let mut command = Command::new("cmd.exe");
+    command.raw_arg(format!("/d /c start \"\" \"{url}\""));
     command
 }
 
@@ -493,11 +548,10 @@ fn render(
     for (row, (index, instance)) in instances.iter().enumerate().skip(start).take(available).enumerate() {
         let marker = if index == selected { '›' } else { ' ' };
         let text = format!(
-            "{marker} {:<20} {:<10} http://{}.{}:{port}",
+            "{marker} {:<20} {:<10} {}",
             instance.name,
             instance.status.label(),
-            instance.name,
-            MASTER_HOST
+            instance_url(&instance.name, port)
         );
         line(
             &mut frame,
@@ -528,7 +582,7 @@ fn render(
             &mut frame,
             footer,
             width,
-            "↑↓ select · Enter specs · s start · x stop · r restart · a start all · n new · e edit · R rescan · q quit",
+            "↑↓ select · Enter specs · s start · x stop · r restart · a start all · o open · n new · e edit · R rescan · q quit",
             Some(Color::DarkGrey),
             false,
         )?;
@@ -577,7 +631,7 @@ fn render_specs(
 fn describe_instance(instance: &InstanceInfo, port: u16) -> Vec<String> {
     let mut lines = vec![
         spec("state", instance.status.label()),
-        spec("url", &format!("http://{}.{MASTER_HOST}:{port}", instance.name)),
+        spec("url", &instance_url(&instance.name, port)),
         spec("config", &instance.config_path().display().to_string()),
         spec("log", &instance.log_path().display().to_string()),
     ];
@@ -922,8 +976,14 @@ impl Supervisor {
             return Ok(());
         }
         let dir = self.instances[index].dir.clone();
-        validate_config(&super::Instance::new(&dir).config_path())
+        let instance = super::Instance::new(&dir);
+        validate_config(&instance.config_path())
             .with_context(|| format!("instance {name:?} has an invalid config"))?;
+        // Asked here as well as by the worker, which holds the claim, so an
+        // instance another control plane is serving says so instead of ending in a
+        // handshake that never comes. A start that races past this one still meets
+        // the worker's.
+        drop(instance.claim().await?);
         self.instances[index].state = InstanceState::Starting;
         self.publish().await;
 
@@ -1742,6 +1802,23 @@ mod tests {
         super::super::check(&text).unwrap();
     }
 
+    /// An instance something else serves — another control plane on the same
+    /// directory, or a worker started by hand — is refused before any worker is
+    /// spawned, and says why.
+    #[tokio::test]
+    async fn an_instance_another_gateway_holds_is_refused_before_spawning() {
+        let root = tempfile::tempdir().unwrap();
+        let mut supervisor = Supervisor::open(root.path().to_path_buf(), PathBuf::from("no-such-remotex"))
+            .await
+            .unwrap();
+        supervisor.create("alpha").await.unwrap();
+        let _held = super::super::Instance::new(root.path().join("alpha")).claim().await.unwrap();
+
+        let error = supervisor.start("alpha").await.unwrap_err();
+        assert!(format!("{error:#}").contains("already served by another gateway"), "{error:#}");
+        assert_eq!(supervisor.instances()[0].status, InstanceStatus::Stopped);
+    }
+
     #[tokio::test]
     async fn two_subdomains_share_one_port_and_reach_different_gateways() {
         let routes = RouteTable::default();
@@ -1869,8 +1946,10 @@ mod tests {
     ) -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
         let endpoint = transport::endpoint(directory.path());
-        let mut listener = transport::WorkerListener::bind(&endpoint).unwrap();
+        let claim = super::super::Instance::new(directory.path()).claim().await.unwrap();
+        let mut listener = transport::WorkerListener::bind(&endpoint, &claim).unwrap();
         let task = tokio::spawn(async move {
+            let _claim = claim;
             let (mut stream, _) = axum::serve::Listener::accept(&mut listener).await;
             let mut request = Vec::new();
             let mut chunk = [0u8; 1024];

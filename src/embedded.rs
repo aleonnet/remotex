@@ -126,14 +126,60 @@ impl Instance {
         ConfigFile::parse_with(&text, Audience::Embedded)
             .with_context(|| format!("in config file {}", path.display()))
     }
+
+    /// Claim this instance for one gateway: an exclusive lock on
+    /// `<dir>/gateway.lock`, held until the claim is dropped.
+    ///
+    /// The operating system releases the lock when its holder ends, however it
+    /// ends, so a killed gateway leaves nothing to clear, and a second gateway is
+    /// refused before it touches the instance's endpoint, log or state. It is the
+    /// same lock on every platform: `flock` on Unix, `LockFileEx` on Windows.
+    ///
+    /// A held lock is asked again for [`CLAIM_PATIENCE`] before it counts as
+    /// another gateway's: Windows releases a lock whose holder has just ended
+    /// "depending upon available system resources", not at the moment it ends,
+    /// and a restart asks the moment the previous gateway has.
+    pub async fn claim(&self) -> anyhow::Result<Claim> {
+        let path = self.dir.join("gateway.lock");
+        let file = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(false)
+            .open(&path)
+            .with_context(|| format!("cannot open {}", path.display()))?;
+        let deadline = tokio::time::Instant::now() + CLAIM_PATIENCE;
+        loop {
+            match file.try_lock() {
+                Ok(()) => return Ok(Claim { _file: file }),
+                Err(std::fs::TryLockError::WouldBlock) if tokio::time::Instant::now() < deadline => {
+                    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
+                }
+                Err(std::fs::TryLockError::WouldBlock) => {
+                    anyhow::bail!("{} is already served by another gateway", self.dir.display())
+                }
+                Err(std::fs::TryLockError::Error(error)) => {
+                    return Err(error).with_context(|| format!("cannot lock {}", path.display()));
+                }
+            }
+        }
+    }
+}
+
+/// How long [`Instance::claim`] waits out a lock before calling it held.
+const CLAIM_PATIENCE: std::time::Duration = std::time::Duration::from_secs(2);
+
+/// An instance held by this process; see [`Instance::claim`].
+pub struct Claim {
+    _file: std::fs::File,
 }
 
 /// Serve an instance until something stops us, printing the handshake to `stdout`.
 ///
 /// The order is the contract: bind, *then* announce. An endpoint announced before it
 /// is bound is a promise this process might not keep, and the parent would race a
-/// connection against a listener that does not exist yet.
-pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
+/// connection against a listener that does not exist yet. It serves the instance
+/// `claim` holds, and holds it until it returns.
+pub async fn serve(instance: &Instance, claim: Claim) -> anyhow::Result<()> {
     let file = instance.load()?;
     let token = EmbeddedToken::generate();
     let endpoint = transport::endpoint(&instance.dir);
@@ -148,7 +194,7 @@ pub async fn serve(instance: &Instance) -> anyhow::Result<()> {
         .context("cannot record websocket throughput ([meter].database)")?;
 
     // Removes a Unix socket file when it is dropped, whichever way this returns.
-    let listener = transport::WorkerListener::bind(&endpoint)?;
+    let listener = transport::WorkerListener::bind(&endpoint, &claim)?;
 
     let handshake = Handshake {
         endpoint: endpoint.clone(),

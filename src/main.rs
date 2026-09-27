@@ -108,6 +108,9 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
 /// hand, and the server arm only completes by failing.
 #[cfg(feature = "embedded-gateway")]
 async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Result<()> {
+    // Ahead of the race below, because asking for the claim can wait, and waiting
+    // is what `serve` must not do before it has refused.
+    let claim = instance.claim().await?;
     tokio::select! {
         // In order, and the order is the point. `serve` reads and checks the config
         // before its first `await`, so it is ready with a refusal on the very first
@@ -117,7 +120,7 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
         // that wins decides whether a refused config is reported at all: `[server]`
         // in the file, and one run in five exits 0 with nothing on stderr.
         biased;
-        result = remotex::embedded::serve(instance) => result?,
+        result = remotex::embedded::serve(instance, claim) => result?,
         _ = remotex::embedded::parent_closed() => {
             info!("stdin closed: whatever started this gateway is gone; stopping");
         }
