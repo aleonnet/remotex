@@ -1,7 +1,6 @@
 //! What the video stream shares with the rest of the gateway: the framebuffer copy it
-//! reads, the picture limits it encodes within, and the colour conversion in front of
-//! it. [`crate::vp9`] knows only how to encode a picture; when a round is taken is
-//! [`crate::encode`]'s business.
+//! reads and the picture limits it encodes within. [`crate::vp9`] knows only how to
+//! encode a picture; when a round is taken is [`crate::encode`]'s business.
 //!
 //! Two things about the shape follow from the rest of the gateway rather than from
 //! any codec:
@@ -20,7 +19,6 @@
 //! because every attach injects a repaint, which is one of the moments the stream's
 //! keyframe is forced.
 
-use crate::config::Chroma;
 use crate::shadow::Rect;
 
 /// The 1–100 quality dial, coarsest first.
@@ -228,11 +226,10 @@ impl Mirror {
 /// Refuse a coded picture the encoder will not take.
 ///
 /// The coded picture is the mirror's: the desktop grown to even sides. 4:2:0
-/// subsamples chroma 2×2, so [`Yuv`] needs even sides there — and 4:4:4, which would
-/// not, is held to the same ones: one geometry, not two. VP9 itself does not need
-/// them either; the mirror's padding already supplies the column or row an odd
-/// desktop is short of, and an odd-width chroma plane would be a second path to be
-/// wrong in.
+/// subsamples chroma 2×2, and 4:4:4, which would not need even sides, is held to the
+/// same ones: one geometry, not two. VP9 itself does not need them either; the
+/// mirror's padding already supplies the column or row an odd desktop is short of,
+/// and a chroma plane rounded up would be a second path to be wrong in.
 ///
 /// That cannot be a config-time refusal — only the remote knows its own size, and it
 /// may change mid-session — so the message has to carry the whole explanation to
@@ -252,13 +249,13 @@ pub fn check_picture((w, h): (u16, u16)) -> anyhow::Result<()> {
 /// How many threads the encoder gets: every core but one, at least two where there
 /// are two, at most [`MAX_THREADS`]. The stream has one picture and nothing to
 /// overlap with, so its parallelism has to come from inside the picture — VP9's
-/// row-based multithreading and the tile columns [`tile_columns_log2`] gives it,
-/// set by the caller alongside this count. An encode is a burst of milliseconds
-/// that the person at the browser is waiting on, so it gets the machine; the one
-/// core kept back is for the engine's read loop and the socket, which are what
-/// make the next frame. Measured with [`Yuv`]'s bench on six cores: at 1080p the
-/// picture is too small for more than three threads to matter either way, and at
-/// 4K six threads take a frame in six sevenths of the time three do.
+/// row-based multithreading and the tile columns the encoder cuts for this count.
+/// An encode is a burst of milliseconds that the person at the browser is waiting
+/// on, so it gets the machine; the one core kept back is for the engine's read
+/// loop and the socket, which are what make the next frame. Measured with the
+/// encoder's bench on six cores: at 1080p the picture is too small for more than
+/// three threads to matter either way, and at 4K six threads take a frame in six
+/// sevenths of the time three do.
 pub fn threads() -> usize {
     threads_for(std::thread::available_parallelism().map_or(1, |n| n.get()))
 }
@@ -279,105 +276,6 @@ fn threads_for(cores: usize) -> usize {
     if cores <= 2 { cores } else { (cores - 1).min(MAX_THREADS) }
 }
 
-/// A tile column is about this wide, so libvpx's `tile_columns` is the log2 of how
-/// many of them the picture holds: none under 1920 pixels, two at 1080p, four at
-/// 4K. The width rather than the thread count decides it because a tile is a cost
-/// as well as a split — the columns are coded apart, which costs bytes, and at
-/// 1080p four of them coded slower than two whatever the threads — while at 4K four
-/// were worth having. Never more than the threads can fill, since a tile no thread
-/// takes is the cost without the split. libvpx clamps the value to what the width
-/// allows in any case.
-const TILE_WIDTH: usize = 960;
-
-/// libvpx's `VP9E_SET_TILE_COLUMNS` for a picture `width` wide coded on `threads`.
-pub fn tile_columns_log2(width: u16, threads: usize) -> u32 {
-    (usize::from(width) / TILE_WIDTH).max(1).ilog2().min(threads.max(1).ilog2())
-}
-
-/// One picture as planar YUV, and the RGB→YUV conversion in front of the encoder.
-///
-/// BT.601 studio swing, the `yuv` crate's, on the AVX2 or NEON path the machine has.
-/// The chroma planes are one sample per pixel or one per 2×2 group averaged, as
-/// [`Chroma`] says — the tight `(w, w, w)` I444 or `(w, w/2, w/2)` I420 layout libvpx
-/// wraps without copying. The conversion's cost is measured separately in the encoder
-/// bench: the scalar loop this replaced was two fifths of a 1080p encode on a
-/// six-core host, and its 4:2:0 averaging the slower of its two paths.
-pub struct Yuv {
-    y: Vec<u8>,
-    u: Vec<u8>,
-    v: Vec<u8>,
-    size: (usize, usize),
-    chroma: Chroma,
-}
-
-impl Yuv {
-    /// A buffer for a `w`×`h` picture, both even.
-    ///
-    /// Reused across frames so a 1080p conversion is not a 3 MB allocation apiece.
-    /// Even because the mirror is held at even sides, which is what keeps the 4:2:0
-    /// chroma rows below made of whole 2×2 groups.
-    pub fn new(w: u16, h: u16, chroma: Chroma) -> Self {
-        let size = (usize::from(w), usize::from(h));
-        let samples = match chroma {
-            Chroma::Subsampled => size.0 * size.1 / 4,
-            Chroma::Full => size.0 * size.1,
-        };
-        Self { y: vec![0; size.0 * size.1], u: vec![0; samples], v: vec![0; samples], size, chroma }
-    }
-
-    /// Which sampling this buffer holds, and so which libvpx image format wraps it.
-    pub fn chroma(&self) -> Chroma {
-        self.chroma
-    }
-
-    /// Convert `rgb` — packed RGB888 for exactly this buffer's picture — in place.
-    ///
-    /// The length is checked rather than trusted, because everything after the check
-    /// indexes by the picture size and this binary aborts on an out-of-bounds panic.
-    pub fn read_rgb(&mut self, rgb: &[u8]) -> anyhow::Result<()> {
-        let (w, h) = self.size;
-        anyhow::ensure!(
-            rgb.len() == w * h * 3,
-            "a video crop came back {} bytes for a {w}x{h} picture",
-            rgb.len(),
-        );
-        use yuv::{BufferStoreMut, YuvConversionMode, YuvPlanarImageMut, YuvRange, YuvStandardMatrix};
-        let (_, chroma_stride, _) = self.strides();
-        let mut image = YuvPlanarImageMut {
-            y_plane: BufferStoreMut::Borrowed(&mut self.y),
-            y_stride: w as u32,
-            u_plane: BufferStoreMut::Borrowed(&mut self.u),
-            u_stride: chroma_stride as u32,
-            v_plane: BufferStoreMut::Borrowed(&mut self.v),
-            v_stride: chroma_stride as u32,
-            width: w as u32,
-            height: h as u32,
-        };
-        let (range, matrix, mode) = (YuvRange::Limited, YuvStandardMatrix::Bt601, YuvConversionMode::Balanced);
-        // The 4:2:0 chroma sample is the 2×2 group's rounded average, as the crate
-        // takes it; `the_conversion_is_bt601_studio_swing` holds it to that.
-        match self.chroma {
-            Chroma::Full => yuv::rgb_to_yuv444(&mut image, rgb, (w * 3) as u32, range, matrix, mode),
-            Chroma::Subsampled => yuv::rgb_to_yuv420(&mut image, rgb, (w * 3) as u32, range, matrix, mode),
-        }
-        .map_err(|e| anyhow::anyhow!("converting a {w}x{h} picture to {}: {e}", self.chroma.name()))
-    }
-
-    /// The three planes, for the codec's image to point at.
-    pub fn planes(&self) -> (&[u8], &[u8], &[u8]) {
-        (&self.y, &self.u, &self.v)
-    }
-
-    /// The three planes' strides, in the same order as [`Self::planes`].
-    pub fn strides(&self) -> (usize, usize, usize) {
-        let chroma = match self.chroma {
-            Chroma::Subsampled => self.size.0 / 2,
-            Chroma::Full => self.size.0,
-        };
-        (self.size.0, chroma, chroma)
-    }
-}
-
 #[cfg(test)]
 impl Mirror {
     /// The pixel at `(x, y)`, for the tests about blitting and padding.
@@ -394,6 +292,7 @@ impl Mirror {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::config::Chroma;
 
     /// A rectangle from a position and a size, which is what most of these want.
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
@@ -407,20 +306,6 @@ mod tests {
         let cores = [1, 2, 3, 4, 5, 6, 8, 9, 16, 64, 256];
         let threads: Vec<usize> = cores.into_iter().map(threads_for).collect();
         assert_eq!(threads, [1, 2, 2, 3, 4, 5, 7, 8, 8, 8, 8]);
-    }
-
-    /// Tile columns follow the width — one under 1920, two at 1080p, four at 4K and
-    /// 5K — and never outnumber the threads.
-    #[test]
-    fn tile_columns_follow_the_width_and_never_outnumber_the_threads() {
-        assert_eq!(tile_columns_log2(1280, 8), 0);
-        assert_eq!(tile_columns_log2(1920, 8), 1);
-        assert_eq!(tile_columns_log2(2560, 8), 1);
-        assert_eq!(tile_columns_log2(3840, 8), 2);
-        assert_eq!(tile_columns_log2(5120, 8), 2);
-        assert_eq!(tile_columns_log2(3840, 2), 1);
-        assert_eq!(tile_columns_log2(3840, 1), 0);
-        assert_eq!(tile_columns_log2(3840, 0), 0);
     }
 
     /// Synthetic screen content: a light panel with text-like runs, and one window being
@@ -538,11 +423,11 @@ mod tests {
 
                 // The conversion on its own, over the same pixels: it is inside the
                 // encode timing above, and this is what says how much of it it was.
-                let mut yuv = Yuv::new(mirror.coded().0, mirror.coded().1, chroma);
+                let mut picture = wlshare_vp9::Picture::new(mirror.coded().0, mirror.coded().1, chroma.into()).expect("a picture");
                 let crop = mirror.picture().to_vec();
                 let started = std::time::Instant::now();
                 for _ in 0..FRAMES {
-                    yuv.read_rgb(&crop).expect("its own picture");
+                    picture.read_rgb(&crop).expect("its own picture");
                 }
                 let convert = started.elapsed();
 
@@ -693,70 +578,5 @@ mod tests {
                 "the encoder refuses the {held:?} the engine was told to ask for"
             );
         }
-    }
-
-    #[test]
-    fn a_conversion_refuses_a_crop_that_is_not_its_picture() {
-        let mut i420 = Yuv::new(64, 32, Chroma::Subsampled);
-        i420.read_rgb(&flat(64, 32, [10, 20, 30])).expect("its own picture");
-        assert!(
-            i420.read_rgb(&flat(64, 31, [10, 20, 30])).is_err(),
-            "a mis-sized crop would have indexed out of the planes"
-        );
-        // I420: full-size luma, quarter-size chroma, both tight.
-        let (y, u, v) = i420.planes();
-        assert_eq!((y.len(), u.len(), v.len()), (64 * 32, 32 * 16, 32 * 16));
-        assert_eq!(i420.strides(), (64, 32, 32));
-        // I444: three full-size planes.
-        let mut i444 = Yuv::new(64, 32, Chroma::Full);
-        i444.read_rgb(&flat(64, 32, [10, 20, 30])).expect("its own picture");
-        assert!(i444.read_rgb(&flat(64, 31, [10, 20, 30])).is_err());
-        let (y, u, v) = i444.planes();
-        assert_eq!((y.len(), u.len(), v.len()), (64 * 32, 64 * 32, 64 * 32));
-        assert_eq!(i444.strides(), (64, 64, 64));
-    }
-
-    /// The conversion's arithmetic, at the points BT.601 studio swing pins exactly:
-    /// black and white land on 16 and 235, every grey is chroma-neutral at 128, and
-    /// a saturated red is the strongest V a swing this size has. The tolerance is one
-    /// code value, which is the rounding the integer coefficients are allowed.
-    #[test]
-    fn the_conversion_is_bt601_studio_swing() {
-        let mut i420 = Yuv::new(2, 2, Chroma::Subsampled);
-        let mut i444 = Yuv::new(2, 2, Chroma::Full);
-        let close = |got: u8, want: u8, what: &str| {
-            assert!(got.abs_diff(want) <= 1, "{what}: got {got}, wanted {want}");
-        };
-        for (colour, y_want, u_want, v_want, name) in [
-            ([0u8, 0, 0], 16u8, 128u8, 128u8, "black"),
-            ([255, 255, 255], 235, 128, 128, "white"),
-            ([128, 128, 128], 126, 128, 128, "mid grey"),
-            ([255, 0, 0], 81, 90, 240, "red"),
-            ([0, 0, 255], 41, 240, 110, "blue"),
-        ] {
-            for yuv in [&mut i420, &mut i444] {
-                yuv.read_rgb(&flat(2, 2, colour)).expect("a 2x2 picture");
-                let (y, u, v) = yuv.planes();
-                close(y[0], y_want, name);
-                close(u[0], u_want, name);
-                close(v[0], v_want, name);
-            }
-        }
-        // At 4:2:0 the chroma sample is the 2×2 average, not the top-left pixel: a
-        // checkerboard of full red and full blue meets in the middle. At 4:4:4 each
-        // pixel keeps its own.
-        let mut quad = Vec::new();
-        quad.extend_from_slice(&[255, 0, 0, 0, 0, 255]);
-        quad.extend_from_slice(&[0, 0, 255, 255, 0, 0]);
-        i420.read_rgb(&quad).expect("a 2x2 picture");
-        let (_, u, v) = i420.planes();
-        close(u[0], 165, "checkerboard U");
-        close(v[0], 175, "checkerboard V");
-        i444.read_rgb(&quad).expect("a 2x2 picture");
-        let (_, u, v) = i444.planes();
-        close(u[0], 90, "red pixel U");
-        close(v[0], 240, "red pixel V");
-        close(u[1], 240, "blue pixel U");
-        close(v[1], 110, "blue pixel V");
     }
 }
