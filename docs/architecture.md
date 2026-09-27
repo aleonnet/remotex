@@ -294,9 +294,12 @@ the browser as it came: no ZRLE on either side, and no encode here.
   alone, which is never behind; while the picture is the passed stream each echo is
   instead held for the queue ahead of the frame on the browser's link
   (`VideoSink::fence_hold`): how long the oldest owed batch has waited beyond the
-  link's ping round trip, when more than one is owed, and nothing when the frame
-  just passed is owed alone — its own transmission is the link working, not the
-  link behind. So a frame alone brings the next at once, and from then on each echo
+  link's ping round trip, when that batch was written before the frame was handed
+  over, and nothing when the oldest owed is the frame's own — its transmission is
+  the link working, not the link behind. Judged by the batch's time rather than
+  by how many are owed, because the frame joins the paint window's count from the
+  socket's task, after its fence has already been read. So a frame alone brings
+  the next at once, and from then on each echo
   carries what is queued ahead of the frame it follows, which wlshare paces itself
   to. Two holds were measured and refused: one that ran to everything queued having
   given its budget back put every frame's own transmission into wlshare's floor,
@@ -505,8 +508,11 @@ subtraction. The distance is the smallest ping round trip of the last minute
 rather than the smallest batch's end-to-end time, because a batch's time carries
 its own transmission, and a stream whose frames are all one size spends the
 same time sending every one: taken from them, the baseline read that time as
-distance and the walk stood still. A ping is a few bytes; every heartbeat ping
-carries its own number and its pong is timed. Sixty milliseconds of queueing lag
+distance and the walk stood still. A ping is a few bytes; every ping carries its
+own number, every one sent is kept until its pong times it, and a parked wait's
+ping does not displace the heartbeat's — on the slow link where the distance is
+wanted, a pong takes the queue ahead of it to return, and one that answered a
+displaced ping measured nothing. Sixty milliseconds of queueing lag
 counts as a behind frame even when nothing local blocked, which is exactly the
 case the paint window measured a VP9 attachment falling 222 ms behind at 7
 batches in flight while every queue stayed shallow. The walk's floor moves from
@@ -527,7 +533,10 @@ to the quality the link bears, and the settle's frame is no verdict. The screen
 stopping says nothing about the link, and a walk that started every burst of motion
 from the dial was measured, on a desktop moving four seconds in eight over 5 Mbit/s,
 to put the picture 0.45 s behind on average and the walk back at 50 or 60 every
-burst; keeping its place, the same run held 42 to 59 and 0.12 s. A stream that went
+burst; keeping its place, the same run held 42 to 59 and 0.12 s. The clear frames
+before the quiet do not span it either: the walk's run of clear frames starts over
+at the settle, so a burst earns its step back up from its own frames rather than
+taking one on its first. A stream that went
 out at the dial owes nothing and sends nothing when it goes quiet.
 
 That signal only works because those queues are shallow. One message is a whole

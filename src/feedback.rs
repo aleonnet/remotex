@@ -27,8 +27,9 @@
 //! the distance.
 //!
 //! One writer, many cheap readers: the ws bridge stores two atomics on the
-//! events it already handles (a batch sent, a batch acknowledged), and a reader
-//! pays two loads and a subtraction. Nothing here polls, allocates, or locks.
+//! events it already handles (a batch sent, a batch acknowledged), the passing
+//! sink one more on a frame handed over, and a reader pays a few loads and a
+//! subtraction. Nothing here polls, allocates, or locks.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -70,8 +71,9 @@ pub struct LinkFeedback {
     /// The smallest ping round trip (in ms) over the tracker's recent window —
     /// the link's distance. [`BASELINE_UNKNOWN`] until the first pong.
     baseline_ms: AtomicU32,
-    /// How many batches are owed.
-    owed: AtomicU32,
+    /// Microseconds since [`epoch`] (offset by one) when the last passed frame
+    /// was handed to the browser's queue. `0` before any was.
+    handed_us: AtomicU64,
 }
 
 impl LinkFeedback {
@@ -79,7 +81,7 @@ impl LinkFeedback {
         Self {
             oldest_sent_us: AtomicU64::new(0),
             baseline_ms: AtomicU32::new(BASELINE_UNKNOWN),
-            owed: AtomicU32::new(0),
+            handed_us: AtomicU64::new(0),
         }
     }
 
@@ -103,12 +105,16 @@ impl LinkFeedback {
         age.saturating_sub(Duration::from_millis(u64::from(baseline)))
     }
 
-    /// Record when the oldest unacknowledged batch was sent, or that none is, and
-    /// how many are owed.
-    pub fn owed_since(&self, sent: Option<Instant>, owed: usize) {
+    /// Record when the oldest unacknowledged batch was sent, or that none is.
+    pub fn owed_since(&self, sent: Option<Instant>) {
         let value = sent.map_or(0, micros_since_epoch);
         self.oldest_sent_us.store(value, Ordering::Relaxed);
-        self.owed.store(u32::try_from(owed).unwrap_or(u32::MAX), Ordering::Relaxed);
+    }
+
+    /// Record that a passed frame was handed to the browser's queue at `at` —
+    /// what [`Self::hold`] tells the batches ahead of it from its own.
+    pub fn handed(&self, at: Instant) {
+        self.handed_us.store(micros_since_epoch(at), Ordering::Relaxed);
     }
 
     /// Record the link's distance: the smallest ping round trip over the paint
@@ -117,10 +123,16 @@ impl LinkFeedback {
         self.baseline_ms.store(ms, Ordering::Relaxed);
     }
 
-    /// How long the queue ahead of a frame handed to the browser now is: the
-    /// oldest owed batch's wait beyond the distance, when more than one is owed,
-    /// and nothing when the frame just written is the only one — its own
-    /// transmission is the link working, not the link behind.
+    /// How long the queue ahead of the last frame handed over is: the oldest owed
+    /// batch's wait beyond the distance, when that batch went out before the frame
+    /// was handed over, and nothing when it did not — then the only batch owed
+    /// carries the frame itself, and its own transmission is the link working,
+    /// not the link behind.
+    ///
+    /// Judged by when the batch was written rather than by how many are owed: the
+    /// frame joins the tracker's count from the socket's task, some time after it
+    /// was handed over, and a fence that followed it at once found the count one
+    /// short as often as not, and read a batch ahead of the frame as nothing.
     ///
     /// What a passed stream's fence is held for ([`crate::vnc`]): the remote keeps
     /// one frame in flight, times the echo and reads it as queueing. Held for the
@@ -129,7 +141,8 @@ impl LinkFeedback {
     /// while its frame is alone, it sends the next, and from then on the echo
     /// carries what is queued ahead of each frame and it paces itself to that.
     pub fn hold(&self, now: Instant) -> Duration {
-        if self.owed.load(Ordering::Relaxed) < 2 {
+        let oldest = self.oldest_sent_us.load(Ordering::Relaxed);
+        if oldest == 0 || oldest >= self.handed_us.load(Ordering::Relaxed) {
             return Duration::ZERO;
         }
         self.lag(now)
@@ -141,7 +154,7 @@ impl LinkFeedback {
     pub fn reset(&self) {
         self.oldest_sent_us.store(0, Ordering::Relaxed);
         self.baseline_ms.store(BASELINE_UNKNOWN, Ordering::Relaxed);
-        self.owed.store(0, Ordering::Relaxed);
+        self.handed_us.store(0, Ordering::Relaxed);
     }
 }
 
@@ -167,7 +180,7 @@ mod tests {
 
         // A batch owed but no baseline yet: still no lag — queueing cannot be
         // told from distance until an acknowledgment has measured the floor.
-        feedback.owed_since(Some(now), 1);
+        feedback.owed_since(Some(now));
         assert_eq!(feedback.lag(now + Duration::from_secs(1)), Duration::ZERO);
     }
 
@@ -179,7 +192,7 @@ mod tests {
         // ahead of the real one, where a real `now` would saturate to it.
         let sent = epoch() + Duration::from_millis(1);
         feedback.baseline(40);
-        feedback.owed_since(Some(sent), 1);
+        feedback.owed_since(Some(sent));
         // 100 ms owed on a 40 ms link: 60 ms of queueing, to the microsecond the
         // store rounds.
         let lag = feedback.lag(sent + Duration::from_millis(100));
@@ -198,32 +211,40 @@ mod tests {
         let sent = Instant::now();
         let later = sent + Duration::from_millis(500);
         feedback.baseline(10);
-        feedback.owed_since(Some(sent), 1);
+        feedback.owed_since(Some(sent));
         assert!(feedback.lag(later) > Duration::from_millis(400));
 
         // Everything acknowledged: nothing owed, no lag.
-        feedback.owed_since(None, 0);
+        feedback.owed_since(None);
         assert_eq!(feedback.lag(later), Duration::ZERO);
 
         // A new attachment starts unmeasured.
-        feedback.owed_since(Some(sent), 1);
+        feedback.owed_since(Some(sent));
         feedback.reset();
         assert_eq!(feedback.lag(later), Duration::ZERO);
     }
 
-    /// The hold is the queue ahead of a frame: the lag, once more than one batch
-    /// is owed, and nothing for a frame that is owed alone.
+    /// The hold is the queue ahead of the frame handed over: the lag, once the
+    /// oldest owed batch went out before the frame did, and nothing for a frame
+    /// whose batch is the oldest owed — or is not counted yet.
     #[test]
-    fn the_hold_is_the_lag_behind_more_than_one_owed_batch() {
+    fn the_hold_is_the_lag_behind_a_batch_older_than_the_frame() {
         let feedback = LinkFeedback::new();
         let sent = epoch() + Duration::from_millis(1);
+        let handed = sent + Duration::from_millis(50);
         let later = sent + Duration::from_millis(400);
         feedback.baseline(20);
-        feedback.owed_since(Some(sent), 1);
+        feedback.owed_since(Some(sent));
         assert!(feedback.lag(later) > Duration::from_millis(370));
+        assert_eq!(feedback.hold(later), Duration::ZERO, "a frame not handed over yet was held");
+        feedback.handed(handed);
+        assert_eq!(feedback.hold(later), feedback.lag(later), "the batch ahead of the frame was not held for");
+        // The frame's own batch, counted or not, is no queue ahead of it.
+        feedback.owed_since(Some(handed));
         assert_eq!(feedback.hold(later), Duration::ZERO, "a frame owed alone was held for its own delivery");
-        feedback.owed_since(Some(sent), 2);
-        assert_eq!(feedback.hold(later), feedback.lag(later));
+        feedback.owed_since(None);
+        assert_eq!(feedback.hold(later), Duration::ZERO);
+        feedback.owed_since(Some(sent));
         feedback.reset();
         assert_eq!(feedback.hold(later), Duration::ZERO);
     }

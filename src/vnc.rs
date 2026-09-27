@@ -10258,12 +10258,13 @@ mod tests {
         task.abort();
     }
 
-    /// A link with two batches owed, the older for `lag` beyond its distance, as the
-    /// paint window would publish it: what a passed frame's fence is held for.
+    /// A link with a batch owed for `lag` beyond its distance from before the next
+    /// frame is passed, as the paint window would publish it: what that frame's
+    /// fence is held for.
     async fn queued_for(lag: Duration) -> Arc<crate::feedback::LinkFeedback> {
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         feedback.baseline(0);
-        feedback.owed_since(Some(tokio::time::Instant::now()), 2);
+        feedback.owed_since(Some(tokio::time::Instant::now()));
         tokio::time::sleep(lag).await;
         feedback
     }

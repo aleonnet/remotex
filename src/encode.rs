@@ -356,9 +356,12 @@ impl Congestion {
     /// ([`settle_stream`]). The walk keeps its quality — the screen stopping says
     /// nothing about the link — and starts its verdicts over from here, with the
     /// cooldown restarted like any other move, so the frames queued behind that one
-    /// large picture are not read as the link giving way.
+    /// large picture are not read as the link giving way. The clear run starts
+    /// over too: the quiet is no evidence of room, and a run that spanned it would
+    /// take quality back on the first frame of every burst.
     fn settle(&mut self, now: tokio::time::Instant) {
         self.recent = 0;
+        self.clear = None;
         self.changed_at = Some(now);
         self.stepped_on = None;
     }
@@ -1016,6 +1019,9 @@ impl VideoSink {
         };
         let bytes = frame.len();
         let held = self.hold(bytes).await;
+        // Before the push: the batch that carries the frame is written after it,
+        // which is what tells [`Self::fence_hold`] the batches ahead from its own.
+        self.shared.feedback.handed(tokio::time::Instant::now());
         self.shared.units.fetch_add(1, Ordering::Relaxed);
         self.shared.encoded_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         if passed.keyframe {
@@ -2137,7 +2143,7 @@ mod tests {
 
         // Behind: a batch owed for far longer than the link's floor.
         link.baseline(5);
-        link.owed_since(Some(tokio::time::Instant::now()), 1);
+        link.owed_since(Some(tokio::time::Instant::now()));
         tokio::time::sleep(SETTLE_IDLE * 4).await;
         assert!(
             sink.due_at().await.is_none(),
@@ -2145,7 +2151,7 @@ mod tests {
         );
         assert_eq!(sink.shared.video.lock().await.stream.quality(), 20);
 
-        link.owed_since(None, 0);
+        link.owed_since(None);
         tokio::time::timeout(SETTLE_IDLE * 4, sink.round_returned())
             .await
             .expect("the settle never came once the lag cleared");
@@ -2614,6 +2620,27 @@ mod tests {
         let at = start + ADJUST_COOLDOWN * 2 + FRAME;
         assert_eq!(congestion.observe(Duration::ZERO, LAG_SEVERE, at), None);
         assert_eq!(congestion.observe(Duration::ZERO, LAG_SEVERE, at), None);
+    }
+
+    /// The clear frames before a desktop went quiet do not span the quiet: a burst
+    /// of motion after a settle earns its step back up from its own frames.
+    #[test]
+    fn a_settle_starts_the_clear_run_over() {
+        let mut congestion = Congestion::new(90, Some(20));
+        let start = tokio::time::Instant::now();
+        congestion.observe(Duration::ZERO, LAG_SEVERE, start);
+        assert_eq!(congestion.observe(Duration::ZERO, LAG_SEVERE, start).map(|pace| pace.quality), Some(60));
+        // Three clear frames, the cooldown over, and then the desktop goes quiet.
+        let (moved, at) = clear_frames(&mut congestion, CLEAR_FRAMES - 1, start + ADJUST_COOLDOWN);
+        assert_eq!(moved, None);
+        congestion.settle(at + Duration::from_secs(5));
+        // The first frame of the next burst, a clear span and more after those
+        // three, does not make the fourth.
+        let at = at + Duration::from_secs(5) + ADJUST_COOLDOWN;
+        assert_eq!(congestion.observe(Duration::ZERO, Duration::ZERO, at), None, "the quiet was counted as clear");
+        // Its own run is what takes the frames back.
+        let (moved, _) = clear_frames(&mut congestion, CLEAR_RUN, at);
+        assert_eq!(moved, Some(Pace { quality: 60, interval: VIDEO_FRAME_INTERVAL }));
     }
 
     /// An adaptive plan's floor reaches the walk, which becomes lag-aware and starts on

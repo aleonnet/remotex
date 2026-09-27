@@ -105,6 +105,9 @@ const HEARTBEAT_TIMINGS: HeartbeatTimings = HeartbeatTimings {
     timeout: REATTACH_GRACE_PERIOD,
 };
 
+/// Pings kept while their pongs are owed — see [`PaintTracker::pinged`].
+const OUTSTANDING_PINGS: usize = 32;
+
 /// Sent-batch timestamps retained while the painter owes an acknowledgment.
 /// Bounded independently of the backpressure window below: a broken or raw test
 /// client must not turn missing feedback into unbounded gateway memory.
@@ -262,8 +265,13 @@ struct PaintTracker {
     /// When the pongs of the last [`BASELINE_WINDOW`] came and their round trips
     /// (ms), whose minimum is the published baseline.
     recent_round_trips: VecDeque<(Instant, u32)>,
-    /// The number of the last ping sent, and when — what its pong is timed against.
-    pinged: Option<(u32, Instant)>,
+    /// The pings sent and not answered yet, by number and when — what each one's
+    /// pong is timed against. Every one, not the last alone: the heartbeat and a
+    /// parked wait both ping, a pong takes the queue ahead of it to come back, and
+    /// a ping that a newer one displaced would have its pong measure nothing, on
+    /// the link where the measurement is wanted. At most
+    /// [`OUTSTANDING_PINGS`]; a client answering none is the heartbeat's to end.
+    pinged: VecDeque<(u32, Instant)>,
     /// Pings sent, numbering them.
     pings: u32,
     /// The sequence of the last batch written, which every ping carries.
@@ -308,7 +316,7 @@ impl PaintTracker {
     /// after every change to the front of `pending`.
     fn publish_owed(&self) {
         if let Some(feedback) = &self.feedback {
-            feedback.owed_since(self.pending.front().map(|paint| paint.sent), self.pending.len());
+            feedback.owed_since(self.pending.front().map(|paint| paint.sent));
         }
     }
     /// Batches the painter has not acknowledged yet — what [`PAINT_WINDOW`]
@@ -342,7 +350,10 @@ impl PaintTracker {
     /// send noted for its pong.
     fn pinged(&mut self, sequence: u32) -> Vec<u8> {
         self.pings = self.pings.wrapping_add(1);
-        self.pinged = Some((self.pings, Instant::now()));
+        if self.pinged.len() == OUTSTANDING_PINGS {
+            self.pinged.pop_front();
+        }
+        self.pinged.push_back((self.pings, Instant::now()));
         let mut payload = sequence.to_le_bytes().to_vec();
         payload.extend_from_slice(&self.pings.to_le_bytes());
         payload
@@ -350,7 +361,9 @@ impl PaintTracker {
 
     /// A pong came back with `payload`: everything written up to the batch its
     /// ping named has reached the client, because the socket is ordered, and if
-    /// it answers the last ping sent, its round trip is the link's distance now.
+    /// it answers a ping still outstanding, its round trip is the link's distance
+    /// now. Pongs come in the pings' order, so the pings before the one answered
+    /// are answered or lost, and forgotten with it.
     fn ponged(&mut self, payload: &[u8]) {
         let Ok(payload) = <[u8; 8]>::try_from(payload) else {
             return;
@@ -360,8 +373,9 @@ impl PaintTracker {
         let ping = u32::from_le_bytes(ping.try_into().expect("four bytes"));
         self.received_through(sequence);
         let now = Instant::now();
-        if let Some((sent, at)) = self.pinged.take_if(|(sent, _)| *sent == ping) {
-            debug_assert_eq!(sent, ping);
+        if let Some(answered) = self.pinged.iter().position(|(sent, _)| *sent == ping) {
+            let (_, at) = self.pinged[answered];
+            self.pinged.drain(..=answered);
             let round_trip = u32::try_from(now.saturating_duration_since(at).as_millis()).unwrap_or(u32::MAX);
             while self.recent_round_trips.front().is_some_and(|(at, _)| now.saturating_duration_since(*at) > BASELINE_WINDOW) {
                 self.recent_round_trips.pop_front();
@@ -1535,21 +1549,32 @@ mod tests {
         let payload = paint.pinged(1);
         paint.ponged(&payload);
         assert!(paint.baseline().is_some(), "the pong measured nothing");
+        feedback.handed(Instant::now());
         paint.sent(2, Vec::new());
         let lag = feedback.lag(later(500));
         assert!(lag > Duration::from_millis(400), "expected ~500ms of lag, got {lag:?}");
 
-        // A pong for another ping than the last measures nothing.
-        let stale = paint.pinged(2);
-        let _newer = paint.pinged(2);
+        // Every outstanding ping is timed by its own pong, whichever was sent last;
+        // a pong answering none of them — one already answered — measures nothing.
+        let older = paint.pinged(2);
+        let newer = paint.pinged(2);
         let before = paint.recent_round_trips.len();
-        paint.ponged(&stale);
-        assert_eq!(paint.recent_round_trips.len(), before, "a stale pong was timed");
+        paint.ponged(&older);
+        assert_eq!(paint.recent_round_trips.len(), before + 1, "a ping displaced by a newer one was not timed");
+        paint.ponged(&older);
+        assert_eq!(paint.recent_round_trips.len(), before + 1, "an answered ping was timed again");
+        paint.ponged(&newer);
+        assert_eq!(paint.recent_round_trips.len(), before + 2, "the newer ping was not timed");
+        assert!(paint.pinged.is_empty());
 
-        // A second batch owed behind the first is a queue, which the hold reads.
+        // The frame handed over owes its own batch alone: no queue ahead of it. A
+        // batch owed from before the next frame is handed over is one, which the
+        // hold reads whether or not that frame's batch is counted yet.
         assert_eq!(feedback.hold(later(500)), Duration::ZERO, "a frame owed alone was held");
+        feedback.handed(Instant::now());
+        assert!(feedback.hold(later(500)) > Duration::from_millis(400), "the batch ahead of the frame was not held for");
         paint.sent(3, Vec::new());
-        assert!(feedback.hold(later(500)) > Duration::from_millis(400));
+        assert!(feedback.hold(later(500)) > Duration::from_millis(400), "the batch ahead of the frame was not held for");
 
         // Settling the debt settles the lag.
         paint.acknowledge(3, 0, 0);
