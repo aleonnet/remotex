@@ -4,8 +4,8 @@
 //! which is exactly the property that gets it into every browser build: a Chromium built
 //! without proprietary codecs still decodes it.
 //!
-//! The coding is `wlshare-vp9`'s, the crate wlshare's own stream is coded with, pulled
-//! from that repository by git: the one place libvpx is spoken to for either side, so a
+//! The coding is `desktop-vp9`'s, the crate wlshare's own stream is coded with, pinned
+//! by its release tag: the one place libvpx is spoken to for either side, so a
 //! passed wlshare frame and one encoded here are the same stream by construction. What
 //! this module owns is the stream over the mirror: the picture limits, the keyframe
 //! owed until a frame carries it, and the WebCodecs string the browser is configured
@@ -16,7 +16,7 @@ use anyhow::Context as _;
 use crate::config::Chroma;
 use crate::video::{AccessUnit, Mirror, check_picture};
 
-pub use wlshare_vp9::{FrameHeader, frame_header};
+pub use desktop_vp9::{FrameHeader, frame_header};
 
 /// The frame rate the level of a stream this gateway encodes is figured at.
 ///
@@ -33,7 +33,7 @@ pub const ENCODED_FPS: u64 = 30;
 /// VP9 level covers, which [`check_picture`] has already refused long before this is
 /// reached.
 pub fn codec_string(w: u16, h: u16, chroma: Chroma, fps: u64) -> Option<String> {
-    wlshare_vp9::codec_string(w, h, chroma.into(), fps)
+    desktop_vp9::codec_string(w, h, chroma.into(), fps)
 }
 
 /// One VP9 stream over a [`Mirror`]'s coded picture.
@@ -42,9 +42,9 @@ pub fn codec_string(w: u16, h: u16, chroma: Chroma, fps: u64) -> Option<String> 
 /// stream mean anything: every frame is expressed as a change from the last one. A desktop that
 /// is resized gets a *new* stream.
 pub struct Stream {
-    encoder: wlshare_vp9::Encoder,
+    encoder: desktop_vp9::Encoder,
     /// The conversion in front of the encoder, reused across frames.
-    picture: wlshare_vp9::Picture,
+    picture: desktop_vp9::Picture,
     /// The picture encoded: the mirror's coded size, the desktop grown to even sides.
     coded: (u16, u16),
     /// Whether the next frame must be one a decoder can start from.
@@ -67,10 +67,10 @@ impl Stream {
     pub fn new(coded: (u16, u16), quality: u8, chroma: Chroma) -> anyhow::Result<Self> {
         check_picture(coded)?;
         let sampling = chroma.into();
-        let picture = wlshare_vp9::Picture::new(coded.0, coded.1, sampling)?;
+        let picture = desktop_vp9::Picture::new(coded.0, coded.1, sampling)?;
         // Every core but one for the one stream, which has nothing to overlap with. See
         // `video::threads`.
-        let encoder = wlshare_vp9::Encoder::new(coded.0, coded.1, sampling, quality, crate::video::threads())
+        let encoder = desktop_vp9::Encoder::new(coded.0, coded.1, sampling, quality, crate::video::threads())
             .with_context(|| format!("vp9 encoder for a {}x{} picture", coded.0, coded.1))?;
         Ok(Self {
             encoder,
@@ -110,7 +110,7 @@ impl Stream {
 
     /// Move the dial on the live encoder, without a keyframe.
     ///
-    /// This is how a congested link gives up quality (the walk in `wlshare_vp9::walk`), and
+    /// This is how a congested link gives up quality (the walk in `desktop_vp9::walk`), and
     /// "without a keyframe" is the whole reason it is a retune rather than a rebuild — which
     /// would force a keyframe on the next frame, spending a few hundred KB at the exact moment
     /// the link has run out of room.

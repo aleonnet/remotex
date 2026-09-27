@@ -798,6 +798,17 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktop-vp9"
+version = "0.0.2"
+source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.2#abcf195ceb235c51af978ef19e8220b78498fe6e"
+dependencies = [
+ "libvpx-prebuilt-sys",
+ "log",
+ "thiserror",
+ "yuv",
+]
+
+[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2331,7 +2342,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.274"
+version = "0.0.275"
 dependencies = [
  "aac",
  "aes",
@@ -2343,6 +2354,7 @@ dependencies = [
  "clap",
  "crossterm",
  "des 0.8.1",
+ "desktop-vp9",
  "eax",
  "env_logger",
  "flacenc",
@@ -2380,7 +2392,6 @@ dependencies = [
  "toml",
  "tower",
  "uuid",
- "wlshare-vp9",
  "yuv",
 ]
 
@@ -3806,17 +3817,6 @@ name = "wit-bindgen"
 version = "0.57.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "1ebf944e87a7c253233ad6766e082e3cd714b5d03812acc24c318f549614536e"
-
-[[package]]
-name = "wlshare-vp9"
-version = "0.0.41"
-source = "git+https://github.com/andrewtheguy/wlshare?tag=v0.0.41#65392fcda1fd6276880143c345e96a8f8bd82c04"
-dependencies = [
- "libvpx-prebuilt-sys",
- "log",
- "thiserror",
- "yuv",
-]
 
 [[package]]
 name = "writeable"
