@@ -1615,13 +1615,13 @@ mod tests {
             audio: false,
             camera: false,
             microphone: false,
-            render: "video q90 4:4:4 · adaptive ≥20".to_owned(),
+            render: "video q90 4:4:4 · adaptive".to_owned(),
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"video q90 4:4:4 · adaptive ≥20"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"video q90 4:4:4 · adaptive"}"#
             ),
             None => panic!("connected must be a text frame"),
         }

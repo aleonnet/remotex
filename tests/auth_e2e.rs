@@ -43,7 +43,6 @@ async fn spawn_app() -> SocketAddr {
             video_quality: None,
             render_chroma: None,
             render_adaptive: None,
-            render_adaptive_min: None,
             hevc_passthrough: false,
             virtual_display: false,
             audio_bitrate: None,

@@ -453,8 +453,8 @@ password = "change-me"
 #
 # video_quality is the dial, 1-100 and defaulting to 90. It is a *ceiling*: on a link
 # that can carry it you get exactly that quality, and a link that cannot makes the
-# picture coarser until it can, down to render_adaptive_min. Nothing ever goes finer
-# than what is set here.
+# picture coarser until it can, then sends fewer frames. Nothing ever goes finer than
+# what is set here, and a desktop that has gone quiet is sharpened back at it.
 #
 # It is decoded with WebCodecs, which is **secure-context only** — the same limit
 # remote audio has. A browser pointed at a gateway on a plain-HTTP LAN address shows
@@ -500,14 +500,11 @@ password = "change-me"
 
 # `video_quality` tracks measured client queueing — on unless this turns it off. The
 # configured quality remains the ceiling; the stream adds the client's paint lag to its
-# existing send-pressure signal, and never goes below render_adaptive_min.
+# existing send-pressure signal. There is no floor to set: like every adaptive
+# stream's, the point where a coarser picture gives way to fewer frames is built into
+# the encoder, and a desktop that has gone quiet is sharpened back at `video_quality`,
+# so a coarse walk is never a coarse screen for long.
 #
-# Turning it off walks on send pressure alone, floored at 1, which is worth having only
-# to pin one side of a measurement.
+# Turning it off walks on send pressure alone, which is worth having only to pin one
+# side of a measurement.
 #render_adaptive = true
-
-# Floor for that adaptive walk, 1–100 and defaulting to 20. Refused beside
-# `render_adaptive = false`, and it may not exceed `video_quality`. A target whose
-# dial sits below the default floor walks down to that dial instead — the default
-# never asks a stream for a quality it does not send.
-#render_adaptive_min = 20

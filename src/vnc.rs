@@ -172,13 +172,14 @@ const ENCODING_WLSHARE_VP9: i32 = 0x574c_5356;
 /// desktop the ceiling admits at the finest quantizer is a few megabytes; a length
 /// past this is a server that has lost its framing.
 const MAX_WLSHARE_VP9_FRAME: u32 = 64 << 20;
-/// The longest a passed stream's fence echo waits for the browser to take what came
-/// before it ([`VideoSink::drained`]). A client that is not drawing acknowledges
-/// nothing, and its batches' budget comes back only with a pong, so an unbounded
-/// wait would stop wlshare, which sends nothing until the echo, at one frame a
-/// heartbeat. The paint window's own grace for such a window, and the one wlshare's
-/// desktop client gives its own: past it the echo goes, and a client that is only
-/// slow still holds the engine where it always did, at the budget.
+/// The longest a passed stream's fence echo is held for the browser's delivery of
+/// what came before it ([`VideoSink::fence_hold`]). A client that is not drawing
+/// acknowledges nothing, and the wait its oldest batch shows grows without bound,
+/// so an unbounded hold would stop wlshare, which sends nothing until the echo,
+/// for as long as the window stays shut. The paint window's own grace for such a
+/// window, and the one wlshare's desktop client gives its own: past it the echo
+/// goes, and a client that is only slow still holds the engine where it always
+/// did, at the budget.
 const FENCE_HOLD_LIMIT: Duration = Duration::from_millis(500);
 /// The extension's one message type, used in both directions: the server's
 /// `OutputList` and the client's `SelectOutput`. Outside every registered RFB
@@ -3209,14 +3210,15 @@ async fn read_loop<R: AsyncRead + Unpin>(
     // it, and then by [`lists_wlshare_vp9`] at the end of each update.
     let mut vp9_listed = passthrough.is_some() && lists_wlshare_vp9(desktop.lock().unwrap().size);
     // The fences owed an echo, in order, while the picture is wlshare's VP9. Each
-    // waits for the browser to have taken what came before it
-    // ([`VideoSink::drained`]): wlshare holds one frame in flight and walks its
+    // is held for what the browser's link makes of a frame beyond its distance
+    // ([`VideoSink::fence_hold`]): wlshare holds one frame in flight and walks its
     // quality by the fence's round trip, which an immediate echo would make the round
     // trip to this gateway alone. Every fence waits in the one queue, so none
-    // overtakes another, and each carries the deadline it was queued with,
-    // [`FENCE_HOLD_LIMIT`] on: the loop turns on every server message, and a limit
-    // measured afresh each turn would never run out on a server that keeps talking.
-    // The flag is BlockAfter, which stops the reading until that fence is echoed.
+    // overtakes another, and each carries the instant it is due, figured when it was
+    // queued and at most [`FENCE_HOLD_LIMIT`] on: the loop turns on every server
+    // message, and a hold measured afresh each turn would never run out on a server
+    // that keeps talking. The flag is BlockAfter, which stops the reading until that
+    // fence is echoed.
     let mut held_fences: VecDeque<(tokio::time::Instant, bool, Vec<u8>)> = VecDeque::new();
     loop {
         // Raced against the next message rather than awaited on its own, so a paced
@@ -3263,12 +3265,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 None => std::future::pending().await,
             }
         };
-        let fence_deadline = held_fences.front().map(|(deadline, ..)| *deadline);
+        let fence_due_at = held_fences.front().map(|(due, ..)| *due);
         // Only the last fence held can be BlockAfter: nothing is read behind one.
         let blocked = held_fences.back().is_some_and(|(_, block_after, _)| *block_after);
         let fence_due = async {
-            if let Some(deadline) = fence_deadline.filter(|_| sink.passing()) {
-                let _ = tokio::time::timeout_at(deadline, sink.drained()).await;
+            if let Some(due) = fence_due_at.filter(|_| sink.passing()) {
+                tokio::time::sleep_until(due).await;
             }
         };
         let read = tokio::select! {
@@ -3844,8 +3846,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 let flags = flags & (FENCE_BLOCK_BEFORE | FENCE_BLOCK_AFTER);
                 let echo = client_fence(flags, &payload);
                 if sink.passing() {
-                    let deadline = tokio::time::Instant::now() + FENCE_HOLD_LIMIT;
-                    held_fences.push_back((deadline, flags & FENCE_BLOCK_AFTER != 0, echo));
+                    let due = tokio::time::Instant::now() + sink.fence_hold().min(FENCE_HOLD_LIMIT);
+                    held_fences.push_back((due, flags & FENCE_BLOCK_AFTER != 0, echo));
                 } else {
                     // The stream it was held for has stopped: what is held goes
                     // first, so this one overtakes none of them.
@@ -7867,14 +7869,19 @@ mod tests {
 
     /// A sink and the frame channel behind it.
     fn test_sink() -> (VideoSink, mpsc::Receiver<ServerMsg>) {
+        test_sink_on(Arc::new(crate::feedback::LinkFeedback::new()))
+    }
+
+    /// A sink reading the browser's link from `feedback`, for a test that says
+    /// what the link is doing.
+    fn test_sink_on(feedback: Arc<crate::feedback::LinkFeedback>) -> (VideoSink, mpsc::Receiver<ServerMsg>) {
         let (frame_tx, frame_rx) = mpsc::channel(8);
         let plan = crate::config::RenderPlan {
             quality: 60,
-            adaptive: None,
+            adaptive: false,
             chroma: crate::config::Chroma::Subsampled,
             apple_hevc: false,
         };
-        let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::None);
         // Larger than any desktop these tests paint, so a rectangle lands in the
         // mirror without the `Resize` a live engine would have sent first.
@@ -7885,7 +7892,15 @@ mod tests {
     /// A sink that has been told the desktop is `size`, which its mirror needs before
     /// it takes a pixel — on a live session that is the engine's own `Resize`.
     async fn sized_sink(size: (u16, u16)) -> (VideoSink, mpsc::Receiver<ServerMsg>) {
-        let (sink, mut rx) = test_sink();
+        sized_sink_on(size, Arc::new(crate::feedback::LinkFeedback::new())).await
+    }
+
+    /// [`sized_sink`] on a given link.
+    async fn sized_sink_on(
+        size: (u16, u16),
+        feedback: Arc<crate::feedback::LinkFeedback>,
+    ) -> (VideoSink, mpsc::Receiver<ServerMsg>) {
+        let (sink, mut rx) = test_sink_on(feedback);
         sink.msg(ServerMsg::Resize { w: size.0, h: size.1, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
         assert!(matches!(rx.recv().await, Some(ServerMsg::Resize { .. })));
@@ -10221,14 +10236,18 @@ mod tests {
     }
 
     /// wlshare's VP9 goes to the browser as it came, and the fence behind a frame is
-    /// echoed only once the browser's side has let go of it: wlshare walks its
-    /// quality by that round trip, and must see the browser's queue in it.
+    /// held for what the browser's link makes of a frame beyond its distance:
+    /// wlshare walks its quality by that round trip, and must see the browser's
+    /// delivery in it.
     #[tokio::test]
-    async fn a_passed_frames_fence_waits_for_the_browser_to_take_it() {
+    async fn a_passed_frames_fence_is_held_for_the_browsers_delivery() {
         let (uplink, sent) = test_uplink();
-        let (sink, mut rx) = sized_sink((64, 32)).await;
+        // Two batches owed, the older for 250 ms beyond the distance.
+        let feedback = queued_for(Duration::from_millis(250)).await;
+        let (sink, mut rx) = sized_sink_on((64, 32), feedback).await;
         let mut shared = test_shared(uplink, shared_desktop((64, 32), None, None), test_shadow((64, 32)));
         shared.passthrough = Some(rfb38_encoding_list(false, false, false, false).into());
+        let started = tokio::time::Instant::now();
         let task = open_read_loop(wlshare_vp9_update(64, 32, 0xa0, b"f1"), shared, sink);
 
         assert!(matches!(rx.recv().await, Some(ServerMsg::VideoFormat { .. })));
@@ -10237,9 +10256,8 @@ mod tests {
         };
         assert!(unit.keyframe && unit.data.len() == 100 && unit.data[0] == 0xa0);
         tokio::time::sleep(Duration::from_millis(100)).await;
-        assert!(written(&sent).is_empty(), "the fence was echoed while the browser held the frame");
+        assert!(written(&sent).is_empty(), "the fence was echoed before the browser's delivery");
 
-        drop(unit);
         let echo = client_fence(0, b"f1");
         tokio::time::timeout(Duration::from_secs(2), async {
             while written(&sent) != echo {
@@ -10247,7 +10265,45 @@ mod tests {
             }
         })
         .await
-        .expect("the fence was echoed once the frame was taken");
+        .expect("the fence was never echoed");
+        assert!(started.elapsed() >= Duration::from_millis(240), "echoed before the queue ahead had gone");
+        task.abort();
+    }
+
+    /// A link with a batch owed for `lag` beyond its distance from before the next
+    /// frame is passed, as the paint window would publish it: what that frame's
+    /// fence is held for.
+    async fn queued_for(lag: Duration) -> Arc<crate::feedback::LinkFeedback> {
+        let feedback = Arc::new(crate::feedback::LinkFeedback::new());
+        feedback.baseline(0);
+        feedback.owed_since(Some(tokio::time::Instant::now()));
+        tokio::time::sleep(lag).await;
+        feedback
+    }
+
+    /// A link with room — nothing owed, the last frame delivered at once — has its
+    /// fence echoed at once: the hop to this gateway is then the whole round trip,
+    /// as it is.
+    #[tokio::test]
+    async fn a_passed_frames_fence_goes_at_once_on_a_link_with_room() {
+        let (uplink, sent) = test_uplink();
+        let (sink, mut rx) = sized_sink((64, 32)).await;
+        let mut shared = test_shared(uplink, shared_desktop((64, 32), None, None), test_shadow((64, 32)));
+        shared.passthrough = Some(rfb38_encoding_list(false, false, false, false).into());
+        let started = tokio::time::Instant::now();
+        let task = open_read_loop(wlshare_vp9_update(64, 32, 0xa0, b"f1"), shared, sink);
+
+        assert!(matches!(rx.recv().await, Some(ServerMsg::VideoFormat { .. })));
+        let _kept = rx.recv().await;
+        let echo = client_fence(0, b"f1");
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while written(&sent) != echo {
+                tokio::time::sleep(Duration::from_millis(5)).await;
+            }
+        })
+        .await
+        .expect("the fence was never echoed");
+        assert!(started.elapsed() < Duration::from_millis(200), "a link with room held the fence");
         task.abort();
     }
 
@@ -10257,7 +10313,9 @@ mod tests {
     #[tokio::test]
     async fn a_passed_frames_fence_is_held_no_longer_than_the_limit() {
         let (uplink, sent) = test_uplink();
-        let (sink, mut rx) = sized_sink((64, 32)).await;
+        // A queue seconds deep ahead of the frame.
+        let feedback = queued_for(Duration::from_secs(2)).await;
+        let (sink, mut rx) = sized_sink_on((64, 32), feedback).await;
         let mut shared = test_shared(uplink, shared_desktop((64, 32), None, None), test_shadow((64, 32)));
         shared.passthrough = Some(rfb38_encoding_list(false, false, false, false).into());
         let started = tokio::time::Instant::now();
@@ -10283,7 +10341,8 @@ mod tests {
     #[tokio::test]
     async fn a_held_fence_goes_at_its_deadline_while_the_server_keeps_talking() {
         let (uplink, sent) = test_uplink();
-        let (sink, mut rx) = sized_sink((64, 32)).await;
+        let feedback = queued_for(Duration::from_secs(2)).await;
+        let (sink, mut rx) = sized_sink_on((64, 32), feedback).await;
         let mut shared = test_shared(uplink, shared_desktop((64, 32), None, None), test_shadow((64, 32)));
         shared.passthrough = Some(rfb38_encoding_list(false, false, false, false).into());
         let (mut server, client) = tokio::io::duplex(1 << 16);
@@ -10322,7 +10381,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: None, chroma: Chroma::Full, apple_hevc: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: Chroma::Full, apple_hevc: false };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::Rects);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
@@ -10389,7 +10448,8 @@ mod tests {
     #[tokio::test]
     async fn a_held_block_after_fence_stops_the_reading_until_it_goes() {
         let (uplink, sent) = test_uplink();
-        let (sink, mut rx) = sized_sink((64, 32)).await;
+        let feedback = queued_for(Duration::from_millis(250)).await;
+        let (sink, mut rx) = sized_sink_on((64, 32), feedback).await;
         let mut shared = test_shared(uplink, shared_desktop((64, 32), None, None), test_shadow((64, 32)));
         shared.passthrough = Some(rfb38_encoding_list(false, false, false, false).into());
         let mut wire = wlshare_vp9_update(64, 32, 0xa0, b"f1");
@@ -10406,7 +10466,7 @@ mod tests {
             tokio::time::timeout(Duration::from_millis(100), rx.recv()).await.is_err(),
             "the frame behind a held BlockAfter fence was read"
         );
-        assert!(written(&sent).is_empty(), "the fence was echoed while the browser held the frame");
+        assert!(written(&sent).is_empty(), "the fence was echoed before the browser's delivery");
 
         drop(unit);
         let next = tokio::time::timeout(Duration::from_secs(2), rx.recv())

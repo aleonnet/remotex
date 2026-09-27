@@ -232,7 +232,7 @@ export type ControlMsg =
       // camera's twin: enabled afresh each session by opening /ws/mic.
       microphone: boolean;
       // The render dial this session resolved to, in one line —
-      // `video q90 4:4:4 · adaptive ≥20`. The *resolved plan* rather than the config
+      // `video q90 4:4:4 · adaptive`. The *resolved plan* rather than the config
       // keys, which the reader may not have: defaults and the browser's own chroma
       // are already applied.
       render: string;

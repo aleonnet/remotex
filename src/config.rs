@@ -281,10 +281,10 @@ pub struct RenderPlan {
     /// quantizer: turning that into one is [`crate::vp9`]'s business, and it is the
     /// only module that should know what a quantizer is.
     pub quality: u8,
-    /// The floor of the adaptive quality walk, when
-    /// [`TargetConfig::render_adaptive`] asked for one. `None` keeps the congestion
-    /// walk's historical shape: pressure-only, floored at 1.
-    pub adaptive: Option<u8>,
+    /// Whether the quality walk listens to the client's lag
+    /// ([`TargetConfig::render_adaptive`]). Off, the congestion walk keeps its
+    /// historical shape: pressure only.
+    pub adaptive: bool,
     /// [`TargetConfig::render_chroma`], resolved.
     pub chroma: Chroma,
     /// The picture is the Mac's HEVC passed through rather than VP9 encoded here:
@@ -342,10 +342,10 @@ impl RenderPlan {
             Some(slot) => slot.to_owned(),
             None => self.chroma.card_name().to_owned(),
         };
-        // The floor as a suffix: the quality named before it is a ceiling the link
-        // may fall below, and this is how far.
-        let floor = self.adaptive.map_or_else(String::new, |floor| format!(" · adaptive ≥{floor}"));
-        format!("video q{} {chroma}{floor}", self.quality)
+        // The walk as a suffix: the quality named before it is a ceiling the link
+        // may fall below.
+        let adaptive = if self.adaptive { " · adaptive" } else { "" };
+        format!("video q{} {chroma}{adaptive}", self.quality)
     }
 }
 
@@ -609,22 +609,17 @@ pub struct TargetConfig {
     ///
     /// The configured quality stays the *ceiling* — a link with room to spare
     /// never earns a better picture than the one asked for — and the walk's floor
-    /// is [`Self::render_adaptive_min`]. The stream already gives quality up when
-    /// queueing a frame blocks; this adds the client's own lag — how long the
-    /// oldest unacknowledged paint batch has been owed, beyond the link's measured
-    /// floor — as a second reason to, and moves the walk's floor up from 1.
+    /// is the encoder's own, fixed where a coarser picture stops being worth more
+    /// than fewer frames, as every adaptive stream fixes it. The stream already
+    /// gives quality up when queueing a frame blocks; this adds the client's own
+    /// lag — how long the oldest unacknowledged paint batch has been owed, beyond
+    /// the link's measured floor — as a second reason to. A desktop left coarse is
+    /// sharpened at the dial once it goes quiet, which is what keeps a coarse walk
+    /// from being a coarse screen.
     ///
     /// Resolved by the accessor of the same name.
     #[serde(default)]
     pub render_adaptive: Option<bool>,
-    /// Floor (1–100) for [`Self::render_adaptive`]; `None` reads as
-    /// [`DEFAULT_RENDER_ADAPTIVE_MIN`], or as [`Self::video_quality`] where the dial
-    /// sits below it — a default floor never narrows a stream's walk to nothing.
-    /// Must not exceed [`Self::video_quality`] when written —
-    /// a floor above the ceiling is a contradiction better refused than resolved.
-    /// Refused beside `render_adaptive = false`.
-    #[serde(default)]
-    pub render_adaptive_min: Option<u8>,
     /// Pass a High Performance Mac's HEVC to a browser whose decoder takes it, as the
     /// Mac sent it, instead of decoding it here and encoding VP9 from its pictures.
     /// For a LAN: the stream is the Mac's own, with no quality walk behind it, so
@@ -638,11 +633,6 @@ pub struct TargetConfig {
     #[serde(default)]
     pub hevc_passthrough: bool,
 }
-
-/// The quality floor [`TargetConfig::render_adaptive`] falls back to when
-/// [`TargetConfig::render_adaptive_min`] is unset. Low enough to matter on a
-/// struggling link, high enough that text stays legible.
-pub const DEFAULT_RENDER_ADAPTIVE_MIN: u8 = 20;
 
 /// The stream quality a target streams at when [`TargetConfig::video_quality`] is
 /// unset — the ceiling of the adaptive walk, not a promise. High enough that a link
@@ -720,17 +710,7 @@ impl TargetConfig {
     /// [`Self::hevc_passthrough`] target.
     pub fn render_plan(&self, decoders: Decoders) -> RenderPlan {
         let quality = self.video_quality();
-        // The floor the walk will hold to, which is never above the ceiling it walks
-        // under. Only the *default* floor can sit there — an explicit
-        // `render_adaptive_min` over a configured `video_quality` is refused at parse —
-        // and a target that asked for a walk gets the widest one its dial admits. Held
-        // here rather than left to the encoder so that a card cannot state a floor the
-        // stream never walks down to.
-        let adaptive = self.render_adaptive().then(|| {
-            self.render_adaptive_min
-                .unwrap_or(DEFAULT_RENDER_ADAPTIVE_MIN)
-                .min(quality)
-        });
+        let adaptive = self.render_adaptive();
         let chroma = match self.render_chroma.unwrap_or_default() {
             ChromaChoice::Subsampled => Chroma::Subsampled,
             ChromaChoice::Full => Chroma::Full,
@@ -1565,31 +1545,6 @@ impl ConfigFile {
                     (1..=100).contains(&q),
                     "target {:?} sets video_quality = {q}, which is out of range — it \
                      must be 1–100",
-                    target.name
-                );
-            }
-            anyhow::ensure!(
-                target.render_adaptive_min.is_none() || target.render_adaptive(),
-                "target {:?} sets render_adaptive_min beside render_adaptive = false — \
-                 the floor belongs to the adaptive walk, and without the walk nothing \
-                 would read it",
-                target.name
-            );
-            if let Some(floor) = target.render_adaptive_min {
-                anyhow::ensure!(
-                    (1..=100).contains(&floor),
-                    "target {:?} sets render_adaptive_min = {floor}, which is out of \
-                     range — it must be 1–100",
-                    target.name
-                );
-                // A floor above the ceiling is a contradiction, and the stream's
-                // quality is the ceiling the walk must fit under.
-                let ceiling = target.video_quality();
-                anyhow::ensure!(
-                    floor <= ceiling,
-                    "target {:?} sets render_adaptive_min = {floor} above its \
-                     video_quality of {ceiling}, which leaves the adaptive walk nowhere \
-                     to go",
                     target.name
                 );
             }
@@ -2639,7 +2594,7 @@ mod tests {
                 cfg.targets[0].render_plan(decoder.into()),
                 RenderPlan {
                     quality: DEFAULT_VIDEO_QUALITY,
-                    adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN),
+                    adaptive: true,
                     chroma: decoder,
                     apple_hevc: false,
                 }
@@ -2654,7 +2609,7 @@ mod tests {
             cfg.targets[0].render_plan(Chroma::Subsampled.into()),
             RenderPlan {
                 quality: 60,
-                adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN),
+                adaptive: true,
                 chroma: Chroma::Subsampled,
                 apple_hevc: false,
             }
@@ -2681,7 +2636,7 @@ mod tests {
         };
         let stream = |chroma| RenderPlan {
             quality: 100,
-            adaptive: Some(DEFAULT_RENDER_ADAPTIVE_MIN),
+            adaptive: true,
             chroma,
             apple_hevc: false,
         };
@@ -2710,10 +2665,10 @@ mod tests {
         let summary = |extra: &str| {
             parse_target(&format!("video_quality = 60\n{extra}")).unwrap().targets[0].render_summary()
         };
-        assert_eq!(summary(""), "video q60 chroma auto · adaptive ≥20");
+        assert_eq!(summary(""), "video q60 chroma auto · adaptive");
         assert_eq!(summary("render_chroma = \"auto\""), summary(""));
-        assert_eq!(summary("render_chroma = \"420\""), "video q60 4:2:0 · adaptive ≥20");
-        assert_eq!(summary("render_chroma = \"444\""), "video q60 4:4:4 · adaptive ≥20");
+        assert_eq!(summary("render_chroma = \"420\""), "video q60 4:2:0 · adaptive");
+        assert_eq!(summary("render_chroma = \"444\""), "video q60 4:4:4 · adaptive");
         assert_eq!(summary("render_adaptive = false"), "video q60 chroma auto");
     }
 
@@ -2724,11 +2679,11 @@ mod tests {
         let describe = |keys: &str, decoder: Chroma| {
             parse_target(keys).unwrap().targets[0].render_plan(decoder.into()).describe()
         };
-        assert_eq!(describe("video_quality = 60", Chroma::Subsampled), "video q60 4:2:0 · adaptive ≥20");
-        assert_eq!(describe("video_quality = 60", Chroma::Full), "video q60 4:4:4 · adaptive ≥20");
+        assert_eq!(describe("video_quality = 60", Chroma::Subsampled), "video q60 4:2:0 · adaptive");
+        assert_eq!(describe("video_quality = 60", Chroma::Full), "video q60 4:4:4 · adaptive");
         assert_eq!(
             describe("video_quality = 60\nrender_chroma = \"444\"", Chroma::Subsampled),
-            "video q60 4:4:4 · adaptive ≥20"
+            "video q60 4:4:4 · adaptive"
         );
         assert_eq!(
             describe("video_quality = 60\nrender_adaptive = false", Chroma::Subsampled),
@@ -3029,7 +2984,7 @@ mod tests {
         assert!(!hp("").render_plan(takes).apple_hevc, "only the key opts in");
         assert_eq!(
             passed.render_summary(),
-            "video q90 chroma auto · adaptive ≥20 · HEVC passed where the browser takes it"
+            "video q90 chroma auto · adaptive · HEVC passed where the browser takes it"
         );
 
         for subtype in ["", "subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\n"] {
@@ -3545,64 +3500,34 @@ mod tests {
         .resolve()
     }
 
-    /// The switch resolves into the plan with its floor, and the plan says so.
+    /// The switch resolves into the plan, and the plan says so.
     #[test]
-    fn render_adaptive_resolves_a_floor_into_the_plan() {
-        let cfg = parse_target("video_quality = 80\nrender_adaptive = true\nrender_adaptive_min = 35")
-            .expect("adaptive video");
+    fn render_adaptive_resolves_into_the_plan() {
+        let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: Some(35), chroma: Chroma::Subsampled, apple_hevc: false });
-        assert_eq!(plan.describe(), "video q80 4:2:0 · adaptive ≥35");
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_hevc: false });
+        assert_eq!(plan.describe(), "video q80 4:2:0 · adaptive");
     }
 
-    /// A dial below the default floor takes the floor down with it. The walk is the
-    /// operator's, and the widest one a dial of 10 admits runs from 10 to 10 — not
-    /// from 20, which is a quality that stream never sends. The card has to say the
-    /// same, or it promises a floor nothing walks down to.
-    ///
-    /// Only the default reaches here: a written `render_adaptive_min` above the dial
-    /// is refused at parse ([`a_floor_above_a_ceiling_is_refused`]).
+    /// A target that turned the walk off stays exactly on its dial: the
+    /// pressure-only walk the stream had before the key existed, and a card that
+    /// promises no walk.
     #[test]
-    fn a_dial_below_the_default_floor_is_the_floor() {
-        let cfg = parse_target("video_quality = 10").expect("a low dial");
-        let plan = cfg.targets[0].render_plan(Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 10, adaptive: Some(10), chroma: Chroma::Subsampled, apple_hevc: false });
-        assert_eq!(plan.describe(), "video q10 4:2:0 · adaptive ≥10");
-    }
-
-    /// A target that turned the walk off stays exactly on its dial: no floor in the
-    /// plan, and the pressure-only walk the stream had before the key existed.
-    #[test]
-    fn render_adaptive_false_leaves_the_plan_without_a_floor() {
+    fn render_adaptive_false_leaves_the_plan_without_a_walk() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
-        assert_eq!(
-            cfg.targets[0].render_plan(Chroma::Subsampled.into()),
-            RenderPlan { quality: 80, adaptive: None, chroma: Chroma::Subsampled, apple_hevc: false }
-        );
+        let plan = cfg.targets[0].render_plan(Chroma::Subsampled.into());
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_hevc: false });
+        assert_eq!(plan.describe(), "video q80 4:2:0");
     }
 
-    /// The floor belongs to the walk; beside a walk that was turned off nothing
-    /// reads it.
+    /// The floor key is gone: a settle sharpens a quiet desktop at the dial, which
+    /// is what the floor was for, and a file that still writes it is refused as
+    /// any unknown key is.
     #[test]
-    fn render_adaptive_min_beside_a_walk_turned_off_is_refused() {
-        let err = parse_target("video_quality = 80\nrender_adaptive = false\nrender_adaptive_min = 30")
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("render_adaptive_min"));
-    }
-
-    /// A floor above the stream's quality leaves the walk nowhere to go.
-    #[test]
-    fn a_floor_above_a_ceiling_is_refused() {
-        let err = parse_target("video_quality = 50\nrender_adaptive = true\nrender_adaptive_min = 60")
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("nowhere to go"));
-
-        // The *default* floor over a low dial is no contradiction — the operator
-        // never wrote it. It parses, and [`TargetConfig::render_plan`] resolves the
-        // floor to the dial instead ([`a_dial_below_the_default_floor_is_the_floor`]).
-        parse_target("video_quality = 10\nrender_adaptive = true")
-            .expect("a default floor clamps instead of refusing");
+    fn a_render_floor_is_no_longer_a_key() {
+        let err = parse_target("video_quality = 80\nrender_adaptive_min = 30").unwrap_err();
+        assert!(format!("{err:#}").contains("render_adaptive_min"), "{err:#}");
     }
 
     /// The audio keys resolve the same way the render dial does: defaults

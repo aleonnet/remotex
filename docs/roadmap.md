@@ -112,12 +112,25 @@ from `video`'s measurements rather than assumed.
 
 A browser that decodes 4:4:4 watching wlshare is sent wlshare's VP9 as it comes
 ([wlshare's stream, passed through](architecture.md#wlshares-stream-passed-through)),
-and that stream is coded at wlshare's `vp9_quality` and `vp9_quality_min`: the
-target's `video_quality`, `render_adaptive` and `render_adaptive_min` do not reach
-it. The plan is one message of wlshare's VP9 encoding, client to server, naming the
-dial's ceiling and floor, which the gateway sends from the target's keys when it
-lists the encoding, so that the keys mean on a passed stream what they mean on one
-coded here.
+and that stream is coded at wlshare's `vp9_quality`: the target's `video_quality`
+and `render_adaptive` do not reach it. The plan is one message of wlshare's VP9
+encoding, client to server, naming the dial, which the gateway sends from the
+target's keys when it lists the encoding, so that the keys mean on a passed stream
+what they mean on one coded here.
+
+### The first keyframe on a slow link
+
+Every stream starts at the dial, and its first keyframe is the whole desktop at
+that quality: 400 KB for a 1080p desktop at 90, two seconds on a 2 Mbit/s link
+before the first paint, and the largest lag any session on such a link ever shows.
+The walk cannot know the link before the first frame has crossed it, so the
+keyframe holds the verdicts for two seconds instead of misreading its own queue
+as the link ([the codec](architecture.md#the-codec)); a stream that started below
+the dial and climbed, as the walk climbs from a settle, would paint sooner on a
+slow link at the cost of a coarser first second on a fast one, which the settle
+sharpens within half a second of the desktop going quiet. Measured before it is
+chosen: the cost on the LAN, where most sessions run, against the gain on the link
+it is for.
 
 ### How a passed-through stream is doing
 

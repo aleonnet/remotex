@@ -244,7 +244,7 @@ mod tests {
         let (frame_tx, frame_rx) = mpsc::channel(4);
         let plan = crate::config::RenderPlan {
             quality: 60,
-            adaptive: None,
+            adaptive: false,
             chroma: crate::config::Chroma::Subsampled,
             apple_hevc: false,
         };

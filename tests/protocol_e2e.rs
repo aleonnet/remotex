@@ -1193,7 +1193,6 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         video_quality: None,
         render_chroma: None,
         render_adaptive: None,
-        render_adaptive_min: None,
         hevc_passthrough: false,
         virtual_display: false,
         audio_bitrate: None,

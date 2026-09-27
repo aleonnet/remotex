@@ -105,6 +105,9 @@ const HEARTBEAT_TIMINGS: HeartbeatTimings = HeartbeatTimings {
     timeout: REATTACH_GRACE_PERIOD,
 };
 
+/// Pings kept while their pongs are owed — see [`PaintTracker::pinged`].
+const OUTSTANDING_PINGS: usize = 32;
+
 /// Sent-batch timestamps retained while the painter owes an acknowledgment.
 /// Bounded independently of the backpressure window below: a broken or raw test
 /// client must not turn missing feedback into unbounded gateway memory.
@@ -194,8 +197,9 @@ const PAINT_WINDOW_GRACE: Duration = Duration::from_millis(500);
 /// [`PaintTracker::sent`]'s decision about a batch's queue budget.
 ///
 /// Queueing, not distance: how long the oldest batch has been owed or the last
-/// one took, whichever is longer, less the fastest acknowledgment this socket has
-/// ever returned. The last one's time matters because a client far enough behind
+/// one took, whichever is longer, less the link's distance — its ping round trip,
+/// or until a pong has measured one the fastest acknowledgment this socket has
+/// returned. The last one's time matters because a client far enough behind
 /// is sent to in lock-step, and then owes nothing at the moment of every write. Measured at 100 ms of round trip
 /// with no bandwidth limit, holding every batch's budget until its receipt capped
 /// an attachment at 22 Mbit/s that carried 65 without it — the budget divided by
@@ -204,10 +208,13 @@ const PAINT_WINDOW_GRACE: Duration = Duration::from_millis(500);
 /// of them is queueing.
 const KEEPING_UP: Duration = Duration::from_millis(100);
 
-/// A ping's payload: the sequence of the last screen batch written before it.
+/// A ping's payload: the sequence of the last screen batch written before it, and
+/// the ping's own number, so its pong times this ping and no other. Recorded with
+/// the tracker, which times the pong.
 fn ping(paint: &Mutex<PaintTracker>) -> Message {
-    let sequence = paint.lock().unwrap().last_sent;
-    Message::Ping(sequence.to_le_bytes().to_vec().into())
+    let mut paint = paint.lock().unwrap();
+    let sequence = paint.last_sent;
+    Message::Ping(paint.pinged(sequence).into())
 }
 
 struct PendingPaint {
@@ -237,13 +244,16 @@ enum Admission {
     PastWindow,
 }
 
-/// Acknowledgments whose end-to-end times the baseline is the minimum of.
+/// How far back the pongs go whose round trips the baseline is the minimum of.
 ///
-/// The baseline is what [`LinkFeedback::lag`] subtracts so distance does not read
-/// as queueing. A window rather than an all-time minimum so a route change is
-/// eventually believed; at the paint window's ordinary cadence this is a few
-/// seconds of history, the same order as RustDesk's 60-sample RTT window.
-const BASELINE_WINDOW: usize = 32;
+/// The baseline is the link's distance, what [`LinkFeedback::lag`] subtracts so
+/// distance does not read as queueing. A ping's round trip rather than a batch's,
+/// because a batch's carries its own transmission and a stream of same-sized frames
+/// made that read as distance (see `src/feedback.rs`). A window rather than an
+/// all-time minimum so a route change is eventually believed, and a minute of one —
+/// the order of RustDesk's 60-sample RTT window — so that a heartbeat's worth of
+/// pongs is always in it.
+const BASELINE_WINDOW: Duration = Duration::from_secs(60);
 
 #[derive(Default)]
 struct PaintTracker {
@@ -252,9 +262,18 @@ struct PaintTracker {
     /// encoders — see [`LinkFeedback`]. `None` in tests that only assert the
     /// tracker's own arithmetic.
     feedback: Option<Arc<LinkFeedback>>,
-    /// End-to-end times (ms) of the last [`BASELINE_WINDOW`] acknowledgments,
-    /// whose minimum is the published baseline.
-    recent_end_to_end: VecDeque<u32>,
+    /// When the pongs of the last [`BASELINE_WINDOW`] came and their round trips
+    /// (ms), whose minimum is the published baseline.
+    recent_round_trips: VecDeque<(Instant, u32)>,
+    /// The pings sent and not answered yet, by number and when — what each one's
+    /// pong is timed against. Every one, not the last alone: the heartbeat and a
+    /// parked wait both ping, a pong takes the queue ahead of it to come back, and
+    /// a ping that a newer one displaced would have its pong measure nothing, on
+    /// the link where the measurement is wanted. At most
+    /// [`OUTSTANDING_PINGS`]; a client answering none is the heartbeat's to end.
+    pinged: VecDeque<(u32, Instant)>,
+    /// Pings sent, numbering them.
+    pings: u32,
     /// The sequence of the last batch written, which every ping carries.
     last_sent: u32,
     /// The newest batch a pong has proved the client received, and when it did.
@@ -327,6 +346,54 @@ impl PaintTracker {
         self.in_flight() < PAINT_WINDOW && self.behind() <= PAINT_LAG_LIMIT
     }
 
+    /// A ping is going out behind `sequence`: its payload, numbered, and the
+    /// send noted for its pong.
+    fn pinged(&mut self, sequence: u32) -> Vec<u8> {
+        self.pings = self.pings.wrapping_add(1);
+        if self.pinged.len() == OUTSTANDING_PINGS {
+            self.pinged.pop_front();
+        }
+        self.pinged.push_back((self.pings, Instant::now()));
+        let mut payload = sequence.to_le_bytes().to_vec();
+        payload.extend_from_slice(&self.pings.to_le_bytes());
+        payload
+    }
+
+    /// A pong came back with `payload`: everything written up to the batch its
+    /// ping named has reached the client, because the socket is ordered, and if
+    /// it answers a ping still outstanding, its round trip is the link's distance
+    /// now. Pongs come in the pings' order, so the pings before the one answered
+    /// are answered or lost, and forgotten with it.
+    fn ponged(&mut self, payload: &[u8]) {
+        let Ok(payload) = <[u8; 8]>::try_from(payload) else {
+            return;
+        };
+        let (sequence, ping) = payload.split_at(4);
+        let sequence = u32::from_le_bytes(sequence.try_into().expect("four bytes"));
+        let ping = u32::from_le_bytes(ping.try_into().expect("four bytes"));
+        self.received_through(sequence);
+        let now = Instant::now();
+        if let Some(answered) = self.pinged.iter().position(|(sent, _)| *sent == ping) {
+            let (_, at) = self.pinged[answered];
+            self.pinged.drain(..=answered);
+            let round_trip = u32::try_from(now.saturating_duration_since(at).as_millis()).unwrap_or(u32::MAX);
+            while self.recent_round_trips.front().is_some_and(|(at, _)| now.saturating_duration_since(*at) > BASELINE_WINDOW) {
+                self.recent_round_trips.pop_front();
+            }
+            self.recent_round_trips.push_back((now, round_trip));
+            if let Some(feedback) = &self.feedback {
+                let baseline = self.baseline().expect("just recorded");
+                feedback.baseline(u32::try_from(baseline.as_millis()).unwrap_or(u32::MAX));
+            }
+        }
+    }
+
+    /// The link's distance: the smallest ping round trip in the window, or `None`
+    /// before the first pong.
+    fn baseline(&self) -> Option<Duration> {
+        self.recent_round_trips.iter().map(|(_, ms)| Duration::from_millis(u64::from(*ms))).min()
+    }
+
     /// A pong came back carrying `sequence`: everything written up to that batch
     /// has reached the client, because the socket is ordered.
     fn received_through(&mut self, sequence: u32) {
@@ -378,7 +445,8 @@ impl PaintTracker {
     /// distance allows — see [`KEEPING_UP`].
     fn keeping_up(&self) -> bool {
         let slowest = self.behind().max(self.last_round_trip);
-        slowest.saturating_sub(self.fastest.unwrap_or_default()) <= KEEPING_UP
+        let distance = self.baseline().or(self.fastest).unwrap_or_default();
+        slowest.saturating_sub(distance) <= KEEPING_UP
     }
 
     /// Record a batch about to be written, and return the queue budget to give
@@ -458,15 +526,6 @@ impl PaintTracker {
         self.max_draw_ms = self.max_draw_ms.max(draw_ms);
         self.end_to_end_ms = self.end_to_end_ms.saturating_add(elapsed);
         self.max_end_to_end_ms = self.max_end_to_end_ms.max(elapsed);
-        if self.recent_end_to_end.len() == BASELINE_WINDOW {
-            self.recent_end_to_end.pop_front();
-        }
-        self.recent_end_to_end.push_back(u32::try_from(elapsed).unwrap_or(u32::MAX));
-        if let Some(feedback) = &self.feedback
-            && let Some(baseline) = self.recent_end_to_end.iter().min()
-        {
-            feedback.baseline(*baseline);
-        }
         self.publish_owed();
     }
 }
@@ -550,7 +609,8 @@ where
         waited = true;
         if let Some(sequence) = probe {
             // Behind everything owed, so its pong is the client saying it has it all.
-            ws_tx.send(Message::Ping(sequence.to_le_bytes().to_vec().into())).await?;
+            let payload = paint.lock().unwrap().pinged(sequence);
+            ws_tx.send(Message::Ping(payload.into())).await?;
         }
         let overdue = async {
             match overdue_at {
@@ -1359,11 +1419,10 @@ async fn session(
             Some(Ok(Message::Pong(payload))) => {
                 // The ping this answers named the last batch written before it, so
                 // the client has everything up to there — which is what lets a
-                // parked batch tell a silent painter from a slow link.
-                if let Ok(sequence) = <[u8; 4]>::try_from(payload.as_ref()) {
-                    paint.lock().unwrap().received_through(u32::from_le_bytes(sequence));
-                    room.notify_one();
-                }
+                // parked batch tell a silent painter from a slow link — and timed
+                // the ping, which is the link's distance.
+                paint.lock().unwrap().ponged(&payload);
+                room.notify_one();
             }
             Some(Ok(_)) => {} // Binary/Ping: nothing to do
             Some(Err(e)) => {
@@ -1466,9 +1525,9 @@ mod tests {
     }
 
     /// What the tracker learns reaches the encoders: sending marks the link
-    /// owed, the first acknowledgment measures the baseline, and settling the
-    /// debt settles the lag. Asked about *later* instants rather than waited
-    /// for, so nothing here depends on the machine's speed.
+    /// owed, the first pong measures the baseline, and settling the debt settles
+    /// the lag. Asked about *later* instants rather than waited for, so nothing
+    /// here depends on the machine's speed.
     #[test]
     fn the_tracker_publishes_owed_age_and_baseline_through_the_feedback() {
         let feedback = Arc::new(LinkFeedback::new());
@@ -1478,20 +1537,47 @@ mod tests {
         // Nothing owed: no lag, however much later it is asked.
         assert_eq!(feedback.lag(later(500)), Duration::ZERO);
 
-        // A batch owed but never acknowledged: still none — with no baseline,
-        // queueing cannot be told from distance, and the safe answer is clear.
+        // A batch owed, even acknowledged, but no pong yet: still none — with no
+        // baseline, queueing cannot be told from distance, and the safe answer is
+        // clear.
         paint.sent(1, Vec::new());
         assert_eq!(feedback.lag(later(500)), Duration::ZERO);
-
-        // The first acknowledgment measures the floor; the age of the next owed
-        // batch beyond that floor is lag.
         paint.acknowledge(1, 0, 0);
+
+        // The first pong measures the distance; the age of the next owed batch
+        // beyond it is lag.
+        let payload = paint.pinged(1);
+        paint.ponged(&payload);
+        assert!(paint.baseline().is_some(), "the pong measured nothing");
+        feedback.handed(Instant::now());
         paint.sent(2, Vec::new());
         let lag = feedback.lag(later(500));
         assert!(lag > Duration::from_millis(400), "expected ~500ms of lag, got {lag:?}");
 
+        // Every outstanding ping is timed by its own pong, whichever was sent last;
+        // a pong answering none of them — one already answered — measures nothing.
+        let older = paint.pinged(2);
+        let newer = paint.pinged(2);
+        let before = paint.recent_round_trips.len();
+        paint.ponged(&older);
+        assert_eq!(paint.recent_round_trips.len(), before + 1, "a ping displaced by a newer one was not timed");
+        paint.ponged(&older);
+        assert_eq!(paint.recent_round_trips.len(), before + 1, "an answered ping was timed again");
+        paint.ponged(&newer);
+        assert_eq!(paint.recent_round_trips.len(), before + 2, "the newer ping was not timed");
+        assert!(paint.pinged.is_empty());
+
+        // The frame handed over owes its own batch alone: no queue ahead of it. A
+        // batch owed from before the next frame is handed over is one, which the
+        // hold reads whether or not that frame's batch is counted yet.
+        assert_eq!(feedback.hold(later(500)), Duration::ZERO, "a frame owed alone was held");
+        feedback.handed(Instant::now());
+        assert!(feedback.hold(later(500)) > Duration::from_millis(400), "the batch ahead of the frame was not held for");
+        paint.sent(3, Vec::new());
+        assert!(feedback.hold(later(500)) > Duration::from_millis(400), "the batch ahead of the frame was not held for");
+
         // Settling the debt settles the lag.
-        paint.acknowledge(2, 0, 0);
+        paint.acknowledge(3, 0, 0);
         assert_eq!(feedback.lag(later(500)), Duration::ZERO);
     }
 
@@ -1618,7 +1704,7 @@ mod tests {
         let Some(Message::Ping(first)) = sent.lock().unwrap().first().cloned() else {
             panic!("the parked wait sent no ping");
         };
-        assert_eq!(first.as_ref(), newest.to_le_bytes().as_slice());
+        assert_eq!(&first[..4], newest.to_le_bytes().as_slice());
 
         // The link delivered after all, and the painter painted.
         paint.lock().unwrap().received_through(newest);
@@ -1877,7 +1963,6 @@ mod tests {
             video_quality: None,
             render_chroma: None,
             render_adaptive: None,
-            render_adaptive_min: None,
             hevc_passthrough: false,
             virtual_display: false,
             audio_bitrate: None,

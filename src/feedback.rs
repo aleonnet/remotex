@@ -9,18 +9,27 @@
 //! parks instead of after.
 //!
 //! The figure published is **queueing lag**, not raw staleness. A batch's
-//! end-to-end time includes the network round trip and the browser's decode, and
-//! on a distant link those are large while the link is perfectly healthy. So the
-//! tracker also publishes a baseline — the smallest end-to-end time seen over a
-//! recent window of acknowledgments, the same move RustDesk's QoS and
-//! Guacamole's `sync` handler both make — and [`LinkFeedback::lag`] answers with
-//! the age of the oldest owed batch *minus* that baseline. A clean link reads as
-//! zero lag no matter how far away it is; only time spent queued behind a client
-//! that cannot keep up counts.
+//! end-to-end time includes the network round trip, and on a distant link that
+//! is large while the link is perfectly healthy. So the tracker also publishes a
+//! baseline — the link's distance, the smallest ping round trip seen over a
+//! recent window — and [`LinkFeedback::lag`] answers with the age of the oldest
+//! owed batch *minus* that baseline. A clean link reads as zero lag no matter how
+//! far away it is; what counts is the time a batch spends beyond the distance:
+//! being sent, queued behind others, and decoded by a client that cannot keep up.
+//!
+//! The baseline is a ping's round trip and not the smallest batch's, the move
+//! RustDesk's QoS and Guacamole's `sync` handler make, because a batch's time
+//! carries its own transmission. A stream whose frames are all one size — a
+//! passed VP9 stream, one frame in flight — spends the same time sending every
+//! one, and a baseline taken from them read that time as distance: at 5 Mbit/s
+//! the browser painted 8 frames a second a quarter of a second behind and no
+//! frame ever counted as late. A ping is a few bytes and carries nothing but
+//! the distance.
 //!
 //! One writer, many cheap readers: the ws bridge stores two atomics on the
-//! events it already handles (a batch sent, a batch acknowledged), and a reader
-//! pays two loads and a subtraction. Nothing here polls, allocates, or locks.
+//! events it already handles (a batch sent, a batch acknowledged), the passing
+//! sink one more on a frame handed over, and a reader pays a few loads and a
+//! subtraction. Nothing here polls, allocates, or locks.
 
 use std::sync::OnceLock;
 use std::sync::atomic::{AtomicU32, AtomicU64, Ordering};
@@ -59,10 +68,12 @@ pub struct LinkFeedback {
     /// Microseconds since [`epoch`] (offset by one) when the oldest currently
     /// unacknowledged batch was sent. `0` means nothing is owed.
     oldest_sent_us: AtomicU64,
-    /// The smallest per-batch end-to-end time (sent → acknowledged, in ms) over
-    /// the tracker's recent window — the link's floor. [`BASELINE_UNKNOWN`]
-    /// until the first acknowledgment.
+    /// The smallest ping round trip (in ms) over the tracker's recent window —
+    /// the link's distance. [`BASELINE_UNKNOWN`] until the first pong.
     baseline_ms: AtomicU32,
+    /// Microseconds since [`epoch`] (offset by one) when the last passed frame
+    /// was handed to the browser's queue. `0` before any was.
+    handed_us: AtomicU64,
 }
 
 impl LinkFeedback {
@@ -70,6 +81,7 @@ impl LinkFeedback {
         Self {
             oldest_sent_us: AtomicU64::new(0),
             baseline_ms: AtomicU32::new(BASELINE_UNKNOWN),
+            handed_us: AtomicU64::new(0),
         }
     }
 
@@ -99,10 +111,41 @@ impl LinkFeedback {
         self.oldest_sent_us.store(value, Ordering::Relaxed);
     }
 
-    /// Record the link's floor: the smallest end-to-end time over the paint
+    /// Record that a passed frame was handed to the browser's queue at `at` —
+    /// what [`Self::hold`] tells the batches ahead of it from its own.
+    pub fn handed(&self, at: Instant) {
+        self.handed_us.store(micros_since_epoch(at), Ordering::Relaxed);
+    }
+
+    /// Record the link's distance: the smallest ping round trip over the paint
     /// tracker's recent window.
     pub fn baseline(&self, ms: u32) {
         self.baseline_ms.store(ms, Ordering::Relaxed);
+    }
+
+    /// How long the queue ahead of the last frame handed over is: the oldest owed
+    /// batch's wait beyond the distance, when that batch went out before the frame
+    /// was handed over, and nothing when it did not — then the only batch owed
+    /// carries the frame itself, and its own transmission is the link working,
+    /// not the link behind.
+    ///
+    /// Judged by when the batch was written rather than by how many are owed: the
+    /// frame joins the tracker's count from the socket's task, some time after it
+    /// was handed over, and a fence that followed it at once found the count one
+    /// short as often as not, and read a batch ahead of the frame as nothing.
+    ///
+    /// What a passed stream's fence is held for ([`crate::vnc`]): the remote keeps
+    /// one frame in flight, times the echo and reads it as queueing. Held for the
+    /// frame's own delivery instead, a lock-step remote read every frame's
+    /// transmission as lag and coded for a third of the link; held for nothing
+    /// while its frame is alone, it sends the next, and from then on the echo
+    /// carries what is queued ahead of each frame and it paces itself to that.
+    pub fn hold(&self, now: Instant) -> Duration {
+        let oldest = self.oldest_sent_us.load(Ordering::Relaxed);
+        if oldest == 0 || oldest >= self.handed_us.load(Ordering::Relaxed) {
+            return Duration::ZERO;
+        }
+        self.lag(now)
     }
 
     /// Forget everything. Called when the attachment changes, so a detached
@@ -111,6 +154,7 @@ impl LinkFeedback {
     pub fn reset(&self) {
         self.oldest_sent_us.store(0, Ordering::Relaxed);
         self.baseline_ms.store(BASELINE_UNKNOWN, Ordering::Relaxed);
+        self.handed_us.store(0, Ordering::Relaxed);
     }
 }
 
@@ -178,5 +222,30 @@ mod tests {
         feedback.owed_since(Some(sent));
         feedback.reset();
         assert_eq!(feedback.lag(later), Duration::ZERO);
+    }
+
+    /// The hold is the queue ahead of the frame handed over: the lag, once the
+    /// oldest owed batch went out before the frame did, and nothing for a frame
+    /// whose batch is the oldest owed — or is not counted yet.
+    #[test]
+    fn the_hold_is_the_lag_behind_a_batch_older_than_the_frame() {
+        let feedback = LinkFeedback::new();
+        let sent = epoch() + Duration::from_millis(1);
+        let handed = sent + Duration::from_millis(50);
+        let later = sent + Duration::from_millis(400);
+        feedback.baseline(20);
+        feedback.owed_since(Some(sent));
+        assert!(feedback.lag(later) > Duration::from_millis(370));
+        assert_eq!(feedback.hold(later), Duration::ZERO, "a frame not handed over yet was held");
+        feedback.handed(handed);
+        assert_eq!(feedback.hold(later), feedback.lag(later), "the batch ahead of the frame was not held for");
+        // The frame's own batch, counted or not, is no queue ahead of it.
+        feedback.owed_since(Some(handed));
+        assert_eq!(feedback.hold(later), Duration::ZERO, "a frame owed alone was held for its own delivery");
+        feedback.owed_since(None);
+        assert_eq!(feedback.hold(later), Duration::ZERO);
+        feedback.owed_since(Some(sent));
+        feedback.reset();
+        assert_eq!(feedback.hold(later), Duration::ZERO);
     }
 }

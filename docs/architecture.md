@@ -106,10 +106,12 @@ A target's stream keys are per target, and every one has a default:
   stream's picture goes, and [choosing a chroma](#choosing-a-chroma) for when to
   take the decision away from the browser.
 - `render_adaptive` (on unless a target writes `false`) lets VP9 encoded in the
-  gateway track the measured link down to `render_adaptive_min` (default 20, or
-  the dial itself where that is lower) — see
+  gateway track the measured link — see
   [what the link will bear](#choosing-a-chroma) for the signal and the walk.
-  Turned off, the walk is the pressure-only one floored at 1.
+  There is no floor key: the walk's floor is a constant of the encoder's, where
+  it hands off from quality to frame rate as WebRTC's quality scaler does at its
+  own quantizer threshold, and the settle sharpens a quiet desktop back at the
+  dial. Turned off, the walk is the pressure-only one.
 - `hevc_passthrough` (off unless a target writes `true`, and only on
   `ard-high-performance`) passes the Mac's HEVC to a browser that takes it, which
   none of the keys above then reach.
@@ -120,7 +122,7 @@ The engines never see the config keys. They collapse to one `RenderPlan`
 `VideoSink` in `src/encode.rs`:
 
 ```text
-video_quality / render_chroma / render_adaptive* / hevc_passthrough
+video_quality / render_chroma / render_adaptive / hevc_passthrough
   → TargetConfig::render_plan(browser decoders) → RenderPlan → vnc::run / rdp::run
   → VideoSink::new(engine, frame_tx, plan, feedback, tiles)
   → DesktopStream (src/stream.rs) → vp9::Stream
@@ -288,19 +290,31 @@ the browser as it came: no ZRLE on either side, and no encode here.
   it send a second that no shadow is there to skip. Until the keyframe arrives the
   frames still coded against the old picture are dropped, and it goes out behind a
   fresh `VideoFormat`.
-- **The fence carries the browser's queue.** wlshare keeps one frame in flight and
-  walks its quality by each fence's round trip. Echoed at once, as for any other
-  server, it would time the hop to this gateway alone, which is never behind; while
-  the picture is the passed stream each echo instead waits until everything
-  queued towards the browser has given its budget back (`VideoSink::drained`) —
-  immediately on a link with room, and once the browser has taken it on one that is
-  behind — so the queueing is inside the round trip wlshare reads. Echoes wait in
-  one queue, in order, raced against the next server message rather than in front of
+- **The fence carries the browser's queue.** wlshare keeps one frame in flight
+  and walks its quality by each fence's round trip, less the shortest it has seen.
+  Echoed at once, as for any other server, it would time the hop to this gateway
+  alone, which is never behind; while the picture is the passed stream each echo is
+  instead held for the queue ahead of the frame on the browser's link
+  (`VideoSink::fence_hold`): how long the oldest owed batch has waited beyond the
+  link's ping round trip, when that batch was written before the frame was handed
+  over, and nothing when the oldest owed is the frame's own — its transmission is
+  the link working, not the link behind. Judged by the batch's time rather than
+  by how many are owed, because the frame joins the paint window's count from the
+  socket's task, after its fence has already been read. So a frame alone brings
+  the next at once, and from then on each echo
+  carries what is queued ahead of the frame it follows, which wlshare paces itself
+  to. Two holds were measured and refused: one that ran to everything queued having
+  given its budget back put every frame's own transmission into wlshare's floor,
+  since in lock-step every frame is one size and takes the same time, and the walk
+  never moved, at 8 frames a second a quarter of a second behind on 5 Mbit/s; one
+  that ran to the frame's own delivery beyond the distance read that transmission
+  as lag instead and walked to the floor for a third of the link. Echoes wait in one
+  queue, in order, raced against the next server message rather than in front of
   it — except behind a fence asking for BlockAfter, where the reading waits for the
   echo — and none waits longer than 500 ms (`FENCE_HOLD_LIMIT`), the grace a window
-  that is not drawing gets: such a window acknowledges nothing, its budget comes
-  back only with a pong, and wlshare, which sends nothing until the echo, would
-  otherwise run at one frame a heartbeat.
+  that is not drawing gets: such a window acknowledges nothing, the wait its oldest
+  batch shows only grows, and wlshare, which sends nothing until the echo, would
+  otherwise stop with it.
 - **Past the ceiling it is tiles.** A frame is the whole desktop, which past the
   ceiling is not video: a desktop past it is not listed the encoding, and one that a
   resize takes there has it taken off the list, which wlshare answers with the whole
@@ -310,7 +324,7 @@ the browser as it came: no ZRLE on either side, and no encode here.
   wlshare starts over at a keyframe.
 
 The target's quality keys do not reach a passed stream, which is coded at wlshare's
-`vp9_quality` and `vp9_quality_min` — see the [roadmap](roadmap.md#the-targets-quality-keys-on-wlshares-own-stream).
+`vp9_quality` — see the [roadmap](roadmap.md#the-targets-quality-keys-on-wlshares-own-stream).
 
 #### Apple's HEVC, passed through
 
@@ -446,8 +460,9 @@ from the bitstream.
 
 The dial is a **ceiling**, and that framing is what makes adaptation tractable here.
 `Congestion` in `src/encode.rs` watches one local signal — how long queueing an
-access unit blocked — and walks the 1–100 dial down towards 1 when the link is behind,
-back up towards the configured quality when it is not; never past it. It moves the
+access unit blocked — and walks the 1–100 dial down to its floor of 20 when the link is
+behind, then the frame rate, and back up towards the configured quality when it is
+not; never past it. It moves the
 dial rather than a quantizer because a quantizer is the codec module's own scale
 and never leaves it. What TCP hides is
 *headroom*, and this never needs headroom, because exceeding the operator's setting
@@ -456,30 +471,75 @@ answers it. Quality moves through `Stream::set_quality`, which re-tunes the runn
 encoder rather than rebuilding it: a rebuild would force a keyframe per adjustment,
 spending a few hundred KB exactly when bytes are scarce.
 
-`render_adaptive` gives the same walk a second signal and an operator's floor on
-every VP9 picture encoded here, unless its target turned the walk off. On a
+The walk has two knobs in a fixed order. Quality goes first, to the floor, and
+by more the further behind the link is: ten points for a frame 60 ms behind, twenty
+at 150 ms, thirty at 400 ms, where the frame rate is halved as well. On the floor
+the frame interval doubles instead, 33 ms up to 267 — bytes on the wire are bytes
+per frame times frames per second, and the floor bounds only the first: at 2 Mbit/s
+the picture ran 0.7 s behind on the floor with nothing left to give up, and with the
+frames going as well it ran 0.2 s behind at a fifth of the frames, every one of them
+fresh. A verdict is two behind frames among the last four, not a run — the queueing
+a link that is barely too small shows is intermittent, and a run that one clear
+frame reset took eleven seconds per step — and a keyframe is no verdict, being the
+whole picture and slow by its nature; the frames behind it queue behind its
+crossing, which says how big it was and not what the link bears, so the verdicts
+wait two seconds after one. A step is taken at most once a second, and
+while the lag is still falling a fifth per second from the step before, the queue
+that step left is draining and no further one is taken: judging the drain as a
+link still too small was measured to take 69 to the floor in three seconds on a
+link that carried 55. A second of clear frames, four at the least, takes the frames
+back first, then the quality, in steps that double from three to twenty-four while
+the link keeps taking them — a span rather than thirty frames, because a link
+slowed to four frames a second never saw thirty inside a burst of motion and stayed
+on the floor; a step the link refuses within four seconds is walked back after
+300 ms rather than a full cooldown, to the quality it came from, and for fifteen
+seconds the walk climbs no further than halfway back towards the one refused —
+TCP's slow-start threshold, on the dial, found by bisection. Without it a walk
+whose steps double would spend a session bouncing off the same quality; with plain
+steps of three, 5 Mbit/s already cycled 47 → 59 → 49 every ten seconds, and a walk
+that stepped ten down from a refusal and climbed to one under it cycled 43 → 49 →
+39 → 48 → 38 every few seconds, the ceiling dropping a point a cycle.
+
+`render_adaptive` gives the same walk a second signal on every VP9 picture
+encoded here, unless its target turned the walk off. On a
 decoded High Performance session that is the whole picture; on a passed one it
 is only the VP9 picture between HEVC stretches. The signal is the client's own lag: the paint window already tracks how
 long the oldest unacknowledged batch has been owed, and `LinkFeedback`
-(`src/feedback.rs`) publishes that age minus a baseline — the smallest recent
-end-to-end time, so distance never reads as queueing; RustDesk and Guacamole
-both make the same subtraction. Sixty milliseconds of queueing lag counts as
-a behind frame even when nothing local blocked, which is exactly the case the
-paint window measured a VP9 attachment falling 222 ms behind at 7 batches in
-flight while every queue stayed shallow. The walk's floor moves from 1 to
-`render_adaptive_min`. Under `render_adaptive = false` the walk is pressure-only.
+(`src/feedback.rs`) publishes that age minus a baseline — the link's distance,
+so distance never reads as queueing; RustDesk and Guacamole both make the same
+subtraction. The distance is the smallest ping round trip of the last minute
+rather than the smallest batch's end-to-end time, because a batch's time carries
+its own transmission, and a stream whose frames are all one size spends the
+same time sending every one: taken from them, the baseline read that time as
+distance and the walk stood still. A ping is a few bytes; every ping carries its
+own number, every one sent is kept until its pong times it, and a parked wait's
+ping does not displace the heartbeat's — on the slow link where the distance is
+wanted, a pong takes the queue ahead of it to return, and one that answered a
+displaced ping measured nothing. Sixty milliseconds of queueing lag
+counts as a behind frame even when nothing local blocked, which is exactly the
+case the paint window measured a VP9 attachment falling 222 ms behind at 7
+batches in flight while every queue stayed shallow. Under `render_adaptive =
+false` the walk is pressure-only.
 
 The walk only runs when a round is taken, and a round is only taken when something
 changed, so a desktop that stops moving right after the link coarsened it would keep
-that picture, and the walk would stay below the dial, until something changed again.
-The order task's settle tick is what comes back for it. Once the stream has been
-idle `SETTLE_IDLE` since a round that went out below the
-dial, and on a `render_adaptive` target the lag has cleared, it takes the dial back
-and marks the unchanged mirror dirty. The engine encodes that as one inter frame.
-libvpx codes the residual of unchanged blocks at the finer quantizer, so the frame
-sharpens the whole desktop without a keyframe; the vp9 test
-`a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe` guards that. A
-stream that went out at the dial owes nothing and sends nothing when it goes quiet.
+that picture until something changed again. The order task's settle tick is what
+comes back for it. Once the stream has been idle `SETTLE_IDLE` since a round that
+went out below the dial, and on a `render_adaptive` target the lag has cleared, it
+puts the encoder at the dial and marks the unchanged mirror dirty. The engine
+encodes that as one inter frame. libvpx codes the residual of unchanged blocks at
+the finer quantizer, so the frame sharpens the whole desktop without a keyframe; the
+vp9 test `a_finer_quantizer_sharpens_an_unchanged_picture_without_a_keyframe` guards
+that. The walk keeps its place through it: the round after the settle's goes back
+to the quality the link bears, and the settle's frame is no verdict. The screen
+stopping says nothing about the link, and a walk that started every burst of motion
+from the dial was measured, on a desktop moving four seconds in eight over 5 Mbit/s,
+to put the picture 0.45 s behind on average and the walk back at 50 or 60 every
+burst; keeping its place, the same run held 42 to 59 and 0.12 s. The clear frames
+before the quiet do not span it either: the walk's run of clear frames starts over
+at the settle, so a burst earns its step back up from its own frames rather than
+taking one on its first. A stream that went
+out at the dial owes nothing and sends nothing when it goes quiet.
 
 That signal only works because those queues are shallow. One message is a whole
 frame, and a deep queue at each of two hops in series is seconds of buffered
@@ -712,7 +772,8 @@ exists to prevent.
 
 The same distinction settles the budget. A client whose acknowledgments arrive
 about as fast as its distance allows — the oldest batch owed or the last round
-trip, less the fastest round trip the socket has shown, within 100 ms — gets a
+trip, less the link's ping round trip (or the fastest acknowledgment the socket has
+shown, until a pong has measured one), within 100 ms — gets a
 batch's share back at the write, and its flight is the window's to bound: holding
 it to receipt instead capped an unthrottled attachment 100 ms away at 22 Mbit/s
 that otherwise carried 65. A client that is behind keeps the share with the batch
