@@ -799,8 +799,8 @@ dependencies = [
 
 [[package]]
 name = "desktop-vp9"
-version = "0.0.2"
-source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.2#abcf195ceb235c51af978ef19e8220b78498fe6e"
+version = "0.0.3"
+source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.3#1e3376500dc4ab0c109228f0a64ff2e3f28cfb9f"
 dependencies = [
  "libvpx-prebuilt-sys",
  "log",
