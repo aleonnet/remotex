@@ -85,7 +85,12 @@ if [[ ! -s "$out/video.h265" ]]; then
   echo "no HEVC was captured; the stream never started — see $out/gateway.log" >&2
   exit 1
 fi
-ls -l "$out/video.h265" "$out/audio.eld"
+ls -l "$out/video.h265"
+if [[ -s "$out/audio.eld" ]]; then
+  ls -l "$out/audio.eld"
+else
+  echo "no AAC-ELD was captured; the sound leg never ran — see $out/gateway.log" >&2
+fi
 if command -v ffprobe >/dev/null; then
   ffprobe -v error -count_frames \
     -show_entries stream=codec_name,profile,width,height,pix_fmt,nb_read_frames \
@@ -93,7 +98,9 @@ if command -v ffprobe >/dev/null; then
 fi
 # 4-byte length + unit, 100 units a second.
 uv run python - "$out/audio.eld" <<'EOF'
-import struct, sys
+import os, struct, sys
+if not os.path.exists(sys.argv[1]):
+    sys.exit()
 data = open(sys.argv[1], "rb").read()
 at = units = 0
 while at + 4 <= len(data):
