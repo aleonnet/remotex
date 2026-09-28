@@ -1,7 +1,9 @@
-# The gateway is the only package here. `serve` is the deployable browser gateway;
+# The gateway is the root package. `serve` is the deployable browser gateway;
 # `tui` is the feature-gated local multi-instance control plane;
 # `serve-embedded` is its hidden per-instance worker. Every shape serves the same
-# SPA and uses the same protocol implementation.
+# SPA and uses the same protocol implementation. `crates/remotex-viewer` is the
+# desktop window that shows that SPA; commands run here build the gateway alone,
+# and `-p remotex-viewer` picks the viewer.
 #
 # One version for the whole workspace. `[workspace.package]` below is the only
 # literal `version` in the tree — the root package inherits it with
@@ -14,9 +16,10 @@
 # the root package from shadowing it.
 [workspace]
 resolver = "3"
+members = ["crates/remotex-viewer"]
 
 [workspace.package]
-version = "0.0.278"
+version = "0.0.279"
 
 [package]
 name = "remotex"
