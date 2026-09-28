@@ -828,8 +828,23 @@ link to a physical Mac has not been observed.
   about 320 kbit/s. The decoder is configured out of band with
   AudioSpecificConfig `F8 E6 50 00`: object type 39, 48 kHz, stereo, 480-sample
   frames, no SBR, no resilience tools.
-- **Decoder.** Neither a browser's WebCodecs nor FFmpeg's native `aac` decodes
-  AAC-ELD, so the gateway does (`src/aac_eld.rs`). It uses the pure-Rust port of
+- **Decoder.** Remote audio reaches the browser as Opus whatever the target, so
+  the gateway decodes AAC-ELD itself (`src/aac_eld.rs`). Others can decode it too.
+  Chrome 154's WebCodecs on macOS decoded all 3450 units of a capture, but only as
+  `mp4a.40.2` with the AudioSpecificConfig above as the description; it refused
+  `mp4a.40.39` as an unknown codec name. Safari 26.6 refuses `mp4a.40.39` too,
+  since it is not on WebKit's WebCodecs allow-list. Safari's `isConfigSupported`
+  says yes to Chrome's configuration, then fails every unit with
+  "InternalAudioDecoderCocoa decoding failed". Safari reads the configuration
+  through CoreAudio's `kAudioFormatProperty_FormatInfo`, which refuses a bare
+  AudioSpecificConfig. Refused, Safari builds an AAC-LC decoder with no
+  configuration, and the unified log shows that decoder rejecting each packet as
+  `'bada'`. Given the same AudioSpecificConfig inside an MPEG-4 ES_Descriptor
+  (`03 18 00 01 00 04 13 40 15 00 18 00`, eight zero bytes, `05 04 F8 E6 50 00`),
+  `FormatInfo` reads `aace`, 48 kHz, stereo, 480 frames per packet, and Safari
+  decoded all 3450 units; Chrome has not been tried with the ES_Descriptor.
+  FFmpeg's native `aac` (libavcodec 62.28) decoded the capture cleanly at the
+  same levels as Chrome and Safari. The gateway's decoder is the pure-Rust port of
   Fraunhofer's fdk-aac decoder that AOSP ships as `platform/external/aac`,
   `rust/`, cut down to raw AAC-ELD access units
   ([fdk-aac-rust](https://github.com/andrewtheguy/fdk-aac-rust)). Against

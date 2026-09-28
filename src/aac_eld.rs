@@ -2,9 +2,9 @@
 //!
 //! Compiled only with the `apple-hp-media` feature. The Mac's
 //! `RemoteDesktopSystemAudio` transmitter encodes AAC-ELD (MPEG-4 audio object
-//! type 39) whatever the negotiation agreed — see `docs/apple-vnc-889.md` — and
-//! neither a browser's WebCodecs nor FFmpeg's native decoder will take it, so the
-//! gateway has to turn it into PCM itself. The decoder is Fraunhofer's own, in
+//! type 39) whatever the negotiation agreed — see `docs/apple-vnc-889.md`. Remote
+//! audio reaches the browser as Opus whatever the target, so the gateway turns it
+//! into PCM itself. The decoder is Fraunhofer's own, in
 //! Rust: the port AOSP ships as `platform/external/aac`, `rust/`, cut down to
 //! AAC-ELD for Cargo. Its licence is the same non-OSI-approved "Fraunhofer FDK AAC
 //! Codec Library for Android" text, which is one reason the default build never
