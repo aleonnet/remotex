@@ -3513,9 +3513,13 @@ version = "0.0.278"
 dependencies = [
  "anyhow",
  "arboard",
+ "dirs 6.0.0",
  "libavcodec-hevc-prebuilt-sys",
+ "serde",
  "serde_json",
  "tao",
+ "url",
+ "uuid",
  "webview2-com",
  "windows",
  "windows-core",
