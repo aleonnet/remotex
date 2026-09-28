@@ -1,17 +1,25 @@
-# What the Windows row of .github/workflows/release.yml does, run natively on the CI box by
-# ci/windows/remote.ps1 (`remote.ps1 ci`), with the checks AGENTS.md asks for after a Rust
-# change in front of it: the frontend, clippy, the tests, then the release installer. When this file
-# and the workflow disagree, the workflow is right and this is stale.
+# The checks AGENTS.md asks for after a Rust change, run natively on the CI box by
+# ci/windows/remote.ps1 (`remote.ps1 ci`): the frontend, clippy and the tests.
+#
+# `remote.ps1 ci -Package` adds what the Windows row of .github/workflows/release.yml does: the
+# release installer, then installing it. That is a full release build and an MSI round trip, which
+# a change to the code alone does not need on every rerun; ask for it when packaging changes or
+# before a release. When this file and the workflow disagree, the workflow is right and this is
+# stale.
 #
 # PowerShell 7. Installs nothing; the machine is provisioned by ci/windows/provision.ps1.
 #Requires -Version 7
+[CmdletBinding()]
+param([switch] $Package)
 $ErrorActionPreference = 'Stop'
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot '..\..')).Path
 
 function Invoke-Step([string] $Name, [scriptblock] $Body) {
     Write-Host ''
     Write-Host "== $Name =="
+    $clock = [Diagnostics.Stopwatch]::StartNew()
     & $Body
+    Write-Host ("   {0} took {1:n0}s" -f $Name, $clock.Elapsed.TotalSeconds)
     if ($LASTEXITCODE -ne 0) {
         Write-Host ''
         Write-Host "FAILED: $Name (exit $LASTEXITCODE)"
@@ -43,6 +51,11 @@ Invoke-Step 'frontend' {
 $env:REMOTEX_PREBUILT_FRONTEND = 'frontend\dist'
 Invoke-Step 'clippy' { & cargo clippy --all-targets -- -D warnings }
 Invoke-Step 'cargo test' { & cargo test }
+if (-not $Package) {
+    Write-Host ''
+    Write-Host '== release installer: not asked for (remote.ps1 ci -Package) =='
+    exit 0
+}
 Invoke-Step 'release installer' {
     & pwsh -NoProfile -File packaging\build-windows-msi.ps1
 }

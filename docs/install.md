@@ -79,8 +79,9 @@ C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
 ```
 
 The gateway reads its config from `%ProgramData%\remotex\remotex.toml`. Add
-`/qn` for an unattended install. The multi-instance control plane
-(`remotex tui`) is not available on Windows; the command exists and says so.
+`/qn` for an unattended install. The multi-instance control plane,
+`remotex tui`, is included and keeps its instances under
+`%LOCALAPPDATA%\remotex\instances`.
 
 ## First configuration
 

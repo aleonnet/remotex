@@ -1553,7 +1553,7 @@ browser: <instance>.remotex.localhost:<port>
                     │ Host-routed HTTP and WebSockets
                     ▼
              TUI master process
-                    │ <instance>/gateway.sock
+                    │ <instance>/gateway.sock, or \\.\pipe\remotex-<random> on Windows
                     ▼
        hidden serve-embedded subprocess
 ```
@@ -1569,11 +1569,27 @@ on either of them, because a browser picks the family and a master left holding
 for a port — an ephemeral one is a control plane nobody can be told how to
 reach, and `SharedPort::bind` refuses `0` on every path, tests included.
 
-Each hidden worker binds
-`<instance>/gateway.sock` at mode `0600`, prints one JSON readiness line —
-`{"socket","token"}` — after binding, reads only that instance's
+Each hidden worker binds its private endpoint, prints one JSON readiness line —
+`{"endpoint","token"}` — after binding, reads only that instance's
 `remotex.toml`, and stops when its parent's stdin closes (`src/embedded.rs`,
-`Audience::Embedded`). The master seeds the token as a host-only HttpOnly
+`Audience::Embedded`). Before any of that it claims the instance: an exclusive
+lock on `<instance>/gateway.lock` through std's `File::try_lock`, the same on
+every platform and released by the operating system however the worker ends. A
+second worker for the same instance — another TUI on the same directory, or one
+started by hand — is refused before it binds, and the TUI asks the same lock
+before it spawns, so it can say why. A killed worker leaves no lock to clear,
+and on Unix its leftover socket is simply replaced. On Unix the endpoint is `<instance>/gateway.sock` at mode
+`0600` in a `0700` directory. On Windows it is a named pipe
+(`src/embedded/transport.rs`): a random `\\.\pipe\remotex-<random>` per
+launch, because pipe names are one machine-wide namespace any user may create
+in, created as its first instance so the name printed is one the worker holds,
+with a DACL naming only the user and remote clients refused. Several instances
+of it wait at once, a listen backlog for the connections a page load opens
+together. The instance directories get the equivalent of `0700`: a protected
+DACL naming the user and `SYSTEM`, inherited by the configs in them. A worker
+runs with a hidden console of its own, so the TUI's Ctrl+C and window close
+never reach it directly; closing the window still stops every worker, by ending
+the TUI and so their stdin. The master seeds the token as a host-only HttpOnly
 `remotex_session` cookie before proxying the browser to the child. Raw connection
 proxying preserves both ordinary HTTP and WebSocket upgrades without another
 gateway protocol implementation.
@@ -1617,10 +1633,11 @@ that something is still serving refuses the start, and the file is removed when
 the gateway stops. No client addresses that form directly — the page reaches its
 gateway over one HTTP origin and two WebSockets, all of which need a host and a
 port, so whatever terminates the proxy is what a browser talks to. An embedded
-gateway is that arrangement in one process tree: the worker listens on
-`<instance>/gateway.sock` and never on TCP, and the thing terminating the proxy
-is the TUI master, which the browser reaches over loopback TCP and which
-forwards each connection to that socket.
+gateway is that arrangement in one process tree: the worker listens on its
+private endpoint — `<instance>/gateway.sock`, or a named pipe on Windows — and
+never on TCP, and the thing terminating the proxy is the TUI master, which the
+browser reaches over loopback TCP and which forwards each connection to that
+endpoint.
 
 `[branding]` is a top-level table rather than `[server]` keys: it names the
 deployment rather than the server, and one value with two spellings is one of

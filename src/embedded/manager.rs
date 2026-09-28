@@ -1,9 +1,10 @@
 //! The native multi-instance control plane.
 //!
 //! One TUI owns one public loopback port and one subprocess per running instance.
-//! The subprocesses keep their Unix sockets private; this process routes raw
-//! HTTP connections by `Host`, so ordinary requests and WebSocket upgrades follow
-//! exactly the same path without reimplementing either protocol.
+//! The subprocesses keep their endpoints private — see [`super::transport`]; this
+//! process routes raw HTTP connections by `Host`, so ordinary requests and
+//! WebSocket upgrades follow exactly the same path without reimplementing either
+//! protocol.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::io::Write;
@@ -26,7 +27,7 @@ use tokio::io::{AsyncBufReadExt as _, AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 
-use super::Handshake;
+use super::{Handshake, transport};
 use crate::config::{
     DEFAULT_BRANDING, DEFAULT_SIZE, Protocol, TargetConfig,
 };
@@ -45,7 +46,7 @@ const VERSION: &str = env!("CARGO_PKG_VERSION");
 pub const INSTANCE_TEMPLATE: &str = r#"# A remotex local instance.
 #
 # There is no [server] block. The TUI control plane owns the shared loopback
-# listener, this instance's subdomain, its private Unix socket, and its launch
+# listener, this instance's subdomain, its private endpoint, and its launch
 # token. Only [branding] and [[targets]] belong here.
 
 # [branding]
@@ -79,18 +80,27 @@ pub struct TuiOptions {
 
 /// The platform's private application-data directory for local instances.
 pub fn default_instances_dir() -> anyhow::Result<PathBuf> {
+    // Local rather than roaming: the configs hold credentials, and a roaming
+    // profile would copy them to every machine the account signs in to.
+    #[cfg(windows)]
+    {
+        let data = std::env::var_os("LOCALAPPDATA")
+            .filter(|value| !value.is_empty())
+            .context("LOCALAPPDATA is not set; pass --instances-dir")?;
+        Ok(PathBuf::from(data).join("remotex").join("instances"))
+    }
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::var_os("HOME").context("HOME is not set; pass --instances-dir")?;
-        Ok(PathBuf::from(home).join("Library/Application Support/remotex/instances"))
+        let home = std::env::home_dir().context("cannot find the home directory; pass --instances-dir")?;
+        Ok(home.join("Library/Application Support/remotex/instances"))
     }
-    #[cfg(not(target_os = "macos"))]
+    #[cfg(all(unix, not(target_os = "macos")))]
     {
         if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
             return Ok(PathBuf::from(data).join("remotex/instances"));
         }
-        let home = std::env::var_os("HOME").context("HOME is not set; pass --instances-dir")?;
-        Ok(PathBuf::from(home).join(".local/share/remotex/instances"))
+        let home = std::env::home_dir().context("cannot find the home directory; pass --instances-dir")?;
+        Ok(home.join(".local/share/remotex/instances"))
     }
 }
 
@@ -250,6 +260,19 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                             };
                         }
                     }
+                    KeyCode::Char('o') => {
+                        if let Some(instance) = instances.get(selected) {
+                            let url = instance_url(&instance.name, router.port());
+                            message = if instance.status != InstanceStatus::Running {
+                                format!("{} is {}; s starts it", instance.name, instance.status.label())
+                            } else {
+                                match open_browser(&url) {
+                                    Ok(()) => format!("opening {url}"),
+                                    Err(error) => format!("cannot open {url}: {error:#}"),
+                                }
+                            };
+                        }
+                    }
                     KeyCode::Char('e') => {
                         if let Some(instance) = instances.get(selected) {
                             let name = instance.name.clone();
@@ -282,9 +305,8 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
 ///
 /// `VISUAL` and `EDITOR` hold a shell command line, not a program path: `subl -w`
 /// and `code --wait` are ordinary values, and every tool that honours these
-/// variables lets the shell split them. So the value is handed to `sh -c` with
-/// the path as a positional argument, which keeps a path with spaces in it out of
-/// the words the shell splits.
+/// variables lets the shell split them. So the value is handed to the platform's
+/// shell with the path kept out of the words it splits.
 async fn edit_config(path: &Path) -> anyhow::Result<()> {
     let editor = std::env::var("VISUAL")
         .ok()
@@ -294,17 +316,88 @@ async fn edit_config(path: &Path) -> anyhow::Result<()> {
                 .ok()
                 .filter(|value| !value.trim().is_empty())
         })
-        .unwrap_or_else(|| String::from("vi"));
-    let status = Command::new("sh")
-        .arg("-c")
-        .arg(format!("{editor} \"$@\""))
-        .arg("sh")
-        .arg(path)
+        .unwrap_or_else(|| String::from(DEFAULT_EDITOR));
+    let status = editor_command(&editor, path)
         .status()
         .await
         .with_context(|| format!("cannot start editor {editor}"))?;
     anyhow::ensure!(status.success(), "editor {editor} exited with {status}");
     Ok(())
+}
+
+#[cfg(unix)]
+const DEFAULT_EDITOR: &str = "vi";
+#[cfg(windows)]
+const DEFAULT_EDITOR: &str = "notepad";
+
+/// `sh -c`, with the path as a positional argument.
+#[cfg(unix)]
+fn editor_command(editor: &str, path: &Path) -> Command {
+    let mut command = Command::new("sh");
+    command.arg("-c").arg(format!("{editor} \"$@\"")).arg("sh").arg(path);
+    command
+}
+
+/// `cmd /c`, with the path quoted after the editor's own words.
+///
+/// The line is handed over raw, because cmd does not split its command line the
+/// way a program's `argv` is split and an escaped argument would reach it with
+/// its escapes. `/s` strips exactly the outer pair of quotes, leaving
+/// `<editor> "%REMOTEX_EDIT_PATH%"`. The path arrives in that variable rather than
+/// in the line, because cmd expands `%NAME%` inside quotes too and a directory may
+/// be called `%TEMP%`; what a variable expands to is not expanded again, and a
+/// Windows path cannot hold a `"` to break out of its quotes. `/v:off` keeps a `!`
+/// literal whatever the registry says about delayed expansion, and `/d` skips any
+/// AutoRun it sets.
+#[cfg(windows)]
+fn editor_command(editor: &str, path: &Path) -> Command {
+    let mut command = Command::new("cmd.exe");
+    command
+        .env("REMOTEX_EDIT_PATH", path)
+        .raw_arg(format!("/d /v:off /s /c \"{editor} \"%REMOTEX_EDIT_PATH%\"\""));
+    command
+}
+
+/// The instance's origin on the shared port. Its `/` seeds the login cookie, so
+/// a browser sent here lands in the SPA already signed in.
+fn instance_url(name: &str, port: u16) -> String {
+    format!("http://{name}.{MASTER_HOST}:{port}")
+}
+
+/// Hands `url` to the desktop's default browser without waiting for it: some
+/// launchers stay until the browser exits. None of them gets the terminal, which
+/// the TUI is drawing on.
+fn open_browser(url: &str) -> anyhow::Result<()> {
+    browser_command(url)
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+        .context("cannot start the browser launcher")?;
+    Ok(())
+}
+
+#[cfg(target_os = "macos")]
+fn browser_command(url: &str) -> Command {
+    let mut command = Command::new("open");
+    command.arg(url);
+    command
+}
+
+#[cfg(all(unix, not(target_os = "macos")))]
+fn browser_command(url: &str) -> Command {
+    let mut command = Command::new("xdg-open");
+    command.arg(url);
+    command
+}
+
+/// `start`, whose first quoted word is a window title, so the empty one keeps
+/// the URL from being taken for it.
+#[cfg(windows)]
+fn browser_command(url: &str) -> Command {
+    let mut command = Command::new("cmd.exe");
+    command.raw_arg(format!("/d /c start \"\" \"{url}\""));
+    command
 }
 
 fn validate_config(path: &Path) -> anyhow::Result<()> {
@@ -461,11 +554,10 @@ fn render(
     for (row, (index, instance)) in instances.iter().enumerate().skip(start).take(available).enumerate() {
         let marker = if index == selected { '›' } else { ' ' };
         let text = format!(
-            "{marker} {:<20} {:<10} http://{}.{}:{port}",
+            "{marker} {:<20} {:<10} {}",
             instance.name,
             instance.status.label(),
-            instance.name,
-            MASTER_HOST
+            instance_url(&instance.name, port)
         );
         line(
             &mut frame,
@@ -496,7 +588,7 @@ fn render(
             &mut frame,
             footer,
             width,
-            "↑↓ select · Enter specs · s start · x stop · r restart · a start all · n new · e edit · R rescan · q quit",
+            "↑↓ select · Enter specs · s start · x stop · r restart · a start all · o open · n new · e edit · R rescan · q quit",
             Some(Color::DarkGrey),
             false,
         )?;
@@ -545,7 +637,7 @@ fn render_specs(
 fn describe_instance(instance: &InstanceInfo, port: u16) -> Vec<String> {
     let mut lines = vec![
         spec("state", instance.status.label()),
-        spec("url", &format!("http://{}.{MASTER_HOST}:{port}", instance.name)),
+        spec("url", &instance_url(&instance.name, port)),
         spec("config", &instance.config_path().display().to_string()),
         spec("log", &instance.log_path().display().to_string()),
     ];
@@ -727,7 +819,7 @@ impl InstanceStatus {
     }
 }
 
-/// One row of the manager's public state, with no launch token or socket path.
+/// One row of the manager's public state, with no launch token or endpoint.
 #[derive(Clone, Debug)]
 pub struct InstanceInfo {
     pub name: String,
@@ -753,7 +845,9 @@ impl InstanceInfo {
 enum InstanceState {
     Stopped,
     Starting,
-    Running(RunningGateway),
+    /// Boxed because a Windows child process carries its handles and job state
+    /// inline, which makes this variant many times the size of the others.
+    Running(Box<RunningGateway>),
     /// A clean exit this manager did not request; the string says how it ended.
     Exited(String),
     Failed(String),
@@ -767,7 +861,7 @@ struct ManagedInstance {
 
 struct RunningGateway {
     child: Child,
-    socket: PathBuf,
+    endpoint: String,
     token: String,
 }
 
@@ -844,6 +938,9 @@ impl Supervisor {
                 self.instances.push(instance);
             } else {
                 let dir = self.root.join(&name);
+                // A directory made or copied in by hand keeps whatever access it came
+                // with until it is made private here, the files already in it included.
+                transport::make_private(&dir)?;
                 bootstrap_config(&dir)?;
                 self.instances.push(ManagedInstance {
                     name,
@@ -867,7 +964,7 @@ impl Supervisor {
         let dir = self.root.join(name);
         std::fs::create_dir(&dir)
             .with_context(|| format!("cannot create {}", dir.display()))?;
-        set_private_dir_permissions(&dir)?;
+        transport::make_private(&dir)?;
         if let Err(error) = bootstrap_config(&dir) {
             let _ = std::fs::remove_dir(&dir);
             return Err(error);
@@ -888,14 +985,20 @@ impl Supervisor {
             return Ok(());
         }
         let dir = self.instances[index].dir.clone();
-        validate_config(&super::Instance::new(&dir).config_path())
+        let instance = super::Instance::new(&dir);
+        validate_config(&instance.config_path())
             .with_context(|| format!("instance {name:?} has an invalid config"))?;
+        // Asked here as well as by the worker, which holds the claim, so an
+        // instance another control plane is serving says so instead of ending in a
+        // handshake that never comes. A start that races past this one still meets
+        // the worker's.
+        drop(instance.claim().await?);
         self.instances[index].state = InstanceState::Starting;
         self.publish().await;
 
         match spawn_gateway(&self.binary, &dir).await {
             Ok(gateway) => {
-                self.instances[index].state = InstanceState::Running(gateway);
+                self.instances[index].state = InstanceState::Running(Box::new(gateway));
                 self.publish().await;
                 Ok(())
             }
@@ -913,7 +1016,7 @@ impl Supervisor {
         let index = self.index(name)?;
         let state = std::mem::replace(&mut self.instances[index].state, InstanceState::Stopped);
         if let InstanceState::Running(gateway) = state {
-            stop_gateway(gateway).await;
+            stop_gateway(*gateway).await;
         }
         self.publish().await;
         Ok(())
@@ -954,7 +1057,7 @@ impl Supervisor {
         for instance in &mut self.instances {
             let state = std::mem::replace(&mut instance.state, InstanceState::Stopped);
             if let InstanceState::Running(gateway) = state {
-                stop_gateway(gateway).await;
+                stop_gateway(*gateway).await;
             }
         }
         self.publish().await;
@@ -978,7 +1081,7 @@ impl Supervisor {
                 InstanceState::Running(gateway) => (
                     InstanceStatus::Running,
                     Some(RouteTarget {
-                        socket: gateway.socket.clone(),
+                        endpoint: gateway.endpoint.clone(),
                         token: gateway.token.clone(),
                     }),
                 ),
@@ -994,20 +1097,30 @@ impl Supervisor {
 /// The gateway exits 0 on SIGINT or SIGTERM after logging "shutdown signal
 /// received", and on its stdin closing; a `pkill` aimed at some other remotex
 /// therefore shows up here as a clean exit, not a crash. Only a non-zero code
-/// or a crash signal is a failure.
+/// or a crash is a failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum ExitKind {
     /// Exit code 0.
     Clean,
     /// Exit code other than 0.
     Code(i32),
-    /// Killed by a signal someone sends on purpose: SIGINT, SIGTERM, SIGHUP.
-    Stopped(i32),
-    /// Killed by any other signal: SIGSEGV, SIGABRT, SIGKILL, and so on.
-    Crashed(i32),
+    /// Ended from outside on purpose: SIGINT, SIGTERM or SIGHUP on Unix, and on
+    /// Windows the status of a process a Ctrl+C or Ctrl+Break ended.
+    Stopped(Termination),
+    /// Anything else that ended it: SIGSEGV, SIGABRT, SIGKILL and so on, or on
+    /// Windows an exception status such as an access violation or a fail-fast.
+    Crashed(Termination),
 }
 
+/// What ended a gateway that did not exit by itself: a signal number on Unix, an
+/// `NTSTATUS` on Windows.
+#[cfg(unix)]
+type Termination = i32;
+#[cfg(windows)]
+type Termination = u32;
+
 impl ExitKind {
+    #[cfg(unix)]
     fn of(status: std::process::ExitStatus) -> Self {
         use std::os::unix::process::ExitStatusExt as _;
         match (status.code(), status.signal()) {
@@ -1021,12 +1134,28 @@ impl ExitKind {
         }
     }
 
+    /// Windows has one number for all of it. An exit code with both severity bits
+    /// set is an `NTSTATUS` error, which a process does not choose to exit with:
+    /// the system ended it. A `TerminateProcess` from outside is not among them —
+    /// it exits with whatever code its caller named — and reads as that code.
+    #[cfg(windows)]
+    fn of(status: std::process::ExitStatus) -> Self {
+        match status.code().map(|code| code as u32) {
+            Some(0) => Self::Clean,
+            Some(status @ STATUS_CONTROL_C_EXIT) => Self::Stopped(status),
+            Some(status) if status & 0xC000_0000 == 0xC000_0000 => Self::Crashed(status),
+            Some(code) => Self::Code(code as i32),
+            None => Self::Crashed(0),
+        }
+    }
+
     fn is_clean(self) -> bool {
         matches!(self, Self::Clean | Self::Stopped(_))
     }
 }
 
-fn signal_name(signal: i32) -> &'static str {
+#[cfg(unix)]
+fn termination_name(signal: i32) -> &'static str {
     match signal {
         libc::SIGHUP => "SIGHUP",
         libc::SIGINT => "SIGINT",
@@ -1045,24 +1174,65 @@ fn signal_name(signal: i32) -> &'static str {
     }
 }
 
+#[cfg(windows)]
+const STATUS_CONTROL_C_EXIT: u32 = 0xC000_013A;
+
+#[cfg(windows)]
+fn termination_name(status: u32) -> &'static str {
+    match status {
+        0xC000_0005 => "STATUS_ACCESS_VIOLATION",
+        0xC000_0017 => "STATUS_NO_MEMORY",
+        0xC000_001D => "STATUS_ILLEGAL_INSTRUCTION",
+        0xC000_0094 => "STATUS_INTEGER_DIVIDE_BY_ZERO",
+        0xC000_00FD => "STATUS_STACK_OVERFLOW",
+        STATUS_CONTROL_C_EXIT => "STATUS_CONTROL_C_EXIT",
+        0xC000_0374 => "STATUS_HEAP_CORRUPTION",
+        // What a Rust panic under `panic = "abort"` ends in: `abort` is a fail-fast.
+        0xC000_0409 => "STATUS_STACK_BUFFER_OVERRUN, a fail-fast such as an abort",
+        _ => "an uncommon status",
+    }
+}
+
 impl std::fmt::Display for ExitKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
+            #[cfg(unix)]
             Self::Clean => write!(
                 f,
                 "the gateway shut down cleanly (exit code 0) without this control plane asking; \
                  something else sent it SIGINT or SIGTERM, such as a pkill matching 'remotex serve'"
             ),
+            // A worker has a console of its own on Windows, so no Ctrl+C typed
+            // anywhere reaches it: there is no outside hand to name.
+            #[cfg(windows)]
+            Self::Clean => write!(
+                f,
+                "the gateway shut down cleanly (exit code 0) without this control plane asking"
+            ),
             Self::Code(code) => write!(f, "the gateway failed with exit code {code}"),
+            #[cfg(unix)]
             Self::Stopped(signal) => write!(
                 f,
                 "the gateway was stopped from outside by signal {signal} ({})",
-                signal_name(signal)
+                termination_name(signal)
             ),
+            #[cfg(windows)]
+            Self::Stopped(status) => write!(
+                f,
+                "the gateway was stopped from outside with status {status:#010X} ({})",
+                termination_name(status)
+            ),
+            #[cfg(unix)]
             Self::Crashed(signal) => write!(
                 f,
                 "the gateway died on signal {signal} ({})",
-                signal_name(signal)
+                termination_name(signal)
+            ),
+            #[cfg(windows)]
+            Self::Crashed(status) => write!(
+                f,
+                "the gateway died with status {status:#010X} ({})",
+                termination_name(status)
             ),
         }
     }
@@ -1077,14 +1247,22 @@ async fn spawn_gateway(binary: &Path, dir: &Path) -> anyhow::Result<RunningGatew
         .with_context(|| format!("cannot open {}", log_path.display()))?;
     writeln!(log, "\n--- gateway launch ---")?;
     let stderr = log.try_clone()?;
-    let mut child = Command::new(binary)
+    let mut command = Command::new(binary);
+    command
         .arg("serve-embedded")
         .arg("--instance-dir")
         .arg(dir)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::from(stderr))
-        .kill_on_drop(true)
+        .kill_on_drop(true);
+    // A console of its own, which nobody sees. Sharing this one would hand every
+    // worker the Ctrl+C typed into an editor this TUI runs, and the close event of
+    // the window — each a stop the TUI did not ask for. Closing the window still
+    // stops them, by ending this process and so closing their stdin.
+    #[cfg(windows)]
+    command.creation_flags(CREATE_NO_WINDOW);
+    let mut child = command
         .spawn()
         .with_context(|| format!("cannot start gateway for {}", dir.display()))?;
     let stdout = child.stdout.take().context("gateway stdout was not piped")?;
@@ -1096,15 +1274,17 @@ async fn spawn_gateway(binary: &Path, dir: &Path) -> anyhow::Result<RunningGatew
     anyhow::ensure!(bytes != 0, "gateway exited before printing its handshake; see {}", log_path.display());
     let handshake: Handshake = serde_json::from_str(line.trim_end())
         .with_context(|| format!("gateway printed a malformed handshake: {line:?}"))?;
-    let socket = PathBuf::from(&handshake.socket);
-    anyhow::ensure!(socket == dir.join("gateway.sock"), "gateway returned the wrong socket path");
+    transport::check_endpoint(dir, &handshake.endpoint)?;
     anyhow::ensure!(!handshake.token.is_empty(), "gateway returned an empty token");
     Ok(RunningGateway {
         child,
-        socket,
+        endpoint: handshake.endpoint,
         token: handshake.token,
     })
 }
+
+#[cfg(windows)]
+const CREATE_NO_WINDOW: u32 = 0x0800_0000;
 
 async fn stop_gateway(mut gateway: RunningGateway) {
     drop(gateway.child.stdin.take());
@@ -1127,17 +1307,7 @@ fn valid_instance_name(name: &str) -> anyhow::Result<()> {
 
 fn create_private_dir(path: &Path) -> anyhow::Result<()> {
     std::fs::create_dir_all(path).with_context(|| format!("cannot create {}", path.display()))?;
-    set_private_dir_permissions(path)
-}
-
-fn set_private_dir_permissions(path: &Path) -> anyhow::Result<()> {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt as _;
-        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
-            .with_context(|| format!("cannot make {} private", path.display()))?;
-    }
-    Ok(())
+    transport::make_private(path)
 }
 
 fn bootstrap_config(dir: &Path) -> anyhow::Result<()> {
@@ -1149,6 +1319,7 @@ fn bootstrap_config(dir: &Path) -> anyhow::Result<()> {
     let result = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
+        // On Windows the file takes the directory's owner-only DACL by inheritance.
         #[cfg(unix)]
         {
             use std::os::unix::fs::OpenOptionsExt as _;
@@ -1179,7 +1350,7 @@ struct PublishedInstance {
 
 #[derive(Clone)]
 struct RouteTarget {
-    socket: PathBuf,
+    endpoint: String,
     token: String,
 }
 
@@ -1294,8 +1465,8 @@ async fn route_connection(
     // does not have, and seeding it here is what lets one page load carry it to
     // `/api/*` and to both WebSocket upgrades, which a header cannot reach from
     // inside a document. What follows is that **any local user may drive any
-    // instance** — including one who could not open the instance directory's
-    // `0700` socket directly. This is a single-user desktop tool: do not run
+    // instance** — including one who could not open the worker's owner-only
+    // endpoint directly. This is a single-user desktop tool: do not run
     // `remotex tui` on a machine you share with people you would not give the
     // desktops to. A launch nonce would not change that, only make it a step
     // longer: the page it authenticates has to keep something the next request
@@ -1316,7 +1487,7 @@ async fn route_connection(
         return Ok(());
     }
 
-    let mut gateway = match tokio::net::UnixStream::connect(&target.socket).await {
+    let mut gateway = match transport::connect(&target.endpoint).await {
         Ok(stream) => stream,
         Err(error) => {
             write_response(
@@ -1545,6 +1716,7 @@ mod tests {
     /// A clean exit this manager did not request is not a failure, and the
     /// account of it says which it was, so a `pkill` aimed at some other remotex
     /// is not read as a crash.
+    #[cfg(unix)]
     #[test]
     fn an_unrequested_exit_is_only_a_failure_when_the_gateway_says_so() {
         use std::os::unix::process::ExitStatusExt as _;
@@ -1572,6 +1744,40 @@ mod tests {
         assert!(!segv.is_clean());
         assert!(segv.to_string().contains("SIGSEGV"), "{segv}");
         assert!(!ExitKind::of(status(libc::SIGKILL)).is_clean());
+    }
+
+    /// Windows says all of it with the exit code: a status the system ended the
+    /// process with is a crash however it is spelled, and a code the gateway chose
+    /// is that code — `TerminateProcess` included, which names one.
+    #[cfg(windows)]
+    #[test]
+    fn an_unrequested_exit_is_only_a_failure_when_the_gateway_says_so() {
+        use std::os::windows::process::ExitStatusExt as _;
+        let status = |raw: u32| std::process::ExitStatus::from_raw(raw);
+
+        let clean = ExitKind::of(status(0));
+        assert_eq!(clean, ExitKind::Clean);
+        assert!(clean.is_clean());
+        assert!(clean.to_string().contains("exit code 0"), "{clean}");
+
+        let code = ExitKind::of(status(2));
+        assert_eq!(code, ExitKind::Code(2));
+        assert!(!code.is_clean());
+        assert!(code.to_string().contains("exit code 2"), "{code}");
+        assert_eq!(ExitKind::of(status(1)), ExitKind::Code(1), "what TerminateProcess leaves");
+
+        let interrupted = ExitKind::of(status(STATUS_CONTROL_C_EXIT));
+        assert_eq!(interrupted, ExitKind::Stopped(STATUS_CONTROL_C_EXIT));
+        assert!(interrupted.is_clean());
+        assert!(interrupted.to_string().contains("0xC000013A"), "{interrupted}");
+
+        let violation = ExitKind::of(status(0xC000_0005));
+        assert_eq!(violation, ExitKind::Crashed(0xC000_0005));
+        assert!(!violation.is_clean());
+        assert!(violation.to_string().contains("STATUS_ACCESS_VIOLATION"), "{violation}");
+        let abort = ExitKind::of(status(0xC000_0409));
+        assert!(!abort.is_clean());
+        assert!(abort.to_string().contains("abort"), "a panic's end is named: {abort}");
     }
 
     #[test]
@@ -1605,6 +1811,41 @@ mod tests {
         super::super::check(&text).unwrap();
     }
 
+    /// A path cmd would read as variables — `%TEMP%`, `!x!` — or as operators
+    /// reaches the editor exactly as it is.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_editor_gets_the_path_exactly_as_it_is() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("%TEMP% & !PATH! ^ (x)");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("remotex.toml");
+        std::fs::write(&path, "the-right-file").unwrap();
+
+        let output = editor_command("type", &path).output().await.unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(stdout.contains("the-right-file"), "{stdout}");
+    }
+
+    /// An instance something else serves — another control plane on the same
+    /// directory, or a worker started by hand — is refused before any worker is
+    /// spawned, and says why.
+    #[tokio::test]
+    async fn an_instance_another_gateway_holds_is_refused_before_spawning() {
+        let root = tempfile::tempdir().unwrap();
+        let mut supervisor = Supervisor::open(root.path().to_path_buf(), PathBuf::from("no-such-remotex"))
+            .await
+            .unwrap();
+        supervisor.create("alpha").await.unwrap();
+        let _held = super::super::Instance::new(root.path().join("alpha")).claim().await.unwrap();
+
+        let error = supervisor.start("alpha").await.unwrap_err();
+        assert!(format!("{error:#}").contains("already served by another gateway"), "{error:#}");
+        assert_eq!(supervisor.instances()[0].status, InstanceStatus::Stopped);
+    }
+
     #[tokio::test]
     async fn two_subdomains_share_one_port_and_reach_different_gateways() {
         let routes = RouteTable::default();
@@ -1616,7 +1857,7 @@ mod tests {
                 PublishedInstance {
                     status: InstanceStatus::Running,
                     target: Some(RouteTarget {
-                        socket: first.0.clone(),
+                        endpoint: first.0.clone(),
                         token: "token-one".to_owned(),
                     }),
                 },
@@ -1626,7 +1867,7 @@ mod tests {
                 PublishedInstance {
                     status: InstanceStatus::Running,
                     target: Some(RouteTarget {
-                        socket: second.0.clone(),
+                        endpoint: second.0.clone(),
                         token: "token-two".to_owned(),
                     }),
                 },
@@ -1660,7 +1901,7 @@ mod tests {
             PublishedInstance {
                 status: InstanceStatus::Running,
                 target: Some(RouteTarget {
-                    socket: PathBuf::from("/no/such/remotex-gateway.sock"),
+                    endpoint: transport::endpoint(Path::new("/no/such/instance")),
                     token: "launch-token".to_owned(),
                 }),
             },
@@ -1725,14 +1966,18 @@ mod tests {
         assert!(format!("{error:#}").contains("a browser can be told"), "{error:#}");
     }
 
+    /// A worker's endpoint answering one request with `body`, over the transport
+    /// a real worker listens on.
     async fn fake_gateway(
         body: &'static str,
-    ) -> (PathBuf, tokio::task::JoinHandle<()>, tempfile::TempDir) {
+    ) -> (String, tokio::task::JoinHandle<()>, tempfile::TempDir) {
         let directory = tempfile::tempdir().unwrap();
-        let path = directory.path().join("gateway.sock");
-        let listener = tokio::net::UnixListener::bind(&path).unwrap();
+        let endpoint = transport::endpoint(directory.path());
+        let claim = super::super::Instance::new(directory.path()).claim().await.unwrap();
+        let mut listener = transport::WorkerListener::bind(&endpoint, &claim).unwrap();
         let task = tokio::spawn(async move {
-            let (mut stream, _) = listener.accept().await.unwrap();
+            let _claim = claim;
+            let (mut stream, _) = axum::serve::Listener::accept(&mut listener).await;
             let mut request = Vec::new();
             let mut chunk = [0u8; 1024];
             loop {
@@ -1748,7 +1993,7 @@ mod tests {
             );
             stream.write_all(response.as_bytes()).await.unwrap();
         });
-        (path, task, directory)
+        (endpoint, task, directory)
     }
 
     async fn request(port: u16, host: &str, cookie: Option<&str>) -> String {

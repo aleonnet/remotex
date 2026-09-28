@@ -194,13 +194,17 @@ documentation.
   per-function `#[target_feature]` when needed. Prebuilt native archives must
   keep the same floor. See
   [x86-64 CPU compatibility](packaging/README.md#x86-64-cpu-compatibility).
-- The native `embedded-gateway` feature is the Unix-only `remotex tui` control
-  plane and its hidden `serve-embedded` workers. Containers must be built through
+- The native `embedded-gateway` feature is the `remotex tui` control plane and
+  its hidden `serve-embedded` workers, on Unix and Windows alike: each worker's
+  private endpoint is a Unix socket or an owner-only named pipe, behind
+  `src/embedded/transport.rs`. Containers must be built through
   `packaging/build-container-binary.sh`, with default features disabled, and must
   never expose `tui`, `serve-embedded`, or `check-config --embedded`.
-- Windows ships only `serve`, `check-config`, and `gen-passwd` in the MSI. Build
-  it with `packaging/build-windows-msi.ps1` on `windows-ci-build` through
-  `ci/windows/remote.ps1`. Do not add a service or package-owned live config.
+- The Windows MSI ships the native binary, `tui` included. Build it with
+  `packaging/build-windows-msi.ps1` on `windows-ci-build` through
+  `ci/windows/remote.ps1 ci -Package`, when packaging changes or before a release;
+  a plain `ci` rerun stops after the tests. Do not add a service or
+  package-owned live config.
 - Follow [Packaging](packaging/README.md) for native layouts, prebuilt dependency
   rules, and release workflow.
 

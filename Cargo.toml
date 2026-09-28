@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.275"
+version = "0.0.276"
 
 [package]
 name = "remotex"
@@ -28,7 +28,7 @@ edition = "2024"
 # explicitly disable default features: a remotely deployed gateway must not
 # expose process supervision or its private worker surface.
 default = ["embedded-gateway"]
-embedded-gateway = ["dep:crossterm", "dep:libc"]
+embedded-gateway = ["dep:crossterm", "dep:libc", "dep:windows-sys"]
 # Apple High Performance's media stream (src/vnc_apple_media.rs, src/aac_eld.rs):
 # the Mac's picture as HEVC and its sound as AAC-ELD, both over SRTP, which a
 # target turns on with `subtype = "ard-high-performance"`. The two decoders are
@@ -59,7 +59,6 @@ rust-embed = { version = "8", features = ["debug-embed", "interpolate-folder-pat
 tower = { version = "0.5", features = ["util"] }
 clap = { version = "4", features = ["derive", "env"] }
 crossterm = { version = "0.29", features = ["event-stream"], optional = true }
-libc = { version = "0.2", optional = true }
 anyhow = "1"
 thiserror = "2"
 log = "0.4"
@@ -243,6 +242,23 @@ anyhow = "1"
 [target.'cfg(not(windows))'.dependencies]
 tikv-jemallocator = "0.7"
 tikv-jemalloc-sys = { version = "0.7", features = ["unprefixed_malloc_on_supported_platforms"] }
+
+# The control plane's names for how a worker ended (src/embedded/manager.rs): a
+# Unix worker that did not exit was ended by a signal.
+[target.'cfg(unix)'.dependencies]
+libc = { version = "0.2", optional = true }
+
+# The control plane's private transport on Windows (src/embedded/transport.rs): a
+# named pipe whose DACL admits this user alone, and the same owner-only DACL on the
+# instance directories that hold the targets' credentials — what a `0600` socket in
+# a `0700` directory is on Unix. The version tokio already links.
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", optional = true, features = [
+    "Win32_Foundation",
+    "Win32_Security",
+    "Win32_Security_Authorization",
+    "Win32_System_Threading",
+] }
 
 [[test]]
 name = "embedded_gateway_e2e"

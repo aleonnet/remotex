@@ -111,7 +111,7 @@ msiexec /i remotex-windows-x86_64.msi
 
 The MSI is unsigned, so SmartScreen asks first. It installs the gateway under
 `%ProgramFiles%\remotex`, puts `bin` on the machine `PATH`, and reads
-`%ProgramData%\remotex\remotex.toml`. `remotex tui` is not available on Windows.
+`%ProgramData%\remotex\remotex.toml`.
 
 Packages do not own the live config because it contains credentials. On Linux,
 create it for the account that will run the gateway:
@@ -153,17 +153,22 @@ serving refuses the start rather than answering on half of it.
 Open <http://remotex.localhost:52380>; each
 running instance has its own origin at
 `http://<instance>.remotex.localhost:52380`. Press `n` to create an instance,
-`e` to edit its `remotex.toml`, Enter to start or stop it, `r` to restart it,
-and `q` to stop every child and quit.
+`e` to edit its `remotex.toml`, `s` to start it, `x` to stop it, `r` to restart
+it, `a` to start every stopped one, `o` to open a running one in your browser,
+Enter to see its settings, and `q` to stop every child and quit.
 
 Each immediate subdirectory is one instance. The default root is
 `~/.local/share/remotex/instances` on Linux (or
-`$XDG_DATA_HOME/remotex/instances`) and
-`~/Library/Application Support/remotex/instances` on macOS; pass
-`--instances-dir` to choose another. Its config uses the same `[branding]` and
-`[[targets]]` format as the former native viewer and deliberately has no
-`[server]` block. The supervisor owns the shared TCP port and proxies each
-subdomain to that child's private `<instance>/gateway.sock`.
+`$XDG_DATA_HOME/remotex/instances`),
+`~/Library/Application Support/remotex/instances` on macOS, and
+`%LOCALAPPDATA%\remotex\instances` on Windows; pass `--instances-dir` to choose
+another. The root is made private to your account — mode `0700`, or on Windows
+an ACL naming only you and `SYSTEM` — because the configs hold credentials. Its
+config uses the same `[branding]` and `[[targets]]` format as the former native
+viewer and deliberately has no `[server]` block. `e` opens it in `$VISUAL` or
+`$EDITOR` — `vi` when neither is set, and Notepad on Windows. The supervisor owns
+the shared TCP port and proxies each subdomain to that child's private endpoint:
+`<instance>/gateway.sock`, or on Windows a named pipe only your account can open.
 
 Macs can be configured as ordinary VNC targets using macOS Screen Sharing, with
 no additional software. Use `protocol = "vnc"` with `subtype = "ard"` and the Mac
