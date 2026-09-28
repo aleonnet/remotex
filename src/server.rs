@@ -754,7 +754,7 @@ struct ClaimResponse {
 }
 
 /// Claim the single session slot. Returns the token the WebSocket
-/// must present as `/ws?session=<token>&chroma=420|444&hevc=true|false`; 409 while another
+/// must present as `/ws?session=<token>&chroma=420|444&apple_media=true|false`; 409 while another
 /// browser is attached (retry with `force` to take over). The media sockets
 /// present the token alone — `chroma`, the most colour this browser's video
 /// decoder takes, is the session socket's and is required there
@@ -987,7 +987,7 @@ mod tests {
                 video_quality: None,
                 render_chroma: None,
                 render_adaptive: None,
-                hevc_passthrough: false,
+                media_passthrough: false,
                 virtual_display: false,
                 audio_bitrate: None,
                 audio_adaptive: None,
@@ -1232,7 +1232,7 @@ mod tests {
             video_quality: None,
             render_chroma: None,
             render_adaptive: None,
-            hevc_passthrough: false,
+            media_passthrough: false,
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,

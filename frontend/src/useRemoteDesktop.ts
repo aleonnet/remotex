@@ -21,7 +21,7 @@ import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
 import { HeldModifiers, modifierFlags } from "./heldModifiers.ts";
 import { type MicSender, startMicSender } from "./micSender.ts";
 import "./keyboardLock.ts";
-import { decodesAppleHevc } from "./appleHevc.ts";
+import { decodesAppleMedia } from "./appleMedia.ts";
 import {
   isMacHost,
   MacKeyboardTranslator,
@@ -1131,7 +1131,7 @@ export function useRemoteDesktop(
         gatewaySocketUrl("/ws", sessionId, {
           screen: hostDisplayMsg(),
           chroma: videoChroma(),
-          hevc: decodesAppleHevc(),
+          appleMedia: decodesAppleMedia(),
         }),
       );
       const generation = advancePaintGeneration(paintGenerationRef);

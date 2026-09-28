@@ -427,7 +427,8 @@ pub mod batch {
 /// ```
 ///
 /// Receivers reject nonzero flags. Packet lengths delimit multiple packets within
-/// one WebSocket frame: the Opus packets one wave buffer completed.
+/// one WebSocket frame: the Opus packets one wave buffer completed, or the passed
+/// units already queued when the first was read.
 pub mod audio {
     pub const FRAME_KIND: u8 = 0x03;
     pub const HEADER_LEN: usize = 4;
@@ -452,7 +453,7 @@ pub mod audio {
         frame.extend_from_slice(&count.to_le_bytes());
         for packet in packets {
             let size = u16::try_from(packet.len())
-                .expect("an opus or pcm packet is at most u16::MAX bytes");
+                .expect("an opus packet or a passed unit is at most u16::MAX bytes");
             frame.extend_from_slice(&size.to_le_bytes());
             frame.extend_from_slice(packet);
         }
@@ -1017,10 +1018,13 @@ pub enum ServerMsg {
     /// How to play what follows, sent before the first packet.
     ///
     /// `codec` is `opus`, the WebCodecs codec string, with the RFC 7845 `OpusHead`
-    /// in `head` and `sample_rate` the 48 kHz it was resampled to.
+    /// in `head` and `sample_rate` the 48 kHz it was resampled to. The one other is a
+    /// High Performance Mac's sound passed as it came
+    /// ([`crate::vnc_apple_media::PASSED_SOUND`]): `mp4a.40.39`, AAC-ELD, with its
+    /// AudioSpecificConfig in `head`.
     ///
     /// `packet_frames` is the one thing a client cannot work out for itself: 960
-    /// samples in a 20 ms packet.
+    /// samples in a 20 ms Opus packet, 480 in a 10 ms AAC-ELD unit.
     AudioFormat {
         codec: &'static str,
         sample_rate: u32,

@@ -200,15 +200,18 @@ gateway reports to it every 50 ms allows, as Apple's viewer reports. A Linux
 gateway needs `net.core.rmem_max` of at least 4194304 for the screen's socket,
 which the log warns about when it is lower: the stock 212992 loses keyframes at
 Retina sizes. The gateway authenticates and decrypts every packet, decodes both, and sends them on as the VP9 and Opus every
-target uses — or, with `hevc_passthrough = true` and a browser that decodes it
-(Chrome and Safari; not Firefox), sends the HEVC on as the Mac sent it, for a LAN;
+target uses — or, with `media_passthrough = true` and a browser that decodes them
+(Chrome and Safari; not Firefox), sends the HEVC and the AAC-ELD on as the Mac sent
+them, for a LAN;
 ZRLE carries the picture only until the stream does, and a stream
 that fails ends the session, as it does in Apple's viewer. A playing
 video does not delay the Mac's reading of the input, as RFB pixels' deflate does. The Mac refuses the picture without the sound, and
 mutes its own speakers while it streams, so the target always carries sound, and
-nothing reaches an AirPlay speaker the Mac plays to. It is **experimental** and needs a gateway built with
-`--features apple-hp-media`, which links FFmpeg's HEVC decoder (LGPL) and Fraunhofer's
-AAC-ELD decoder (licence not OSI-approved); no release artifact carries it. See
+nothing reaches an AirPlay speaker the Mac plays to. It is **experimental**. Decoding
+the stream needs a gateway built with `--features apple-hp-media`, which links FFmpeg's
+HEVC decoder (LGPL) and Fraunhofer's AAC-ELD decoder (licence not OSI-approved); no
+release artifact carries it. Any other build runs the subtype only with
+`media_passthrough = true`, and refuses a browser that cannot decode the stream. See
 [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
 Every Apple subtype supports the native Apple pasteboard when `clipboard =

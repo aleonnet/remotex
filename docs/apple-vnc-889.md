@@ -28,8 +28,9 @@ layer.
 | `ard` | Standard, the physical displays | ZRLE | none; the Mac's own output is left alone |
 | `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, ZRLE until it is up | AAC-ELD over the media stream |
 
-`ard-high-performance` is High Performance as Apple's viewer has it, and needs a
-gateway built with the `apple-hp-media` feature.
+`ard-high-performance` is High Performance as Apple's viewer has it. Decoding its
+stream needs a gateway built with the `apple-hp-media` feature; any other gateway
+runs it only with `media_passthrough`, for browsers that decode the stream.
 
 **Unofficial:** `virtual_display = true` on an `ard` target keeps that row's
 picture and sound — ZRLE, none — and takes the display from the other: the same
@@ -589,18 +590,22 @@ delivers and across display changes. A stream that fails ends the session, as it
 ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
 sound, and one that stops (see [Liveness](#the-stream)).
 
-Remotex decodes the picture and encodes it as VP9, unless the target sets
-`hevc_passthrough` and the browser decodes the Mac's HEVC: then each access unit
-goes to the browser as it came, described by the stream's own sequence parameter
-set, and ZRLE's rectangles fill the gaps as VP9 encoded here. A PLI is its repaint. See
-[Apple's HEVC, passed through](architecture.md#apples-hevc-passed-through).
+Remotex decodes the picture and encodes it as VP9, and the sound as Opus, unless
+the target sets `media_passthrough` and the browser decodes the Mac's HEVC and
+AAC-ELD: then each access unit goes to the browser as it came, described by the
+stream's own sequence parameter set, each sound unit goes on `/ws/audio` as it
+came, described by the AudioSpecificConfig below, and ZRLE's rectangles fill the
+picture's gaps as VP9 encoded here. A PLI is its repaint. See
+[Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through).
 
 The two decoders are the `apple-hp-media` Cargo feature, off by default and in
 no release artifact: FFmpeg's HEVC decoder for the picture (libavcodec,
 LGPL-2.1-or-later, linked statically) and Fraunhofer's AAC-ELD decoder for the
-sound (a licence that is not OSI-approved). A build without the feature refuses `ard-high-performance` when
-it reads the config. The wire half of the module — the offers, the replies,
-SRTP and the depacketizer — is compiled and tested in every build.
+sound (a licence that is not OSI-approved). A build without the feature refuses an
+`ard-high-performance` target without `media_passthrough` when it reads the config,
+and ends the session of a browser that cannot decode the stream before it dials the
+Mac. The rest of the module — the offers, the replies, SRTP, the depacketizer, the
+receiver and passing — is compiled and tested in every build.
 
 ### Negotiation
 
@@ -828,8 +833,9 @@ link to a physical Mac has not been observed.
   about 320 kbit/s. The decoder is configured out of band with
   AudioSpecificConfig `F8 E6 50 00`: object type 39, 48 kHz, stereo, 480-sample
   frames, no SBR, no resilience tools.
-- **Decoder.** Remote audio reaches the browser as Opus whatever the target, so
-  the gateway decodes AAC-ELD itself (`src/aac_eld.rs`). Others can decode it too.
+- **Decoder.** The gateway decodes AAC-ELD itself (`src/aac_eld.rs`) for a
+  browser it sends Opus, and passes it as it came, under `media_passthrough`, to one
+  that decodes it. Browsers can decode it.
   Chrome 154's WebCodecs on macOS decoded all 3450 units of a capture, but only as
   `mp4a.40.2` with the AudioSpecificConfig above as the description; it refused
   `mp4a.40.39` as an unknown codec name. Safari 26.6 refuses `mp4a.40.39` too,

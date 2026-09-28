@@ -715,7 +715,7 @@ impl SessionManager {
     /// the socket's URL so they exist at attach time. `decoders` is what its
     /// `VideoDecoder` takes, and it is kept on the attachment for every engine this
     /// browser starts ([`ClientSlot::decoders`]); a target that named
-    /// `render_chroma = "auto"` or `hevc_passthrough` streams what this answer allows.
+    /// `render_chroma = "auto"` or `media_passthrough` streams what this answer allows.
     ///
     /// `display` matters on exactly one path: a target that is
     /// still selected but whose engine a claim change ended ([`Self::claim`]) is
@@ -767,7 +767,7 @@ impl SessionManager {
         // still holds, and one thing it was built for is a fact about the browser
         // rather than about the config: a `render_chroma = "auto"` stream carries
         // the colour the *previous* attachment said its decoder takes, and an
-        // `hevc_passthrough` one the codec. A reload keeps the claim but re-runs
+        // `media_passthrough` one the codecs. A reload keeps the claim but re-runs
         // those questions, so a browser coming back with
         // a different answer would resume onto a stream its decoder refuses. End
         // the engine instead and let the reconnect below build the one this
@@ -1041,7 +1041,7 @@ impl SessionManager {
         // goes through (`forward_input`), so the rule this module states for itself is
         // that critical sections stay short. `audio_epoch` is what makes letting go
         // safe.
-        let (bridge, out, audio_id, epoch, plan, source_format) = {
+        let (bridge, out, audio_id, epoch, plan, source_format, passed) = {
             let mut st = self.state.lock().unwrap();
             // Unconditional, and first: this is also how "replace the previous pump" is
             // expressed, and it is what tells a build already in flight to stand down.
@@ -1057,6 +1057,14 @@ impl SessionManager {
                 debug!("session: an audio socket is open, but this session has no audio source");
                 return;
             };
+            // The engine's plan, which passes a High Performance Mac's sound with its
+            // picture to a browser that decodes both: the Mac's own units then fill
+            // the bridge, and there is nothing to encode.
+            let passed = st
+                .engine
+                .as_ref()
+                .is_some_and(|engine| engine.plan.apple_media)
+                .then_some(crate::vnc_apple_media::PASSED_SOUND);
             // The target's, not a session setting: the codec and its rate are a
             // property of the link to this desktop, which is what the operator
             // configured them from.
@@ -1065,7 +1073,7 @@ impl SessionManager {
                 .as_ref()
                 .map(|target| (target.audio_plan(), target.audio_source_format()))
                 .unwrap_or((AudioPlan::default(), crate::audio::PCM_CD_QUALITY));
-            (bridge, out, audio_id, st.audio_epoch, plan, source_format)
+            (bridge, out, audio_id, st.audio_epoch, plan, source_format, passed)
         };
 
         // The negotiated format when the remote's channel is up, and otherwise the
@@ -1077,18 +1085,22 @@ impl SessionManager {
         // Whether it *has* is worth a line, because it is the only place the
         // difference between a quiet remote and one that will never redirect is
         // visible at all — nothing branches on it.
-        let negotiated = bridge.negotiated_format();
-        info!(
-            "session: arming audio, the remote's audio channel is {}",
-            if negotiated.is_some() { "up" } else { "not up yet" }
-        );
-        let format = negotiated.unwrap_or(source_format);
-
-        let encoded = match bridge.take_listener().into_packets(format, plan) {
-            Ok(encoded) => encoded,
-            Err(e) => {
-                warn!("session: no audio will be sent: {e:#}");
-                return;
+        let encoded = if let Some(format) = passed {
+            info!("session: arming audio, passing the remote's {} as it comes", format.codec);
+            bridge.take_listener().into_passed(format).boxed()
+        } else {
+            let negotiated = bridge.negotiated_format();
+            info!(
+                "session: arming audio, the remote's audio channel is {}",
+                if negotiated.is_some() { "up" } else { "not up yet" }
+            );
+            let format = negotiated.unwrap_or(source_format);
+            match bridge.take_listener().into_packets(format, plan) {
+                Ok(encoded) => encoded.boxed(),
+                Err(e) => {
+                    warn!("session: no audio will be sent: {e:#}");
+                    return;
+                }
             }
         };
         // The adaptive walk, when the plan asked for one. It lives in the pump —
@@ -1715,7 +1727,7 @@ mod tests {
             render_chroma: None,
             render_adaptive: None,
             audio_bitrate: None,
-            hevc_passthrough: false,
+            media_passthrough: false,
             virtual_display: false,
             audio_adaptive: None,
             audio_adaptive_min: None,
@@ -2109,7 +2121,7 @@ mod tests {
 
             assert_eq!(
                 hook_rx.try_recv().expect("connect spawns the engine"),
-                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_hevc: false },
+                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_media: false },
                 "the engine must be built for what the browser said it takes"
             );
             match recv(&mut att.events).await {
@@ -2165,7 +2177,7 @@ mod tests {
         let mut taken = mgr.attach(&second, None, Chroma::Subsampled.into()).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("the takeover reconnects the selected target"),
-            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_hevc: false },
+            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false },
             "the reconnect must follow the browser that took over"
         );
         expect_connected(&mut taken.events, "video-auto").await;
@@ -2219,7 +2231,7 @@ mod tests {
         let mut changed = mgr.attach(&token, None, Chroma::Subsampled.into()).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("a changed answer rebuilds the stream"),
-            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_hevc: false },
+            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false },
             "the rebuilt stream must follow the browser that came back"
         );
         expect_connected(&mut changed.events, "video-auto").await;
@@ -2238,17 +2250,17 @@ mod tests {
             },
         );
         let mgr = Arc::new(SessionManager::with_spawner(
-            vec![TargetConfig { hevc_passthrough: true, ..video_target("mac") }],
+            vec![TargetConfig { media_passthrough: true, ..video_target("mac") }],
             spawner,
         ));
-        let takes = Decoders { chroma: Chroma::Full, apple_hevc: true };
-        let declines = Decoders { chroma: Chroma::Full, apple_hevc: false };
+        let takes = Decoders { chroma: Chroma::Full, apple_media: true };
+        let declines = Decoders { chroma: Chroma::Full, apple_media: false };
 
         let token = mgr.claim(false, None).unwrap();
         let mut att = mgr.attach(&token, None, takes).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "mac", None).await.unwrap();
-        assert!(matches!(hook_rx.try_recv(), Ok(RenderPlan { apple_hevc: true, .. })));
+        assert!(matches!(hook_rx.try_recv(), Ok(RenderPlan { apple_media: true, .. })));
         expect_connected(&mut att.events, "mac").await;
 
         let mut same = mgr.attach(&token, None, takes).await.unwrap();
@@ -2257,8 +2269,8 @@ mod tests {
 
         let mut changed = mgr.attach(&token, None, declines).await.unwrap();
         assert!(
-            matches!(hook_rx.try_recv(), Ok(RenderPlan { apple_hevc: false, .. })),
-            "a browser that takes no HEVC is rebuilt onto VP9"
+            matches!(hook_rx.try_recv(), Ok(RenderPlan { apple_media: false, .. })),
+            "a browser that takes no Mac's stream is rebuilt onto VP9"
         );
         expect_connected(&mut changed.events, "mac").await;
     }
@@ -2822,6 +2834,49 @@ mod tests {
 
         audio.wave(one_frame_of_pcm());
         assert_eq!(expect_audio(&mut sound.packets).await, 1, "and it keeps going");
+    }
+
+    /// A plan that passes a High Performance Mac's stream passes its sound with it:
+    /// the engine's own units reach the socket as they came, behind the Mac's format.
+    /// A browser that declines the stream is armed with Opus, as on any target.
+    #[tokio::test]
+    async fn a_passed_plan_passes_the_engines_sound_behind_its_own_format() {
+        for apple_media in [true, false] {
+            let (hook_tx, hooks) = std_mpsc::channel();
+            let spawner: EngineSpawner = Box::new(
+                move |_target, _plan, _display, input_rx, frame_tx, audio, camera, _feedback| {
+                    hook_tx.send((input_rx, frame_tx, audio, camera)).unwrap();
+                },
+            );
+            let mac = TargetConfig {
+                media_passthrough: true,
+                ..fake_target_with("mac", Meta::of(Protocol::Vnc).audio())
+            };
+            let mgr = Arc::new(SessionManager::with_spawner(vec![mac], spawner));
+            let token = mgr.claim(false, None).unwrap();
+            let mut att =
+                mgr.attach(&token, None, Decoders { chroma: Chroma::Full, apple_media }).await.unwrap();
+            expect_picker(&mut att.events).await;
+            mgr.connect(att.id, "mac", None).await.unwrap();
+            expect_connected_meta(&mut att.events, "mac", Meta::of(Protocol::Vnc).audio()).await;
+            let (_input, _frames, audio, _camera) = hooks.try_recv().unwrap();
+            let audio = audio.expect("an audio target's engine is given a bridge");
+
+            let mut sound = mgr.attach_audio(&token).unwrap();
+            if apple_media {
+                audio.unit(vec![7; 380]);
+                assert_eq!(expect_audio_format(&mut sound.packets).await, "mp4a.40.39");
+                match recv_audio(&mut sound.packets).await {
+                    ServerMsg::Audio(units) => {
+                        assert_eq!(units, [bytes::Bytes::from(vec![7u8; 380])], "the unit as it came");
+                    }
+                    other => panic!("expected the passed unit, got {other:?}"),
+                }
+            } else {
+                audio.wave(one_frame_of_pcm());
+                expect_opus_format(&mut sound.packets).await;
+            }
+        }
     }
 
     /// A second socket on one claim must not leave two pumps on one queue: every

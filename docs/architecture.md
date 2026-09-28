@@ -29,10 +29,10 @@ over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
 Apple's viewer reaches it: in Screen Sharing's Standard mode with `subtype = "ard"`,
 or in High Performance with `ard-high-performance` (a virtual display, with its
 picture and sound over the Mac's media stream, as Apple's viewer takes them),
-whose HEVC a target with `hevc_passthrough` passes to a browser that decodes it
-rather than re-encoding it — see
-[Apple's HEVC, passed through](#apples-hevc-passed-through). Remote audio is encoded as
-Opus and sent on `/ws/audio`, never on the picture queue.
+whose HEVC and AAC-ELD a target with `media_passthrough` passes to a browser that
+decodes them rather than re-encoding them — see
+[Apple's media stream, passed through](#apples-media-stream-passed-through). Remote audio is encoded as
+Opus, save that passed AAC-ELD, and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
 extension on a generic VNC target. The redirection is experimental —
@@ -82,9 +82,9 @@ Every target reaches the browser the same way: the whole framebuffer as one
 inter-frame VP9 stream. There are two exceptions. A VNC desktop past the stream's
 picture ceiling on a target without `resize` goes as the server's own rectangles
 instead — see [tiles past the ceiling](#tiles-past-the-ceiling). And an
-`ard-high-performance` target with `hevc_passthrough` sends a browser that decodes
-it the Mac's own HEVC — see
-[Apple's HEVC, passed through](#apples-hevc-passed-through).
+`ard-high-performance` target with `media_passthrough` sends a browser that decodes
+it the Mac's own HEVC, and its AAC-ELD with it — see
+[Apple's media stream, passed through](#apples-media-stream-passed-through).
 
 > **There is no configurable tile transport.** Earlier releases also sent each
 > changed region as an independent PNG or WebP still (`render_type = "tiles"`, with
@@ -112,17 +112,17 @@ A target's stream keys are per target, and every one has a default:
   it hands off from quality to frame rate as WebRTC's quality scaler does at its
   own quantizer threshold, and the settle sharpens a quiet desktop back at the
   dial. Turned off, the walk is the pressure-only one.
-- `hevc_passthrough` (off unless a target writes `true`, and only on
-  `ard-high-performance`) passes the Mac's HEVC to a browser that takes it, which
-  none of the keys above then reach.
+- `media_passthrough` (off unless a target writes `true`, and only on
+  `ard-high-performance`) passes the Mac's HEVC and AAC-ELD to a browser that
+  decodes them, which none of the keys above then reach.
 
 The engines never see the config keys. They collapse to one `RenderPlan`
-(`quality`, `adaptive`, `chroma`, `apple_hevc`) at the config boundary in
+(`quality`, `adaptive`, `chroma`, `apple_media`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
 ```text
-video_quality / render_chroma / render_adaptive / hevc_passthrough
+video_quality / render_chroma / render_adaptive / media_passthrough
   → TargetConfig::render_plan(browser decoders) → RenderPlan → vnc::run / rdp::run
   → VideoSink::new(engine, frame_tx, plan, feedback, tiles)
   → DesktopStream (src/stream.rs) → vp9::Stream
@@ -337,12 +337,13 @@ sends what it always did, which is encoded here.
   refusal on one with it. Back within the ceiling, the encoding is listed again and
   wlshare starts over at a keyframe.
 
-#### Apple's HEVC, passed through
+#### Apple's media stream, passed through
 
 `ard-high-performance` decodes the Mac's HEVC here and encodes every picture again
-as VP9. With `hevc_passthrough = true`, a browser whose decoder takes the Mac's
-stream is sent it instead, as the Mac sent it, and the gateway neither decodes nor
-encodes a picture of it. It is for a LAN. High Performance always enables its
+as VP9, and decodes its AAC-ELD and encodes the sound again as Opus. With
+`media_passthrough = true`, a browser that decodes both is sent them instead, as
+the Mac sent them, and the gateway neither decodes nor encodes a picture or a sound
+of the stream. Both halves pass or neither does. It is for a LAN. High Performance always enables its
 own rate controller, between 20 and 60 Mbit/s
 ([Rate control](apple-vnc-889.md#rate-control)); this is automatic media-stream
 behavior, not Standard mode's **Adaptive** quality choice. The gateway offers
@@ -362,23 +363,33 @@ Three controls with similar names therefore remain separate:
 | High Performance rate controller | Always enabled by the Mac's video profile; no UI choice | The Mac's HEVC encoder, within its fixed 20–60 Mbit/s range, by the gateway's reports |
 | `render_adaptive` | A remotex target key, on by default | VP9 encoded in the gateway: all pictures after local HEVC decoding, or only the VP9 gaps while HEVC passes |
 
-- **The browser selects.** The page asks its `VideoDecoder` once, at load, about
-  the configuration macwork's stream announces, `hev1.4.10.L150.BE.8`
-  (`frontend/src/appleHevc.ts`), and states the answer as `hevc=true|false` on every
-  session socket, beside its chroma. Only a definite "yes" asks for the stream;
-  VP9 is what every browser here decodes, so a "no", an answer with no verdict and
-  an `isConfigSupported` that throws all keep it. Measured, Chrome and Safari,
-  desktop and mobile, decode the stream picture for picture, and Firefox none of it.
+- **The browser selects.** The page asks once, at load (`frontend/src/appleMedia.ts`),
+  and states the answer as `apple_media=true|false` on every session socket, beside
+  its chroma. For the picture it asks its `VideoDecoder` about the configuration
+  macwork's stream announces, `hev1.4.10.L150.BE.8`. For the sound it decodes one of
+  the Mac's own units, because no question answers it: Chrome and Safari both
+  refuse `mp4a.40.39`, both decode AAC-ELD as `mp4a.40.2`, and they need the
+  AudioSpecificConfig in different forms — Chrome as it is, Safari inside an MPEG-4
+  ES_Descriptor — while Safari's `isConfigSupported` says yes to the form it cannot
+  decode ([The sound](apple-vnc-889.md#the-sound)). The page tries the bare form,
+  then the ES_Descriptor, and keeps the one that produced sound. Only a definite
+  "yes" to both asks for the stream; VP9 and Opus are what every browser here
+  decodes, so a "no", an answer with no verdict, a decoder that fails or never
+  answers, and a question that throws all keep them. Measured, Chrome and Safari,
+  desktop and mobile, decode the stream picture for picture and unit for unit,
+  and Firefox none of it.
   Chrome on Windows decodes HEVC only in hardware, through D3D11. `FFmpegVideoDecoder`
   refuses HEVC, so there is no software fallback. It decodes this stream only where
   the GPU driver reports HEVC Range Extensions 8-bit 4:4:4 as a decoder profile. An
   Intel UHD Graphics 630 does not: Chrome 153 answered no, and each attempt ended
   when the SPS turned out to be 4:4:4, in `kDecoderUnsupportedCodec` (the profile
   missing from the device's list), so the "no" was right.
-  `render_plan` sets `apple_hevc` for a target with the key and a browser that said
-  yes; any other browser is sent VP9 exactly as without the key, and no session is
-  refused for the answer. The plan is fixed for an engine, and a takeover by a
-  browser that answers otherwise rebuilds it, as a different chroma does.
+  A browser that decodes the sound but not the picture, as that one did, loses
+  nothing by being sent both re-encoded.
+  `render_plan` sets `apple_media` for a target with the key and a browser that said
+  yes; any other browser is sent VP9 and Opus exactly as without the key. The plan
+  is fixed for an engine, and a takeover by a browser that answers otherwise
+  rebuilds it, as a different chroma does.
 - **What passes** (`VideoSink::pass_hevc`). The receiver reassembles access units as
   it always does, and hands them to the read loop in order rather than to the
   decoder thread. Each goes out as Annex B, a keyframe where it holds an IRAP
@@ -415,9 +426,23 @@ Three controls with similar names therefore remain separate:
 - **The dial does not reach it.** `video_quality`, `render_chroma` and the adaptive
   walk govern only VP9: the gaps, and the whole picture of a browser that says no.
   `render_adaptive` neither enables nor disables the Mac's separate, always-on
-  High Performance controller. The sound is unchanged:
-  it still needs the AAC-ELD decoder, so the key is behind `apple-hp-media` with the
-  subtype.
+  High Performance controller, and the Opus keys reach no passed sound.
+- **The sound passes on `/ws/audio`.** The receiver hands each authenticated,
+  decrypted AAC-ELD unit to the session's audio bridge as it came
+  (`AudioBridge::unit`) instead of to the decoder thread, and the audio socket,
+  armed from the engine's plan, sends it on with no encoder behind it
+  (`AudioListener::into_passed`): an `audioFormat` of `mp4a.40.39`, 48 kHz stereo,
+  480 frames a packet and the AudioSpecificConfig as `head`, then the units, each a
+  packet in the ordinary audio frame. The player configures its decoder in the form
+  the page found at load. Claim-bound eviction, the queue and its dropping of the
+  oldest unit are the Opus path's; there is no bitrate to walk and no silence to
+  shed.
+- **Without the decoders.** Only the decoders are behind `apple-hp-media`: the
+  offers, SRTP, the receiver and passing compile in every build. A build without
+  them accepts `ard-high-performance` only with `media_passthrough = true`, since
+  a target that decodes has nothing to run on, and a browser that cannot take the
+  stream has nothing to be sent: the engine tells it so and ends before it dials
+  the Mac. That is the one session the browser's answer turns away.
 
 ### Choosing a chroma
 
@@ -629,7 +654,7 @@ own decoder. `src/vp9.rs` is the stream over the mirror: the picture limits, the
 keyframe owed until a frame carries it, and the codec string. The one stream the
 gateway sends in another codec is one it does not encode: a High Performance Mac's
 own HEVC, passed through for a browser that takes it
-([Apple's HEVC, passed through](#apples-hevc-passed-through)). VP9 is BSD-3-Clause
+([Apple's media stream, passed through](#apples-media-stream-passed-through)). VP9 is BSD-3-Clause
 with a patent grant and present in every browser build, the ones that carry no
 proprietary codecs included. On synthetic screen content at 1080p and quality 60 it
 encodes a frame in **4.7 ms** at **18 KB** — measure with
@@ -659,7 +684,7 @@ system.
 What survives of asking is two questions with no power to refuse: how much colour
 this decoder takes, for `render_chroma = "auto"` to resolve against
 ([choosing a chroma](#choosing-a-chroma)), and whether it takes a High Performance
-Mac's HEVC, for `hevc_passthrough` to pass it. Each selects between streams the
+Mac's HEVC, for `media_passthrough` to pass it. Each selects between streams the
 gateway is willing to send; neither decides whether a session may happen. A wrong
 answer costs a picture, not a desktop.
 
@@ -676,12 +701,12 @@ Authentication and desktop ownership are separate:
 1. `POST /api/auth/login` creates the login cookie.
 2. `POST /api/session` claims the single slot. A conflicting claim returns
    `409` unless the request reclaims its token or forces takeover.
-3. `/ws?session=<token>&chroma=420|444&hevc=true|false` attaches to the slot and
+3. `/ws?session=<token>&chroma=420|444&apple_media=true|false` attaches to the slot and
    reports either the target picker or the current connected target. `chroma` and
-   `hevc` are required: the most colour this browser's video decoder takes, and
-   whether it takes a High Performance Mac's HEVC; see
+   `apple_media` are required: the most colour this browser's video decoder takes,
+   and whether it decodes a High Performance Mac's HEVC and AAC-ELD; see
    [Choosing a chroma](#choosing-a-chroma) and
-   [Apple's HEVC, passed through](#apples-hevc-passed-through). The media sockets
+   [Apple's media stream, passed through](#apples-media-stream-passed-through). The media sockets
    carry the token alone.
 4. `connect` starts the selected engine. `disconnect` stops it and returns to
    the picker.
@@ -845,10 +870,14 @@ repeated: u16 packet length | packet bytes
 ```
 
 There is no codec byte in the binary frame; the codec is named once, out of
-band, in `audioFormat`. It is always Opus: `codec` is `opus`, `sampleRate`
+band, in `audioFormat`. It is Opus encoded here: `codec` is `opus`, `sampleRate`
 48 000, `packetFrames` 960 (20 ms), and `head` the `OpusHead`. The rate is
 `audio_bitrate`, default 96 kbit/s, walking down to `audio_adaptive_min`,
-default 32.
+default 32. The one exception is a High Performance Mac's AAC-ELD passed to a
+browser that decodes it: `codec` `mp4a.40.39`, `packetFrames` 480 (10 ms), `head`
+the Mac's AudioSpecificConfig, and each packet one of the Mac's units, with no
+encoder and none of the keys below reaching it
+([Apple's media stream, passed through](#apples-media-stream-passed-through)).
 
 Opus is encoded in `Application::Audio` mode under constrained VBR, set
 explicitly in `src/opus_stream.rs`: `audio_bitrate` is the average the encoder
@@ -1390,7 +1419,8 @@ display layout sets the actual framebuffer geometry. There is no client-side
 resize mode or one-shot button. The Mac supplies that virtual display the way
 it does to Apple's viewer: as HEVC over its media stream, offered once the display has
 settled and decoded in the gateway by FFmpeg's libavcodec (`src/vnc_apple_media.rs`), in a
-gateway built with the `apple-hp-media` feature. ZRLE rectangles carry the
+gateway built with the `apple-hp-media` feature, or passed to a browser that decodes
+it under `media_passthrough`. ZRLE rectangles carry the
 picture until the stream delivers and across every display change. A stream the
 Mac refuses, that brings no picture or no sound, or that stops ends the session,
 as it ends Apple's viewer's. While it runs, polling holds to one pixel, which still brings

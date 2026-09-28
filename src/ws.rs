@@ -3,13 +3,14 @@
 //!
 //! Two endpoints, both presenting the claim token from `POST /api/session`.
 //!
-//! `/ws?session=<token>&chroma=420|444&hevc=true|false` is the session: it attaches
+//! `/ws?session=<token>&chroma=420|444&apple_media=true|false` is the session: it attaches
 //! to the single slot ([`crate::session::SessionManager`]). The URL also names what
 //! only this browser knows about itself — its screen (`w`/`h`/`scale`/`fit`, the
 //! same values `connect` carries) and, required, what its `VideoDecoder` takes: the
-//! most colour, and whether a High Performance Mac's HEVC — so an attach that finds
+//! most colour, and whether a High Performance Mac's picture and sound, HEVC and
+//! AAC-ELD — so an attach that finds
 //! a target whose engine a claim change ended can reconnect it for *this* browser
-//! rather than for the previous one. `chroma` and `hevc` are required because that
+//! rather than for the previous one. `chroma` and `apple_media` are required because that
 //! reconnect happens at attach, before any message this client could send; a socket
 //! that does not name them is refused at the upgrade.
 //! Inbound `ClientMsg` split two ways —
@@ -732,11 +733,11 @@ pub struct SessionParams {
     /// resolve an unset `render_chroma` against, and the upgrade is refused at the
     /// door rather than answered with a guess.
     chroma: Chroma,
-    /// Whether this browser's `VideoDecoder` takes a High Performance Mac's HEVC,
-    /// asked once at page load like [`Self::chroma`] and required for the same
-    /// reason: an `hevc_passthrough` target passes the stream only to a browser that
-    /// said yes.
-    hevc: bool,
+    /// Whether this browser decodes a High Performance Mac's media stream — its
+    /// `VideoDecoder` the HEVC and its `AudioDecoder` the AAC-ELD — asked once at
+    /// page load like [`Self::chroma`] and required for the same reason: a
+    /// `media_passthrough` target passes the stream only to a browser that said yes.
+    apple_media: bool,
 }
 
 pub async fn handler(
@@ -756,7 +757,7 @@ pub async fn handler(
             state.sessions,
             params.session,
             display,
-            Decoders { chroma: params.chroma, apple_hevc: params.hevc },
+            Decoders { chroma: params.chroma, apple_media: params.apple_media },
             HEARTBEAT_TIMINGS,
             Arc::clone(&state.throughput.meters),
         )
@@ -1474,25 +1475,25 @@ mod tests {
             Query::<SessionParams>::try_from_uri(&format!("/ws?{query}").parse::<Uri>().unwrap())
                 .map(|Query(p)| p)
         };
-        let full = parse("session=t&chroma=444&hevc=true").expect("a browser that takes profile 1");
+        let full = parse("session=t&chroma=444&apple_media=true").expect("a browser that takes profile 1");
         assert_eq!(full.chroma, Chroma::Full);
-        assert!(full.hevc);
+        assert!(full.apple_media);
         assert_eq!(full.session.as_deref(), Some("t"));
-        let subsampled = parse("session=t&w=430&h=932&scale=300&fit=true&chroma=420&hevc=false")
+        let subsampled = parse("session=t&w=430&h=932&scale=300&fit=true&chroma=420&apple_media=false")
             .expect("a browser that does not, naming its screen too");
         assert_eq!(subsampled.chroma, Chroma::Subsampled);
-        assert!(!subsampled.hevc);
+        assert!(!subsampled.apple_media);
         assert_eq!(
             (subsampled.w, subsampled.h, subsampled.scale, subsampled.fit),
             (Some(430), Some(932), Some(300), Some(true))
         );
         assert!(parse("session=t").is_err(), "a socket that does not say is not a client");
-        assert!(parse("session=t&chroma=444").is_err(), "nor one that does not say whether it takes HEVC");
+        assert!(parse("session=t&chroma=444").is_err(), "nor one that does not say whether it takes the Mac's stream");
         // `auto` is a *target's* answer, not a browser's: a decoder takes one of two
         // profiles, and a client that named a question would leave the gateway
         // resolving one question with another.
-        assert!(parse("session=t&chroma=auto&hevc=false").is_err(), "the browser answers, it does not ask");
-        assert!(parse("session=t&chroma=422&hevc=false").is_err(), "there are two profiles");
+        assert!(parse("session=t&chroma=auto&apple_media=false").is_err(), "the browser answers, it does not ask");
+        assert!(parse("session=t&chroma=422&apple_media=false").is_err(), "there are two profiles");
 
         let media = Query::<WsParams>::try_from_uri(&"/ws/audio?session=t".parse::<Uri>().unwrap())
             .expect("the media sockets carry the token alone");
@@ -1963,7 +1964,7 @@ mod tests {
             video_quality: None,
             render_chroma: None,
             render_adaptive: None,
-            hevc_passthrough: false,
+            media_passthrough: false,
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,

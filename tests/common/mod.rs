@@ -276,8 +276,8 @@ pub fn init_logging() {
 /// Open the session WebSocket with a claim token and the login cookie.
 ///
 /// `chroma=444` is what a browser whose decoder takes VP9 profile 1 states, and
-/// `hevc=false` one that takes no Mac's HEVC; the session socket requires both
-/// answers, and no target here passes HEVC, so these tests give the ordinary
+/// `apple_media=false` one that takes no Mac's stream; the session socket requires
+/// both answers, and no target here passes one, so these tests give the ordinary
 /// desktop ones.
 #[allow(dead_code)]
 pub async fn connect_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
@@ -288,9 +288,22 @@ pub async fn connect_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
 /// two answers the socket takes.
 #[allow(dead_code)]
 pub async fn connect_ws_as(addr: SocketAddr, token: &str, cookie: &str, chroma: &str) -> Ws {
+    connect_ws_stating(addr, token, cookie, chroma, false).await
+}
+
+/// [`connect_ws_as`] stating too whether this browser decodes a High Performance
+/// Mac's stream, which a `media_passthrough` target passes it.
+#[allow(dead_code)]
+pub async fn connect_ws_stating(
+    addr: SocketAddr,
+    token: &str,
+    cookie: &str,
+    chroma: &str,
+    apple_media: bool,
+) -> Ws {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
-    let mut request = format!("ws://{addr}/ws?session={token}&chroma={chroma}&hevc=false")
+    let mut request = format!("ws://{addr}/ws?session={token}&chroma={chroma}&apple_media={apple_media}")
         .into_client_request()
         .unwrap();
     request

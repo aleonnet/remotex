@@ -121,8 +121,9 @@ those libraries. `LIBVPX_PREBUILT_DIR` and `LIBOPUS_PREBUILT_DIR` select locally
 built archives.
 
 The non-default `apple-hp-media` feature, which `ard-high-performance` targets
-need, adds two decoders and is in no release artifact because of their
-licences. `libavcodec-hevc-prebuilt` (the HEVC picture) links static archives of
+need to decode the Mac's stream (without it they run only with
+`media_passthrough`, for browsers that decode the stream), adds two decoders and
+is in no release artifact because of their licences. `libavcodec-hevc-prebuilt` (the HEVC picture) links static archives of
 FFmpeg's libavcodec and libavutil, configured down to the HEVC decoder and
 parser, and on macOS its VideoToolbox hwaccel, which links Apple's VideoToolbox,
 CoreMedia, CoreVideo and CoreFoundation frameworks. Its archives are private:

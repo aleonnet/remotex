@@ -1959,7 +1959,7 @@ mod tests {
             quality: 60,
             adaptive: false,
             chroma: crate::config::Chroma::Subsampled,
-            apple_hevc: false,
+            apple_media: false,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("test", frame_tx, plan, feedback, crate::encode::TileSupport::None);

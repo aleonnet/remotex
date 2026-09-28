@@ -1,10 +1,11 @@
-//! The AAC-ELD decoder behind Apple High Performance's sound.
+//! Apple High Performance's sound: what the stream is, and the decoder behind it.
 //!
-//! Compiled only with the `apple-hp-media` feature. The Mac's
-//! `RemoteDesktopSystemAudio` transmitter encodes AAC-ELD (MPEG-4 audio object
-//! type 39) whatever the negotiation agreed — see `docs/apple-vnc-889.md`. Remote
-//! audio reaches the browser as Opus whatever the target, so the gateway turns it
-//! into PCM itself. The decoder is Fraunhofer's own, in
+//! The Mac's `RemoteDesktopSystemAudio` transmitter encodes AAC-ELD (MPEG-4 audio
+//! object type 39) whatever the negotiation agreed — see `docs/apple-vnc-889.md`.
+//! The constants describing it are always compiled: a browser that decodes the
+//! stream is passed it as it came, described by them. The decoder is compiled only
+//! with the `apple-hp-media` feature, for every other browser, whose sound goes as
+//! Opus encoded from the PCM it produces. The decoder is Fraunhofer's own, in
 //! Rust: the port AOSP ships as `platform/external/aac`, `rust/`, cut down to
 //! AAC-ELD for Cargo. Its licence is the same non-OSI-approved "Fraunhofer FDK AAC
 //! Codec Library for Android" text, which is one reason the default build never
@@ -18,7 +19,9 @@
 //! frames, the resilience flags, SBR — either refused the configuration or concealed
 //! most of the stream.
 
+#[cfg(feature = "apple-hp-media")]
 use aac::aac_dec::AacDecoderInstance;
+#[cfg(feature = "apple-hp-media")]
 use anyhow::Context as _;
 
 /// AudioSpecificConfig for what the Mac sends, bit by bit:
@@ -45,9 +48,11 @@ pub const CHANNELS: usize = 2;
 /// Full scale for the 16-bit samples the rest of the audio path carries. The
 /// decoder's own output is normalised floating point, so one multiply is the whole
 /// conversion; 32768 is what matches the fixed-point decoder sample for sample.
+#[cfg(feature = "apple-hp-media")]
 const FULL_SCALE: f32 = 32768.0;
 
 /// One decoder for one stream's access units.
+#[cfg(feature = "apple-hp-media")]
 pub struct EldDecoder {
     decoder: AacDecoderInstance,
     /// Scratch for one decoded frame; the decoder writes interleaved `f32`
@@ -55,6 +60,7 @@ pub struct EldDecoder {
     pcm: Vec<f32>,
 }
 
+#[cfg(feature = "apple-hp-media")]
 impl EldDecoder {
     pub fn new() -> anyhow::Result<Self> {
         let mut decoder = AacDecoderInstance::new();
@@ -104,7 +110,7 @@ impl EldDecoder {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "apple-hp-media"))]
 mod tests {
     use super::*;
 
