@@ -202,7 +202,9 @@ documentation.
   never expose `tui`, `serve-embedded`, or `check-config --embedded`.
 - The Windows MSI ships the native binary, `tui` included. Build it with
   `packaging/build-windows-msi.ps1` on `windows-ci-build` through
-  `ci/windows/remote.ps1`. Do not add a service or package-owned live config.
+  `ci/windows/remote.ps1 ci -Package`, when packaging changes or before a release;
+  a plain `ci` rerun stops after the tests. Do not add a service or
+  package-owned live config.
 - Follow [Packaging](packaging/README.md) for native layouts, prebuilt dependency
   rules, and release workflow.
 
