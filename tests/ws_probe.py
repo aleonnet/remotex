@@ -291,6 +291,10 @@ async def main() -> int:
         pending = list(args.select)
         viewports = list(args.viewport)
         awaiting_viewport = None
+        # The next viewport while it waits out --viewport-gap: in flight as surely
+        # as one sent and not yet answered.
+        gap_task = None
+        after_resize_sent = False
         burst_sent = False
         mouse_sent = False
         clipboard_sent = False
@@ -322,10 +326,8 @@ async def main() -> int:
             except Exception as error:  # This is a diagnostic probe: report the socket failure.
                 audio_error = str(error)
 
-        gap_tasks = []
-
         async def send_next_viewport_after_gap() -> None:
-            nonlocal awaiting_viewport
+            nonlocal awaiting_viewport, gap_task
             await asyncio.sleep(args.viewport_gap)
             awaiting_viewport = viewports.pop(0)
             print(f"  -> viewport {awaiting_viewport[0]}x{awaiting_viewport[1]}")
@@ -338,6 +340,7 @@ async def main() -> int:
                     }
                 )
             )
+            gap_task = None
 
         async def send_first_viewport_after_delay() -> None:
             nonlocal awaiting_viewport
@@ -506,9 +509,11 @@ async def main() -> int:
                         )
                         if (
                             args.viewport_after_resize
+                            and not after_resize_sent
                             and viewports
                             and awaiting_viewport is None
                         ):
+                            after_resize_sent = True
                             awaiting_viewport = viewports.pop(0)
                             print(
                                 f"  -> viewport {awaiting_viewport[0]}x"
@@ -526,7 +531,7 @@ async def main() -> int:
                         elif awaiting_viewport == answered:
                             awaiting_viewport = None
                             if viewports:
-                                gap_tasks.append(asyncio.create_task(send_next_viewport_after_gap()))
+                                gap_task = asyncio.create_task(send_next_viewport_after_gap())
                         if (
                             args.mouse is not None
                             and not pending
@@ -576,6 +581,7 @@ async def main() -> int:
                         elif (
                             viewports
                             and awaiting_viewport is None
+                            and gap_task is None
                             and viewport_task is None
                         ):
                             viewport_task = asyncio.create_task(
@@ -635,8 +641,8 @@ async def main() -> int:
                     pass
             if viewport_task is not None and not viewport_task.done():
                 viewport_task.cancel()
-            for task in gap_tasks:
-                task.cancel()
+            if gap_task is not None and not gap_task.done():
+                gap_task.cancel()
         print(f"\n  {frames} binary frames")
         if args.records:
             print(f"  {tiles} tile records, {video_units} video records")

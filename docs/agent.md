@@ -85,9 +85,10 @@ session: the two would contend for the channel.
 It opens the channel first. A session attached to a gateway whose target does not set
 `agent_passthrough` has the channel refused, as has one between connections; the agent
 tries again a second later, then twice as long each time up to 30 seconds. A channel
-that closes is tried again the same way, the wait starting over at a second only once
-the gateway has echoed a frame on it, so a channel closed as soon as it opens — a
-gateway that speaks another version — is not reopened every second. Once open, it waits for the gateway's plan, codes
+that closes, or that cannot be written, is tried again the same way, the wait starting
+over at a second only once the gateway has echoed a frame on it, so a channel closed as
+soon as it opens — a gateway that speaks another version, or one that refuses the first
+frame — is not reopened every second. Once open, it waits for the gateway's plan, codes
 nothing before it, and streams: see
 [Whose picture it is](rdp-in-session-video.md#whose-picture-it-is) for what the gateway
 does with each message.

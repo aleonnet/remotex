@@ -570,6 +570,10 @@ struct Active<'a> {
     /// it is the one the resume names, and keeping one bounds this whatever a host does
     /// with frames nobody acknowledges.
     held_ack: Option<(u32, u32)>,
+    /// The host was told to stop waiting for acknowledgements when the stream ended,
+    /// and waits for none until one is sent again: the next frame's is, even under a
+    /// stream begun meanwhile, or the host would never stall beside it.
+    acks_suspended: bool,
     /// Device redirection's channel, named for the sound's sake alone, and its
     /// handshake — see [`rdpdr`].
     devices: Option<Joined>,
@@ -817,6 +821,7 @@ impl<'a> Active<'a> {
             recorder: microphone.map(|sink| Recorder { proto: rdpeai::Rdpeai::new(), sink }),
             video: config.video.filter(|_| config.egfx).map(video::Stream::new),
             held_ack: None,
+            acks_suspended: false,
             devices,
             rdpdr: rdpdr::Rdpdr::new(),
             share: Share::from(&demand),
@@ -1026,7 +1031,9 @@ impl<'a> Active<'a> {
     /// goes unanswered is never opened.
     async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
         let (replies, updates, watched) = {
-            let Self { chunks, incoming, dynamics, graphics, sound, capture, recorder, video, held_ack, framebuffer, share, .. } = self;
+            let Self {
+                chunks, incoming, dynamics, graphics, sound, capture, recorder, video, held_ack, acks_suspended, framebuffer, share, ..
+            } = self;
             let pdu = match chunks.push(payload)? {
                 Chunk::Whole(pdu) => pdu,
                 Chunk::Partial => return Ok(()),
@@ -1060,8 +1067,9 @@ impl<'a> Active<'a> {
                     dynamics.graphics = None;
                     *graphics = Some(Graphics::new());
                     // A held acknowledgement names this channel's frame; a channel
-                    // opened again numbers its own.
+                    // opened again numbers its own, and waits on every one of them.
                     *held_ack = None;
+                    *acks_suspended = false;
                     (vec![dvc::close(channel)], Vec::new())
                 }
                 // The sound, on the channel a current host prefers for it. Every
@@ -1139,7 +1147,13 @@ impl<'a> Active<'a> {
                     replies.push(dvc::close(channel));
                     (replies, Vec::new())
                 }
-                // An in-session agent's video channel, for a session that takes one.
+                // An in-session agent's video channel, for a session that takes one:
+                // the first agent's, while it holds it. A second is refused, since
+                // taking it would leave the stream the first began without its end.
+                dvc::Message::Create { channel, name } if name == video::CHANNEL_NAME && dynamics.video.is_some() => {
+                    warn!("rdp: refusing {name} on dynamic channel {channel}: an agent in the session holds it already");
+                    (vec![dvc::create_response(channel, dvc::NO_LISTENER)], Vec::new())
+                }
                 dvc::Message::Create { channel, name } if name == video::CHANNEL_NAME && video.is_some() => {
                     info!("rdp: an agent in the session opened {name} on dynamic channel {channel}");
                     let stream = video.as_mut().expect("the guard found a stream");
@@ -1161,7 +1175,7 @@ impl<'a> Active<'a> {
                         Err(e) => {
                             warn!("rdp: closing the agent's video channel: {e}");
                             dynamics.video = None;
-                            watched = stream.closed().outputs;
+                            watched = stream.closed("its message was refused").outputs;
                             (vec![dvc::close(channel)], Vec::new())
                         }
                     }
@@ -1169,7 +1183,7 @@ impl<'a> Active<'a> {
                 dvc::Message::Close { channel } if dynamics.video == Some(channel) => {
                     info!("rdp: the agent closed its video channel");
                     dynamics.video = None;
-                    watched = video.as_mut().expect("a channel accepted for a stream").closed().outputs;
+                    watched = video.as_mut().expect("a channel accepted for a stream").closed("the agent closed its channel").outputs;
                     (vec![dvc::close(channel)], Vec::new())
                 }
                 message => (answer(message, dynamics)?, Vec::new()),
@@ -1286,10 +1300,12 @@ impl<'a> Active<'a> {
         };
         // The agent's stream is the picture: a Windows host stops drawing once a few
         // of its frames stand unacknowledged, and so codes the desktop once, not twice.
-        if self.video.as_ref().is_some_and(video::Stream::flowing) {
+        // A host told to stop waiting is first opted back in, by this frame's.
+        if self.video.as_ref().is_some_and(video::Stream::flowing) && !self.acks_suspended {
             self.held_ack = Some((frame, decoded));
             return Ok(());
         }
+        self.acks_suspended = false;
         let ack = gfx_proto::frame_acknowledge(frame, decoded);
         self.write_channel(dynamic, &dvc::data(channel, &ack)?).await
     }
@@ -1297,7 +1313,8 @@ impl<'a> Active<'a> {
     /// Resume after the host's graphics frames went unacknowledged under the agent's
     /// stream. The suspend sentinel names the most recently decoded frame and has the
     /// host clear every frame it holds outstanding without waiting on it, and the next
-    /// EndFrame's ordinary acknowledgement opts back in ([MS-RDPEGFX] 2.2.2.13).
+    /// EndFrame's ordinary acknowledgement opts back in ([MS-RDPEGFX] 2.2.2.13), sent
+    /// whether or not a stream has begun again by then ([`Self::acknowledge_frame`]).
     async fn resume_frame_acknowledgements(&mut self) -> Result<()> {
         let Some((frame, decoded)) = self.held_ack.take() else {
             return Ok(());
@@ -1306,6 +1323,7 @@ impl<'a> Active<'a> {
             return Ok(());
         };
         let ack = gfx_proto::suspend_frame_acknowledgement(frame, decoded);
+        self.acks_suspended = true;
         self.write_channel(dynamic, &dvc::data(channel, &ack)?).await
     }
 
@@ -1323,6 +1341,22 @@ impl<'a> Active<'a> {
                 self.resume_frame_acknowledgements().await?;
                 self.send(Event::VideoEnded).await;
             }
+        }
+        Ok(())
+    }
+
+    /// Close the agent's channel from this end, which ends its stream.
+    async fn close_video(&mut self) -> Result<()> {
+        let (Some(channel), Some(stream)) = (self.dynamics.video.take(), &mut self.video) else {
+            return Ok(());
+        };
+        info!("rdp: closing the agent's video channel");
+        let turn = stream.closed("its stream cannot be passed on");
+        if let Some(dynamic) = self.dynamic {
+            self.write_channel(dynamic, &dvc::close(channel)).await?;
+        }
+        for output in turn.outputs {
+            self.on_video(output).await?;
         }
         Ok(())
     }
@@ -1561,8 +1595,10 @@ impl<'a> Active<'a> {
                         Command::Shutdown => return Ok(true),
                         Command::Refresh => self.refresh().await?,
                         Command::EchoVideo(seq) => {
-                            let turn = video::Turn { replies: vec![video::echo(seq)], outputs: Vec::new() };
-                            self.video_turn(turn).await?;
+                            if let Some(stream) = &mut self.video {
+                                let turn = video::Turn { replies: vec![stream.echoed(seq)], outputs: Vec::new() };
+                                self.video_turn(turn).await?;
+                            }
                         }
                         Command::VideoKeyframe => {
                             if let Some(stream) = &mut self.video {
@@ -1570,6 +1606,7 @@ impl<'a> Active<'a> {
                                 self.video_turn(turn).await?;
                             }
                         }
+                        Command::CloseVideo => self.close_video().await?,
                         Command::Resize { width, height, scale_percent } => {
                             self.pending_resize = Some((width, height, scale_percent));
                             self.send_layout().await?;

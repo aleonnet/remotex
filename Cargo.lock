@@ -2346,6 +2346,7 @@ dependencies = [
  "opus-prebuilt",
  "png",
  "rand 0.10.2",
+ "remotex-video-channel",
  "rpassword",
  "rsa",
  "rubato",
@@ -2381,8 +2382,16 @@ dependencies = [
  "clap",
  "desktop-vp9",
  "jiff",
+ "remotex-video-channel",
  "windows",
  "windows-service",
+]
+
+[[package]]
+name = "remotex-video-channel"
+version = "0.0.286"
+dependencies = [
+ "desktop-vp9",
 ]
 
 [[package]]

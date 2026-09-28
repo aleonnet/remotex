@@ -10,21 +10,22 @@
 //! A channel that cannot be opened is tried again, less often each time up to
 //! [`OPEN_MOST`]: the session is between connections, or attached to a gateway whose
 //! target does not take the stream, which refuses the channel by name. So is one that
-//! closes, until the gateway has echoed a frame on it.
+//! closes or cannot be written, until the gateway has echoed a frame on it.
 
 use std::process::ExitCode;
 use std::sync::mpsc::{RecvTimeoutError, TryRecvError};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result};
+use anyhow::{Context as _, Result, anyhow};
 use desktop_vp9::Chroma;
 use desktop_vp9::walk::{Pace, QualityWalk};
+use remotex_video_channel::{GAP, Plan, Said, VERSION, frame_header};
 use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 
 use crate::capture::{Capture, Grab};
-use crate::channel::{self, Channel, GAP, Incoming, Plan, VERSION};
+use crate::channel::{Channel, Incoming};
 use crate::log::{self, Log};
 use crate::pointer::PointerState;
 use crate::probe::{Patch, Switches};
@@ -135,7 +136,7 @@ fn stream(log: &mut Log, switches: Switches) -> Result<()> {
     let mut last_capture_error = String::new();
     let mut out = Vec::new();
 
-    loop {
+    'open: loop {
         if let Some(patch) = &patch {
             patch.pump();
         }
@@ -163,67 +164,205 @@ fn stream(log: &mut Log, switches: Switches) -> Result<()> {
             continue;
         };
 
-        // What the gateway said, waiting for it while there is nothing else to do:
-        // no plan yet, or a frame in flight.
-        let idle = stream.as_ref().is_none_or(|stream| stream.in_flight.is_some());
-        let mut said = if idle {
-            match open.incoming.recv_timeout(Duration::from_millis(20)) {
-                Ok(said) => Some(said),
-                Err(RecvTimeoutError::Timeout) => None,
-                Err(RecvTimeoutError::Disconnected) => Some(Incoming::Closed("the reader stopped".into())),
-            }
-        } else {
-            None
-        };
-        let mut closed = None;
-        loop {
-            let next = match said.take() {
-                Some(said) => said,
-                None => match open.incoming.try_recv() {
-                    Ok(said) => said,
-                    Err(TryRecvError::Empty) => break,
-                    Err(TryRecvError::Disconnected) => Incoming::Closed("the reader stopped".into()),
-                },
-            };
-            match next {
-                Incoming::Plan(plan) => {
-                    log.say(format!("the plan: {} at quality {}, {}", plan.chroma.name(), plan.quality, if plan.adaptive { "walked" } else { "held" }));
-                    stream = Some(Stream::new(plan));
-                    // The encoder is the plan's.
-                    capture = None;
-                    pointer.dirty = true;
+        // One turn on the open channel, which ends in why the channel was lost when it
+        // was: the gateway closed it, or it could not be written.
+        let lost: Option<anyhow::Error> = 'turn: {
+            // What the gateway said, waiting for it while there is nothing else to do:
+            // no plan yet, or a frame in flight.
+            let idle = stream.as_ref().is_none_or(|stream| stream.in_flight.is_some());
+            let mut said = if idle {
+                match open.incoming.recv_timeout(Duration::from_millis(20)) {
+                    Ok(said) => Some(said),
+                    Err(RecvTimeoutError::Timeout) => None,
+                    Err(RecvTimeoutError::Disconnected) => Some(Incoming::Closed(anyhow!("the reader stopped"))),
                 }
-                Incoming::Foreign(version) => closed = Some(format!("the gateway speaks version {version}, this agent {VERSION}")),
-                Incoming::Echo(echoed) => {
-                    if let Some(stream) = stream.as_mut()
-                        && let Some(flight) = stream.in_flight.take_if(|flight| flight.seq == echoed)
-                    {
-                        // The stream has started: a closing from here on is news, and
-                        // the channel is tried again at once.
-                        open_wait = OPEN_FIRST;
-                        last_open_error.clear();
-                        open_repeats = false;
-                        let now = Instant::now();
-                        let moved = stream.walk.fenced(now.saturating_duration_since(flight.sent), flight.verdict, now);
-                        follow(moved, &mut stream.walk, &mut capture, log);
-                        if stream.coarse_since.is_some() {
-                            stream.coarse_since = Some(now);
+            } else {
+                None
+            };
+            loop {
+                let next = match said.take() {
+                    Some(said) => said,
+                    None => match open.incoming.try_recv() {
+                        Ok(said) => said,
+                        Err(TryRecvError::Empty) => break,
+                        Err(TryRecvError::Disconnected) => Incoming::Closed(anyhow!("the reader stopped")),
+                    },
+                };
+                match next {
+                    Incoming::Said(Said::Plan(plan)) => {
+                        log.say(format!("the plan: {} at quality {}, {}", plan.chroma.name(), plan.quality, if plan.adaptive { "walked" } else { "held" }));
+                        stream = Some(Stream::new(plan));
+                        // The encoder is the plan's.
+                        capture = None;
+                        pointer.dirty = true;
+                    }
+                    Incoming::Said(Said::Foreign(version)) => {
+                        break 'turn Some(anyhow!("the gateway speaks version {version}, this agent {VERSION}"));
+                    }
+                    Incoming::Said(Said::Echo(echoed)) => {
+                        if let Some(stream) = stream.as_mut()
+                            && let Some(flight) = stream.in_flight.take_if(|flight| flight.seq == echoed)
+                        {
+                            // The stream has started: a closing from here on is news, and
+                            // the channel is tried again at once.
+                            open_wait = OPEN_FIRST;
+                            last_open_error.clear();
+                            open_repeats = false;
+                            let now = Instant::now();
+                            let moved = stream.walk.fenced(now.saturating_duration_since(flight.sent), flight.verdict, now);
+                            follow(moved, &mut stream.walk, &mut capture, log);
+                            if stream.coarse_since.is_some() {
+                                stream.coarse_since = Some(now);
+                            }
                         }
                     }
+                    Incoming::Said(Said::Keyframe) => {
+                        if let Some(stream) = stream.as_mut() {
+                            stream.keyframe_owed = true;
+                        }
+                    }
+                    Incoming::Closed(why) => break 'turn Some(why.context("the channel closed")),
                 }
-                Incoming::Keyframe => {
-                    if let Some(stream) = stream.as_mut() {
+            }
+            let Some(stream) = stream.as_mut() else {
+                continue 'open;
+            };
+            if let Some(flight) = &stream.in_flight {
+                if flight.sent.elapsed() < ECHO_LOST {
+                    continue 'open;
+                }
+                log.say(format!("frame {} was never echoed", flight.seq));
+                stream.in_flight = None;
+            }
+            // No more often than the interval, which a link slowed past the floor has
+            // had doubled.
+            if let Some(due) = stream.captured.map(|captured| captured + stream.walk.interval())
+                && let Some(wait) = due.checked_duration_since(Instant::now())
+            {
+                std::thread::sleep(wait.min(Duration::from_millis(20)));
+                continue 'open;
+            }
+
+            let write = |message: &[u8]| open.send(message).context("writing to the channel");
+
+            if let Some(bytes) = big.take() {
+                // A keyframe's opening byte and nothing a decoder would take: the
+                // channel's business is the bytes.
+                let size = capture.as_ref().map_or((1280, 800), |capture| capture.size);
+                frame_header(&mut out, seq, size);
+                let profile = if stream.plan.chroma == Chroma::Full { 0xA0 } else { 0x80 };
+                out.extend((0..bytes).map(|i| if i == 0 { profile } else { (i % 251) as u8 }));
+                log.say(format!("one message of {} bytes", out.len()));
+                if let Err(e) = write(&out) {
+                    break 'turn Some(e);
+                }
+                stream.in_flight = Some(InFlight { seq, sent: Instant::now(), verdict: false });
+                stream.keyframe_owed = true;
+                seq = seq.wrapping_add(1);
+                continue 'open;
+            }
+
+            if capture.is_none() {
+                match Capture::new(stream.plan, stream.walk.quality(), log) {
+                    Ok(made) => {
+                        capture = Some(made);
                         stream.keyframe_owed = true;
+                        stream.gap_said = false;
+                        pointer.dirty = true;
+                        last_capture_error.clear();
+                    }
+                    Err(e) => {
+                        let text = format!("{e:#}");
+                        if text != last_capture_error {
+                            log.say(format!("the desktop cannot be duplicated: {text}"));
+                            last_capture_error = text;
+                        }
+                        if !stream.gap_said {
+                            stream.gap_said = true;
+                            if let Err(e) = write(&[GAP]) {
+                                break 'turn Some(e);
+                            }
+                        }
+                        std::thread::sleep(RETRY);
+                        continue 'open;
                     }
                 }
-                Incoming::Closed(why) => closed = Some(why),
             }
-            if closed.is_some() {
-                break;
+            let taking = capture.as_mut().expect("made above");
+
+            if let Some(patch) = &patch {
+                patch.paint(seq);
             }
-        }
-        if let Some(why) = closed {
-            let text = format!("channel closed: {why}");
+            let capturing = Instant::now();
+            let changed = match taking.grab(&mut pointer) {
+                Ok(Grab::Picture) => true,
+                Ok(Grab::Still) => false,
+                Ok(Grab::Lost(e)) => {
+                    log.say(format!("duplication lost ({e}); duplicating again"));
+                    capture = None;
+                    continue 'open;
+                }
+                Err(e) => {
+                    log.say(format!("capture failed ({e:#}); duplicating again"));
+                    capture = None;
+                    continue 'open;
+                }
+            };
+            if let Some(message) = pointer.message()
+                && let Err(e) = write(&message)
+            {
+                break 'turn Some(e);
+            }
+            // A duplication new enough to have grabbed nothing holds a blank picture,
+            // which is no keyframe of the desktop: the keyframe waits for the first grab.
+            if !taking.filled {
+                continue 'open;
+            }
+
+            // A desktop that went quiet below the plan's quality is sharpened there once,
+            // with the unchanged picture as one more frame.
+            let now = Instant::now();
+            let settling = !changed && !stream.keyframe_owed && stream.coarse_since.is_some_and(|since| now >= since + SETTLE_IDLE);
+            if !changed && !stream.keyframe_owed && !settling {
+                continue 'open;
+            }
+            if settling {
+                stream.walk.settle(now);
+                let _ = taking.encoder.set_quality(stream.plan.quality);
+            }
+            frame_header(&mut out, seq, taking.size);
+            let quality = taking.encoder.quality();
+            let encoded = taking.encoder.encode(&taking.picture, stream.keyframe_owed, &mut out);
+            if settling {
+                let _ = taking.encoder.set_quality(stream.walk.quality());
+            }
+            let Some(keyframe) = encoded.context("encoding a frame")? else {
+                continue 'open;
+            };
+            let sent = Instant::now();
+            let blocked = match write(&out) {
+                Ok(blocked) => blocked,
+                Err(e) => break 'turn Some(e),
+            };
+            if keyframe {
+                stream.keyframe_owed = false;
+                stream.walk.keyframe(sent);
+            }
+            let verdict = !keyframe && !settling;
+            if verdict {
+                let moved = stream.walk.written(blocked, true, Instant::now());
+                follow(moved, &mut stream.walk, &mut capture, log);
+            }
+            stream.coarse_since = stream.walk.coarse(quality).then_some(sent);
+            stream.captured = Some(capturing);
+            stream.in_flight = Some(InFlight { seq, sent, verdict });
+            seq = seq.wrapping_add(1);
+            None
+        };
+
+        // Lost, it is opened again after the wait, and everything made for it goes.
+        if let Some(why) = lost {
+            let text = format!("channel lost: {why:#}");
             open_repeats = text == last_open_error;
             if !open_repeats {
                 log.say(&text);
@@ -234,144 +373,6 @@ fn stream(log: &mut Log, switches: Switches) -> Result<()> {
             capture = None;
             std::thread::sleep(open_wait);
             open_wait = (open_wait * 2).min(OPEN_MOST);
-            continue;
         }
-        let Some(stream) = stream.as_mut() else {
-            continue;
-        };
-        if let Some(flight) = &stream.in_flight {
-            if flight.sent.elapsed() < ECHO_LOST {
-                continue;
-            }
-            log.say(format!("frame {} was never echoed", flight.seq));
-            stream.in_flight = None;
-        }
-        // No more often than the interval, which a link slowed past the floor has
-        // had doubled.
-        if let Some(due) = stream.captured.map(|captured| captured + stream.walk.interval())
-            && let Some(wait) = due.checked_duration_since(Instant::now())
-        {
-            std::thread::sleep(wait.min(Duration::from_millis(20)));
-            continue;
-        }
-
-        let write = |message: &[u8], log: &mut Log| match open.send(message) {
-            Ok(blocked) => Some(blocked),
-            Err(e) => {
-                log.say(format!("channel write failed: {e:#}"));
-                None
-            }
-        };
-
-        if let Some(bytes) = big.take() {
-            // A keyframe's opening byte and nothing a decoder would take: the
-            // channel's business is the bytes.
-            let size = capture.as_ref().map_or((1280, 800), |capture| capture.size);
-            channel::frame_header(&mut out, seq, size);
-            let profile = if stream.plan.chroma == Chroma::Full { 0xA0 } else { 0x80 };
-            out.extend((0..bytes).map(|i| if i == 0 { profile } else { (i % 251) as u8 }));
-            log.say(format!("one message of {} bytes", out.len()));
-            if write(&out, log).is_none() {
-                channel = None;
-                continue;
-            }
-            stream.in_flight = Some(InFlight { seq, sent: Instant::now(), verdict: false });
-            stream.keyframe_owed = true;
-            seq = seq.wrapping_add(1);
-            continue;
-        }
-
-        if capture.is_none() {
-            match Capture::new(stream.plan, stream.walk.quality(), log) {
-                Ok(made) => {
-                    capture = Some(made);
-                    stream.keyframe_owed = true;
-                    stream.gap_said = false;
-                    pointer.dirty = true;
-                    last_capture_error.clear();
-                }
-                Err(e) => {
-                    let text = format!("{e:#}");
-                    if text != last_capture_error {
-                        log.say(format!("the desktop cannot be duplicated: {text}"));
-                        last_capture_error = text;
-                    }
-                    if !stream.gap_said {
-                        stream.gap_said = true;
-                        if write(&[GAP], log).is_none() {
-                            channel = None;
-                            continue;
-                        }
-                    }
-                    std::thread::sleep(RETRY);
-                    continue;
-                }
-            }
-        }
-        let taking = capture.as_mut().expect("made above");
-
-        if let Some(patch) = &patch {
-            patch.paint(seq);
-        }
-        let capturing = Instant::now();
-        let changed = match taking.grab(&mut pointer) {
-            Ok(Grab::Picture) => true,
-            Ok(Grab::Still) => false,
-            Ok(Grab::Lost(e)) => {
-                log.say(format!("duplication lost ({e}); duplicating again"));
-                capture = None;
-                continue;
-            }
-            Err(e) => {
-                log.say(format!("capture failed ({e:#}); duplicating again"));
-                capture = None;
-                continue;
-            }
-        };
-        if let Some(message) = pointer.message()
-            && write(&message, log).is_none()
-        {
-            channel = None;
-            continue;
-        }
-
-        // A desktop that went quiet below the plan's quality is sharpened there once,
-        // with the unchanged picture as one more frame.
-        let now = Instant::now();
-        let settling = !changed && !stream.keyframe_owed && stream.coarse_since.is_some_and(|since| now >= since + SETTLE_IDLE);
-        if !changed && !stream.keyframe_owed && !settling {
-            continue;
-        }
-        if settling {
-            stream.walk.settle(now);
-            let _ = taking.encoder.set_quality(stream.plan.quality);
-        }
-        channel::frame_header(&mut out, seq, taking.size);
-        let quality = taking.encoder.quality();
-        let encoded = taking.encoder.encode(&taking.picture, stream.keyframe_owed, &mut out);
-        if settling {
-            let _ = taking.encoder.set_quality(stream.walk.quality());
-        }
-        let Some(keyframe) = encoded.context("encoding a frame")? else {
-            continue;
-        };
-        let sent = Instant::now();
-        let Some(blocked) = write(&out, log) else {
-            channel = None;
-            continue;
-        };
-        if keyframe {
-            stream.keyframe_owed = false;
-            stream.walk.keyframe(sent);
-        }
-        let verdict = !keyframe && !settling;
-        if verdict {
-            let moved = stream.walk.written(blocked, true, Instant::now());
-            follow(moved, &mut stream.walk, &mut capture, log);
-        }
-        stream.coarse_since = stream.walk.coarse(quality).then_some(sent);
-        stream.captured = Some(capturing);
-        stream.in_flight = Some(InFlight { seq, sent, verdict });
-        seq = seq.wrapping_add(1);
     }
 }

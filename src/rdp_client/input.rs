@@ -23,6 +23,8 @@ pub(super) enum Command {
     EchoVideo(u32),
     /// Ask the agent for a keyframe.
     VideoKeyframe,
+    /// Close the agent's channel: its stream cannot be taken.
+    CloseVideo,
     /// Ask the server for a new desktop size, over Display Control.
     Resize { width: u32, height: u32, scale_percent: u32 },
     /// Something for the clipboard channel, in the three shapes a clipboard has.
@@ -132,6 +134,14 @@ impl Input {
     /// Ask the agent for a keyframe: whoever is watching has to start decoding over.
     pub fn video_keyframe(&self) {
         self.push(Command::VideoKeyframe);
+    }
+
+    /// Close the agent's channel, for a stream that cannot go on to whoever is
+    /// watching: the graphics pipeline carries the picture, as
+    /// [`Event::VideoEnded`](super::Event::VideoEnded) says once the stream has
+    /// stopped, and the frames already on their way are not owed an echo.
+    pub fn close_video(&self) {
+        self.push(Command::CloseVideo);
     }
 
     /// Ask the server to change the desktop size.

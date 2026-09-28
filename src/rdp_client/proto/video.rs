@@ -4,9 +4,11 @@
 //! Not RDP's. Windows has no extension point for a codec in its graphics pipeline, but an
 //! application in the session may open a dynamic channel of its own and write what it
 //! likes on it, and [`CHANNEL_NAME`] is the one the agent opens. What travels on it is
-//! this module's alone, each message one write on the host and one Data message here —
-//! the channel cuts and joins it ([`super::dvc`]) — with a kind in its first byte and
-//! every field little-endian, as RDP's are.
+//! remotex's alone, each message one write on the host and one Data message here — the
+//! channel cuts and joins it ([`super::dvc`]) — with a kind in its first byte and every
+//! field little-endian, as RDP's are. Each kind's byte and each message's layout are
+//! the `remotex-video-channel` crate's, which the agent builds from too; what they mean
+//! is described here.
 //!
 //! The agent opens the channel and says nothing until it has the **plan**, this end's
 //! first word: what the stream is to be coded at. Then it sends **frames**, each the
@@ -17,6 +19,10 @@
 //! are stalled sends none of its own. A **gap** says the agent cannot see the desktop —
 //! the secure desktop of a UAC prompt or the lock screen, which a capture in the user's
 //! session is refused — and this end may ask for a **keyframe**.
+//!
+//! One in flight is the agent's rule, and it sends another after a frame it has waited
+//! too long for; this end holds the frames it has passed on and not yet echoed to
+//! [`UNECHOED`] bytes together, past which the channel is closed.
 //!
 //! # Whose picture it is
 //!
@@ -41,47 +47,23 @@
 //! See [A Windows host's video over its own RDP connection](../../../docs/rdp-in-session-video.md)
 //! for what was measured against a Windows host and what each rule here rests on.
 
+use std::collections::VecDeque;
+
 use log::{debug, info};
 
+pub use remotex_video_channel::{CHANNEL_NAME, Plan};
+use remotex_video_channel::{FRAME, GAP, POINTER, POINTER_HIDDEN};
+
+use super::dvc::MAX_PAYLOAD;
 use super::pointer::{MAX_DIMENSION, Shape};
-use super::wire::{Malformed, Reader, Writer};
+use super::wire::{Malformed, Reader};
 
 const WHAT: &str = "an agent's video message";
 
-/// The dynamic channel the agent opens.
-pub const CHANNEL_NAME: &str = "remotex.video";
-
-/// What the two ends speak, stated in the plan: an agent that speaks another closes the
-/// channel, and the pipeline goes on carrying the picture.
-pub const VERSION: u8 = 1;
-
-const FRAME: u8 = 0x01;
-const POINTER: u8 = 0x02;
-const POINTER_HIDDEN: u8 = 0x03;
-const GAP: u8 = 0x04;
-const PLAN: u8 = 0x81;
-const ECHO: u8 = 0x82;
-const KEYFRAME: u8 = 0x83;
-
-/// What the agent is to code, which is what this gateway would have coded from the same
-/// pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Plan {
-    /// 4:4:4, or 4:2:0 without it.
-    pub full_chroma: bool,
-    /// The dial the agent's walk never goes above.
-    pub quality: u8,
-    /// Whether the walk listens to the echoes, or holds the dial.
-    pub adaptive: bool,
-}
-
-impl Plan {
-    /// The VP9 profile a stream to this plan is: 1 for 4:4:4 and 0 for 4:2:0, at the
-    /// eight bits every stream here has.
-    pub fn profile(self) -> u8 {
-        u8::from(self.full_chroma)
-    }
-}
+/// The most bytes of frames passed on and not yet echoed: one message's worth, which
+/// an agent keeping one frame in flight never comes near, and which bounds what one
+/// that does not can have waiting on whoever is watching.
+pub const UNECHOED: usize = MAX_PAYLOAD;
 
 /// One frame of the stream, the whole desktop.
 #[derive(Clone, PartialEq, Eq)]
@@ -147,11 +129,13 @@ pub struct Stream {
     /// The pointer as the agent last reported it, kept while the pipeline carries the
     /// picture, whose own pointer updates are the ones that count then.
     pointer: Option<Pointer>,
+    /// The frames passed on and not yet echoed, by number and size.
+    unechoed: VecDeque<(u32, usize)>,
 }
 
 impl Stream {
     pub fn new(plan: Plan) -> Self {
-        Self { plan, flowing: false, asked: false, pointer: None }
+        Self { plan, flowing: false, asked: false, pointer: None, unechoed: VecDeque::new() }
     }
 
     /// Whether the stream is the picture.
@@ -162,19 +146,13 @@ impl Stream {
     /// The agent opened the channel: it is told the plan, and codes nothing before it.
     pub fn opened(&mut self) -> Turn {
         *self = Self::new(self.plan);
-        let mut w = Writer::with_capacity(5);
-        w.u8(PLAN);
-        w.u8(VERSION);
-        w.u8(u8::from(self.plan.full_chroma));
-        w.u8(self.plan.quality);
-        w.u8(u8::from(self.plan.adaptive));
-        Turn { replies: vec![w.finish()], outputs: Vec::new() }
+        Turn { replies: vec![self.plan.message().to_vec()], outputs: Vec::new() }
     }
 
-    /// The channel closed, and the stream with it.
-    pub fn closed(&mut self) -> Turn {
+    /// The channel closed, and the stream with it, for `why`.
+    pub fn closed(&mut self, why: &str) -> Turn {
         let mut turn = Turn::default();
-        self.end(&mut turn, "the agent closed its channel");
+        self.end(&mut turn, why);
         *self = Self::new(self.plan);
         turn
     }
@@ -198,8 +176,12 @@ impl Stream {
                 let (width, height) = (r.u16_le()?, r.u16_le()?);
                 let data = r.rest();
                 let header = desktop_vp9::frame_header(data).ok_or_else(|| r.missing("a VP9 frame header"))?;
-                if header.profile != self.plan.profile() {
+                if header.profile != self.plan.chroma.profile() {
                     return Err(r.refuse("a VP9 profile that is not the plan's,", header.profile));
+                }
+                let waiting = self.unechoed.iter().map(|&(_, len)| len).sum::<usize>() + data.len();
+                if waiting > UNECHOED {
+                    return Err(r.refuse("frames awaiting their echoes, in bytes,", u64::try_from(waiting).unwrap_or(u64::MAX)));
                 }
                 let frame = Frame { seq, width, height, keyframe: header.keyframe, data: data.to_vec() };
                 self.frame(frame, desktop, &mut turn);
@@ -253,6 +235,7 @@ impl Stream {
         if frame.keyframe {
             self.asked = false;
         }
+        self.unechoed.push_back((frame.seq, frame.data.len()));
         turn.outputs.push(Output::Frame(frame));
     }
 
@@ -279,6 +262,14 @@ impl Stream {
         }
     }
 
+    /// The frame numbered `seq` has gone on to whoever is watching: its echo.
+    pub fn echoed(&mut self, seq: u32) -> Vec<u8> {
+        if let Some(at) = self.unechoed.iter().position(|&(unechoed, _)| unechoed == seq) {
+            self.unechoed.remove(at);
+        }
+        echo(seq)
+    }
+
     /// A keyframe asked for by whoever is watching, whatever was asked before.
     pub fn ask_keyframe(&mut self) -> Vec<u8> {
         self.asked = true;
@@ -286,41 +277,35 @@ impl Stream {
     }
 }
 
-/// The frame numbered `seq` has gone on to whoever is watching.
-pub fn echo(seq: u32) -> Vec<u8> {
-    let mut w = Writer::with_capacity(5);
-    w.u8(ECHO);
-    w.u32_le(seq);
-    w.finish()
+fn echo(seq: u32) -> Vec<u8> {
+    remotex_video_channel::echo(seq).to_vec()
 }
 
 fn keyframe() -> Vec<u8> {
-    vec![KEYFRAME]
+    remotex_video_channel::keyframe().to_vec()
 }
 
 #[cfg(test)]
 mod tests {
+    use desktop_vp9::Chroma;
+    use remotex_video_channel::{FRAME_HEADER_LEN, frame_header, pointer_header};
+
     use super::*;
 
     const DESKTOP: (u32, u32) = (1280, 800);
-    const PLAN_444: Plan = Plan { full_chroma: true, quality: 90, adaptive: true };
+    const PLAN_444: Plan = Plan { chroma: Chroma::Full, quality: 90, adaptive: true };
 
-    /// A frame message as the agent writes one. `0xA0` opens a VP9 keyframe of profile
-    /// 1 and `0xA4` a frame predicted from another.
-    fn frame(seq: u32, (width, height): (u16, u16), keyframe: bool) -> Vec<u8> {
-        let mut message = vec![FRAME];
-        message.extend_from_slice(&seq.to_le_bytes());
-        message.extend_from_slice(&width.to_le_bytes());
-        message.extend_from_slice(&height.to_le_bytes());
+    /// A frame message as the agent writes one, with the agent's own header. `0xA0`
+    /// opens a VP9 keyframe of profile 1 and `0xA4` a frame predicted from another.
+    fn frame(seq: u32, size: (u16, u16), keyframe: bool) -> Vec<u8> {
+        let mut message = Vec::new();
+        frame_header(&mut message, seq, size);
         message.extend_from_slice(&[if keyframe { 0xA0 } else { 0xA4 }, 0, 0, 0]);
         message
     }
 
     fn pointer(side: u16) -> Vec<u8> {
-        let mut message = vec![POINTER];
-        for field in [side, side, 1, 0] {
-            message.extend_from_slice(&field.to_le_bytes());
-        }
+        let mut message = pointer_header((side, side), (1, 0));
         message.extend(std::iter::repeat_n(7, usize::from(side) * usize::from(side) * 4));
         message
     }
@@ -335,7 +320,7 @@ mod tests {
 
     #[test]
     fn the_plan_is_the_first_word_and_written_whole() {
-        let mut stream = Stream::new(Plan { full_chroma: false, quality: 70, adaptive: false });
+        let mut stream = Stream::new(Plan { chroma: Chroma::Subsampled, quality: 70, adaptive: false });
         let turn = stream.opened();
         assert_eq!(turn.replies, vec![vec![0x81, 1, 0, 70, 0]]);
         assert!(turn.outputs.is_empty());
@@ -398,9 +383,9 @@ mod tests {
     #[test]
     fn a_channel_that_closes_gives_the_picture_back() {
         let mut stream = flowing();
-        assert_eq!(stream.closed().outputs, vec![Output::Ended]);
+        assert_eq!(stream.closed("a test").outputs, vec![Output::Ended]);
         assert!(!stream.flowing());
-        assert_eq!(Stream::new(PLAN_444).closed(), Turn::default());
+        assert_eq!(Stream::new(PLAN_444).closed("a test"), Turn::default());
     }
 
     /// The pointer travels as its own shape. While the pipeline carries the picture the
@@ -428,10 +413,7 @@ mod tests {
         assert!(refused(&mut stream, &[0x7F]).contains("a kind"));
         assert!(refused(&mut stream, &[FRAME, 1, 0, 0, 0, 0, 5, 0x20, 3]).contains("a VP9 frame header"));
         // A shape past RDP's own bound, one shorter than its size, and a hotspot outside.
-        let mut huge = vec![POINTER];
-        for field in [385u16, 1, 0, 0] {
-            huge.extend_from_slice(&field.to_le_bytes());
-        }
+        let huge = pointer_header((385, 1), (0, 0));
         assert!(refused(&mut stream, &huge).contains("a pointer width"));
         let mut short = pointer(2);
         short.pop();
@@ -446,17 +428,36 @@ mod tests {
     #[test]
     fn a_frame_that_is_not_the_plans_is_refused() {
         let mut subsampled = frame(1, (1280, 800), true);
-        subsampled[9] = 0x80; // a keyframe of profile 0
+        subsampled[FRAME_HEADER_LEN] = 0x80; // a keyframe of profile 0
         let mut stream = Stream::new(PLAN_444);
         stream.opened();
         let refused = stream.push(&subsampled, DESKTOP).unwrap_err().to_string();
         assert!(refused.contains("a VP9 profile that is not the plan's"), "{refused}");
         assert!(!stream.flowing());
 
-        let mut stream = Stream::new(Plan { full_chroma: false, ..PLAN_444 });
+        let mut stream = Stream::new(Plan { chroma: Chroma::Subsampled, ..PLAN_444 });
         stream.opened();
         assert!(stream.push(&subsampled, DESKTOP).unwrap().outputs.contains(&Output::Began));
         assert!(stream.push(&frame(2, (1280, 800), false), DESKTOP).is_err(), "a 4:4:4 frame for a 4:2:0 plan");
+    }
+
+    /// An agent that does not wait for its echoes has what it sends refused once the
+    /// frames passed on and not yet echoed would pass the budget, and each echo makes
+    /// room again.
+    #[test]
+    fn frames_awaiting_their_echoes_are_held_to_a_budget() {
+        let big = |seq| {
+            let mut message = frame(seq, (1280, 800), false);
+            message.resize(message.len() - 4 + UNECHOED / 2, 0);
+            message
+        };
+        let mut stream = flowing();
+        assert!(matches!(&stream.push(&big(2), DESKTOP).unwrap().outputs[..], [Output::Frame(_)]));
+        let refused = stream.push(&big(3), DESKTOP).unwrap_err().to_string();
+        assert!(refused.contains("frames awaiting their echoes"), "{refused}");
+
+        assert_eq!(stream.echoed(2), echo(2));
+        assert!(matches!(&stream.push(&big(3), DESKTOP).unwrap().outputs[..], [Output::Frame(_)]));
     }
 
     /// Whoever is watching asks for a keyframe when its decoder has to start over, and

@@ -197,7 +197,9 @@ Windows has no place in its pipeline for a codec of anybody else's, but an
 application in the session may open a dynamic channel of its own on the connection,
 and remotex's agent opens `remotex.video` to send the desktop as VP9 it codes
 itself. The channel rides `drdynvc` like the rest, and what is said on it is this
-gateway's protocol and not RDP's: `proto/video.rs` is the whole of it, and
+gateway's protocol and not RDP's: `proto/video.rs` is the whole of it, its
+messages' bytes laid out by `crates/remotex-video-channel`, which the agent writes
+them with, and
 [A Windows host's video over its own RDP connection](rdp-in-session-video.md) is
 the design, the messages and what was measured.
 

@@ -11,6 +11,7 @@ description = "Codes a Windows session's desktop as VP9 and sends it to remotex 
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 desktop-vp9.workspace = true
+remotex-video-channel.workspace = true
 jiff = { version = "0.2", default-features = false, features = ["std"] }
 windows-service = "0.8"
 windows = { version = "0.62", features = [

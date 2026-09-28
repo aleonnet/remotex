@@ -1,9 +1,8 @@
 //! The pointer, as Desktop Duplication hands it over beside the picture, which never
 //! holds it: a shape message of its own for the gateway, which the browser draws.
 
+use remotex_video_channel::{POINTER_HIDDEN, pointer_header};
 use windows::Win32::Graphics::Dxgi::DXGI_OUTDUPL_POINTER_SHAPE_INFO;
-
-use crate::channel::{POINTER, POINTER_HIDDEN};
 
 /// RDP's own bound on a pointer's side, which the gateway holds this one to.
 const POINTER_MAX: u32 = 384;
@@ -54,11 +53,7 @@ pub fn message(info: &DXGI_OUTDUPL_POINTER_SHAPE_INFO, bytes: &[u8]) -> Option<V
         return None;
     }
     let hot = |at: i32, side: u32| at.clamp(0, side as i32 - 1) as u16;
-    let mut message = vec![POINTER];
-    message.extend_from_slice(&(width as u16).to_le_bytes());
-    message.extend_from_slice(&(height as u16).to_le_bytes());
-    message.extend_from_slice(&hot(info.HotSpot.x, width).to_le_bytes());
-    message.extend_from_slice(&hot(info.HotSpot.y, height).to_le_bytes());
+    let mut message = pointer_header((width as u16, height as u16), (hot(info.HotSpot.x, width), hot(info.HotSpot.y, height)));
     for row in 0..height {
         for column in 0..width {
             let (r, c) = (row as usize, column as usize);
@@ -95,6 +90,8 @@ pub fn message(info: &DXGI_OUTDUPL_POINTER_SHAPE_INFO, bytes: &[u8]) -> Option<V
 
 #[cfg(test)]
 mod tests {
+    use remotex_video_channel::POINTER;
+
     use super::*;
 
     fn info(kind: u32, width: u32, height: u32, pitch: u32, hot: (i32, i32)) -> DXGI_OUTDUPL_POINTER_SHAPE_INFO {

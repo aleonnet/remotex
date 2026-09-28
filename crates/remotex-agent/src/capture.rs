@@ -19,7 +19,7 @@ use windows::Win32::Graphics::Dxgi::{
 };
 use windows::core::Interface as _;
 
-use crate::channel::Plan;
+use remotex_video_channel::Plan;
 use crate::log::Log;
 use crate::pointer::{self, PointerState};
 
@@ -34,7 +34,10 @@ pub struct Capture {
     dup: IDXGIOutputDuplication,
     staging: Option<ID3D11Texture2D>,
     pub size: (u16, u16),
+    /// The desktop as last grabbed, which is blank until [`Self::filled`].
     pub picture: Picture,
+    /// Whether a grab has put the desktop in [`Self::picture`] yet.
+    pub filled: bool,
     pub encoder: Encoder,
     shape: Vec<u8>,
 }
@@ -93,6 +96,7 @@ impl Capture {
                             staging: None,
                             size: (width, height),
                             picture: Picture::new(width, height, plan.chroma)?,
+                            filled: false,
                             encoder: Encoder::new(width, height, plan.chroma, quality, THREADS)?,
                             shape: Vec::new(),
                         });
@@ -180,6 +184,7 @@ impl Capture {
             let read = self.picture.read_bgrx(pixels, pitch);
             self.context.Unmap(staging, 0);
             read?;
+            self.filled = true;
             Ok(Grab::Picture)
         }
     }

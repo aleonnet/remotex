@@ -42,7 +42,7 @@ const OPENING: (u32, u32) = (1280, 800);
 const RESIZED: (u32, u32) = (1600, 900);
 /// What the agent is asked to code: what a target with no stream keys resolves to for
 /// a browser whose decoder takes profile 1.
-const PLAN: VideoPlan = VideoPlan { full_chroma: true, quality: 90, adaptive: true };
+const PLAN: VideoPlan = VideoPlan { chroma: desktop_vp9::Chroma::Full, quality: 90, adaptive: true };
 /// One message of this many bytes goes ahead of the stream, under `--big`.
 const BIG: usize = 4 << 20;
 

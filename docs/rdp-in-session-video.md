@@ -55,6 +55,10 @@ the graphics pipeline, decoded here and encoded here as VP9.
 - On one with it, a host whose session runs no agent never opens the channel.
 - A frame that is not the plan's profile is refused by name and the channel closed
   with it. The desktop stays on the pipeline.
+- Frames passed on and not yet echoed are held to 64 MiB together, one message's
+  worth. An agent keeps one in flight and never comes near it; one past it has its
+  channel closed.
+- A second agent's channel, while one holds it, is refused.
 - There is no path that decodes the agent's stream in the gateway, to encode it
   again or for any other reason.
 

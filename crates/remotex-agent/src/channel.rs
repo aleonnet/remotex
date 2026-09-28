@@ -3,14 +3,15 @@
 //! on a thread of its own.
 //!
 //! The protocol is the gateway's (`src/rdp_client/proto/video.rs` holds its whole
-//! description), and the constants here must change with it: [`VERSION`] is what keeps
-//! an agent and a gateway that disagree from streaming past each other.
+//! description), and its messages are the `remotex-video-channel` crate's, which the
+//! gateway builds from too: its `VERSION` is what keeps an agent and a gateway that
+//! disagree from streaming past each other.
 
 use std::sync::mpsc::{Receiver, Sender};
 use std::time::{Duration, Instant};
 
-use anyhow::{Context as _, Result, bail};
-use desktop_vp9::Chroma;
+use anyhow::{Context as _, Result, anyhow, bail};
+use remotex_video_channel::{CHANNEL_NAME, Said};
 use windows::Win32::Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_IO_PENDING, HANDLE};
 use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
 use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
@@ -22,42 +23,10 @@ use windows::Win32::System::RemoteDesktop::{
 use windows::Win32::System::Threading::{CreateEventW, GetCurrentProcess};
 use windows::core::PCSTR;
 
-const NAME: &[u8] = b"remotex.video\0";
-/// What this agent speaks, which the plan must name.
-pub const VERSION: u8 = 1;
-
-pub const FRAME: u8 = 0x01;
-pub const POINTER: u8 = 0x02;
-pub const POINTER_HIDDEN: u8 = 0x03;
-pub const GAP: u8 = 0x04;
-const PLAN: u8 = 0x81;
-const ECHO: u8 = 0x82;
-const KEYFRAME: u8 = 0x83;
-
-/// What the gateway is to be sent: what it would have coded from the same pixels.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct Plan {
-    pub chroma: Chroma,
-    pub quality: u8,
-    pub adaptive: bool,
-}
-
 pub enum Incoming {
-    Plan(Plan),
-    /// A plan in a version this agent does not speak.
-    Foreign(u8),
-    Echo(u32),
-    Keyframe,
-    Closed(String),
-}
-
-/// A frame message's opening: its kind, number and size, ahead of the VP9 frame.
-pub fn frame_header(out: &mut Vec<u8>, seq: u32, size: (u16, u16)) {
-    out.clear();
-    out.push(FRAME);
-    out.extend_from_slice(&seq.to_le_bytes());
-    out.extend_from_slice(&size.0.to_le_bytes());
-    out.extend_from_slice(&size.1.to_le_bytes());
+    Said(Said),
+    /// The channel cannot be read any more, and why.
+    Closed(anyhow::Error),
 }
 
 /// A handle another thread may use: the channel's file, read on one thread and
@@ -83,7 +52,8 @@ impl Channel {
     pub fn open() -> Result<Self> {
         unsafe {
             let flags = WTS_CHANNEL_OPTION_DYNAMIC | WTS_CHANNEL_OPTION_DYNAMIC_PRI_HIGH | WTS_CHANNEL_OPTION_DYNAMIC_NO_COMPRESS;
-            let wts = WTSVirtualChannelOpenEx(WTS_CURRENT_SESSION, PCSTR(NAME.as_ptr()), flags).context("WTSVirtualChannelOpenEx")?;
+            let name = std::ffi::CString::new(CHANNEL_NAME).expect("a channel name without a NUL");
+            let wts = WTSVirtualChannelOpenEx(WTS_CURRENT_SESSION, PCSTR(name.as_ptr().cast()), flags).context("WTSVirtualChannelOpenEx")?;
             let mut buffer = std::ptr::null_mut();
             let mut len = 0u32;
             if let Err(e) = WTSVirtualChannelQuery(wts, WTSVirtualFileHandle, &mut buffer, &mut len) {
@@ -170,12 +140,12 @@ fn read(file: Shared, tx: &Sender<Incoming>) {
     const CHUNK: usize = 1600 + 8;
     const FIRST: u32 = 1;
     const LAST: u32 = 2;
-    let closed = |why: String| {
+    let closed = |why: anyhow::Error| {
         let _ = tx.send(Incoming::Closed(why));
     };
     let event = match unsafe { CreateEventW(None, true, false, None) } {
         Ok(event) => event,
-        Err(e) => return closed(format!("CreateEventW: {e}")),
+        Err(e) => return closed(anyhow!(e).context("CreateEventW")),
     };
     let mut message = Vec::new();
     let mut chunk = [0u8; CHUNK];
@@ -186,11 +156,11 @@ fn read(file: Shared, tx: &Sender<Incoming>) {
             if let Err(e) = ReadFile(file.0, Some(&mut chunk), None, Some(&mut ov))
                 && e.code() != ERROR_IO_PENDING.to_hresult()
             {
-                closed(format!("ReadFile: {e}"));
+                closed(anyhow!(e).context("ReadFile"));
                 break;
             }
             if let Err(e) = GetOverlappedResult(file.0, &ov, &mut got, true) {
-                closed(format!("GetOverlappedResult: {e}"));
+                closed(anyhow!(e).context("GetOverlappedResult"));
                 break;
             }
         }
@@ -206,18 +176,10 @@ fn read(file: Shared, tx: &Sender<Incoming>) {
         if flags & LAST == 0 {
             continue;
         }
-        let said = match message[..] {
-            [PLAN, VERSION, chroma, quality, adaptive] => Incoming::Plan(Plan {
-                chroma: if chroma == 0 { Chroma::Subsampled } else { Chroma::Full },
-                quality,
-                adaptive: adaptive != 0,
-            }),
-            [PLAN, version, ..] => Incoming::Foreign(version),
-            [ECHO, a, b, c, d] => Incoming::Echo(u32::from_le_bytes([a, b, c, d])),
-            [KEYFRAME] => Incoming::Keyframe,
-            _ => continue,
+        let Some(said) = Said::read(&message) else {
+            continue;
         };
-        if tx.send(said).is_err() {
+        if tx.send(Incoming::Said(said)).is_err() {
             break;
         }
     }

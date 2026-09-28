@@ -384,7 +384,7 @@ fn connect_config(
         // channel. The agent is told what this gateway would have coded, so the
         // target's keys mean on its stream what they mean on one encoded here.
         video: plan.agent_stream.then(|| VideoPlan {
-            full_chroma: plan.chroma == crate::config::Chroma::Full,
+            chroma: plan.chroma.into(),
             quality: plan.quality,
             adaptive: plan.adaptive,
         }),
@@ -962,6 +962,10 @@ async fn active_loop(
     // The echoes the agent's frames are owed, each held for the queue ahead of its
     // frame on the browser's link ([`VideoSink::fence_hold`]), in order.
     let mut echoes: VecDeque<(Instant, u32)> = VecDeque::new();
+    // The agent's channel is being closed for a frame that could not be passed, and
+    // what it sent after that one is not taken: the pipeline carries the desktop, as
+    // it would without an agent, once the stream has ended.
+    let mut refused = false;
 
     loop {
         let layout_retry = async {
@@ -1048,7 +1052,19 @@ async fn active_loop(
                     // never the leading-edge flush of a frame still being drawn.
                     Event::FramesMarked => frame_marks = true,
                     Event::Cursor(cursor) => pointer.set(cursor),
+                    Event::Video(_) if refused => {}
                     Event::Video(frame) => {
+                        let passed = match sink.passable(frame.width, frame.height, &frame.data) {
+                            Ok(passed) => passed,
+                            // Not the session's end: the stream is not taken, and the
+                            // pipeline carries the desktop.
+                            Err(e) => {
+                                warn!("rdp: the agent's frame {} cannot be passed on: {e:#}", frame.seq);
+                                refused = true;
+                                input.close_video();
+                                continue;
+                            }
+                        };
                         if !streaming {
                             info!("rdp: an agent in the session carries the picture, passed as it comes");
                             streaming = true;
@@ -1057,13 +1073,13 @@ async fn active_loop(
                             pending_damage.clear();
                             damage_due = None;
                         }
-                        sink.pass(frame.width, frame.height, frame.data).await?;
-                        let held = sink.fence_hold().min(crate::vnc::FENCE_HOLD_LIMIT);
-                        echoes.push_back((Instant::now() + held, frame.seq));
+                        sink.pass_checked(frame.width, frame.height, frame.data, passed).await?;
+                        echoes.push_back((Instant::now() + sink.fence_hold(), frame.seq));
                     }
                     Event::VideoEnded => {
                         info!("rdp: the host's own graphics carry the picture again");
                         streaming = false;
+                        refused = false;
                         repaint_owed = true;
                         // The frames that went on are the browser's whatever follows.
                         for (_, seq) in echoes.drain(..) {
@@ -1207,6 +1223,9 @@ async fn active_loop(
                         continue;
                     }
                     send_damage(framebuffer, whole(desktop), &mut shadow, sink).await?;
+                    // The whole desktop has gone out, which is all the repaint the
+                    // pipeline owed for taking the picture back.
+                    repaint_owed = false;
                     // A repaint is a frame. Without this, the whole repaint would
                     // sit in the video mirror unsent, while the shadow already
                     // counts every pixel of it as delivered.
@@ -2422,7 +2441,7 @@ mod tests {
         };
         assert_eq!(
             video(rdp_target("agent_passthrough = true\nvideo_quality = 70\nrender_adaptive = false")),
-            Some(VideoPlan { full_chroma: true, quality: 70, adaptive: false })
+            Some(VideoPlan { chroma: desktop_vp9::Chroma::Full, quality: 70, adaptive: false })
         );
         assert_eq!(video(rdp_target("video_quality = 70")), None);
     }
