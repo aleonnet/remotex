@@ -842,7 +842,9 @@ link to a physical Mac has not been observed.
   `'bada'`. Given the same AudioSpecificConfig inside an MPEG-4 ES_Descriptor
   (`03 18 00 01 00 04 13 40 15 00 18 00`, eight zero bytes, `05 04 F8 E6 50 00`),
   `FormatInfo` reads `aace`, 48 kHz, stereo, 480 frames per packet, and Safari
-  decoded all 3450 units; Chrome has not been tried with the ES_Descriptor.
+  decoded all 3450 units. Chrome 153 on Windows also decoded every unit given the
+  bare AudioSpecificConfig, and refused the ES_Descriptor as an unsupported
+  configuration, so the two browsers need different descriptions.
   FFmpeg's native `aac` (libavcodec 62.28) decoded the capture cleanly at the
   same levels as Chrome and Safari. The gateway's decoder is the pure-Rust port of
   Fraunhofer's fdk-aac decoder that AOSP ships as `platform/external/aac`,

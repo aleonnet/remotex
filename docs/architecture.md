@@ -369,6 +369,12 @@ Three controls with similar names therefore remain separate:
   VP9 is what every browser here decodes, so a "no", an answer with no verdict and
   an `isConfigSupported` that throws all keep it. Measured, Chrome and Safari,
   desktop and mobile, decode the stream picture for picture, and Firefox none of it.
+  Chrome on Windows decodes HEVC only in hardware, through D3D11. `FFmpegVideoDecoder`
+  refuses HEVC, so there is no software fallback. It decodes this stream only where
+  the GPU driver reports HEVC Range Extensions 8-bit 4:4:4 as a decoder profile. An
+  Intel UHD Graphics 630 does not: Chrome 153 answered no, and each attempt ended
+  when the SPS turned out to be 4:4:4, in `kDecoderUnsupportedCodec` (the profile
+  missing from the device's list), so the "no" was right.
   `render_plan` sets `apple_hevc` for a target with the key and a browser that said
   yes; any other browser is sent VP9 exactly as without the key, and no session is
   refused for the answer. The plan is fixed for an engine, and a takeover by a
