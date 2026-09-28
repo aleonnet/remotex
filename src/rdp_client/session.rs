@@ -97,8 +97,8 @@ pub struct Connect {
     /// Take the desktop as a VP9 stream from an agent in the session, where one opens
     /// its channel, coded to this plan — see [`video`]. The stream then carries the
     /// picture in place of the graphics pipeline, as [`Event::Video`], so it needs
-    /// [`Self::egfx`]. `None` refuses the channel by name, and a host with no agent never
-    /// opens it.
+    /// [`Self::egfx`]. `None`, for a target that did not opt in, refuses the channel by
+    /// name, and a host with no agent never opens it.
     pub video: Option<video::Plan>,
 }
 

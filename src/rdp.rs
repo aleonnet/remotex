@@ -380,9 +380,10 @@ fn connect_config(
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
         camera: uplinks.camera.as_ref().map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
         microphone: uplinks.microphone.as_ref().map(|bridge| rdp_mic::sink(Arc::clone(bridge))),
-        // An agent in the session is told what this gateway would have coded, so
-        // the target's keys mean on its stream what they mean on one encoded here.
-        video: Some(VideoPlan {
+        // Only a target that opted in takes an agent's stream; any other refuses its
+        // channel. The agent is told what this gateway would have coded, so the
+        // target's keys mean on its stream what they mean on one encoded here.
+        video: plan.agent_stream.then(|| VideoPlan {
             full_chroma: plan.chroma == crate::config::Chroma::Full,
             quality: plan.quality,
             adaptive: plan.adaptive,
@@ -2037,6 +2038,7 @@ mod tests {
             adaptive: false,
             chroma: crate::config::Chroma::Subsampled,
             apple_media: false,
+            agent_stream: false,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("test", frame_tx, plan, feedback, crate::encode::TileSupport::None);
@@ -2406,6 +2408,23 @@ mod tests {
 
         let fixed = rdp_target("");
         assert_eq!(opening_layout(&fixed, Some(phone)), Layout { w, h, density: Density::One });
+    }
+
+    /// An agent's channel is taken on a target that opted in, told the plan the
+    /// target's keys resolve to, and refused by name on any other.
+    #[test]
+    fn only_an_opted_in_target_takes_an_agents_stream() {
+        let opening = Layout { w: 1280, h: 800, density: Density::One };
+        let uplinks = Uplinks { camera: None, microphone: None };
+        let video = |target: TargetConfig| {
+            let plan = target.render_plan(crate::config::Chroma::Full.into());
+            connect_config(&target, plan, opening, None, &uplinks).video
+        };
+        assert_eq!(
+            video(rdp_target("agent_passthrough = true\nvideo_quality = 70\nrender_adaptive = false")),
+            Some(VideoPlan { full_chroma: true, quality: 70, adaptive: false })
+        );
+        assert_eq!(video(rdp_target("video_quality = 70")), None);
     }
 
     #[test]

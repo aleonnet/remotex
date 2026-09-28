@@ -18,7 +18,25 @@ transport. It is not a new RDP graphics codec or decoder extension: RDP treats t
 channel's messages as opaque application data.
 
 The gateway's side is `src/rdp_client/proto/video.rs`, the RDP client's session and
-the RDP engine. The agent is a proof of concept, `tests/dvc-video-poc/agent`, started
+the RDP engine, and it runs only for a target that opts in:
+
+```toml
+[[targets]]
+name = "win"
+protocol = "rdp"
+host = "10.0.0.5"
+agent_passthrough = true
+```
+
+The key is the target's say, as `media_passthrough` is for a High Performance Mac
+([Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through)):
+it resolves in `TargetConfig::render_plan` to `RenderPlan::agent_stream`, beside
+`apple_media`, and the RDP engine offers the channel only where it is set. Without it
+the session refuses `remotex.video` by name, and an agent in the session has nothing
+to write to. It is refused off `rdp` and beside `egfx = false`, because the pipeline
+is what carries the desktop wherever the stream cannot. Unlike the Mac's stream it
+waits on no answer of the browser's: the agent codes the profile the plan names,
+which is the browser's own wherever it chose one. The agent is a proof of concept, `tests/dvc-video-poc/agent`, started
 by hand or by the probe: nothing installs it or starts it at logon.
 
 ## Passed, or not taken
@@ -29,12 +47,10 @@ that leaves the host is the frame the browser is handed. Whenever that cannot ho
 the stream is not taken and the desktop travels as it does on a host with no agent:
 the graphics pipeline, decoded here and encoded here as VP9.
 
-- A host whose session runs no agent never opens the channel. Nothing is configured,
-  and no key selects the stream.
+- A target without `agent_passthrough` refuses the channel.
+- On one with it, a host whose session runs no agent never opens the channel.
 - A frame that is not the plan's profile is refused by name and the channel closed
   with it. The desktop stays on the pipeline.
-- A target with `egfx = false` refuses the channel: the stream stands in for the
-  pipeline, and there is none to stand in for.
 - There is no path that decodes the agent's stream in the gateway, to encode it
   again or for any other reason.
 
@@ -316,7 +332,8 @@ before it captures, so that a frame counts as *fresh* only when the decoded patc
 shows that colour: a captured frame proves nothing if it is the same surface handed
 back again. `--big <bytes>` sends one message of that size ahead of the stream.
 
-Through the gateway, `tests/ws_probe.py` shows what a browser is sent: `videoFormat`
+Through the gateway, against a target with `agent_passthrough = true`,
+`tests/ws_probe.py` shows what a browser is sent: `videoFormat`
 with `passthrough: true` while the stream is the picture and `false` in each gap.
 `--viewport-gap` leaves the desktop at each size long enough for the stream to come
 back before the next resize.

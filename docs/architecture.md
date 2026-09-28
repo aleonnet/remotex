@@ -89,7 +89,7 @@ it the Mac's own HEVC, and its AAC-ELD with it — see
 The VP9 is encoded here, save where the remote codes that very stream itself and it
 is passed as it came: wlshare over VNC
 ([wlshare's stream, passed through](#wlshares-stream-passed-through)), and a Windows
-host whose session runs remotex's agent over RDP
+host whose session runs remotex's agent, on an RDP target with `agent_passthrough`
 ([An RDP host's stream, passed through](#an-rdp-hosts-stream-passed-through)).
 
 > **There is no configurable tile transport.** Earlier releases also sent each
@@ -121,14 +121,18 @@ A target's stream keys are per target, and every one has a default:
 - `media_passthrough` (off unless a target writes `true`, and only on
   `ard-high-performance`) passes the Mac's HEVC and AAC-ELD to a browser that
   decodes them, which none of the keys above then reach.
+- `agent_passthrough` (off unless a target writes `true`, and only on `rdp` with
+  the graphics pipeline) takes the VP9 remotex's agent codes in the session where
+  one runs, and passes it; the agent is told the keys above, resolved, so they
+  mean on its stream what they mean on one encoded here.
 
 The engines never see the config keys. They collapse to one `RenderPlan`
-(`quality`, `adaptive`, `chroma`, `apple_media`) at the config boundary in
+(`quality`, `adaptive`, `chroma`, `apple_media`, `agent_stream`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
 ```text
-video_quality / render_chroma / render_adaptive / media_passthrough
+video_quality / render_chroma / render_adaptive / media_passthrough / agent_passthrough
   → TargetConfig::render_plan(browser decoders) → RenderPlan → vnc::run / rdp::run
   → VideoSink::new(engine, frame_tx, plan, feedback, tiles)
   → DesktopStream (src/stream.rs) → vp9::Stream
@@ -358,12 +362,19 @@ The channel's messages, what was measured against a Windows host, and what is le
 open are in
 [A Windows host's video over its own RDP connection](rdp-in-session-video.md).
 
-- **Passed, or not taken.** The stream is for passing and nothing else. A host whose
-  session runs no agent never opens the channel, and its pipeline is decoded and
-  encoded here, as is that of a target with `egfx = false`, which refuses the
-  channel. A frame that is not the plan's profile is refused by name and the channel
-  closed with it, which leaves the desktop on the pipeline. No key selects the
-  stream, and no path decodes it here.
+- **Opted in per target.** `agent_passthrough` is the target's say, as
+  `media_passthrough` is for a High Performance Mac, and resolves in
+  `TargetConfig::render_plan` to `RenderPlan::agent_stream` beside `apple_media`.
+  Without it the session refuses the channel by name, and an agent in the session
+  has nothing to write to. The key is refused off `rdp` and beside `egfx = false`,
+  because the pipeline is what carries the desktop wherever the stream cannot. It
+  waits on no answer of the browser's: the agent codes the profile the plan names,
+  and that is the browser's own wherever it chose one.
+- **Passed, or not taken.** The stream is for passing and nothing else. On a target
+  that opted in, a host whose session runs no agent never opens the channel, and its
+  pipeline is decoded and encoded here. A frame that is not the plan's profile is
+  refused by name and the channel closed with it, which leaves the desktop on the
+  pipeline. No path decodes the stream here.
 - **The plan is the channel's first word.** On accepting the channel the gateway
   states the plan's chroma, the target's `video_quality` as the ceiling, and whether
   `render_adaptive` lets the walk listen, and the agent codes nothing before it. A
@@ -1353,8 +1364,9 @@ carry no frame boundary, and the desktop keeps its opening size — `resize = tr
 refused beside it, because an RDP resize is the pipeline's graphics reset.
 On either path the pointer travels as its own shape rather than in the framebuffer.
 
-A host whose session runs remotex's agent codes the desktop as VP9 itself, on a
-dynamic channel of its own, and the pipeline then carries only the gaps: see
+On a target with `agent_passthrough`, a host whose session runs remotex's agent
+codes the desktop as VP9 itself, on a dynamic channel of its own, and the pipeline
+then carries only the gaps: see
 [An RDP host's stream, passed through](#an-rdp-hosts-stream-passed-through).
 
 Read [The RDP client, written here](rdp-client.md) for the whole of it: the

@@ -6944,12 +6944,12 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false };
+        let walked = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, agent_stream: false };
         assert_eq!(
             with_wlshare_vp9(&rest, walked),
             [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_WLSHARE_VP9_SUBSAMPLED, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
         );
-        let held = RenderPlan { quality: 90, adaptive: false, chroma: Chroma::Full, apple_media: false };
+        let held = RenderPlan { quality: 90, adaptive: false, chroma: Chroma::Full, apple_media: false, agent_stream: false };
         assert_eq!(
             with_wlshare_vp9(&rest, held),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
@@ -7957,6 +7957,7 @@ mod tests {
             adaptive: false,
             chroma: crate::config::Chroma::Subsampled,
             apple_media: false,
+            agent_stream: false,
         };
         Arc::new(Listing::new(rfb38_encoding_list(false, false, false, false), plan))
     }
@@ -7990,6 +7991,7 @@ mod tests {
             adaptive: false,
             chroma: crate::config::Chroma::Subsampled,
             apple_media: false,
+            agent_stream: false,
         };
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::None);
         // Larger than any desktop these tests paint, so a rectangle lands in the
@@ -10490,7 +10492,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Full, apple_media: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Full, apple_media: false, agent_stream: false };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::Rects);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();

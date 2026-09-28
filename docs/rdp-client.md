@@ -201,9 +201,11 @@ gateway's protocol and not RDP's: `proto/video.rs` is the whole of it, and
 [A Windows host's video over its own RDP connection](rdp-in-session-video.md) is
 the design, the messages and what was measured.
 
-`Connect::video` is the plan the agent is to code, and `None` refuses the channel by
-name like any other nobody listens on. So does a session without the pipeline: the
-stream stands in for it, and takes nothing's place where there is none. On accepting
+`Connect::video` is the plan the agent is to code, set by the engine only for a
+target with `agent_passthrough` (`RenderPlan::agent_stream`), and `None` refuses the
+channel by name like any other nobody listens on. So does a session without the
+pipeline, which the config already refuses beside the key: the stream stands in for
+the pipeline, and takes nothing's place where there is none. On accepting
 the channel the client states the plan, which is its first word there.
 
 `proto::video::Stream` decides whose picture the desktop is. The stream is the
