@@ -25,7 +25,7 @@ use super::proto::gcc::Channel;
 use super::proto::pointer::{self, Pointer};
 use super::proto::share::{self, Pdu};
 use super::microphone::{MicrophoneFeed, MicrophoneInput, MicrophoneQueue, MicrophoneSink};
-use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpeai, rdpecam, rdpsnd, tls};
+use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpeai, rdpecam, rdpsnd, tls, video};
 use super::proto::gfx as gfx_proto;
 
 // ------------------------------------------------------------------ configuration
@@ -94,14 +94,13 @@ pub struct Connect {
     /// there records — and feeds it the PCM handed to [`Session::microphone`] while it
     /// does. `None` refuses the channel by name.
     pub microphone: Option<Box<dyn MicrophoneSink>>,
-    /// POC: where the messages of the `remotex.video` dynamic channel go — the channel
-    /// an in-session agent opens with `WTSVirtualChannelOpenEx`. `None` refuses it by
-    /// name like any other channel nobody here listens on.
-    pub video: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    /// Take the desktop as a VP9 stream from an agent in the session, where one opens
+    /// its channel, coded to this plan — see [`video`]. The stream then carries the
+    /// picture in place of the graphics pipeline, as [`Event::Video`], so it needs
+    /// [`Self::egfx`]. `None` refuses the channel by name, and a host with no agent never
+    /// opens it.
+    pub video: Option<video::Plan>,
 }
-
-/// POC: the name the in-session agent opens its channel under.
-pub const VIDEO_CHANNEL: &str = "remotex.video";
 
 /// Where a session's redirected sound goes.
 ///
@@ -198,6 +197,18 @@ pub enum Event {
     /// handler until it is.
     ClipboardWanted { format: u32 },
     Cursor(Cursor),
+    /// One frame of an in-session agent's stream, the whole desktop, which carries the
+    /// picture from its first frame until [`Event::VideoEnded`]: the framebuffer goes
+    /// stale meanwhile, because the host's own graphics are stalled beside the stream,
+    /// and the pointer still arrives as [`Event::Cursor`], from the agent. Every frame
+    /// is owed an [`Input::echo_video`] once it has gone on to whoever is watching,
+    /// which is what the agent sends the next one on.
+    Video(video::Frame),
+    /// The graphics pipeline carries the picture again, as [`Event::Paint`] and
+    /// [`Event::Frame`]: the agent cannot see the desktop, the desktop is changing
+    /// size, or its channel closed. The host repaints what changed under the stream
+    /// without being asked.
+    VideoEnded,
     /// The session is over, and the channel is about to close. `Ok(())` is an
     /// orderly disconnection from either side.
     Ended(Result<(), Error>),
@@ -552,12 +563,12 @@ struct Active<'a> {
     capture: Option<Capture>,
     /// The microphone and where the host's decisions about it go, for a session that asked.
     recorder: Option<Recorder>,
-    /// POC: where the agent's video channel's messages go, for a session that asked.
-    video: Option<mpsc::UnboundedSender<Vec<u8>>>,
-    /// POC: whether graphics frames go unacknowledged, and the newest acknowledgement
-    /// held back. Only the newest is needed to resume with the most recently decoded
-    /// frame, and keeping one bounds this deliberately nonstandard Windows probe.
-    withhold_acks: bool,
+    /// An in-session agent's stream, for a session that takes one.
+    video: Option<video::Stream>,
+    /// The newest graphics frame left unacknowledged while the agent's stream is the
+    /// picture, which is what stalls the host's own graphics beside it. Only the newest:
+    /// it is the one the resume names, and keeping one bounds this whatever a host does
+    /// with frames nobody acknowledges.
     held_ack: Option<(u32, u32)>,
     /// Device redirection's channel, named for the sound's sake alone, and its
     /// handshake — see [`rdpdr`].
@@ -636,7 +647,7 @@ struct Dynamics {
     audio: bool,
     /// The sound channel, once the server has opened it.
     sound: Option<u32>,
-    /// POC: the agent's video channel, once the server has opened it.
+    /// The agent's video channel, once it has opened it.
     video: Option<u32>,
 }
 
@@ -804,8 +815,7 @@ impl<'a> Active<'a> {
             sound: sink.map(|sink| Sound { proto: rdpsnd::Rdpsnd::new(), sink }),
             capture: camera.map(|camera| Capture { proto: rdpecam::Rdpecam::new(&camera.name), sink: camera.sink }),
             recorder: microphone.map(|sink| Recorder { proto: rdpeai::Rdpeai::new(), sink }),
-            video: config.video.clone(),
-            withhold_acks: false,
+            video: config.video.filter(|_| config.egfx).map(video::Stream::new),
             held_ack: None,
             devices,
             rdpdr: rdpdr::Rdpdr::new(),
@@ -1015,8 +1025,8 @@ impl<'a> Active<'a> {
     /// live. Everything it says is answered, because a channel whose Create Request
     /// goes unanswered is never opened.
     async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
-        let (replies, updates) = {
-            let Self { chunks, incoming, dynamics, graphics, sound, capture, recorder, video, held_ack, framebuffer, .. } = self;
+        let (replies, updates, watched) = {
+            let Self { chunks, incoming, dynamics, graphics, sound, capture, recorder, video, held_ack, framebuffer, share, .. } = self;
             let pdu = match chunks.push(payload)? {
                 Chunk::Whole(pdu) => pdu,
                 Chunk::Partial => return Ok(()),
@@ -1031,7 +1041,8 @@ impl<'a> Active<'a> {
             let Some(message) = incoming.push(pdu)? else {
                 return Ok(());
             };
-            match message {
+            let mut watched = Vec::new();
+            let (replies, updates) = match message {
                 // The desktop itself, which is the framebuffer's business and not a
                 // reply's.
                 dvc::Message::Data { channel, data } if dynamics.graphics == Some(channel) => {
@@ -1128,26 +1139,46 @@ impl<'a> Active<'a> {
                     replies.push(dvc::close(channel));
                     (replies, Vec::new())
                 }
-                // POC: the in-session agent's video channel.
-                dvc::Message::Create { channel, name } if name == VIDEO_CHANNEL && video.is_some() => {
-                    info!("rdp: the host opened {VIDEO_CHANNEL} on dynamic channel {channel}");
+                // An in-session agent's video channel, for a session that takes one.
+                dvc::Message::Create { channel, name } if name == video::CHANNEL_NAME && video.is_some() => {
+                    info!("rdp: an agent in the session opened {name} on dynamic channel {channel}");
+                    let stream = video.as_mut().expect("the guard found a stream");
                     dynamics.video = Some(channel);
-                    (vec![dvc::create_response(channel, dvc::ACCEPTED)], Vec::new())
+                    let turn = stream.opened();
+                    let mut replies = vec![dvc::create_response(channel, dvc::ACCEPTED)];
+                    replies.extend(video_pieces(channel, turn.replies)?);
+                    (replies, Vec::new())
                 }
                 dvc::Message::Data { channel, data } if dynamics.video == Some(channel) => {
-                    if let Some(video) = video {
-                        let _ = video.send(data.to_vec());
+                    let stream = video.as_mut().expect("a channel accepted for a stream");
+                    match stream.push(data, (share.width, share.height)) {
+                        Ok(turn) => {
+                            watched = turn.outputs;
+                            (video_pieces(channel, turn.replies)?, Vec::new())
+                        }
+                        // Not the session's end: the agent is an application on the
+                        // host, and the desktop has the pipeline to travel on.
+                        Err(e) => {
+                            warn!("rdp: closing the agent's video channel: {e}");
+                            dynamics.video = None;
+                            watched = stream.closed().outputs;
+                            (vec![dvc::close(channel)], Vec::new())
+                        }
                     }
-                    (Vec::new(), Vec::new())
                 }
                 dvc::Message::Close { channel } if dynamics.video == Some(channel) => {
-                    info!("rdp: the host closed {VIDEO_CHANNEL}");
+                    info!("rdp: the agent closed its video channel");
                     dynamics.video = None;
+                    watched = video.as_mut().expect("a channel accepted for a stream").closed().outputs;
                     (vec![dvc::close(channel)], Vec::new())
                 }
                 message => (answer(message, dynamics)?, Vec::new()),
-            }
+            };
+            (replies, updates, watched)
         };
+        for output in watched {
+            self.on_video(output).await?;
+        }
         if let Some(dynamic) = self.dynamic {
             for reply in replies {
                 self.write_channel(dynamic, &reply).await?;
@@ -1168,6 +1199,11 @@ impl<'a> Active<'a> {
                     self.share.width = width;
                     self.share.height = height;
                     self.announce_desktop(width, height).await;
+                    // The agent's stream starts over at the new size.
+                    if let Some(stream) = &mut self.video {
+                        let turn = stream.reset();
+                        self.video_turn(turn).await?;
+                    }
                 }
                 gfx::Update::Paint(rect) => self.paint(rect),
                 gfx::Update::Frame { id, decoded } => {
@@ -1248,7 +1284,9 @@ impl<'a> Active<'a> {
         let (Some(channel), Some(dynamic)) = (self.dynamics.graphics, self.dynamic) else {
             return Ok(()); // the channel closed under the frame; nothing to answer on
         };
-        if self.withhold_acks {
+        // The agent's stream is the picture: a Windows host stops drawing once a few
+        // of its frames stand unacknowledged, and so codes the desktop once, not twice.
+        if self.video.as_ref().is_some_and(video::Stream::flowing) {
             self.held_ack = Some((frame, decoded));
             return Ok(());
         }
@@ -1256,16 +1294,50 @@ impl<'a> Active<'a> {
         self.write_channel(dynamic, &dvc::data(channel, &ack)?).await
     }
 
-    /// Resume after the POC deliberately left Windows' graphics frames
-    /// unacknowledged. The suspend sentinel acknowledges the most recently decoded
-    /// frame and makes the server clear every outstanding frame without waiting on
-    /// it. The next ordinary EndFrame acknowledgement opts back in.
-    async fn resume_frame_acknowledgements(&mut self, frame: u32, decoded: u32) -> Result<()> {
+    /// Resume after the host's graphics frames went unacknowledged under the agent's
+    /// stream. The suspend sentinel names the most recently decoded frame and has the
+    /// host clear every frame it holds outstanding without waiting on it, and the next
+    /// EndFrame's ordinary acknowledgement opts back in ([MS-RDPEGFX] 2.2.2.13).
+    async fn resume_frame_acknowledgements(&mut self) -> Result<()> {
+        let Some((frame, decoded)) = self.held_ack.take() else {
+            return Ok(());
+        };
         let (Some(channel), Some(dynamic)) = (self.dynamics.graphics, self.dynamic) else {
             return Ok(());
         };
         let ack = gfx_proto::suspend_frame_acknowledgement(frame, decoded);
         self.write_channel(dynamic, &dvc::data(channel, &ack)?).await
+    }
+
+    /// What the agent's stream said, acted on.
+    async fn on_video(&mut self, output: video::Output) -> Result<()> {
+        match output {
+            // Nothing to do at once: the acknowledgements stop with the next EndFrame.
+            video::Output::Began => {}
+            video::Output::Frame(frame) => self.send(Event::Video(frame)).await,
+            video::Output::Pointer(video::Pointer::Hidden) => self.send(Event::Cursor(Cursor::Hidden)).await,
+            video::Output::Pointer(video::Pointer::Shape(shape)) => {
+                self.send(Event::Cursor(Cursor::Image(shape.into()))).await;
+            }
+            video::Output::Ended => {
+                self.resume_frame_acknowledgements().await?;
+                self.send(Event::VideoEnded).await;
+            }
+        }
+        Ok(())
+    }
+
+    /// A turn of the agent's stream taken outside its channel's own messages.
+    async fn video_turn(&mut self, turn: video::Turn) -> Result<()> {
+        if let (Some(channel), Some(dynamic)) = (self.dynamics.video, self.dynamic) {
+            for pdu in video_pieces(channel, turn.replies)? {
+                self.write_channel(dynamic, &pdu).await?;
+            }
+        }
+        for output in turn.outputs {
+            self.on_video(output).await?;
+        }
+        Ok(())
     }
 
     /// The clipboard channel. Both ends announce a copy and neither transfers
@@ -1488,14 +1560,14 @@ impl<'a> Active<'a> {
                     match other {
                         Command::Shutdown => return Ok(true),
                         Command::Refresh => self.refresh().await?,
-                        Command::SuppressOutput { allow } => self.suppress_output(allow).await?,
-                        Command::WithholdAcks { withhold } => {
-                            info!("rdp: withholding graphics frame acknowledgements {withhold}, latest held {}", self.held_ack.is_some());
-                            self.withhold_acks = withhold;
-                            if !withhold
-                                && let Some((frame, decoded)) = self.held_ack.take()
-                            {
-                                self.resume_frame_acknowledgements(frame, decoded).await?;
+                        Command::EchoVideo(seq) => {
+                            let turn = video::Turn { replies: vec![video::echo(seq)], outputs: Vec::new() };
+                            self.video_turn(turn).await?;
+                        }
+                        Command::VideoKeyframe => {
+                            if let Some(stream) = &mut self.video {
+                                let turn = video::Turn { replies: vec![stream.ask_keyframe()], outputs: Vec::new() };
+                                self.video_turn(turn).await?;
                             }
                         }
                         Command::Resize { width, height, scale_percent } => {
@@ -1581,14 +1653,6 @@ impl<'a> Active<'a> {
             self.write_io(&pdu).await?;
         }
         Ok(())
-    }
-
-    /// POC: turn the server's display updates off, or back on for the whole desktop.
-    async fn suppress_output(&mut self, allow: bool) -> Result<()> {
-        let desktop = allow.then(|| (narrow(self.share.width), narrow(self.share.height)));
-        info!("rdp: Suppress Output, allow {allow}, server offers it {}", self.share.suppress_output);
-        let pdu = desktop::suppress(self.user, self.share.id, desktop);
-        self.write_io(&pdu).await
     }
 
     /// Leave the way a client that meant to leaves: an MCS Disconnect Provider
@@ -1762,6 +1826,15 @@ fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<
             Vec::new()
         }
     })
+}
+
+/// The agent's channel's messages, as the dynamic channel PDUs that carry them.
+fn video_pieces(channel: u32, messages: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>> {
+    let mut pdus = Vec::new();
+    for message in messages {
+        pdus.extend(dvc::pieces(channel, &message)?);
+    }
+    Ok(pdus)
 }
 
 /// A desktop dimension as the `u16` the protocol counts in, saturating rather than

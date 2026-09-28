@@ -496,6 +496,8 @@ async fn pump(
                     .then(|| rdp_clipboard::encode_unicode(tally.offer.unwrap_or(COPIED)));
                 session.input().send_clipboard(data);
             }
+            // This probe takes no agent's stream: `Connect::video` is `None`.
+            Event::Video(_) | Event::VideoEnded => panic!("an agent's stream nobody asked for"),
             Event::Connected { .. } => panic!("a second Connected"),
             Event::Ended(result) => panic!("the session ended: {result:?}"),
         }

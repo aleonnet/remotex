@@ -1,5 +1,7 @@
 #Requires -Version 7
-# Deploy the agent to the sandbox and start it in andrew's interactive session.
+# Deploy the agent to the sandbox and start it in andrew's interactive session, with
+# the switches given: `--patch`, `--big <bytes>`.
+param([string]$AgentArgs = '')
 $ErrorActionPreference = 'Stop'
 $Out = Join-Path $PSScriptRoot '..' '..' 'tmp' 'dvc-video-poc'
 $s = New-PSSession -HostName windows-ent-sandbox -SSHTransport
@@ -8,8 +10,11 @@ Invoke-Command -Session $s {
   New-Item -ItemType Directory -Force C:\ci-workspaces\dvc-video-poc | Out-Null
 }
 Copy-Item -ToSession $s -Path "$Out/dvc-video-agent.exe" -Destination C:\ci-workspaces\dvc-video-poc\
-Invoke-Command -Session $s {
-  $a = New-ScheduledTaskAction -Execute C:\ci-workspaces\dvc-video-poc\dvc-video-agent.exe -WorkingDirectory C:\ci-workspaces\dvc-video-poc
+Invoke-Command -Session $s -ArgumentList $AgentArgs {
+  param($AgentArgs)
+  $action = @{ Execute = 'C:\ci-workspaces\dvc-video-poc\dvc-video-agent.exe'; WorkingDirectory = 'C:\ci-workspaces\dvc-video-poc' }
+  if ($AgentArgs) { $action.Argument = $AgentArgs }
+  $a = New-ScheduledTaskAction @action
   $p = New-ScheduledTaskPrincipal -UserId $env:USERNAME -LogonType Interactive
   $t = New-ScheduledTaskSettingsSet -ExecutionTimeLimit (New-TimeSpan -Minutes 10) -AllowStartIfOnBatteries
   Register-ScheduledTask -TaskName RemotexDvcVideoAgent -Action $a -Principal $p -Settings $t -Force | Out-Null

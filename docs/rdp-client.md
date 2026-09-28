@@ -38,6 +38,11 @@ The desktop, the pointer, keyboard, mouse, resize, the clipboard, sound, and a
 camera going the other way. No touch: it is announced only by a host that opens MS-RDPEI, which this client never
 asks for. What it would take is in [`roadmap.md`](roadmap.md).
 
+One thing it carries is not RDP's: the desktop as a VP9 stream that an agent in the
+session codes itself, on a dynamic channel the agent opens, which then stands in for
+the graphics pipeline — see
+[An agent's stream in the pipeline's place](#an-agents-stream-in-the-pipelines-place).
+
 ## The connection sequence
 
 One long sequence, every step of it a question the host answers before the next
@@ -117,7 +122,9 @@ far end's clipboard then costs a report of its size instead of the session.
 
 ## Graphics
 
-Two paths, chosen by the target's `egfx` key, which defaults to on.
+Two paths, chosen by the target's `egfx` key, which defaults to on. Beside the
+pipeline, and only beside it, an agent in the session may carry the picture with a
+stream of its own.
 
 ### The graphics pipeline (MS-RDPEGFX)
 
@@ -149,7 +156,9 @@ EndFrame. `rdp_client/gfx.rs` keeps each surface's pixels and the rectangles dra
 into since the last frame, and at the EndFrame copies those rectangles of every
 mapped surface into the framebuffer — the shape of FreeRDP's `gdi/gfx.c`. Each
 EndFrame is acknowledged (`queueDepth` unavailable), which a Windows host requires
-or it throttles and then stops; and each surfaces to the engine as `Event::Frame`
+or it stops drawing 11 or 12 frames later — the one case it is left unacknowledged
+on purpose is [an agent's stream](#an-agents-stream-in-the-pipelines-place), where
+stopping the host is the point — and each surfaces to the engine as `Event::Frame`
 after the paints it covers, which is the frame boundary the engine's flush was
 built to guess at. A monitor layout is answered by ResetGraphics, which resizes the
 framebuffer and surfaces as `Event::Resize`, the channels untouched.
@@ -181,6 +190,50 @@ clips to the surface. A rectangle that will not decode is left unpainted with a
 warning and the session runs on, since the host draws it again; a PDU whose framing
 is wrong ends the session, as any malformed PDU does. The channel says which codecs
 and commands it carried when it ends, at `info`.
+
+### An agent's stream in the pipeline's place
+
+Windows has no place in its pipeline for a codec of anybody else's, but an
+application in the session may open a dynamic channel of its own on the connection,
+and remotex's agent opens `remotex.video` to send the desktop as VP9 it codes
+itself. The channel rides `drdynvc` like the rest, and what is said on it is this
+gateway's protocol and not RDP's: `proto/video.rs` is the whole of it, and
+[A Windows host's video over its own RDP connection](rdp-in-session-video.md) is
+the design, the messages and what was measured.
+
+`Connect::video` is the plan the agent is to code, and `None` refuses the channel by
+name like any other nobody listens on. So does a session without the pipeline: the
+stream stands in for it, and takes nothing's place where there is none. On accepting
+the channel the client states the plan, which is its first word there.
+
+`proto::video::Stream` decides whose picture the desktop is. The stream is the
+picture from a keyframe the size of the desktop — the size the pipeline last
+described — until the agent says it cannot see the desktop, a frame arrives at any
+other size, or the channel closes. A frame that goes up is `Event::Video`, and the
+pipeline taking the picture back is `Event::VideoEnded`. A frame that does not go up
+is echoed to the agent from here, since the agent sends its next frame on the echo;
+one that does is echoed by the caller, with `Input::echo_video`, once it has gone on
+to whoever is watching. `Input::video_keyframe` asks the agent for a keyframe.
+
+While the stream is the picture the client leaves the pipeline's frames
+unacknowledged and keeps the newest of them. A Windows host stops drawing 11 or 12
+frames later, so the desktop is coded once. Those last frames are decoded into the
+framebuffer like any others, which is then stale until the pipeline draws again: a
+caller sends nothing of it under the stream. When the pipeline takes the picture
+back the client sends the frame it kept with `queueDepth` `0xFFFFFFFF`, the suspend
+sentinel, which has the host clear the frames it holds outstanding without waiting
+on them, and acknowledges the next EndFrame as usual, which opts back in
+(MS-RDPEGFX 2.2.2.13). The host draws again within tens of milliseconds and repaints
+what changed meanwhile without being asked. The session does this itself and no
+caller drives it, because the channel may close with the pipeline stalled and only
+the session is there to see it.
+
+A message the client cannot read — an unknown kind, a frame of another profile than
+the plan's, a pointer past 384 pixels a side — closes the channel and leaves the
+session as it was. The agent is an application on the host, not the host, and the
+desktop has the pipeline to travel on.
+
+`tests/rdp_dvc_video_probe.rs` drives a real host and the agent.
 
 ### Bitmap updates
 
@@ -239,6 +292,16 @@ of them through damage, the flush interval, an encode, the socket, a decode and 
 paint. The server's own pointer *positions* are dropped: the browser's pointer is
 already where the mouse is, and nothing here can move a hardware pointer.
 
+Under [an agent's stream](#an-agents-stream-in-the-pipelines-place) the shape comes
+from the agent instead, on its channel, and reaches the caller as the same
+`Event::Cursor`. It has to: a Windows host whose graphics are stalled sends no
+pointer updates either. Measured on one path across the desktop, the host sent 20
+shapes with its frames acknowledged and none with them withheld. The agent's picture
+holds no pointer, as the framebuffer holds none: Desktop Duplication hands the
+desktop over without it. While the pipeline carries the picture the host's own
+updates are the ones that count, and the agent's latest shape is kept for the
+stream's first frame.
+
 ## Resize and density
 
 With `resize = true`, the Display Control Virtual Channel applies explicit
@@ -267,6 +330,13 @@ byte-identical layout was discarded 400 ms after the server's own Display Contro
 capabilities PDU and honoured 6.7 s into the same session. The ladder lives in the
 engine (`LAYOUT_RETRY_DELAYS`), because a retry needs a clock and a policy and the
 client owns neither.
+
+Under [an agent's stream](#an-agents-stream-in-the-pipelines-place) the host still
+resizes the session, but its graphics reset waits for the acknowledgements the
+client is withholding. The agent's first frame at the new size is what ends the
+wait: it is not the desktop's size as the pipeline last described it, so the
+pipeline takes the picture back, the acknowledgements resume, and the reset
+arrives as it does on any session.
 
 ## The clipboard (MS-RDPECLIP)
 
@@ -464,3 +534,11 @@ and `rdpsnd` named without `rdpdr` all look from here exactly like a working
 session in which nothing happens. That is why the probes assert on what the *host* does — that it opens a
 channel, takes a format list, resets the graphics to the size that was asked for —
 rather than on what this client sent.
+
+The stall under an agent's stream is measured as well, and is the one the client
+leans on rather than works around: nothing in MS-RDPEGFX says a host stops drawing
+for want of acknowledgements, or that its pointer updates stop with it. It is to be
+measured again on each Windows generation, and the client is written to stay
+correct without it — a host that went on drawing would be decoded into a
+framebuffer nothing is sent from, and one acknowledgement is kept however many are
+withheld.

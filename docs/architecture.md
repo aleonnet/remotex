@@ -86,6 +86,12 @@ instead — see [tiles past the ceiling](#tiles-past-the-ceiling). And an
 it the Mac's own HEVC, and its AAC-ELD with it — see
 [Apple's media stream, passed through](#apples-media-stream-passed-through).
 
+The VP9 is encoded here, save where the remote codes that very stream itself and it
+is passed as it came: wlshare over VNC
+([wlshare's stream, passed through](#wlshares-stream-passed-through)), and a Windows
+host whose session runs remotex's agent over RDP
+([An RDP host's stream, passed through](#an-rdp-hosts-stream-passed-through)).
+
 > **There is no configurable tile transport.** Earlier releases also sent each
 > changed region as an independent PNG or WebP still (`render_type = "tiles"`, with
 > `render_subtype`, `image_quality`, a per-tile photographic classifier, a
@@ -337,6 +343,73 @@ sends what it always did, which is encoded here.
   `resize`, where a frame already on its way is dropped, and for the ceiling's
   refusal on one with it. Back within the ceiling, the encoding is listed again and
   wlshare starts over at a keyframe.
+
+#### An RDP host's stream, passed through
+
+Windows has no place for a codec of anybody else's in its graphics pipeline, so an
+RDP host cannot be asked for VP9 the way wlshare is. What it allows is an
+application in the session opening a dynamic channel of its own on the connection
+the session is attached to. remotex's agent does: it captures the desktop with
+Desktop Duplication, codes it with the same `desktop-vp9` crate at the plan this
+gateway states, and writes each frame to `remotex.video`, which the gateway passes to
+the browser as it came. The encode this gateway does for an RDP target is then the
+host's, and nothing between the host and the browser decodes or encodes a picture.
+The channel's messages, what was measured against a Windows host, and what is left
+open are in
+[A Windows host's video over its own RDP connection](rdp-in-session-video.md).
+
+- **Passed, or not taken.** The stream is for passing and nothing else. A host whose
+  session runs no agent never opens the channel, and its pipeline is decoded and
+  encoded here, as is that of a target with `egfx = false`, which refuses the
+  channel. A frame that is not the plan's profile is refused by name and the channel
+  closed with it, which leaves the desktop on the pipeline. No key selects the
+  stream, and no path decodes it here.
+- **The plan is the channel's first word.** On accepting the channel the gateway
+  states the plan's chroma, the target's `video_quality` as the ceiling, and whether
+  `render_adaptive` lets the walk listen, and the agent codes nothing before it. A
+  message rather than wlshare's pseudo-encodings, because the channel is this
+  gateway's own and nothing else reads it. The plan is fixed for an engine, and a
+  takeover by a browser that resolves otherwise rebuilds the engine, whose new
+  connection the agent opens its channel on again.
+- **Whose picture it is** (`rdp_client::proto::video::Stream`). The pipeline carries
+  the desktop, and the stream carries it instead from a keyframe the size of the
+  desktop until the agent says it cannot see the desktop, a frame arrives at another
+  size, or the channel closes. The session reports a frame as `Event::Video` and the
+  pipeline's return as `Event::VideoEnded`.
+- **The host's own graphics are stalled beside it.** While the stream is the picture
+  the session withholds the pipeline's frame acknowledgements, and a Windows host
+  stops drawing 11 or 12 frames later, so the desktop is coded once. The session
+  resumes them, with the suspend sentinel MS-RDPEGFX specifies, when the pipeline
+  takes the picture back, and the host repaints what changed without being asked.
+  The stall is measured Windows behavior and not the protocol's; a host that went on
+  drawing would be decoded into a framebuffer nothing is sent from. Suppress Output,
+  the protocol's own switch, is not used: it switches the session's display off and
+  the agent's capture with it.
+- **Passed as it came** (`VideoSink::pass`), as wlshare's frame is: its size held to
+  the ceiling, the configuration announced ahead of it the plan's chroma's string for
+  its size, its bytes taking their share of `QUEUE_BUDGET`. The mirror, the rounds,
+  the quality walk and the settle do not run: the agent paces, codes, walks and
+  settles its stream itself.
+- **The gaps are VP9 encoded here.** The secure desktop — a UAC prompt, the lock
+  screen — is refused a capture in the user's session, so the agent says so and the
+  pipeline shows it. A resize is a turn of the pipeline's too, since the host's
+  graphics reset waits for the acknowledgements. At each the engine sends the whole
+  desktop at the pipeline's next frame, which starts the stream encoded here over at
+  a keyframe behind its own announcement (`VideoSink::damage`), and the agent's
+  stream coming back starts at a keyframe the same way: the turns a High Performance
+  Mac's passed stream takes with its rectangles.
+- **The echo carries the browser's queue.** The agent keeps one frame in flight and
+  walks its quality by each echo's round trip, less the shortest it has seen. Each
+  echo is held for the queue ahead of its frame on the browser's link
+  (`VideoSink::fence_hold`), 500 ms at most, as wlshare's fence is.
+- **A restart waits for a keyframe.** A reattach resets the render and asks the agent
+  for a keyframe; the frames still coded against the old picture are dropped until
+  it arrives, and it goes out behind a fresh `VideoFormat`.
+- **The pointer comes from the agent**, as its own shape and never in the picture.
+  A host whose graphics are stalled sends no pointer updates either, so the agent
+  sends the shape Desktop Duplication hands over beside the picture, and the session
+  reports it as the `Event::Cursor` a host's own update is. While the pipeline
+  carries the picture the host's own updates are the ones that count.
 
 #### Apple's media stream, passed through
 
@@ -1279,6 +1352,10 @@ server draws with bitmap updates, damage is flushed on the 16 ms guess because t
 carry no frame boundary, and the desktop keeps its opening size — `resize = true` is
 refused beside it, because an RDP resize is the pipeline's graphics reset.
 On either path the pointer travels as its own shape rather than in the framebuffer.
+
+A host whose session runs remotex's agent codes the desktop as VP9 itself, on a
+dynamic channel of its own, and the pipeline then carries only the gaps: see
+[An RDP host's stream, passed through](#an-rdp-hosts-stream-passed-through).
 
 Read [The RDP client, written here](rdp-client.md) for the whole of it: the
 connection sequence, the channels and the chunk flags a Windows host silently

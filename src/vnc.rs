@@ -190,7 +190,7 @@ const MAX_WLSHARE_VP9_FRAME: u32 = 64 << 20;
 /// window, and the one wlshare's desktop client gives its own: past it the echo
 /// goes, and a client that is only slow still holds the engine where it always
 /// did, at the budget.
-const FENCE_HOLD_LIMIT: Duration = Duration::from_millis(500);
+pub(crate) const FENCE_HOLD_LIMIT: Duration = Duration::from_millis(500);
 /// The extension's one message type, used in both directions: the server's
 /// `OutputList` and the client's `SelectOutput`. Outside every registered RFB
 /// message type.

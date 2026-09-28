@@ -23,6 +23,7 @@
 //!
 //! See docs/architecture.md for the design.
 
+use std::collections::VecDeque;
 use std::sync::Arc;
 
 use log::{debug, info, warn};
@@ -44,7 +45,7 @@ use crate::session::Uplinks;
 use crate::rdp_client::proto::rdpsnd;
 use crate::rdp_client::{
     self as client, AudioSink, Connect, Event, Frame, Framebuffer, Input, MouseButton as RdpButton,
-    Session,
+    Session, VideoPlan,
 };
 use crate::rdp_clipboard::{self, CF_UNICODETEXT};
 use crate::shadow::{self, Rect, Shadow};
@@ -166,7 +167,7 @@ pub async fn run(
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = VideoSink::new("rdp", frame_tx, plan, feedback, TileSupport::None);
-    session(config, display, input_rx, audio, uplinks, &sink).await;
+    session(config, plan, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }
 
@@ -196,6 +197,7 @@ impl AudioSink for Sound {
 
 async fn session(
     config: TargetConfig,
+    plan: RenderPlan,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     audio: Option<Arc<AudioBridge>>,
@@ -203,7 +205,7 @@ async fn session(
     sink: &VideoSink,
 ) {
     let opening = opening_layout(&config, display);
-    let (session, mut events) = Session::start(connect_config(&config, opening, audio, &uplinks));
+    let (session, mut events) = Session::start(connect_config(&config, plan, opening, audio, &uplinks));
     // The feeds exist from here, so the camera and mic sockets' traffic has somewhere to
     // go before the desktop does: a plug made while the host is still connecting waits in
     // the session's queue for the enumeration channel.
@@ -355,6 +357,7 @@ fn opening_layout(config: &TargetConfig, display: Option<HostDisplay>) -> Layout
 /// Everything the RDP client needs to open this target's session.
 fn connect_config(
     config: &TargetConfig,
+    plan: RenderPlan,
     opening: Layout,
     audio: Option<Arc<AudioBridge>>,
     uplinks: &Uplinks,
@@ -377,7 +380,13 @@ fn connect_config(
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
         camera: uplinks.camera.as_ref().map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
         microphone: uplinks.microphone.as_ref().map(|bridge| rdp_mic::sink(Arc::clone(bridge))),
-        video: None,
+        // An agent in the session is told what this gateway would have coded, so
+        // the target's keys mean on its stream what they mean on one encoded here.
+        video: Some(VideoPlan {
+            full_chroma: plan.chroma == crate::config::Chroma::Full,
+            quality: plan.quality,
+            adaptive: plan.adaptive,
+        }),
     }
 }
 
@@ -940,6 +949,19 @@ async fn active_loop(
     // survives resizes and never unlearns.
     let mut frame_marks = false;
 
+    // Whether an agent in the session carries the picture with a stream of its own,
+    // passed to the browser as it came ([`Event::Video`]). The host's graphics are
+    // stalled beside it, so the framebuffer is stale and nothing of it is sent.
+    let mut streaming = false;
+    // The pipeline took the picture back and owes the browser all of it: what the
+    // framebuffer held went stale under the stream, and the shadow knows nothing of
+    // what the stream showed. Paid at the pipeline's next frame, once the host has
+    // drawn what changed.
+    let mut repaint_owed = false;
+    // The echoes the agent's frames are owed, each held for the queue ahead of its
+    // frame on the browser's link ([`VideoSink::fence_hold`]), in order.
+    let mut echoes: VecDeque<(Instant, u32)> = VecDeque::new();
+
     loop {
         let layout_retry = async {
             match layout_retry_at {
@@ -974,6 +996,12 @@ async fn active_loop(
                 None => std::future::pending().await,
             }
         };
+        let echo_due = async {
+            match echoes.front() {
+                Some((deadline, _)) => tokio::time::sleep_until(*deadline).await,
+                None => std::future::pending().await,
+            }
+        };
 
         tokio::select! {
             event = events.recv() => {
@@ -984,10 +1012,25 @@ async fn active_loop(
                     anyhow::bail!("the RDP client stopped reporting");
                 };
                 match event {
+                    // The last frames the host drew before its graphics stalled
+                    // under the agent's stream: the stream is the picture.
+                    Event::Paint(_) | Event::Frame if streaming => {}
                     Event::Paint(rect) => {
                         // Staged rather than sent: whether this goes out now or at
                         // the deadline is decided once, at the end of the loop.
                         stage_damage(&mut pending_damage, damaged(rect));
+                    }
+                    // The pipeline's first frame since it took the picture back: the
+                    // host has drawn what changed under the stream, and the whole
+                    // desktop goes out, as the stream encoded here.
+                    Event::Frame if repaint_owed => {
+                        frame_marks = true;
+                        repaint_owed = false;
+                        pending_damage.clear();
+                        shadow.forget();
+                        send_damage(framebuffer, whole(desktop), &mut shadow, sink).await?;
+                        damage_flushed = Instant::now();
+                        damage_due = None;
                     }
                     // The server says this is where its frame ends, which is the fact
                     // the damage interval was built to guess at: everything staged
@@ -1004,6 +1047,31 @@ async fn active_loop(
                     // never the leading-edge flush of a frame still being drawn.
                     Event::FramesMarked => frame_marks = true,
                     Event::Cursor(cursor) => pointer.set(cursor),
+                    Event::Video(frame) => {
+                        if !streaming {
+                            info!("rdp: an agent in the session carries the picture, passed as it comes");
+                            streaming = true;
+                            repaint_owed = false;
+                            // Staged damage names pixels the stream carries now.
+                            pending_damage.clear();
+                            damage_due = None;
+                        }
+                        sink.pass(frame.width, frame.height, frame.data).await?;
+                        let held = sink.fence_hold().min(crate::vnc::FENCE_HOLD_LIMIT);
+                        echoes.push_back((Instant::now() + held, frame.seq));
+                    }
+                    Event::VideoEnded => {
+                        info!("rdp: the host's own graphics carry the picture again");
+                        streaming = false;
+                        repaint_owed = true;
+                        // The frames that went on are the browser's whatever follows.
+                        for (_, seq) in echoes.drain(..) {
+                            input.echo_video(seq);
+                        }
+                        // A still desktop draws nothing unasked, and the repaint
+                        // waits for a frame.
+                        input.refresh();
+                    }
                     Event::ResizeReady { max_area } => {
                         debug!("rdp: the remote offers dynamic resize, up to {max_area} pixels");
                         resize_ready = true;
@@ -1131,18 +1199,13 @@ async fn active_loop(
                     // Not part of the repaint: the pixels carry no pointer, and
                     // the server only names a shape when it changes.
                     sink.msg(pointer.attached()).await?;
-                    send_damage(
-                        framebuffer,
-                        Rect {
-                            left: 0,
-                            top: 0,
-                            right: desktop.0.saturating_sub(1),
-                            bottom: desktop.1.saturating_sub(1),
-                        },
-                        &mut shadow,
-                        sink,
-                    )
-                    .await?;
+                    if streaming {
+                        // The picture is the agent's stream, which starts over at the
+                        // keyframe asked for here; the framebuffer is stale under it.
+                        input.video_keyframe();
+                        continue;
+                    }
+                    send_damage(framebuffer, whole(desktop), &mut shadow, sink).await?;
                     // A repaint is a frame. Without this, the whole repaint would
                     // sit in the video mirror unsent, while the shadow already
                     // counts every pixel of it as delivered.
@@ -1300,6 +1363,14 @@ async fn active_loop(
                 // same task as every other frame boundary, so the stream stays serial
                 // by construction rather than by the lock.
                 sink.frame().await?;
+                continue;
+            }
+            () = echo_due => {
+                let now = Instant::now();
+                while let Some(&(deadline, seq)) = echoes.front() && deadline <= now {
+                    input.echo_video(seq);
+                    echoes.pop_front();
+                }
                 continue;
             }
             _ = damage_flush => {
@@ -1731,6 +1802,11 @@ fn stage_damage(pending: &mut Vec<Rect>, rect: Rect) {
         return;
     };
     pending[pick] = union(&pending[pick], &rect);
+}
+
+/// The whole of a desktop, as a rectangle.
+fn whole(desktop: (u16, u16)) -> Rect {
+    Rect { left: 0, top: 0, right: desktop.0.saturating_sub(1), bottom: desktop.1.saturating_sub(1) }
 }
 
 /// Drain the staged damage into the mirror.

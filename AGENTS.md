@@ -137,6 +137,25 @@ documentation.
   server or at a chroma other than the plan's, ask wlshare for the plan with a
   client message, or add a key that selects it. See
   [wlshare's stream, passed through](docs/architecture.md#wlshares-stream-passed-through).
+- An RDP host whose session runs remotex's agent codes its desktop as VP9 itself
+  and sends it on a dynamic channel of the same connection, `remotex.video`, which
+  is this gateway's protocol and not RDP's. The gateway states the plan's chroma,
+  dial and walk as the channel's first message and passes each frame to the
+  browser untouched; a host with no agent never opens the channel, and its graphics
+  pipeline is decoded and encoded here. The stream is for passing and nothing else:
+  never decode it here, and wherever it cannot be passed as it came — a frame that
+  is not the plan's, a target without `egfx` — it is not taken and the pipeline
+  carries the desktop. The pipeline also carries every gap: the secure desktop,
+  which the agent cannot see, a resize, a closed channel, each switch starting at a
+  keyframe. While the stream is the picture the session withholds the pipeline's
+  frame acknowledgements, which stalls the host's own graphics and its pointer
+  updates with them, so the pointer comes from the agent as its own shape, never
+  drawn into the picture. Do not add a key that selects the stream, a port or
+  logon of the agent's own, framing of its own on the channel's messages, Suppress
+  Output to stop the host's graphics, or a session that ends for want of the
+  agent. Treat the stall as measured Windows behavior, not a specification. See
+  [An RDP host's stream, passed through](docs/architecture.md#an-rdp-hosts-stream-passed-through)
+  and [A Windows host's video over its own RDP connection](docs/rdp-in-session-video.md).
 - Remote audio uses its own `/ws/audio` socket and queue; opening the socket is
   the subscription. Do not put audio on the session socket. Remote audio is Opus
   encoded here, save a High Performance Mac's AAC-ELD under `media_passthrough`;

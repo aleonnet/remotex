@@ -239,6 +239,13 @@ async def main() -> int:
         "display list, which a generic VNC server never sends",
     )
     parser.add_argument(
+        "--viewport-gap",
+        type=duration,
+        default=0.0,
+        help="seconds between a viewport's answer and the next request, which is how "
+        "long the desktop is left at each size",
+    )
+    parser.add_argument(
         "--apple-media",
         action="store_true",
         help="state that this client decodes a High Performance Mac's HEVC and AAC-ELD, "
@@ -314,6 +321,23 @@ async def main() -> int:
                 raise
             except Exception as error:  # This is a diagnostic probe: report the socket failure.
                 audio_error = str(error)
+
+        gap_tasks = []
+
+        async def send_next_viewport_after_gap() -> None:
+            nonlocal awaiting_viewport
+            await asyncio.sleep(args.viewport_gap)
+            awaiting_viewport = viewports.pop(0)
+            print(f"  -> viewport {awaiting_viewport[0]}x{awaiting_viewport[1]}")
+            await socket.send(
+                json.dumps(
+                    {
+                        "type": "viewport",
+                        "w": awaiting_viewport[0],
+                        "h": awaiting_viewport[1],
+                    }
+                )
+            )
 
         async def send_first_viewport_after_delay() -> None:
             nonlocal awaiting_viewport
@@ -502,20 +526,7 @@ async def main() -> int:
                         elif awaiting_viewport == answered:
                             awaiting_viewport = None
                             if viewports:
-                                awaiting_viewport = viewports.pop(0)
-                                print(
-                                    f"  -> viewport {awaiting_viewport[0]}x"
-                                    f"{awaiting_viewport[1]}"
-                                )
-                                await socket.send(
-                                    json.dumps(
-                                        {
-                                            "type": "viewport",
-                                            "w": awaiting_viewport[0],
-                                            "h": awaiting_viewport[1],
-                                        }
-                                    )
-                                )
+                                gap_tasks.append(asyncio.create_task(send_next_viewport_after_gap()))
                         if (
                             args.mouse is not None
                             and not pending
@@ -624,6 +635,8 @@ async def main() -> int:
                     pass
             if viewport_task is not None and not viewport_task.done():
                 viewport_task.cancel()
+            for task in gap_tasks:
+                task.cancel()
         print(f"\n  {frames} binary frames")
         if args.records:
             print(f"  {tiles} tile records, {video_units} video records")
