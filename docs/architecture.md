@@ -669,7 +669,7 @@ Nothing downstream of `TargetConfig::render_plan` names a codec: `encode.rs`,
 `stream.rs` and the wire carry access units, a keyframe bit and a configuration
 string, and `vp9.rs` is reachable only from `stream.rs`.
 
-**The browser is asked one question, and never asked to justify itself.** The
+**The browser is not asked for a codec, and never asked to justify itself.** The
 client used to probe for the codec: `/api/config` published the gateway's ordered
 codecs with a WebCodecs string for each, the client asked
 `VideoDecoder.isConfigSupported` about them before login, and `ClientMsg::Connect`
@@ -681,12 +681,15 @@ any fault anywhere near the path — a serde field-name mismatch, for one — su
 as an accusation against the browser and sent the reader to the wrong half of the
 system.
 
-What survives of asking is two questions with no power to refuse: how much colour
-this decoder takes, for `render_chroma = "auto"` to resolve against
+What survives of asking is two questions that select rather than refuse: how much
+colour this decoder takes, for `render_chroma = "auto"` to resolve against
 ([choosing a chroma](#choosing-a-chroma)), and whether it takes a High Performance
-Mac's HEVC, for `media_passthrough` to pass it. Each selects between streams the
-gateway is willing to send; neither decides whether a session may happen. A wrong
-answer costs a picture, not a desktop.
+Mac's HEVC and AAC-ELD, for `media_passthrough` to pass them. Each selects between
+streams the gateway is willing to send. A wrong answer costs a picture, not a
+desktop, save in the one case where the gateway has only one stream to send: a
+build without the `apple-hp-media` decoders ends the session of a browser that
+says no to the Mac's stream
+([Apple's media stream, passed through](#apples-media-stream-passed-through)).
 
 The refusal itself stays where it always was: one honest failure at the client's own
 decoder. The gateway announces the configuration in `ServerMsg::VideoFormat` before

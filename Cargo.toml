@@ -35,8 +35,9 @@ embedded-gateway = ["dep:crossterm", "dep:libc", "dep:windows-sys"]
 # the feature: FFmpeg's HEVC decoder (LGPL, linked statically) and Fraunhofer's
 # AAC-ELD decoder, whose licence is not OSI-approved. So it is off by default and
 # in no release artifact; an operator builds
-# `cargo build --release --features apple-hp-media`, and any other build refuses
-# that subtype.
+# `cargo build --release --features apple-hp-media`. Any other build takes that
+# subtype only with `media_passthrough`, passing the stream to a browser that
+# decodes it.
 apple-hp-media = ["dep:avcodec-hevc-sys", "dep:aac"]
 
 [dependencies]

@@ -12,11 +12,12 @@
 //! 26.6 and is recorded in `docs/apple-vnc-889.md` ("The media stream: High
 //! Performance's picture and sound").
 //!
-//! A target takes this path with `subtype = "ard-high-performance"`, and only in a
-//! build with the `apple-hp-media` feature: the wire half of this module — offers,
-//! replies, SRTP, depacketizing — is always compiled and tested, and the feature
-//! adds the two decoders and the receiver that feeds them. A build without it
-//! refuses that subtype at config parse, so nothing here runs in it.
+//! A target takes this path with `subtype = "ard-high-performance"`. Everything but
+//! the two decoders — offers, replies, SRTP, depacketizing, the receiver, and
+//! passing the stream on — is compiled in every build; the `apple-hp-media`
+//! feature adds the decoders. A build without it takes the subtype only with
+//! `media_passthrough`, refused at config parse otherwise, and ends the session
+//! of a browser that cannot decode the stream before it dials the Mac.
 //!
 //! The offer is two AVConference negotiation blobs, rebuilt field by field from the
 //! ones Apple's client produced ([`audio_offer_blob`], [`video_offer_blob`]). The
@@ -2034,10 +2035,23 @@ const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 /// depacketizer completes, as Annex B; `audio.eld` is every AAC-ELD unit, each
 /// behind its length as a big-endian u32. Both are written before any decoder
 /// sees them, whether the session decodes the stream or passes it on.
+///
+/// The files are written on a thread of their own, so a slow disk never holds up
+/// the sockets the stream is read from: the receiver hands each unit over and
+/// moves on, and a disk [`DUMP_QUEUE`] units behind stops the dump rather than the
+/// stream.
 struct MediaDump {
-    video: std::io::BufWriter<std::fs::File>,
-    audio: std::io::BufWriter<std::fs::File>,
+    units: std::sync::mpsc::SyncSender<(Track, Vec<u8>)>,
 }
+
+/// Which file a dumped unit goes to.
+enum Track {
+    Video,
+    Audio,
+}
+
+/// How many units the dump's writer may fall behind the receiver.
+const DUMP_QUEUE: usize = 4096;
 
 impl MediaDump {
     fn from_env() -> Option<Self> {
@@ -2049,31 +2063,63 @@ impl MediaDump {
         };
         let opened = std::fs::create_dir_all(&dir)
             .with_context(|| format!("create {}", dir.display()))
-            .and_then(|()| Ok(Self { video: open("video.h265")?, audio: open("audio.eld")? }));
-        match opened {
-            Ok(dump) => {
-                log::info!("vnc: dumping the media stream to {} (REMOTEX_HP_DUMP)", dir.display());
-                Some(dump)
-            }
+            .and_then(|()| Ok((open("video.h265")?, open("audio.eld")?)));
+        let (mut video, mut audio) = match opened {
+            Ok(files) => files,
             Err(e) => {
                 log::warn!("vnc: not dumping the media stream: {e:#}");
-                None
+                return None;
+            }
+        };
+        let (units, queued) = std::sync::mpsc::sync_channel::<(Track, Vec<u8>)>(DUMP_QUEUE);
+        let writer = std::thread::Builder::new().name("hp-dump".into()).spawn(move || {
+            let written = queued
+                .iter()
+                .try_for_each(|(track, unit)| match track {
+                    Track::Video => video.write_all(&unit),
+                    Track::Audio => audio.write_all(&unit),
+                })
+                .and_then(|()| video.flush())
+                .and_then(|()| audio.flush());
+            if let Err(e) = written {
+                log::warn!("vnc: stopped dumping the media stream: {e}");
+            }
+        });
+        if let Err(e) = writer {
+            log::warn!("vnc: not dumping the media stream: no writer thread: {e}");
+            return None;
+        }
+        log::info!("vnc: dumping the media stream to {} (REMOTEX_HP_DUMP)", dir.display());
+        Some(Self { units })
+    }
+
+    fn video(&self, unit: &AccessUnit) -> anyhow::Result<()> {
+        let mut annex_b = Vec::with_capacity(unit.iter().map(|nal| 4 + nal.len()).sum());
+        for nal in unit {
+            annex_b.extend_from_slice(&[0, 0, 0, 1]);
+            annex_b.extend_from_slice(nal);
+        }
+        self.hand_over(Track::Video, annex_b)
+    }
+
+    fn audio(&self, unit: &[u8]) -> anyhow::Result<()> {
+        let len = u32::try_from(unit.len()).context("an AAC-ELD unit past 4 GiB")?;
+        let mut framed = Vec::with_capacity(4 + unit.len());
+        framed.extend_from_slice(&len.to_be_bytes());
+        framed.extend_from_slice(unit);
+        self.hand_over(Track::Audio, framed)
+    }
+
+    fn hand_over(&self, track: Track, bytes: Vec<u8>) -> anyhow::Result<()> {
+        match self.units.try_send((track, bytes)) {
+            Ok(()) => Ok(()),
+            Err(std::sync::mpsc::TrySendError::Full(_)) => {
+                anyhow::bail!("the disk fell {DUMP_QUEUE} units behind the stream")
+            }
+            Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
+                anyhow::bail!("its writer stopped")
             }
         }
-    }
-
-    fn video(&mut self, unit: &AccessUnit) -> std::io::Result<()> {
-        for nal in unit {
-            self.video.write_all(&[0, 0, 0, 1])?;
-            self.video.write_all(nal)?;
-        }
-        Ok(())
-    }
-
-    fn audio(&mut self, unit: &[u8]) -> std::io::Result<()> {
-        let len = u32::try_from(unit.len()).map_err(std::io::Error::other)?;
-        self.audio.write_all(&len.to_be_bytes())?;
-        self.audio.write_all(unit)
     }
 }
 
@@ -2254,10 +2300,10 @@ impl Receiver {
                             let now = Some(std::time::Instant::now());
                             *self.sounded.lock().unwrap() = now;
                             *self.sound_heard.lock().unwrap() = now;
-                            if let Some(d) = dump.as_mut()
+                            if let Some(d) = dump.as_ref()
                                 && let Err(e) = d.audio(&data[header.payload.0..header.payload.1])
                             {
-                                log::warn!("vnc: stopped dumping the media stream: {e}");
+                                log::warn!("vnc: stopped dumping the media stream: {e:#}");
                                 dump = None;
                             }
                             if let Some(sound) = sound
@@ -2318,10 +2364,10 @@ impl Receiver {
                         Depacketized::Pending => {}
                         Depacketized::Lost => want_keyframe = true,
                         Depacketized::Unit(unit) => {
-                            if let Some(d) = dump.as_mut()
+                            if let Some(d) = dump.as_ref()
                                 && let Err(e) = d.video(&unit)
                             {
-                                log::warn!("vnc: stopped dumping the media stream: {e}");
+                                log::warn!("vnc: stopped dumping the media stream: {e:#}");
                                 dump = None;
                             }
                             match onward.send(unit) {

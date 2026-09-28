@@ -61,7 +61,7 @@ mkdir -p "$out"
 rm -f "$out/video.h265" "$out/audio.eld"
 cp tests/hp_decode/index.html tests/hp_decode/probe.js "$out/"
 REMOTEX_HP_DUMP="$out" RUST_LOG=info,remotex=debug \
-  ./target/release/remotex serve --config "$config" >"$out/gateway.log" 2>&1 &
+  ./target/release/remotex serve --config "$config" --listen "127.0.0.1:$port" >"$out/gateway.log" 2>&1 &
 gateway=$!
 trap 'kill "$gateway" 2>/dev/null || true; wait "$gateway" 2>/dev/null || true' EXIT
 
