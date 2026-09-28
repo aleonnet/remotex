@@ -25,6 +25,7 @@ import {
   type AudioStreamInfo,
   audioLabel,
   renderLabel,
+  type VideoStreamInfo,
   videoLabel,
 } from "./mediaLabel.ts";
 import { keepTabWithin } from "./modalFocus.ts";
@@ -563,7 +564,7 @@ function ScreenHelp({
   renderPlan,
   tiling,
   audio,
-  videoDecode,
+  videoStream,
 }: {
   size: RemoteSize | null;
   hostScale: number;
@@ -571,9 +572,9 @@ function ScreenHelp({
   renderPlan: string;
   tiling: boolean;
   audio: AudioRow;
-  videoDecode: string | null;
+  videoStream: VideoStreamInfo | null;
 }) {
-  const video = videoLabel(videoDecode, tiling);
+  const video = videoLabel(videoStream, tiling);
   return (
     <>
       <h3>This session</h3>
@@ -627,7 +628,9 @@ function ScreenHelp({
           {/* The exact WebCodecs configuration the decoder was built with. It is
               what a `VideoDecoder` complaint names, and until this row it was
               readable only in the console — on a session that is *working*, not
-              one that failed, which is when the question is usually asked. */}
+              one that failed, which is when the question is usually asked. With
+              it, whether the stream is the remote's own passed through or one
+              the gateway encoded, which only the gateway knows. */}
           <dd>{video}</dd>
         </div>
       </dl>
@@ -910,7 +913,7 @@ export default function FloatingMenu({
   audioEnabled,
   audioError,
   audioStream,
-  videoDecode,
+  videoStream,
   onAudioChange,
   canCamera,
   cameraEnabled,
@@ -991,7 +994,7 @@ export default function FloatingMenu({
   // be, and what the video decoder was configured with. Both null until a format
   // arrives, which is a state the card words rather than hides.
   audioStream: AudioStreamInfo | null;
-  videoDecode: string | null;
+  videoStream: VideoStreamInfo | null;
   onAudioChange: (enabled: boolean) => void;
   // The camera, under Audio's hide-don't-disable rule: `camera = true` is
   // RDP's and generic VNC's (wlshare's camera extension) alone, so on every other
@@ -1524,7 +1527,7 @@ export default function FloatingMenu({
               error: audioError,
               stream: audioStream,
             }}
-            videoDecode={videoDecode}
+            videoStream={videoStream}
           />
           <h3>Shortcuts</h3>
           <dl className="help-list">

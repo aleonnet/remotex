@@ -1052,7 +1052,10 @@ pub enum ServerMsg {
     /// `vp09.00.40.08.01.06.06.06.00`. It comes from the encoder rather than from a prediction, and it is sent
     /// with the round that produced the stream's first unit because that is where the encoder's
     /// answer exists.
-    VideoFormat { decode: String },
+    ///
+    /// `passthrough` says whose stream it is: the remote's own, passed to the browser untouched
+    /// (wlshare's VP9, a High Performance Mac's HEVC), or one this gateway encoded.
+    VideoFormat { decode: String, passthrough: bool },
     /// The remote started consuming the camera — an application on it opened
     /// the device — and the browser should encode and send from now on,
     /// starting at a keyframe. Camera-socket traffic only, like the two below:
@@ -1165,6 +1168,7 @@ enum ControlMsg<'a> {
     },
     VideoFormat {
         decode: &'a str,
+        passthrough: bool,
     },
     CameraStart {
         width: u32,
@@ -1263,7 +1267,9 @@ impl ServerMsg {
             ServerMsg::CameraKeyframe => control(&ControlMsg::CameraKeyframe),
             ServerMsg::MicOpen => control(&ControlMsg::MicOpen),
             ServerMsg::MicClose => control(&ControlMsg::MicClose),
-            ServerMsg::VideoFormat { decode } => control(&ControlMsg::VideoFormat { decode }),
+            ServerMsg::VideoFormat { decode, passthrough } => {
+                control(&ControlMsg::VideoFormat { decode, passthrough: *passthrough })
+            }
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
             ServerMsg::Resizing { active } => control(&ControlMsg::Resizing { active: *active }),
@@ -1650,8 +1656,8 @@ mod tests {
         // How to decode the stream, which is the message a client cannot work out for
         // itself: VP9 carries no parameter sets, so every field here is the gateway's
         // answer and a renamed one is a decoder that never gets configured.
-        match (ServerMsg::VideoFormat { decode: "vp09.00.40.08".to_owned() }).text_frame() {
-            Some(json) => assert_eq!(json, r#"{"type":"videoFormat","decode":"vp09.00.40.08"}"#),
+        match (ServerMsg::VideoFormat { decode: "vp09.00.40.08".to_owned(), passthrough: true }).text_frame() {
+            Some(json) => assert_eq!(json, r#"{"type":"videoFormat","decode":"vp09.00.40.08","passthrough":true}"#),
             None => panic!("videoFormat must be a text frame"),
         }
         // A composition: each screen's pixels and its points, named so the page's
