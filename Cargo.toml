@@ -1,29 +1,15 @@
-# The gateway is the root package. `serve` is the deployable browser gateway;
-# `tui` is the feature-gated local multi-instance control plane;
-# `serve-embedded` is its hidden per-instance worker. Every shape serves the same
-# SPA and uses the same protocol implementation. `crates/remotex-viewer` is the
-# desktop window that shows that SPA; commands run here build the gateway alone,
-# and `-p remotex-viewer` picks the viewer.
-#
-# One version for the whole workspace. `[workspace.package]` below is the only
-# literal `version` in the tree — the root package inherits it with
-# `version.workspace = true`.
+# The gateway. `serve` is the deployable browser gateway; `tui` is the
+# feature-gated local multi-instance control plane; `serve-embedded` is its
+# hidden per-instance worker. Every shape serves the same SPA and uses the same
+# protocol implementation. The desktop window that shows that SPA,
+# remotex-viewer, is a repository of its own (docs/viewer.md).
 #
 # Note for anyone editing this file: frontend/vite.config.ts regexes the *first*
 # line matching `^version = "…"` out of this manifest to stamp the login screen,
-# so that line must stay the workspace version. `version.workspace = true` does
-# not match the regex (the `.` after `version` breaks it), which is what keeps
-# the root package from shadowing it.
-[workspace]
-resolver = "3"
-members = ["crates/remotex-viewer"]
-
-[workspace.package]
-version = "0.0.283"
-
+# so the package's `version` must stay the first such line.
 [package]
 name = "remotex"
-version.workspace = true
+version = "0.0.283"
 edition = "2024"
 
 [features]

@@ -13,9 +13,6 @@ documentation.
   `cargo test`, and both again with `--features apple-hp-media` when the change
   reaches the Apple engine or the media stream.
 - After frontend JS/TS changes, run the Biome checks in `frontend/`.
-- After `crates/remotex-viewer` changes, run
-  `cargo clippy -p remotex-viewer --all-targets -- -D warnings` on
-  `windows-ci-build` and on macvm. Linux is out of its scope: do not build it here.
 - Before browser QA of a frontend change, rebuild the gateway and say so: the
   frontend bundle is compiled into the binary, so a running `remotex serve`
   never sees a newer bundle. For source-based iteration, use
@@ -33,13 +30,14 @@ documentation.
 ## Product boundaries
 
 - There is one client: the browser SPA, whether in a browser, installed as a
-  Chrome or Edge app, or shown by `remotex-viewer` (`crates/remotex-viewer`). The
-  viewer is a shell around the unchanged page: it delivers web platform APIs the
-  page already uses — full screen, key events, `navigator.clipboard`,
-  `window.resizeTo`, and on Windows HEVC decoding — natively. It never implements a
-  page feature, and the page carries no code for it. Its one screen of its own is
-  the library that picks a gateway, a name and a URL each; a gateway's window gets
-  no button or bar from it. See [remotex-viewer](docs/viewer.md).
+  Chrome or Edge app, or shown by `remotex-viewer`, a repository of its own
+  (`../remotex-viewer`). The viewer is a shell around the unchanged page: it
+  delivers web platform APIs the page already uses — full screen, key events,
+  `navigator.clipboard`, `window.resizeTo`, and on Windows HEVC decoding —
+  natively. It never implements a page feature, and the page carries no code for
+  it: its one trace here is the interop protocol version `frontend/index.html`
+  states. A change to what that version describes bumps it and describes the new
+  version in [remotex-viewer](docs/viewer.md); the viewer then speaks it.
 - There is one frontend build, compiled from Cargo's `OUT_DIR` into the gateway
   binary (`src/assets.rs`) and served from its origin root. A standalone frontend
   build and the platform-independent release artifact use `frontend/dist`; a
