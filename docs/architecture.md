@@ -205,8 +205,9 @@ adaptive quantization moved nothing either. `render_chroma = "444"` selects VP9
 profile 1 — a colour sample per pixel, the same quantizer, a keyframe a third
 larger, inter frames no larger, about a third more encode time — and the codec
 string it announces is `vp09.01.…` instead of `vp09.00.…`. The cost is the
-decoder: no hardware VP9 decoder takes profile 1, so it always decodes in software
-— Chromium does — and a browser with no software VP9 at all, which is iOS and
+decoder: no browser's hardware VP9 path takes profile 1 — Intel's media engines
+from Ice Lake on decode it, but Chromium's D3D11 and VA-API decoders advertise
+profiles 0 and 2 only — so it always decodes in software, and a browser with no software VP9 at all, which is iOS and
 iPadOS, refuses the configuration by name the way it would refuse any other.
 `a_444_stream_keeps_the_colour_420_averages_away` in `desktop-vp9` is the round
 trip that pins the difference, through the archive's own decoder.
