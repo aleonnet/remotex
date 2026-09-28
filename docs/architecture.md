@@ -1491,9 +1491,9 @@ button and `keyboardLock.ts` deliberately does not watch `(display-mode: fullscr
 — arming on that took a lock Chromium never made active, which is the failure it
 looked like a fix for. The way out of the mode is that button again, or holding
 Escape, which is Chromium's own exit from a locked full screen.
-[remotex-viewer](viewer.md) delivers the same mode without asking the browser: it
-fills the monitor on the page's `requestFullscreen` and takes every key from the OS
-while it lasts, and its window is an app window that reserves no chords.
+[remotex-viewer](viewer.md) needs neither: it takes every key from the OS whenever the
+remote surface has focus, windowed or full screen, fills the monitor on the page's
+`requestFullscreen`, and its window is an app window that reserves no chords.
 
 The Command translation table itself is always complete and never changes with
 fullscreen. App windows therefore send every chord in windowed and fullscreen use
