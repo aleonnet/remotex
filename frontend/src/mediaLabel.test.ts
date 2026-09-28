@@ -77,11 +77,18 @@ test("a channel count that is neither mono nor stereo still names itself", () =>
   );
 });
 
-test("the video row waits for the format, then names it", () => {
+test("the video row waits for the format, then names it and whose stream it is", () => {
   assert.equal(videoLabel(null, false), "Waiting for the video format");
-  assert.equal(videoLabel("vp09.00.40.08", false), "vp09.00.40.08");
   assert.equal(
-    videoLabel("vp09.00.40.08", true),
+    videoLabel({ decode: "vp09.00.40.08", passthrough: false }, false),
+    "vp09.00.40.08 · encoded by the gateway",
+  );
+  assert.equal(
+    videoLabel({ decode: "hev1.4.10.L150.BE.8", passthrough: true }, false),
+    "hev1.4.10.L150.BE.8 · passthrough from the remote",
+  );
+  assert.equal(
+    videoLabel({ decode: "vp09.00.40.08", passthrough: true }, true),
     "Not in use: the picture is PNG tiles",
   );
 });

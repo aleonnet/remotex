@@ -27,7 +27,7 @@ import {
   MacKeyboardTranslator,
   type TranslatedKey,
 } from "./macKeys.ts";
-import type { AudioStreamInfo } from "./mediaLabel.ts";
+import type { AudioStreamInfo, VideoStreamInfo } from "./mediaLabel.ts";
 import {
   type MosaicView,
   mosaicDensity,
@@ -501,13 +501,14 @@ export function useRemoteDesktop(
   // `status` is "connected", which the status overlay does not.
   const [videoError, setVideoError] = useState<string | null>(null);
   // The configuration string the video decoder this attachment holds was built
-  // with — the card's Video row, and the counterpart of `audioStream`.
+  // with, and whether the stream is the remote's own passed through or one the
+  // gateway encoded — the card's Video row, and the counterpart of `audioStream`.
   //
   // Kept here as well as in the worker because they are two different uses of the
   // same fact: the worker configures a `VideoDecoder` with it, and this reports what
   // was configured. Emptied with the decoder itself in `clearDesktop`, so it never
   // describes a desktop that has ended.
-  const [videoDecode, setVideoDecode] = useState<string | null>(null);
+  const [videoStream, setVideoStream] = useState<VideoStreamInfo | null>(null);
   // The render dial this session resolved to, from `connected`. Empty in the picker.
   const [renderPlan, setRenderPlan] = useState("");
   // Whether the picture arrives as PNG tiles rather than video, from `tiling`.
@@ -945,7 +946,7 @@ export function useRemoteDesktop(
       painter?.clear();
       // The decoder went with it, so what the card says about it goes too. The
       // next attachment re-announces its stream.
-      setVideoDecode(null);
+      setVideoStream(null);
       // Sound's own socket goes with this one. The gateway would keep the
       // subscription alive across a reattach — it belongs to the claim now — but this
       // browser cannot: rebuilding a decoder needs an AudioContext, and a context
@@ -1622,8 +1623,9 @@ export function useRemoteDesktop(
           // error, which arrives at `onVideoError` naming the configuration.
           painter?.setVideoFormat({ decode: msg.decode });
           // And the same string for the card, which is the only place the exact
-          // configuration is written down while the picture is working.
-          setVideoDecode(msg.decode);
+          // configuration is written down while the picture is working, with whose
+          // stream it is: only the gateway knows whether it encoded it.
+          setVideoStream({ decode: msg.decode, passthrough: msg.passthrough });
           break;
         case "clipboard": {
           // Both paths update the panel, but only unsolicited pushes mirror
@@ -2610,7 +2612,7 @@ export function useRemoteDesktop(
     // rows: the codec each decoder was built with, which the render dial does not
     // say and which nothing else on screen writes down.
     audioStream,
-    videoDecode,
+    videoStream,
     canCamera,
     cameraEnabled,
     cameraError,

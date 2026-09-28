@@ -659,7 +659,7 @@ impl VideoSink {
             self.shared.keyframe_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
         }
         if let Some(decode) = announce {
-            self.push(Pending::Msg(ServerMsg::VideoFormat { decode })).await?;
+            self.push(Pending::Msg(ServerMsg::VideoFormat { decode, passthrough: true })).await?;
         }
         let unit = VideoUnit { w, h, keyframe: passed.keyframe, data: frame, held };
         self.push(Pending::Msg(ServerMsg::Video(unit))).await?;
@@ -958,7 +958,7 @@ async fn order_loop(
         // that needs it arrives. Sent here rather than pushed, because this *is* the
         // ordered task: nothing queued behind this round can overtake it.
         if let Some(decode) = produced.format {
-            let msg = ServerMsg::VideoFormat { decode };
+            let msg = ServerMsg::VideoFormat { decode, passthrough: false };
             if frame_tx.send(msg).await.is_err() {
                 break;
             }
@@ -1203,7 +1203,7 @@ mod tests {
 
         let out = drain(&mut frame_rx, 3).await;
         assert!(
-            matches!(&out[0], ServerMsg::VideoFormat { decode } if decode == "vp09.00.40.08.01.06.06.06.00"),
+            matches!(&out[0], ServerMsg::VideoFormat { decode, passthrough: true } if decode == "vp09.00.40.08.01.06.06.06.00"),
             "{:?}",
             out[0]
         );
@@ -1243,8 +1243,8 @@ mod tests {
         let (sink, mut frame_rx) = video_sink(64, 48).await;
         let rect = Rect::from_size(0, 0, 64, 48).unwrap();
         let hevc = |keyframe| crate::stream::Passed { decode: HEVC.to_owned(), keyframe };
-        let is_vp9 = |msg: &ServerMsg| matches!(msg, ServerMsg::VideoFormat { decode } if decode.starts_with("vp09"));
-        let is_hevc = |msg: &ServerMsg| matches!(msg, ServerMsg::VideoFormat { decode } if decode == HEVC);
+        let is_vp9 = |msg: &ServerMsg| matches!(msg, ServerMsg::VideoFormat { decode, passthrough: false } if decode.starts_with("vp09"));
+        let is_hevc = |msg: &ServerMsg| matches!(msg, ServerMsg::VideoFormat { decode, passthrough: true } if decode == HEVC);
 
         // Before the stream flows: VP9 from the rectangles.
         sink.damage(rect, &[7; 64 * 48 * 3]).await.unwrap();
@@ -1418,8 +1418,8 @@ mod tests {
         sink.flush().await;
 
         let out = drain(&mut frame_rx, 2).await;
-        let ServerMsg::VideoFormat { decode } = &out[0] else {
-            panic!("the first thing a stream sends must be its format, got {:?}", out[0]);
+        let ServerMsg::VideoFormat { decode, passthrough: false } = &out[0] else {
+            panic!("the first thing a stream sends must be its format, encoded here, got {:?}", out[0]);
         };
         assert!(decode.starts_with("vp09.00."), "not a VP9 profile-0 configuration: {decode}");
         let announced = decode.clone();

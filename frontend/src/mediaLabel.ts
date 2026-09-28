@@ -97,14 +97,29 @@ export function renderLabel(plan: string, tiling: boolean): string {
   return tiling ? "PNG tiles: the desktop is past what video carries" : plan;
 }
 
+/** The wire fields of `videoFormat`. */
+export interface VideoStreamInfo {
+  decode: string;
+  // The remote's own stream, passed through untouched — wlshare's VP9, a High
+  // Performance Mac's HEVC — rather than one the gateway encoded.
+  passthrough: boolean;
+}
+
 /**
- * The Video row: the exact configuration the decoder was built with, or what the
- * row is waiting for before the stream's format has arrived. While the picture is
- * tiles no decoder is in use, whatever one was built before.
+ * The Video row: the exact configuration the decoder was built with and whose
+ * stream it decodes, or what the row is waiting for before the stream's format has
+ * arrived. While the picture is tiles no decoder is in use, whatever one was built
+ * before.
  */
-export function videoLabel(decode: string | null, tiling: boolean): string {
+export function videoLabel(
+  stream: VideoStreamInfo | null,
+  tiling: boolean,
+): string {
   if (tiling) {
     return "Not in use: the picture is PNG tiles";
   }
-  return decode ?? "Waiting for the video format";
+  if (!stream) {
+    return "Waiting for the video format";
+  }
+  return `${stream.decode} · ${stream.passthrough ? "passthrough from the remote" : "encoded by the gateway"}`;
 }

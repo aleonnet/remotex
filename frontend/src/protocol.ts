@@ -261,8 +261,10 @@ export type ControlMsg =
   //
   // `decode` is the exact WebCodecs string to configure with: `vp09.00.40.08.01.06.06.06.00`.
   // Nothing here parses a bitstream to find it out; VP9 has no parameter sets to
-  // parse.
-  | { type: "videoFormat"; decode: string }
+  // parse. `passthrough` says whose stream it is: the remote's own, passed through
+  // untouched (wlshare's VP9, a High Performance Mac's HEVC), or one the gateway
+  // encoded.
+  | { type: "videoFormat"; decode: string; passthrough: boolean }
   // Whether the remote runs macOS, discovered by the engine as it connects.
   // The browser uses it to decide whether selected local Command shortcuts stay
   // Command or become remote Control.
