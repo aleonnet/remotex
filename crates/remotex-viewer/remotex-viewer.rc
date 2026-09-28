@@ -1,3 +1,0 @@
-// The executable's icon, which Explorer shows, and which `os::with_icon` loads for its
-// windows as resource 1.
-1 ICON "icons/remotex-viewer.ico"
