@@ -2027,6 +2027,56 @@ const VIDEO_RECEIVE_BUFFER: usize = 4 << 20;
 #[cfg(feature = "apple-hp-media")]
 const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 
+/// `REMOTEX_HP_DUMP=<dir>`: the stream as it arrives, for replay outside the
+/// gateway (`tests/hp_capture.sh`). `video.h265` is every access unit the
+/// depacketizer completes, as Annex B; `audio.eld` is every AAC-ELD unit, each
+/// behind its length as a big-endian u32. Both are written before any decoder
+/// sees them, whether the session decodes the picture or passes it on.
+#[cfg(feature = "apple-hp-media")]
+struct MediaDump {
+    video: std::io::BufWriter<std::fs::File>,
+    audio: std::io::BufWriter<std::fs::File>,
+}
+
+#[cfg(feature = "apple-hp-media")]
+impl MediaDump {
+    fn from_env() -> Option<Self> {
+        let dir = std::path::PathBuf::from(std::env::var_os("REMOTEX_HP_DUMP")?);
+        let open = |name: &str| {
+            std::fs::File::create(dir.join(name))
+                .map(std::io::BufWriter::new)
+                .with_context(|| format!("create {}", dir.join(name).display()))
+        };
+        let opened = std::fs::create_dir_all(&dir)
+            .with_context(|| format!("create {}", dir.display()))
+            .and_then(|()| Ok(Self { video: open("video.h265")?, audio: open("audio.eld")? }));
+        match opened {
+            Ok(dump) => {
+                log::info!("vnc: dumping the media stream to {} (REMOTEX_HP_DUMP)", dir.display());
+                Some(dump)
+            }
+            Err(e) => {
+                log::warn!("vnc: not dumping the media stream: {e:#}");
+                None
+            }
+        }
+    }
+
+    fn video(&mut self, unit: &AccessUnit) -> std::io::Result<()> {
+        for nal in unit {
+            self.video.write_all(&[0, 0, 0, 1])?;
+            self.video.write_all(nal)?;
+        }
+        Ok(())
+    }
+
+    fn audio(&mut self, unit: &[u8]) -> std::io::Result<()> {
+        let len = u32::try_from(unit.len()).map_err(std::io::Error::other)?;
+        self.audio.write_all(&len.to_be_bytes())?;
+        self.audio.write_all(unit)
+    }
+}
+
 /// The UDP side: RTCP out on both legs once a second and rate reports on the
 /// picture's every [`RATE_FEEDBACK`], video in and depacketized, sound in and
 /// decoded. It runs until the session drops it, and stops early only
@@ -2148,6 +2198,7 @@ impl Receiver {
         let mut warned_silent = false;
         let mut datagram = vec![0u8; 65_536];
         let mut sound_datagram = vec![0u8; 2048];
+        let mut dump = MediaDump::from_env();
         let failure = loop {
             let mut want_keyframe = false;
             tokio::select! {
@@ -2197,6 +2248,12 @@ impl Receiver {
                             let now = Some(std::time::Instant::now());
                             *self.sounded.lock().unwrap() = now;
                             *self.sound_heard.lock().unwrap() = now;
+                            if let Some(d) = dump.as_mut()
+                                && let Err(e) = d.audio(&data[header.payload.0..header.payload.1])
+                            {
+                                log::warn!("vnc: stopped dumping the media stream: {e}");
+                                dump = None;
+                            }
                             if let Some(sound) = sound
                                 && let Err(e) = sound.push(&header, &data[header.payload.0..header.payload.1])
                             {
@@ -2254,23 +2311,31 @@ impl Receiver {
                     match depacketizer.push(&header, payload) {
                         Depacketized::Pending => {}
                         Depacketized::Lost => want_keyframe = true,
-                        Depacketized::Unit(unit) => match onward.send(unit) {
-                            Sent::Queued => pictures += 1,
-                            Sent::Full(depth) => {
-                                behind += 1;
-                                if behind <= 3 {
-                                    log::warn!(
-                                        "vnc: {} fell {depth} pictures behind the Mac; \
-                                         dropping to its next keyframe",
-                                        onward.name()
-                                    );
-                                }
-                                depacketizer.resync();
-                                want_keyframe = true;
+                        Depacketized::Unit(unit) => {
+                            if let Some(d) = dump.as_mut()
+                                && let Err(e) = d.video(&unit)
+                            {
+                                log::warn!("vnc: stopped dumping the media stream: {e}");
+                                dump = None;
                             }
-                            Sent::Unready => want_keyframe = true,
-                            Sent::Stopped => break anyhow::anyhow!("{} stopped", onward.name()),
-                        },
+                            match onward.send(unit) {
+                                Sent::Queued => pictures += 1,
+                                Sent::Full(depth) => {
+                                    behind += 1;
+                                    if behind <= 3 {
+                                        log::warn!(
+                                            "vnc: {} fell {depth} pictures behind the Mac; \
+                                             dropping to its next keyframe",
+                                            onward.name()
+                                        );
+                                    }
+                                    depacketizer.resync();
+                                    want_keyframe = true;
+                                }
+                                Sent::Unready => want_keyframe = true,
+                                Sent::Stopped => break anyhow::anyhow!("{} stopped", onward.name()),
+                            }
+                        }
                     }
                 }
                 () = keyframe_wanted.notified() => {
