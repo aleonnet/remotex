@@ -167,7 +167,8 @@ mod windows {
 
     /// How many instances of the pipe wait for a client at once: a listen
     /// backlog. A page load opens several connections together, and each takes an
-    /// instance; one waiting instance would turn all but the first away busy.
+    /// instance until its replacement is made; a client that finds none waiting
+    /// retries for [`BUSY_PATIENCE`].
     const BACKLOG: usize = 4;
 
     /// How long a client keeps asking a pipe whose every instance is busy.
@@ -206,12 +207,13 @@ mod windows {
         }
     }
 
-    /// The pipe, with [`BACKLOG`] instances waiting for clients.
+    /// The pipe, with up to [`BACKLOG`] instances waiting for clients.
     ///
-    /// Each waiting instance is a task that hands its connection over and puts a
-    /// fresh instance in its place *before* doing so, so the name never has fewer
-    /// than [`BACKLOG`] - 1 instances listening — and never none, which would free
-    /// it for anybody to create. Dropping the listener ends the tasks and closes the
+    /// Each waiting instance is a task that, once a client connects, creates the
+    /// instance to take its place before anything it does can wait, so its slot is
+    /// listening again whenever it pauses to hand the connection over. A slot whose
+    /// replacement cannot be created hands the connection over first and stays
+    /// empty while it retries. Dropping the listener ends the tasks and closes the
     /// pipe.
     pub struct WorkerListener {
         name: String,
@@ -278,15 +280,26 @@ mod windows {
     }
 
     async fn wait_for_clients(
-        mut server: NamedPipeServer,
+        first: NamedPipeServer,
         name: String,
         security: Arc<SecurityDescriptor>,
         accepted: mpsc::Sender<NamedPipeServer>,
     ) {
+        let mut waiting = Some(first);
         loop {
+            let server = match waiting.take() {
+                Some(server) => server,
+                None => replacement(&name, &security).await,
+            };
             let connected = server.connect().await;
-            let next = replacement(&name, &security).await;
-            let server = std::mem::replace(&mut server, next);
+            // Synchronously, before the send below can wait on a busy accept loop.
+            waiting = match create(&name, &security, false) {
+                Ok(next) => Some(next),
+                Err(error) => {
+                    log::warn!("cannot create another instance of {name}: {error}");
+                    None
+                }
+            };
             match connected {
                 Ok(()) => {
                     if accepted.send(server).await.is_err() {
@@ -294,12 +307,14 @@ mod windows {
                     }
                 }
                 // A client that went away before it was connected. The instance is
-                // spent either way, and its replacement is already waiting.
+                // spent either way.
                 Err(error) => log::debug!("a client left {name} before it was served: {error}"),
             }
         }
     }
 
+    /// An instance for a slot whose last replacement could not be created,
+    /// retried once a second.
     async fn replacement(name: &str, security: &SecurityDescriptor) -> NamedPipeServer {
         loop {
             match create(name, security, false) {
