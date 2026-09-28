@@ -19,7 +19,7 @@ resolver = "3"
 members = ["crates/remotex-viewer"]
 
 [workspace.package]
-version = "0.0.281"
+version = "0.0.282"
 
 [package]
 name = "remotex"
