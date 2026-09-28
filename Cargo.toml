@@ -7,6 +7,18 @@
 # Note for anyone editing this file: frontend/vite.config.ts regexes the *first*
 # line matching `^version = "…"` out of this manifest to stamp the login screen,
 # so the package's `version` must stay the first such line.
+#
+# The workspace's one other member is the in-session video POC's agent, a
+# Windows-only test binary that root-level cargo commands never build: it is a
+# member so that it codes with the gateway's desktop-vp9, from
+# `[workspace.dependencies]` below, and resolves it through this Cargo.lock.
+[workspace]
+resolver = "3"
+members = ["tests/dvc-video-poc/agent"]
+
+[workspace.dependencies]
+desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.5" }
+
 [package]
 name = "remotex"
 version = "0.0.286"
@@ -77,7 +89,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # a thing no check of this gateway should have to have. Do not restore a source build,
 # a vcpkg dependency, or bindgen. libvpx asserts nothing — it returns error codes —
 # which is why the encoder is a plain `?` path under `panic = "abort"`.
-desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.5" }
+desktop-vp9.workspace = true
 # YUV→RGB for the HEVC pictures High Performance's media stream decodes to
 # (src/vnc_apple_media.rs). Pure Rust with AVX2 and NEON paths chosen at run time —
 # no C, no assembler, the same bargain as above.

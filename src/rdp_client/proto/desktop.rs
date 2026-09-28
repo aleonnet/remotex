@@ -78,7 +78,7 @@ fn refresh(user: u16, share_id: u32, width: u16, height: u16) -> Vec<u8> {
 
 /// A Suppress Output PDU. `Some` turns updates back on for that desktop; `None`
 /// turns them off.
-fn suppress(user: u16, share_id: u32, desktop: Option<(u16, u16)>) -> Vec<u8> {
+pub fn suppress(user: u16, share_id: u32, desktop: Option<(u16, u16)>) -> Vec<u8> {
     let mut w = Writer::with_capacity(12);
     w.u8(if desktop.is_some() { ALLOW } else { 0 });
     w.zeros(3);

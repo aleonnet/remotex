@@ -19,6 +19,10 @@ pub(super) enum Command {
     Input(Event),
     /// Ask the server to repaint the whole desktop.
     Refresh,
+    /// POC: Suppress Output, off (`allow: false`) or back on.
+    SuppressOutput { allow: bool },
+    /// POC: stop acknowledging graphics frames, or clear the held frame and resume.
+    WithholdAcks { withhold: bool },
     /// Ask the server for a new desktop size, over Display Control.
     Resize { width: u32, height: u32, scale_percent: u32 },
     /// Something for the clipboard channel, in the three shapes a clipboard has.
@@ -112,6 +116,18 @@ impl Input {
     /// Ask the server to repaint the whole desktop.
     pub fn refresh(&self) {
         self.push(Command::Refresh);
+    }
+
+    /// POC: turn the server's display updates off (`false`) or back on (`true`),
+    /// with a Suppress Output PDU.
+    pub fn suppress_output(&self, allow: bool) {
+        self.push(Command::SuppressOutput { allow });
+    }
+
+    /// POC: stop acknowledging graphics pipeline frames (`true`), or clear the
+    /// newest held frame with the protocol's suspend sentinel and resume (`false`).
+    pub fn withhold_frame_acks(&self, withhold: bool) {
+        self.push(Command::WithholdAcks { withhold });
     }
 
     /// Ask the server to change the desktop size.

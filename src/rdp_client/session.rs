@@ -94,7 +94,14 @@ pub struct Connect {
     /// there records — and feeds it the PCM handed to [`Session::microphone`] while it
     /// does. `None` refuses the channel by name.
     pub microphone: Option<Box<dyn MicrophoneSink>>,
+    /// POC: where the messages of the `remotex.video` dynamic channel go — the channel
+    /// an in-session agent opens with `WTSVirtualChannelOpenEx`. `None` refuses it by
+    /// name like any other channel nobody here listens on.
+    pub video: Option<mpsc::UnboundedSender<Vec<u8>>>,
 }
+
+/// POC: the name the in-session agent opens its channel under.
+pub const VIDEO_CHANNEL: &str = "remotex.video";
 
 /// Where a session's redirected sound goes.
 ///
@@ -545,6 +552,13 @@ struct Active<'a> {
     capture: Option<Capture>,
     /// The microphone and where the host's decisions about it go, for a session that asked.
     recorder: Option<Recorder>,
+    /// POC: where the agent's video channel's messages go, for a session that asked.
+    video: Option<mpsc::UnboundedSender<Vec<u8>>>,
+    /// POC: whether graphics frames go unacknowledged, and the newest acknowledgement
+    /// held back. Only the newest is needed to resume with the most recently decoded
+    /// frame, and keeping one bounds this deliberately nonstandard Windows probe.
+    withhold_acks: bool,
+    held_ack: Option<(u32, u32)>,
     /// Device redirection's channel, named for the sound's sake alone, and its
     /// handshake — see [`rdpdr`].
     devices: Option<Joined>,
@@ -622,6 +636,8 @@ struct Dynamics {
     audio: bool,
     /// The sound channel, once the server has opened it.
     sound: Option<u32>,
+    /// POC: the agent's video channel, once the server has opened it.
+    video: Option<u32>,
 }
 
 /// The sound conversation, and where its buffers go.
@@ -788,6 +804,9 @@ impl<'a> Active<'a> {
             sound: sink.map(|sink| Sound { proto: rdpsnd::Rdpsnd::new(), sink }),
             capture: camera.map(|camera| Capture { proto: rdpecam::Rdpecam::new(&camera.name), sink: camera.sink }),
             recorder: microphone.map(|sink| Recorder { proto: rdpeai::Rdpeai::new(), sink }),
+            video: config.video.clone(),
+            withhold_acks: false,
+            held_ack: None,
             devices,
             rdpdr: rdpdr::Rdpdr::new(),
             share: Share::from(&demand),
@@ -997,7 +1016,7 @@ impl<'a> Active<'a> {
     /// goes unanswered is never opened.
     async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
         let (replies, updates) = {
-            let Self { chunks, incoming, dynamics, graphics, sound, capture, recorder, framebuffer, .. } = self;
+            let Self { chunks, incoming, dynamics, graphics, sound, capture, recorder, video, held_ack, framebuffer, .. } = self;
             let pdu = match chunks.push(payload)? {
                 Chunk::Whole(pdu) => pdu,
                 Chunk::Partial => return Ok(()),
@@ -1029,6 +1048,9 @@ impl<'a> Active<'a> {
                     debug!("rdp: the host closed the graphics channel");
                     dynamics.graphics = None;
                     *graphics = Some(Graphics::new());
+                    // A held acknowledgement names this channel's frame; a channel
+                    // opened again numbers its own.
+                    *held_ack = None;
                     (vec![dvc::close(channel)], Vec::new())
                 }
                 // The sound, on the channel a current host prefers for it. Every
@@ -1105,6 +1127,23 @@ impl<'a> Active<'a> {
                     let mut replies = recorder.settle(channel, turn)?;
                     replies.push(dvc::close(channel));
                     (replies, Vec::new())
+                }
+                // POC: the in-session agent's video channel.
+                dvc::Message::Create { channel, name } if name == VIDEO_CHANNEL && video.is_some() => {
+                    info!("rdp: the host opened {VIDEO_CHANNEL} on dynamic channel {channel}");
+                    dynamics.video = Some(channel);
+                    (vec![dvc::create_response(channel, dvc::ACCEPTED)], Vec::new())
+                }
+                dvc::Message::Data { channel, data } if dynamics.video == Some(channel) => {
+                    if let Some(video) = video {
+                        let _ = video.send(data.to_vec());
+                    }
+                    (Vec::new(), Vec::new())
+                }
+                dvc::Message::Close { channel } if dynamics.video == Some(channel) => {
+                    info!("rdp: the host closed {VIDEO_CHANNEL}");
+                    dynamics.video = None;
+                    (vec![dvc::close(channel)], Vec::new())
                 }
                 message => (answer(message, dynamics)?, Vec::new()),
             }
@@ -1209,7 +1248,23 @@ impl<'a> Active<'a> {
         let (Some(channel), Some(dynamic)) = (self.dynamics.graphics, self.dynamic) else {
             return Ok(()); // the channel closed under the frame; nothing to answer on
         };
+        if self.withhold_acks {
+            self.held_ack = Some((frame, decoded));
+            return Ok(());
+        }
         let ack = gfx_proto::frame_acknowledge(frame, decoded);
+        self.write_channel(dynamic, &dvc::data(channel, &ack)?).await
+    }
+
+    /// Resume after the POC deliberately left Windows' graphics frames
+    /// unacknowledged. The suspend sentinel acknowledges the most recently decoded
+    /// frame and makes the server clear every outstanding frame without waiting on
+    /// it. The next ordinary EndFrame acknowledgement opts back in.
+    async fn resume_frame_acknowledgements(&mut self, frame: u32, decoded: u32) -> Result<()> {
+        let (Some(channel), Some(dynamic)) = (self.dynamics.graphics, self.dynamic) else {
+            return Ok(());
+        };
+        let ack = gfx_proto::suspend_frame_acknowledgement(frame, decoded);
         self.write_channel(dynamic, &dvc::data(channel, &ack)?).await
     }
 
@@ -1433,6 +1488,16 @@ impl<'a> Active<'a> {
                     match other {
                         Command::Shutdown => return Ok(true),
                         Command::Refresh => self.refresh().await?,
+                        Command::SuppressOutput { allow } => self.suppress_output(allow).await?,
+                        Command::WithholdAcks { withhold } => {
+                            info!("rdp: withholding graphics frame acknowledgements {withhold}, latest held {}", self.held_ack.is_some());
+                            self.withhold_acks = withhold;
+                            if !withhold
+                                && let Some((frame, decoded)) = self.held_ack.take()
+                            {
+                                self.resume_frame_acknowledgements(frame, decoded).await?;
+                            }
+                        }
                         Command::Resize { width, height, scale_percent } => {
                             self.pending_resize = Some((width, height, scale_percent));
                             self.send_layout().await?;
@@ -1516,6 +1581,14 @@ impl<'a> Active<'a> {
             self.write_io(&pdu).await?;
         }
         Ok(())
+    }
+
+    /// POC: turn the server's display updates off, or back on for the whole desktop.
+    async fn suppress_output(&mut self, allow: bool) -> Result<()> {
+        let desktop = allow.then(|| (narrow(self.share.width), narrow(self.share.height)));
+        info!("rdp: Suppress Output, allow {allow}, server offers it {}", self.share.suppress_output);
+        let pdu = desktop::suppress(self.user, self.share.id, desktop);
+        self.write_io(&pdu).await
     }
 
     /// Leave the way a client that meant to leaves: an MCS Disconnect Provider

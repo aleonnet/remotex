@@ -854,6 +854,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "dvc-video-agent"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "desktop-vp9",
+ "windows",
+]
+
+[[package]]
 name = "eax"
 version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
