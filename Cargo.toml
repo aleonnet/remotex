@@ -16,7 +16,7 @@
 resolver = "3"
 
 [workspace.package]
-version = "0.0.277"
+version = "0.0.278"
 
 [package]
 name = "remotex"
