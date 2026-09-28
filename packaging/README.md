@@ -61,7 +61,7 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `REMOTEX_CONTAINER_FEATURES` |
 | `publish-full-image.sh` | build a release tag's linux/amd64 image with `apple-hp-media`, from this checkout, and push it to the private `ghcr.io/andrewtheguy/remotex-full` |
-| `publish-windows-viewer.sh` | build a release tag's `remotex-viewer.exe` on `windows-ci-build` (`build-windows-viewer.ps1`) and attach it to that tag's release in the private `andrewtheguy/remotex-viewer-releases` |
+| `publish-windows-viewer.sh` | build a release tag's viewer installer from `windows/remotex-viewer.wxs` on `windows-ci-build` (`build-windows-viewer.ps1`, which installs and removes it too) and attach it to that tag's release in the private `andrewtheguy/remotex-viewer-releases` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 
@@ -169,11 +169,14 @@ are directed to install.
 
 `remotex-viewer` is in no public release either: on Windows it links the same
 libavcodec archive to decode HEVC 4:4:4. `publish-windows-viewer.sh TAG` builds a
-release tag's `remotex-viewer.exe` on `windows-ci-build` and attaches it to a release
-of the same name in the private `andrewtheguy/remotex-viewer-releases`, which it
+release tag's installer, `remotex-viewer-VERSION-windows-x86_64.msi`, on
+`windows-ci-build`, installs and removes it there, and attaches it to a release of
+the same name in the private `andrewtheguy/remotex-viewer-releases`, which it
 refuses to publish to unless that repository is private. `windows-ci-build` has no
 `gh`, so the script downloads the archive release the tag's viewer pins, checks it
 against that release's `SHA256SUMS`, and sends it there with the tag's tree. Run it
 after the release workflow has created the tag, with `git fetch --tags` first. The
-executable needs the WebView2 runtime and the Visual C++ runtime; the archive is
-built against the DLL C runtime, so the viewer cannot link it statically.
+package installs the viewer under Program Files with a Start menu shortcut, and the
+Visual C++ runtime beside it: the archive is built against the DLL C runtime, so the
+viewer cannot link it statically, and the package does not rely on a machine having
+the redistributable. The WebView2 runtime ships with Windows.
