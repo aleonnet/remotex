@@ -144,7 +144,7 @@ High Performance is not made for a slow link. Apple's
 asks for high bandwidth and consistently low latency, recommends a wired
 connection, and names 75 Mbit/s for a single 4K display, its virtual display's
 largest (3840×2160, within the gateway's ceiling). So what a passed stream
-([Apple's HEVC, passed through](architecture.md#apples-hevc-passed-through)) is
+([Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through)) is
 adapted for next is resolution: carrying a 4K display, not a link that cannot
 carry the stream.
 
@@ -166,7 +166,7 @@ carry the stream.
 None of it has been measured at 4K.
 
 A slow link is not a passed stream's to answer. A browser on one is served by a
-target without `hevc_passthrough`, whose VP9 the adaptive walk lowers; a passed
+target without `media_passthrough`, whose VP9 the adaptive walk lowers; a passed
 session is not switched to VP9 for it, though the gaps' switch would make that
 possible. A brief stall stays what it is: the Mac's units predict from every one
 before, so none can be dropped alone, and a full queue drops to the next IDR and

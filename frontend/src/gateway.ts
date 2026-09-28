@@ -50,7 +50,7 @@ export function gatewaySocketUrl(
   client?: {
     screen: { w: number; h: number; scale: number; fit: boolean };
     chroma: VideoChroma;
-    hevc: boolean;
+    appleMedia: boolean;
   },
 ): string {
   const url = new URL(gatewayUrl(path));
@@ -62,7 +62,7 @@ export function gatewaySocketUrl(
     url.searchParams.set("scale", String(client.screen.scale));
     url.searchParams.set("fit", String(client.screen.fit));
     url.searchParams.set("chroma", client.chroma);
-    url.searchParams.set("hevc", String(client.hevc));
+    url.searchParams.set("apple_media", String(client.appleMedia));
   }
   return url.toString();
 }

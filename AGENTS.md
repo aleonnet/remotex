@@ -104,9 +104,12 @@ documentation.
   untouched where a rule below allows it; transcoded, it is only ever to VP9. The
   browser is asked two questions, each once at page load and stated on the session
   socket: which VP9 profile its decoder takes, for `render_chroma = "auto"`, and
-  whether it takes a High Performance Mac's HEVC, for `hevc_passthrough`. The
-  gateway *selects* on the answers and never refuses a client for them. Do not grow them into a
-  capability negotiation or a reason to turn a session away. Preserve the announced
+  whether it decodes a High Performance Mac's HEVC and AAC-ELD, for
+  `media_passthrough`. The gateway *selects* on the answers and never refuses a
+  client for them, save a build without the `apple-hp-media` decoders facing a
+  browser that cannot take the Mac's stream, which has nothing else to send. Do
+  not grow them into a capability negotiation or another reason to turn a session
+  away. Preserve the announced
   configuration and color-space behavior described in
   [The codec](docs/architecture.md#the-codec) and
   [Choosing a chroma](docs/architecture.md#choosing-a-chroma).
@@ -126,7 +129,8 @@ documentation.
   [wlshare's stream, passed through](docs/architecture.md#wlshares-stream-passed-through).
 - Remote audio uses its own `/ws/audio` socket and queue; opening the socket is
   the subscription. Do not put audio on the session socket. Remote audio is Opus
-  only; there is no codec key, and do not add another encoder or a passthrough.
+  encoded here, save a High Performance Mac's AAC-ELD under `media_passthrough`;
+  there is no codec key, and do not add another encoder or another passthrough.
   Preserve claim-bound eviction and the source-format/resampling boundaries in
   [Audio frames](docs/architecture.md#audio-frames).
 - Generic VNC audio is wlshare's audio extension — FLAC frames, with the QEMU
@@ -147,7 +151,10 @@ documentation.
   carries sound and takes no `audio` key. While the sound leg runs the Mac mutes
   its own output, so it plays nothing to an AirPlay speaker. Its two decoders
   are the non-default `apple-hp-media` feature, which no release artifact
-  enables; a build without it refuses the subtype. Zlib carries its picture only
+  enables; a build without it takes the subtype only with `media_passthrough`,
+  and ends the session of a browser that cannot decode the stream before it
+  dials the Mac. Only the decoders sit behind the feature: the offers, SRTP, the
+  receiver and passing compile in every build. Zlib carries its picture only
   until the stream is up and across display changes, and a stream that fails
   ends the session, as in Apple's viewer. Its offer carries Apple's bitrate
   entries and the gateway sends Apple's rate reports, with the delay measured to
@@ -163,13 +170,18 @@ documentation.
   everything but the display and its resizing follows `ard`. Call it unofficial
   wherever it is named, and tested with macOS 26 only; do not present it as a
   mode of Apple's viewer or grow it into a third subtype.
-- `hevc_passthrough` on `ard-high-performance` passes the Mac's HEVC access units,
-  as the Mac sent them, to a browser that said its decoder takes them, for a LAN;
-  every other browser is sent VP9 as without the key. The Mac's ZRLE rectangles
-  fill the stream's gaps as VP9 encoded here, each switch between the two starting
-  at a keyframe, and a PLI is a passed stream's repaint. Keep it
-  to that stream: no other remote's HEVC, and a passed unit is never altered. See
-  [Apple's HEVC, passed through](docs/architecture.md#apples-hevc-passed-through).
+- `media_passthrough` on `ard-high-performance` passes the Mac's media stream, as
+  the Mac sent it, to a browser that said it decodes both halves, for a LAN: its
+  HEVC access units on the session socket and its AAC-ELD units on `/ws/audio`.
+  Both pass or neither does; every other browser is sent VP9 and Opus as without
+  the key. The Mac's ZRLE rectangles fill the stream's gaps as VP9 encoded here,
+  each switch between the two starting at a keyframe, and a PLI is a passed
+  stream's repaint. The page answers for the sound by decoding one of the Mac's
+  units in each form `isConfigSupported` accepts, since it accepts forms that do not
+  decode, and plays it in the form of the
+  configuration that decoded (`frontend/src/appleMedia.ts`). Keep it to that
+  stream: no other remote's HEVC or sound, and a passed unit is never altered.
+  See [Apple's media stream, passed through](docs/architecture.md#apples-media-stream-passed-through).
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
   on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own
   `/ws/camera` socket, is explicit per session, and is bound to both claim and

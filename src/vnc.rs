@@ -1511,8 +1511,8 @@ pub async fn run(
     };
     // Every browser is sent wlshare's own VP9 as it comes when the server is wlshare,
     // asked for at the plan's chroma, dial and walk; any other server is encoded here
-    // from ZRLE. A browser that takes the Mac's HEVC is sent that, on a target that
-    // passes it.
+    // from ZRLE. A browser that decodes the Mac's stream is sent its HEVC, on a
+    // target that passes it.
     let sink = VideoSink::new("vnc", frame_tx, plan, feedback, tiles);
     session(config, display, plan, input_rx, audio, camera, microphone, &sink).await;
     sink.finish().await;
@@ -1529,6 +1529,21 @@ async fn session(
     microphone: Option<Arc<crate::mic::MicBridge>>,
     sink: &VideoSink,
 ) {
+    // A build without the decoders has nothing to send a browser that cannot take
+    // the Mac's stream, and says so before dialling the Mac rather than after its
+    // offer: the config accepts such a target only with `media_passthrough`.
+    if config.media_stream() && !plan.apple_media && !cfg!(feature = "apple-hp-media") {
+        warn!("vnc: refusing a browser that does not decode the Mac's stream, in a build without its decoders");
+        let _ = sink
+            .msg(ServerMsg::Error {
+                message: "This browser does not decode the Mac's HEVC and AAC-ELD, and this \
+                          remotex was built without the apple-hp-media feature, whose decoders \
+                          would send it VP9 and Opus instead."
+                    .to_owned(),
+            })
+            .await;
+        return;
+    }
     // The budget covers the RFB handshake, which can stall on a host that accepts
     // the connection and then says nothing — no socket timeout catches that. The
     // TCP connect has its own deadline inside the helper, so a slow one is
@@ -1799,8 +1814,8 @@ async fn connect(
             read_security_result(&mut reader).await?;
             sock.write_all(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut reader).await?;
-            let pass_hevc = plan.apple_hevc;
-            apple_preface(reader, sock, server, macos, wrap_key, config, display, addresses, pass_hevc).await
+            let pass_media = plan.apple_media;
+            apple_preface(reader, sock, server, macos, wrap_key, config, display, addresses, pass_media).await
         }
     }
 }
@@ -2165,7 +2180,7 @@ async fn apple_preface(
     config: &TargetConfig,
     display: Option<HostDisplay>,
     (peer, local): (std::net::SocketAddr, std::net::SocketAddr),
-    pass_hevc: bool,
+    pass_media: bool,
 ) -> anyhow::Result<Connected> {
     let virtual_display = config.has_virtual_display();
     let media_stream = config.media_stream();
@@ -2241,7 +2256,7 @@ async fn apple_preface(
         macos,
         apple: true,
         poll: true,
-        media: media_stream.then(|| MediaStream::new(peer, local, pass_hevc)),
+        media: media_stream.then(|| MediaStream::new(peer, local, pass_media)),
         passthrough: None,
     })
 }
@@ -6903,12 +6918,12 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_hevc: false };
+        let walked = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false };
         assert_eq!(
             with_wlshare_vp9(&rest, walked),
             [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_WLSHARE_VP9_SUBSAMPLED, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
         );
-        let held = RenderPlan { quality: 90, adaptive: false, chroma: Chroma::Full, apple_hevc: false };
+        let held = RenderPlan { quality: 90, adaptive: false, chroma: Chroma::Full, apple_media: false };
         assert_eq!(
             with_wlshare_vp9(&rest, held),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
@@ -7915,7 +7930,7 @@ mod tests {
             quality: 60,
             adaptive: false,
             chroma: crate::config::Chroma::Subsampled,
-            apple_hevc: false,
+            apple_media: false,
         };
         Arc::new(Listing::new(rfb38_encoding_list(false, false, false, false), plan))
     }
@@ -7948,7 +7963,7 @@ mod tests {
             quality: 60,
             adaptive: false,
             chroma: crate::config::Chroma::Subsampled,
-            apple_hevc: false,
+            apple_media: false,
         };
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::None);
         // Larger than any desktop these tests paint, so a rectangle lands in the
@@ -10449,7 +10464,7 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Full, apple_hevc: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Full, apple_media: false };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::Rects);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();

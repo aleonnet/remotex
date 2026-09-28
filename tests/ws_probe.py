@@ -239,10 +239,10 @@ async def main() -> int:
         "display list, which a generic VNC server never sends",
     )
     parser.add_argument(
-        "--hevc",
+        "--apple-media",
         action="store_true",
-        help="state that this client's decoder takes a High Performance Mac's HEVC, "
-        "which a target with hevc_passthrough then passes it in place of VP9",
+        help="state that this client decodes a High Performance Mac's HEVC and AAC-ELD, "
+        "which a target with media_passthrough then passes it in place of VP9 and Opus",
     )
     parser.add_argument(
         "--records",
@@ -268,9 +268,9 @@ async def main() -> int:
 
     # The session socket requires the browser's decoder answers; the probe stands in
     # for a decoder that takes VP9 profile 1, as a desktop browser does, and takes the
-    # Mac's HEVC only with --hevc.
-    hevc = "true" if args.hevc else "false"
-    url = f"ws://127.0.0.1:{args.port}/ws?session={token}&chroma=444&hevc={hevc}"
+    # Mac's stream only with --apple-media.
+    apple_media = "true" if args.apple_media else "false"
+    url = f"ws://127.0.0.1:{args.port}/ws?session={token}&chroma=444&apple_media={apple_media}"
     # No cap on a message, as a browser has none: a tile of a whole desktop is one
     # batch, which a 2x screen puts past the library's 1 MiB default.
     async with websockets.connect(

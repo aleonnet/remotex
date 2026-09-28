@@ -6,11 +6,15 @@
 // (AUDIO_NEEDS_GESTURE). That WebCodecs exists at all is
 // not a question asked here: it is the client's entry condition (preflight.ts).
 
+import { APPLE_ELD_CODEC, appleEldConfig } from "./appleMedia.ts";
 import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
 
 /** What `audioFormat` said, which is everything needed to play the packets. */
 export interface AudioFormat {
-  /** `"opus"`, the WebCodecs codec string. */
+  /**
+   * The WebCodecs codec string: `"opus"`, or `"mp4a.40.39"` for a High Performance
+   * Mac's AAC-ELD passed as it came.
+   */
   codec: string;
   /**
    * The rate the packets are at: 48 kHz, because that is what the gateway
@@ -19,9 +23,12 @@ export interface AudioFormat {
    */
   sampleRate: number;
   channels: number;
-  /** Samples in one packet at `sampleRate`: 960. */
+  /** Samples in one packet at `sampleRate`: 960 for Opus, 480 for the Mac's AAC-ELD. */
   packetFrames: number;
-  /** `OpusHead`, verbatim: WebCodecs takes it as the config's `description`. */
+  /**
+   * The decoder's configuration: `OpusHead`, verbatim, which WebCodecs takes as the
+   * config's `description`, or the Mac's AudioSpecificConfig.
+   */
   head: Uint8Array;
 }
 
@@ -149,6 +156,10 @@ export function createAudioContext(): AudioContext {
 }
 
 function decoderConfig(format: AudioFormat): AudioDecoderConfig {
+  // The Mac's own sound, in the form this browser was found to decode it at load.
+  if (format.codec === APPLE_ELD_CODEC) {
+    return appleEldConfig(format);
+  }
   return {
     codec: format.codec,
     sampleRate: format.sampleRate,

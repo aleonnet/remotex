@@ -4,6 +4,12 @@
 //! complete buffer when a listener falls behind. Encoding happens only while a
 //! client is attached; quiet remotes emit nothing. A buffer is turned into Opus
 //! packets at the rate the target's [`AudioPlan`] holds.
+//!
+//! The one exception is a High Performance Mac's sound passed to a browser that
+//! decodes it ([`crate::config::TargetConfig::media_passthrough`]): the same queue
+//! then carries the Mac's own AAC-ELD units ([`AudioBridge::unit`]), and the
+//! listener hands them on as packets with no encoder behind them
+//! ([`AudioListener::into_passed`]).
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -154,6 +160,13 @@ impl AudioBridge {
     /// free, and everything downstream shares it instead of copying it.
     pub fn wave(&self, samples: Vec<u8>) {
         let _ = self.waves.send(Bytes::from(samples));
+    }
+
+    /// Queue one already-encoded unit of a passed stream, for a listener built
+    /// with [`AudioListener::into_passed`]. The same queue and the same dropping
+    /// as [`Self::wave`]: a unit is one packet, and nothing after it depends on it.
+    pub fn unit(&self, unit: Vec<u8>) {
+        let _ = self.waves.send(Bytes::from(unit));
     }
 
     /// How many listeners are reading this queue.
@@ -351,6 +364,58 @@ impl AudioListener {
     }
 }
 
+impl AudioListener {
+    /// Everything the client has to be told about a passed stream, and a live-only
+    /// stream of its units, each already a packet: no encoder, no walk and no
+    /// silence to shed, since what arrives is what the remote coded. Every unit
+    /// already queued when one is read goes in the same batch.
+    pub fn into_passed(self, format: PassedFormat) -> EncodedAudio<impl Stream<Item = Vec<Bytes>>> {
+        let stream = futures_util::stream::unfold(self.waves, |mut units| async move {
+            loop {
+                match units.recv().await {
+                    Ok(unit) => {
+                        let mut batch = vec![unit];
+                        while let Ok(unit) = units.try_recv() {
+                            batch.push(unit);
+                        }
+                        return Some((batch, units));
+                    }
+                    // As for PCM: skipping forward is the point, and each unit
+                    // decodes on its own.
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        debug!("audio: listener fell behind, {dropped} passed unit(s) dropped");
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                }
+            }
+        });
+        EncodedAudio {
+            codec: format.codec,
+            sample_rate: format.sample_rate,
+            channels: format.channels,
+            packet_frames: format.packet_frames,
+            head: format.head.to_vec(),
+            signals: None,
+            packets: stream,
+        }
+    }
+}
+
+/// A stream a remote codes itself and the gateway passes as it came: what the
+/// client configures its decoder from, since there is no encoder here to say.
+#[derive(Clone, Copy, Debug)]
+pub struct PassedFormat {
+    /// The WebCodecs codec string naming the stream.
+    pub codec: &'static str,
+    pub sample_rate: u32,
+    pub channels: u16,
+    /// Samples per unit at [`Self::sample_rate`].
+    pub packet_frames: u32,
+    /// The decoder's configuration, as the codec's WebCodecs registration defines
+    /// the `description`.
+    pub head: &'static [u8],
+}
+
 /// Whether a wave buffer is silence: every 16-bit sample within one dither step
 /// of zero. Exact zeros are what a paused player and an idle desktop actually
 /// produce; the ±2 margin is for a remote that dithers its output.
@@ -363,23 +428,41 @@ fn is_silence(pcm: &[u8]) -> bool {
 
 /// A configured stream, and everything the client needs to play it.
 pub struct EncodedAudio<S> {
-    /// The WebCodecs codec string the client configures its decoder with: `opus`.
+    /// The WebCodecs codec string the client configures its decoder with: `opus`,
+    /// or a passed stream's own ([`PassedFormat::codec`]).
     pub codec: &'static str,
     /// The rate the client plays at: [`crate::pcm48::SAMPLE_RATE`], because that
-    /// is what the encoder resampled to.
+    /// is what the encoder resampled to, or a passed stream's own.
     pub sample_rate: u32,
     pub channels: u16,
-    /// Samples per packet at [`Self::sample_rate`]: 960. The client turns it into
-    /// a packet duration, which is the one thing it cannot work out from the
-    /// fields above.
+    /// Samples per packet at [`Self::sample_rate`]: 960 for Opus. The client turns
+    /// it into a packet duration, which is the one thing it cannot work out from
+    /// the fields above.
     pub packet_frames: u32,
-    /// `OpusHead`, the decoder's configuration.
+    /// The decoder's configuration: `OpusHead`, or a passed stream's
+    /// [`PassedFormat::head`].
     pub head: Vec<u8>,
     /// `Some` exactly when the plan is adaptive: the sender's handle for
     /// reporting how its sends went ([`AudioCongestion`] writes through it) and
     /// the encoder's source of truth for the rate it should be at.
     pub signals: Option<Arc<AudioSignals>>,
     pub packets: S,
+}
+
+impl<S: Stream<Item = Vec<Bytes>> + Send + 'static> EncodedAudio<S> {
+    /// This stream behind one type, so an encoded one and a passed one can be
+    /// armed by the same pump.
+    pub fn boxed(self) -> EncodedAudio<futures_util::stream::BoxStream<'static, Vec<Bytes>>> {
+        EncodedAudio {
+            codec: self.codec,
+            sample_rate: self.sample_rate,
+            channels: self.channels,
+            packet_frames: self.packet_frames,
+            head: self.head,
+            signals: self.signals,
+            packets: futures_util::StreamExt::boxed(self.packets),
+        }
+    }
 }
 
 /// The adaptive audio walk's shared state — written on the sending side, where
@@ -692,6 +775,35 @@ mod tests {
         assert_eq!(opus.sample_rate, crate::pcm48::SAMPLE_RATE);
         assert_eq!(opus.packet_frames, 960);
         assert_eq!(&opus.head[0..8], b"OpusHead");
+    }
+
+    /// A passed stream is the remote's units as they came: described by the format
+    /// it was handed, a packet each, batched with whatever was already queued, and
+    /// with no walk behind it.
+    #[tokio::test]
+    async fn a_passed_stream_hands_on_the_remotes_units_untouched() {
+        let bridge = AudioBridge::new();
+        let passed = bridge.take_listener().into_passed(crate::vnc_apple_media::PASSED_SOUND);
+        assert_eq!(
+            (passed.codec, passed.sample_rate, passed.channels, passed.packet_frames),
+            ("mp4a.40.39", 48_000, 2, 480)
+        );
+        assert_eq!(passed.head, [0xf8, 0xe6, 0x50, 0x00], "the Mac's AudioSpecificConfig");
+        assert!(passed.signals.is_none(), "a passed stream has no bitrate to walk");
+        let mut stream = Box::pin(passed.packets);
+
+        bridge.unit(vec![1, 2, 3]);
+        assert_eq!(next(&mut stream).await.unwrap(), [Bytes::from_static(&[1, 2, 3])]);
+        bridge.unit(vec![4]);
+        bridge.unit(vec![5, 6]);
+        assert_eq!(
+            next(&mut stream).await.unwrap(),
+            [Bytes::from_static(&[4]), Bytes::from_static(&[5, 6])],
+            "units already queued go together"
+        );
+
+        drop(bridge);
+        assert!(next(&mut stream).await.is_none());
     }
 
     /// The backpressure rule: the producer is never held up, and what gives way

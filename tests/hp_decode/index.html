@@ -1,0 +1,158 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>HP decode attempts</title>
+<style>
+  body { font: 14px/1.4 system-ui, sans-serif; margin: 16px; max-width: 1200px; }
+  textarea { width: 100%; font: 12px ui-monospace, monospace; }
+  table { border-collapse: collapse; margin: 8px 0; font-size: 12px; }
+  td, th { border: 1px solid #ccc; padding: 3px 6px; vertical-align: top; text-align: left; }
+  .ok { background: #dfd; } .bad { background: #fdd; }
+  canvas { background: #000; }
+  pre { background: #f4f4f4; padding: 8px; overflow: auto; max-height: 300px; }
+  fieldset { margin: 12px 0; }
+</style>
+</head>
+<body>
+<h1>High Performance decode attempts</h1>
+<p id="env"></p>
+
+<fieldset>
+  <legend>HEVC (Annex B)</legend>
+  <p><code>video.h265</code> beside this page · access units per attempt <input id="vmax" type="number" value="150" size="6"> (0 = all)</p>
+  <p>One attempt per line: <code>codec [no-preference|prefer-hardware|prefer-software]</code>.
+  The first lines are derived from the file's SPS once it loads.</p>
+  <textarea id="vlist" rows="10"></textarea>
+  <p><button id="vrun">Run video attempts</button> <span id="vstatus"></span></p>
+  <table id="vtable"></table>
+</fieldset>
+
+<fieldset>
+  <legend>AAC-ELD (u32 big-endian length + unit)</legend>
+  <p><code>audio.eld</code> beside this page</p>
+  <p>One attempt per line: <code>codec description-hex|none sampleRate channels</code>.
+  <code>f8e65000</code> is the gateway's AudioSpecificConfig (ELD, 48 kHz, stereo, 480-sample frames); <code>f8e64000</code> is the same with 512-sample frames.
+  The <code>03…</code> descriptions are that AudioSpecificConfig inside an MPEG-4 ES_Descriptor (the second with its SLConfigDescriptor), which CoreAudio's
+  <code>kAudioFormatProperty_FormatInfo</code> reads as <code>aace</code> where it refuses the bare AudioSpecificConfig: Safari 26.6 passes the description to it
+  as is and, refused, decodes as AAC-LC without the config.</p>
+  <textarea id="alist" rows="8">mp4a.40.39 f8e65000 48000 2
+mp4a.40.39 none 48000 2
+mp4a.40.39 f8e64000 48000 2
+mp4a.40.2 f8e65000 48000 2
+mp4a.40.2 03180001000413401500180000000000000000000504f8e65000 48000 2
+mp4a.40.2 031b0001000413401500180000000000000000000504f8e65000060102 48000 2
+mp4a.40.23 f8e65000 48000 2
+mp4a.40 f8e65000 48000 2</textarea>
+  <p><button id="arun">Run audio attempts</button> <span id="astatus"></span></p>
+  <table id="atable"></table>
+</fieldset>
+
+<h2>Results (JSON)</h2>
+<pre id="json"></pre>
+
+<script type="module">
+import { splitAnnexB, accessUnits, codecFromSps, splitLengthPrefixed, hex, tryVideo, tryAudio } from "./probe.js";
+
+const $ = (id) => document.getElementById(id);
+const all = { userAgent: navigator.userAgent, video: [], audio: [] };
+const show = () => { $("json").textContent = JSON.stringify(all, null, 2); };
+$("env").textContent = `secure context: ${isSecureContext} · VideoDecoder: ${typeof VideoDecoder} · AudioDecoder: ${typeof AudioDecoder} · ${navigator.userAgent}`;
+
+// The capture sits beside the page: tests/hp_capture.sh copies the page into its output.
+async function load(name) {
+  const response = await fetch(name);
+  if (!response.ok) throw new Error(`${name}: HTTP ${response.status}`);
+  return new Uint8Array(await response.arrayBuffer());
+}
+
+let videoUnits = null;
+async function loadVideo() {
+  $("vstatus").textContent = "loading…";
+  const units = accessUnits(splitAnnexB(await load("video.h265")));
+  const sps = units.flatMap((u) => u.nals).find((nal) => ((nal[0] >> 1) & 0x3f) === 33);
+  const derived = sps ? codecFromSps(sps) : null;
+  all.stream = { accessUnits: units.length, keyframes: units.filter((u) => u.key).length, spsCodec: derived };
+  const base = [...new Set([derived, derived?.replace(/^hev1/, "hvc1"), "hev1.4.10.L150.BE.8", "hvc1.4.10.L150.BE.8", "hev1.4.10.L153.BE.8", "hev1.1.6.L150.90", "hev1.4.10.L150"].filter(Boolean))];
+  $("vlist").value = [
+    ...base.map((c) => `${c} no-preference`),
+    ...base.slice(0, 2).map((c) => `${c} prefer-hardware`),
+    ...base.slice(0, 2).map((c) => `${c} prefer-software`),
+  ].join("\n");
+  $("vstatus").textContent = `${units.length} access units, ${all.stream.keyframes} keyframes, SPS says ${derived}`;
+  show();
+  return units;
+}
+loadVideo().then((u) => { videoUnits = u; }, (e) => { $("vstatus").textContent = String(e); });
+
+function row(table, cells, ok) {
+  const tr = table.insertRow();
+  tr.className = ok ? "ok" : "bad";
+  for (const cell of cells) {
+    const td = tr.insertCell();
+    if (cell instanceof Node) td.append(cell); else td.textContent = cell ?? "";
+  }
+  return tr;
+}
+
+$("vrun").addEventListener("click", async () => {
+  videoUnits ??= await loadVideo();
+  const max = Number($("vmax").value) || videoUnits.length;
+  const firstKey = videoUnits.findIndex((u) => u.key);
+  const units = videoUnits.slice(firstKey, firstKey + max);
+  const table = $("vtable");
+  table.innerHTML = "<tr><th>codec</th><th>hw</th><th>fed</th><th>decoded</th><th>error</th><th>first frame</th><th>ms</th><th>isConfigSupported</th><th>picture</th></tr>";
+  all.video = [];
+  for (const line of $("vlist").value.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const [codec, hardwareAcceleration] = line.split(/\s+/);
+    $("vstatus").textContent = `trying ${line}…`;
+    const canvas = Object.assign(document.createElement("canvas"), { width: 192, height: 120 });
+    const r = await tryVideo({ codec, hardwareAcceleration }, units, canvas);
+    all.video.push(r);
+    row(table, [r.codec, r.hardwareAcceleration, r.fed, r.decoded, r.error, r.first && `${r.first.format} ${r.first.coded}`, r.ms, r.probe, canvas], r.decoded > 0 && !r.error);
+    show();
+  }
+  $("vstatus").textContent = "done";
+});
+
+let ctx = null;
+function play(pcm) {
+  ctx ??= new AudioContext();
+  const length = pcm.channels[0].reduce((n, p) => n + p.length, 0);
+  const buffer = ctx.createBuffer(pcm.channels.length, length, pcm.rate);
+  pcm.channels.forEach((planes, c) => {
+    const out = buffer.getChannelData(c);
+    let at = 0;
+    for (const p of planes) { out.set(p, at); at += p.length; }
+  });
+  const source = ctx.createBufferSource();
+  source.buffer = buffer;
+  source.connect(ctx.destination);
+  source.start();
+}
+
+$("arun").addEventListener("click", async () => {
+  $("astatus").textContent = "loading…";
+  const units = splitLengthPrefixed(await load("audio.eld"));
+  all.audioStream = { units: units.length, seconds: units.length / 100 };
+  const table = $("atable");
+  table.innerHTML = "<tr><th>codec</th><th>description</th><th>rate/ch</th><th>fed</th><th>decoded</th><th>error</th><th>first output</th><th>peak / rms</th><th>ms</th><th>isConfigSupported</th><th></th></tr>";
+  all.audio = [];
+  for (const line of $("alist").value.split("\n").map((l) => l.trim()).filter(Boolean)) {
+    const [codec, desc, rate, ch] = line.split(/\s+/);
+    $("astatus").textContent = `trying ${line}…`;
+    const { result: r, pcm } = await tryAudio({ codec, description: hex(desc ?? "none"), sampleRate: Number(rate ?? 48000), numberOfChannels: Number(ch ?? 2) }, units);
+    all.audio.push(r);
+    const button = Object.assign(document.createElement("button"), { textContent: "play", disabled: !pcm });
+    if (pcm) button.onclick = () => play(pcm);
+    row(table, [r.codec, r.description, `${r.sampleRate}/${r.numberOfChannels}`, r.fed, r.decoded, r.error,
+      r.first && `${r.first.format} ${r.first.sampleRate}Hz ${r.first.numberOfChannels}ch ${r.first.numberOfFrames}f`,
+      `${r.peak} / ${r.rms}`, r.ms, r.probe, button], r.decoded > 0 && !r.error);
+    show();
+  }
+  $("astatus").textContent = `done (${units.length} units, ${(units.length / 100).toFixed(1)} s)`;
+});
+</script>
+</body>
+</html>
