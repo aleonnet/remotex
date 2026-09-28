@@ -124,7 +124,9 @@ The non-default `apple-hp-media` feature, which `ard-high-performance` targets
 need, adds two decoders and is in no release artifact because of their
 licences. `libavcodec-hevc-prebuilt` (the HEVC picture) links static archives of
 FFmpeg's libavcodec and libavutil, configured down to the HEVC decoder and
-parser. Its archives are private: its build script downloads the latest release
+parser, and on macOS its VideoToolbox hwaccel, which links Apple's VideoToolbox,
+CoreMedia, CoreVideo and CoreFoundation frameworks. Its archives are private:
+its build script downloads the latest release
 of `andrewtheguy/libavcodec-hevc-prebuilt-archives` through `gh`, so a build
 needs `gh` logged in to an account that can read it, or
 `LIBAVCODEC_HEVC_PREBUILT_DIR` pointing at archives built locally.

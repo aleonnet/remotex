@@ -1274,19 +1274,41 @@ pub struct Picture {
 /// Replaying captured 1600×1000 pictures on a six-core host, one thread took
 /// 14–23 ms a picture, too slow for 60 a second, and four took 7–14 ms. Four,
 /// since a larger display has more rows to share out. Frame threads would hold
-/// each picture back by one per thread, so there are none.
+/// each picture back by one per thread, so there are none. These threads take no
+/// part in a picture VideoToolbox decodes.
 #[cfg(feature = "apple-hp-media")]
 const DECODE_THREADS: std::os::raw::c_int = 4;
 
 /// FFmpeg's HEVC decoder, one context for the session: HEVC access units in,
 /// pictures out.
+///
+/// On macOS the context is handed a VideoToolbox device, and FFmpeg's VideoToolbox
+/// hwaccel gives each picture to VideoToolbox, which for HEVC is asked to enable
+/// its hardware decoder, not required to use it. A Mac with no device to open
+/// decodes on the CPU, and so does a stream the hwaccel fails to start on: FFmpeg
+/// asks for a format again without VideoToolbox's, and `prefer_videotoolbox`
+/// takes a software one. A picture VideoToolbox fails once started is an error,
+/// not decoded on the CPU instead. Either way the pictures are the same: HEVC
+/// decoding is exact.
 #[cfg(feature = "apple-hp-media")]
 struct Hevc {
     ctx: *mut avcodec_hevc_sys::AVCodecContext,
     packet: *mut avcodec_hevc_sys::AVPacket,
     frame: *mut avcodec_hevc_sys::AVFrame,
+    /// A VideoToolbox picture, copied out of its pixel buffer.
+    copy: *mut avcodec_hevc_sys::AVFrame,
     /// The access unit as an Annex B byte stream, kept between units.
     stream: Vec<u8>,
+    /// What decoded the last picture, logged whenever it changes.
+    decoded_by: Option<DecodedBy>,
+}
+
+/// What decoded a picture.
+#[cfg(feature = "apple-hp-media")]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum DecodedBy {
+    VideoToolbox,
+    Software,
 }
 
 // SAFETY: the context, packet and frame are created, used and freed on one thread
@@ -1297,7 +1319,9 @@ unsafe impl Send for Hevc {}
 
 #[cfg(feature = "apple-hp-media")]
 impl Hevc {
-    fn new() -> anyhow::Result<Self> {
+    /// `hardware` hands the pictures to VideoToolbox where this is a Mac that has
+    /// it; without it, or anywhere else, they decode on the CPU.
+    fn new(hardware: bool) -> anyhow::Result<Self> {
         use avcodec_hevc_sys::*;
         use std::os::raw::c_int;
 
@@ -1313,12 +1337,20 @@ impl Hevc {
                 ctx: avcodec_alloc_context3(codec),
                 packet: av_packet_alloc(),
                 frame: av_frame_alloc(),
+                copy: av_frame_alloc(),
                 stream: Vec::new(),
+                decoded_by: None,
             };
             anyhow::ensure!(
-                !decoder.ctx.is_null() && !decoder.packet.is_null() && !decoder.frame.is_null(),
+                !decoder.ctx.is_null()
+                    && !decoder.packet.is_null()
+                    && !decoder.frame.is_null()
+                    && !decoder.copy.is_null(),
                 "libavcodec could not allocate a decoder"
             );
+            if hardware {
+                attach_videotoolbox(decoder.ctx);
+            }
             // The Mac codes with wavefront parallel processing, so its rows decode
             // on slice threads. See DECODE_THREADS.
             (*decoder.ctx).thread_count = DECODE_THREADS;
@@ -1361,12 +1393,95 @@ impl Hevc {
                 anyhow::ensure!(err >= 0, "libavcodec: {}", text(err));
                 // A later picture of the same unit replaces an earlier one: only
                 // the newest is shown.
-                let rgb = to_rgb(&*self.frame);
+                let range = (*self.frame).color_range;
+                let decoded_by = if (*self.frame).format == AVPixelFormat_AV_PIX_FMT_VIDEOTOOLBOX {
+                    DecodedBy::VideoToolbox
+                } else {
+                    DecodedBy::Software
+                };
+                let rgb = match decoded_by {
+                    DecodedBy::VideoToolbox => {
+                        let err = av_hwframe_transfer_data(self.copy, self.frame, 0);
+                        let rgb = if err < 0 {
+                            Err(anyhow::anyhow!("could not copy a VideoToolbox picture out: {}", text(err)))
+                        } else {
+                            to_rgb(&*self.copy, range)
+                        };
+                        av_frame_unref(self.copy);
+                        rgb
+                    }
+                    DecodedBy::Software => to_rgb(&*self.frame, range),
+                };
                 av_frame_unref(self.frame);
+                if self.decoded_by != Some(decoded_by) {
+                    match decoded_by {
+                        DecodedBy::VideoToolbox => log::info!("vnc: the Mac's HEVC is decoded by VideoToolbox"),
+                        DecodedBy::Software => log::info!("vnc: the Mac's HEVC is decoded in software"),
+                    }
+                    self.decoded_by = Some(decoded_by);
+                }
                 picture = Some(rgb?);
             }
             Ok(picture)
         }
+    }
+}
+
+/// Give `ctx` a VideoToolbox device and ask for its pictures. A Mac with no device
+/// to open decodes in software, and says so.
+///
+/// # Safety
+///
+/// `ctx` must be an allocated context that has not been opened.
+#[cfg(all(feature = "apple-hp-media", target_os = "macos"))]
+unsafe fn attach_videotoolbox(ctx: *mut avcodec_hevc_sys::AVCodecContext) {
+    use avcodec_hevc_sys::*;
+
+    let mut device = std::ptr::null_mut();
+    // SAFETY: `device` is written only on success, and then owned here.
+    let err = unsafe {
+        av_hwdevice_ctx_create(&mut device, AVHWDeviceType_AV_HWDEVICE_TYPE_VIDEOTOOLBOX, std::ptr::null(), std::ptr::null_mut(), 0)
+    };
+    if err < 0 {
+        log::warn!("vnc: no VideoToolbox device, so the Mac's HEVC decodes in software: {}", text(err));
+        return;
+    }
+    // SAFETY: the context takes a reference of its own and frees it with itself;
+    // this one is dropped once it has. A failed reference leaves the context
+    // without a device, which decodes in software.
+    unsafe {
+        (*ctx).hw_device_ctx = av_buffer_ref(device);
+        if !(*ctx).hw_device_ctx.is_null() {
+            (*ctx).get_format = Some(prefer_videotoolbox);
+        }
+        av_buffer_unref(&mut device);
+    }
+}
+
+/// No VideoToolbox off macOS: the pictures decode in software.
+#[cfg(all(feature = "apple-hp-media", not(target_os = "macos")))]
+unsafe fn attach_videotoolbox(_ctx: *mut avcodec_hevc_sys::AVCodecContext) {}
+
+/// Choose VideoToolbox's pictures when the decoder offers them, and its default
+/// otherwise. FFmpeg asks again, without them, when the hwaccel fails to start on a
+/// stream, which is how a stream VideoToolbox will not take decodes in software.
+#[cfg(all(feature = "apple-hp-media", target_os = "macos"))]
+unsafe extern "C" fn prefer_videotoolbox(
+    ctx: *mut avcodec_hevc_sys::AVCodecContext,
+    formats: *const avcodec_hevc_sys::AVPixelFormat,
+) -> avcodec_hevc_sys::AVPixelFormat {
+    use avcodec_hevc_sys::*;
+
+    // SAFETY: FFmpeg's list, ended by AV_PIX_FMT_NONE.
+    unsafe {
+        let mut at = formats;
+        while *at != AVPixelFormat_AV_PIX_FMT_NONE {
+            if *at == AVPixelFormat_AV_PIX_FMT_VIDEOTOOLBOX {
+                return *at;
+            }
+            at = at.add(1);
+        }
+        avcodec_default_get_format(ctx, formats)
     }
 }
 
@@ -1381,6 +1496,7 @@ impl Drop for Hevc {
             avcodec_free_context(&mut self.ctx);
             av_packet_free(&mut self.packet);
             av_frame_free(&mut self.frame);
+            av_frame_free(&mut self.copy);
         }
     }
 }
@@ -1397,20 +1513,28 @@ fn text(err: std::os::raw::c_int) -> String {
 }
 
 /// A decoded picture as packed RGB888. The Mac sends full-range BT.709, 8-bit, at
-/// 4:4:4; 4:2:0 is taken too, in case it ever chooses it.
+/// 4:4:4; 4:2:0 is taken too, in case it ever chooses it. FFmpeg's own pictures are
+/// planar (`yuv444p`, `yuv420p`), and a VideoToolbox one, copied out, is the same
+/// samples semi-planar (`nv24`, `nv12`). `range` is the decoded picture's, which a
+/// copy out of VideoToolbox does not carry.
 ///
 /// # Safety
 ///
-/// `frame` must be a picture libavcodec just returned and has not yet been
-/// unreferenced.
+/// `frame` must be a picture libavcodec just returned, or a copy of one, and has not
+/// yet been unreferenced.
 #[cfg(feature = "apple-hp-media")]
-unsafe fn to_rgb(frame: &avcodec_hevc_sys::AVFrame) -> anyhow::Result<Picture> {
+unsafe fn to_rgb(frame: &avcodec_hevc_sys::AVFrame, range: avcodec_hevc_sys::AVColorRange) -> anyhow::Result<Picture> {
     use avcodec_hevc_sys::*;
-    use yuv::{YuvPlanarImage, YuvRange, YuvStandardMatrix};
+    use yuv::{YuvBiPlanarImage, YuvConversionMode, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 
-    let full = frame.format == AVPixelFormat_AV_PIX_FMT_YUV444P;
-    let half = frame.format == AVPixelFormat_AV_PIX_FMT_YUV420P;
-    if !full && !half {
+    // (format, planar, 4:4:4)
+    let read = [
+        (AVPixelFormat_AV_PIX_FMT_YUV444P, true, true),
+        (AVPixelFormat_AV_PIX_FMT_YUV420P, true, false),
+        (AVPixelFormat_AV_PIX_FMT_NV24, false, true),
+        (AVPixelFormat_AV_PIX_FMT_NV12, false, false),
+    ];
+    let Some(&(_, planar, full)) = read.iter().find(|(format, ..)| *format == frame.format) else {
         // SAFETY: a static string for any known format, and null for any other.
         let name = unsafe { av_get_pix_fmt_name(frame.format) };
         let name = if name.is_null() {
@@ -1420,7 +1544,7 @@ unsafe fn to_rgb(frame: &avcodec_hevc_sys::AVFrame) -> anyhow::Result<Picture> {
             unsafe { std::ffi::CStr::from_ptr(name) }.to_string_lossy().into_owned()
         };
         anyhow::bail!("the Mac sent video as {name}, and only 8-bit 4:4:4 and 4:2:0 are read");
-    }
+    };
     let (width, height) = (frame.width as usize, frame.height as usize);
     let chroma_rows = if full { height } else { height.div_ceil(2) };
     let plane = |channel: usize, rows: usize| {
@@ -1429,26 +1553,38 @@ unsafe fn to_rgb(frame: &avcodec_hevc_sys::AVFrame) -> anyhow::Result<Picture> {
         // `stride` bytes each.
         (unsafe { std::slice::from_raw_parts(frame.data[channel], stride * rows) }, stride as u32)
     };
-    let (y_plane, y_stride) = plane(0, height);
-    let (u_plane, u_stride) = plane(1, chroma_rows);
-    let (v_plane, v_stride) = plane(2, chroma_rows);
-    let image = YuvPlanarImage {
-        y_plane,
-        y_stride,
-        u_plane,
-        u_stride,
-        v_plane,
-        v_stride,
-        width: width as u32,
-        height: height as u32,
-    };
-    let range = if frame.color_range == AVColorRange_AVCOL_RANGE_JPEG { YuvRange::Full } else { YuvRange::Limited };
+    let range = if range == AVColorRange_AVCOL_RANGE_JPEG { YuvRange::Full } else { YuvRange::Limited };
     let mut rgb = vec![0u8; width * height * 3];
     let stride = width as u32 * 3;
-    if full {
-        yuv::yuv444_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709)?;
+    let (y_plane, y_stride) = plane(0, height);
+    if planar {
+        let (u_plane, u_stride) = plane(1, chroma_rows);
+        let (v_plane, v_stride) = plane(2, chroma_rows);
+        let image = YuvPlanarImage {
+            y_plane,
+            y_stride,
+            u_plane,
+            u_stride,
+            v_plane,
+            v_stride,
+            width: width as u32,
+            height: height as u32,
+        };
+        if full {
+            yuv::yuv444_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709)?;
+        } else {
+            yuv::yuv420_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709)?;
+        }
     } else {
-        yuv::yuv420_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709)?;
+        let (uv_plane, uv_stride) = plane(1, chroma_rows);
+        let image = YuvBiPlanarImage { y_plane, y_stride, uv_plane, uv_stride, width: width as u32, height: height as u32 };
+        // Balanced: the mode the planar conversions above use.
+        let mode = YuvConversionMode::Balanced;
+        if full {
+            yuv::yuv_nv24_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709, mode)?;
+        } else {
+            yuv::yuv_nv12_to_rgb(&image, &mut rgb, stride, range, YuvStandardMatrix::Bt709, mode)?;
+        }
     }
     Ok(Picture { size: (width as u16, height as u16), rgb })
 }
@@ -2252,7 +2388,7 @@ fn spawn_decoder(
 ) -> (std::sync::mpsc::SyncSender<AccessUnit>, std::thread::JoinHandle<()>) {
     let (units, inbox) = std::sync::mpsc::sync_channel::<AccessUnit>(DECODE_QUEUE);
     let thread = std::thread::spawn(move || {
-        let mut decoder = match Hevc::new() {
+        let mut decoder = match Hevc::new(true) {
             Ok(decoder) => decoder,
             Err(e) => return fail(&failed, e.context("no HEVC decoder")),
         };
@@ -2824,12 +2960,48 @@ mod tests {
     #[test]
     #[cfg(feature = "apple-hp-media")]
     fn a_444_stream_decodes_to_the_colours_ffmpeg_converts_it_to() {
+        let (pictures, decoded_by) = decode_fixture(false);
+        assert_eq!(decoded_by, Some(DecodedBy::Software));
+        assert_the_fixture_colours(&pictures);
+    }
+
+    /// The same stream through VideoToolbox: the same pictures, which on a Mac that
+    /// is not virtual must be VideoToolbox's — FFmpeg's fallback to decoding them
+    /// itself would pass the colours too. That is VideoToolbox, not necessarily its
+    /// hardware decoder, which is not asked. A virtual Mac may have no VideoToolbox
+    /// decoder to reach, and elsewhere there is no VideoToolbox, so both decode in
+    /// software.
+    #[test]
+    #[cfg(feature = "apple-hp-media")]
+    fn the_same_stream_decodes_to_the_same_colours_through_videotoolbox() {
+        let (pictures, decoded_by) = decode_fixture(true);
+        if cfg!(target_os = "macos") && !virtual_mac() {
+            assert_eq!(decoded_by, Some(DecodedBy::VideoToolbox));
+        }
+        assert_the_fixture_colours(&pictures);
+    }
+
+    /// The fixture's pictures, and what decoded the last.
+    #[cfg(feature = "apple-hp-media")]
+    fn decode_fixture(hardware: bool) -> (Vec<Picture>, Option<DecodedBy>) {
         let units = fixture_units();
         assert_eq!(units.len(), 3);
-
-        let mut hevc = Hevc::new().unwrap();
+        let mut hevc = Hevc::new(hardware).unwrap();
         let pictures: Vec<Picture> = units.iter().filter_map(|unit| hevc.decode(unit).unwrap()).collect();
         assert_eq!(pictures.len(), 3, "each unit yields its picture at once");
+        (pictures, hevc.decoded_by)
+    }
+
+    /// Whether this Mac is a virtual machine, from the kernel's `kern.hv_vmm_present`.
+    #[cfg(feature = "apple-hp-media")]
+    fn virtual_mac() -> bool {
+        let out = std::process::Command::new("sysctl").args(["-n", "kern.hv_vmm_present"]).output().unwrap();
+        assert!(out.status.success(), "sysctl -n kern.hv_vmm_present failed");
+        String::from_utf8_lossy(&out.stdout).trim() == "1"
+    }
+
+    #[cfg(feature = "apple-hp-media")]
+    fn assert_the_fixture_colours(pictures: &[Picture]) {
         let last = pictures.last().unwrap();
         assert_eq!(last.size, (64, 48));
         for ((x, y), want) in [

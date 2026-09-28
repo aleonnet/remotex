@@ -99,12 +99,13 @@ yuv = "0.8"
 # (src/vnc_apple_media.rs), behind the `apple-hp-media` feature above: the Mac's
 # picture over its media stream, decoded here and re-encoded as VP9. The same
 # bargain as libvpx above — its sys crate downloads a prebuilt static archive of
-# libavcodec and libavutil, configured down to the HEVC decoder and parser, and
-# compiles no C. The archives are private: building needs `gh` logged in to an
-# account that can read them, or `LIBAVCODEC_HEVC_PREBUILT_DIR`. This FFmpeg is
+# libavcodec and libavutil, configured down to the HEVC decoder and parser (and on
+# macOS its VideoToolbox hwaccel), and compiles no C. The archives are private:
+# building needs `gh` logged in to an account that can read them, or
+# `LIBAVCODEC_HEVC_PREBUILT_DIR`. This FFmpeg is
 # LGPL-2.1-or-later, linked statically; the prebuilt repository's README says
 # what that obliges.
-avcodec-hevc-sys = { package = "libavcodec-hevc-prebuilt-sys", git = "https://github.com/andrewtheguy/libavcodec-hevc-prebuilt", tag = "v9.0.2-20260925183729-7b0476b", optional = true }
+avcodec-hevc-sys = { package = "libavcodec-hevc-prebuilt-sys", git = "https://github.com/andrewtheguy/libavcodec-hevc-prebuilt", tag = "v9.0.2-20260928041244-5fdbab1", optional = true }
 # AAC-ELD, for the same stream's sound, behind the same feature. Fraunhofer's
 # decoder, but the Rust one: AOSP ships a pure-Rust port of it as
 # `platform/external/aac`, `rust/`, which is not published on crates.io. The

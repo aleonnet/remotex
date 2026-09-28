@@ -1617,7 +1617,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "libavcodec-hevc-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libavcodec-hevc-prebuilt?tag=v9.0.2-20260925183729-7b0476b#7b0476b5622ed770d0db7e3f9880422a48909dd6"
+source = "git+https://github.com/andrewtheguy/libavcodec-hevc-prebuilt?tag=v9.0.2-20260928041244-5fdbab1#5fdbab13fc1a63986344185565c1208847c09880"
 
 [[package]]
 name = "libc"
