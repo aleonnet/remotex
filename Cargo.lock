@@ -799,8 +799,8 @@ dependencies = [
 
 [[package]]
 name = "desktop-vp9"
-version = "0.0.2"
-source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.2#abcf195ceb235c51af978ef19e8220b78498fe6e"
+version = "0.0.3"
+source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.3#1e3376500dc4ab0c109228f0a64ff2e3f28cfb9f"
 dependencies = [
  "libvpx-prebuilt-sys",
  "log",
@@ -1617,7 +1617,7 @@ checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
 [[package]]
 name = "libavcodec-hevc-prebuilt-sys"
 version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/libavcodec-hevc-prebuilt?tag=v9.0.2-20260925183729-7b0476b#7b0476b5622ed770d0db7e3f9880422a48909dd6"
+source = "git+https://github.com/andrewtheguy/libavcodec-hevc-prebuilt?tag=v9.0.2-20260928041244-5fdbab1#5fdbab13fc1a63986344185565c1208847c09880"
 
 [[package]]
 name = "libc"
@@ -2342,7 +2342,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.276"
+version = "0.0.277"
 dependencies = [
  "aac",
  "aes",
