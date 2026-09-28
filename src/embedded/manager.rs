@@ -932,6 +932,9 @@ impl Supervisor {
                 self.instances.push(instance);
             } else {
                 let dir = self.root.join(&name);
+                // A directory made or copied in by hand keeps whatever access it came
+                // with until it is made private here, the files already in it included.
+                transport::make_private(&dir)?;
                 bootstrap_config(&dir)?;
                 self.instances.push(ManagedInstance {
                     name,

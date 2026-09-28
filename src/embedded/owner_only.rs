@@ -6,6 +6,12 @@
 //! merged into it — because inheritance is how a directory made under `C:\` would
 //! otherwise hand every local user read access to the passwords.
 //!
+//! A directory's DACL passes to what is under it only as inherited entries: a file
+//! or directory keeps any entries of its own, and Windows lets every user traverse
+//! to a path it knows through directories that refuse them. So a config imported
+//! with its own `Everyone` entry would stay readable under a private root, and
+//! making a directory private resets everything under it as well.
+//!
 //! The user is read from this process's token rather than named by a well-known SID.
 //! `OWNER RIGHTS` would follow the object's owner, and an elevated administrator's
 //! objects are owned by `BUILTIN\Administrators`, which is a group of people.
@@ -23,8 +29,8 @@ use windows_sys::Win32::Security::Authorization::{
 };
 use windows_sys::Win32::Security::{
     ACL, DACL_SECURITY_INFORMATION, GetSecurityDescriptorDacl, GetTokenInformation,
-    PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR, SECURITY_ATTRIBUTES, TOKEN_QUERY,
-    TOKEN_USER, TokenUser,
+    OBJECT_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION, PSECURITY_DESCRIPTOR,
+    SECURITY_ATTRIBUTES, TOKEN_QUERY, TOKEN_USER, TokenUser, UNPROTECTED_DACL_SECURITY_INFORMATION,
 };
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, OpenProcessToken};
 
@@ -99,23 +105,65 @@ impl Drop for SecurityDescriptor {
     }
 }
 
-/// Replace `path`'s DACL with this user's and `SYSTEM`'s alone, inherited by
-/// everything under it — the files already there included, which is how a config
-/// written before the directory was made private becomes private too.
+/// Replace `path`'s DACL with this user's and `SYSTEM`'s alone, and reset
+/// everything under it to those two inherited entries: entries of its own are
+/// dropped and inheritance is turned back on, which is how a config imported, or
+/// written before the directory was made private, becomes private too.
+///
+/// Links are left alone, neither followed nor changed: what they point at is
+/// outside the directory.
 pub fn protect_directory(path: &Path) -> anyhow::Result<()> {
-    let descriptor = SecurityDescriptor::directory()
+    let owner_only = SecurityDescriptor::directory()
         .context("cannot build an owner-only security descriptor")?;
-    let dacl = descriptor
+    set_dacl(
+        path,
+        owner_only.dacl().context("cannot read the owner-only security descriptor")?,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+    )
+    .with_context(|| format!("cannot make {} private", path.display()))?;
+    let inherit_only = SecurityDescriptor::from_sddl("D:")
+        .context("cannot build an empty security descriptor")?;
+    let inherit_only = inherit_only
         .dacl()
-        .context("cannot read the owner-only security descriptor")?;
+        .context("cannot read the empty security descriptor")?;
+    reset_under(path, inherit_only)
+}
+
+/// Give everything under `dir` the empty DACL `inherit_only` and inheritance, so
+/// each ends up with its parent's inheritable entries and nothing else. A parent
+/// is reset before what is in it.
+fn reset_under(dir: &Path, inherit_only: *const ACL) -> anyhow::Result<()> {
+    for entry in std::fs::read_dir(dir).with_context(|| format!("cannot list {}", dir.display()))? {
+        let entry = entry.with_context(|| format!("cannot list {}", dir.display()))?;
+        let path = entry.path();
+        let kind = entry
+            .file_type()
+            .with_context(|| format!("cannot inspect {}", path.display()))?;
+        if kind.is_symlink() {
+            continue;
+        }
+        set_dacl(
+            &path,
+            inherit_only,
+            DACL_SECURITY_INFORMATION | UNPROTECTED_DACL_SECURITY_INFORMATION,
+        )
+        .with_context(|| format!("cannot make {} private", path.display()))?;
+        if kind.is_dir() {
+            reset_under(&path, inherit_only)?;
+        }
+    }
+    Ok(())
+}
+
+fn set_dacl(path: &Path, dacl: *const ACL, what: OBJECT_SECURITY_INFORMATION) -> io::Result<()> {
     let name: Vec<u16> = path.as_os_str().encode_wide().chain(std::iter::once(0)).collect();
-    // SAFETY: `name` is NUL-terminated, `dacl` points into `descriptor`, and both
-    // outlive the call.
+    // SAFETY: `name` is NUL-terminated and `dacl` points into a descriptor the
+    // caller holds; the call copies what it needs.
     let status = unsafe {
         SetNamedSecurityInfoW(
             name.as_ptr(),
             SE_FILE_OBJECT,
-            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+            what,
             std::ptr::null_mut(),
             std::ptr::null_mut(),
             dacl,
@@ -123,8 +171,7 @@ pub fn protect_directory(path: &Path) -> anyhow::Result<()> {
         )
     };
     if status != 0 {
-        return Err(io::Error::from_raw_os_error(status as i32))
-            .with_context(|| format!("cannot make {} private", path.display()));
+        return Err(io::Error::from_raw_os_error(status as i32));
     }
     Ok(())
 }
@@ -272,5 +319,43 @@ mod tests {
         let (_, entries) = split(&dacl_sddl(&config));
         let (_, expected) = split(&canonical(&format!("D:(A;ID;FA;;;SY)(A;ID;FA;;;{user})")));
         assert_eq!(entries, expected, "the config inherits the two entries and nothing else");
+    }
+
+    /// What was already under the directory with entries of its own — an imported
+    /// config open to everyone, a file cut off from inheritance, a directory handing
+    /// everyone read access down — ends up with the two inherited entries alone.
+    #[test]
+    fn protecting_a_directory_resets_what_is_already_under_it() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("instances");
+        let instance = dir.join("alpha");
+        std::fs::create_dir_all(&instance).unwrap();
+        let config = instance.join("remotex.toml");
+        let state = instance.join("state.db");
+        std::fs::write(&config, "").unwrap();
+        std::fs::write(&state, "").unwrap();
+        let everyone = |path: &Path, sddl: &str, what| {
+            let descriptor = SecurityDescriptor::from_sddl(sddl).unwrap();
+            set_dacl(path, descriptor.dacl().unwrap(), what).unwrap();
+        };
+        everyone(&instance, "D:(A;OICI;FR;;;WD)", DACL_SECURITY_INFORMATION);
+        everyone(&config, "D:(A;;FR;;;WD)", DACL_SECURITY_INFORMATION);
+        everyone(
+            &state,
+            "D:P(A;;FA;;;WD)",
+            DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        );
+        assert!(dacl_sddl(&config).contains(";;;WD)"), "the setup gives everyone read access");
+
+        protect_directory(&dir).unwrap();
+
+        let user = current_user_sid().unwrap();
+        let (_, directory) = split(&canonical(&format!("D:(A;OICIID;FA;;;SY)(A;OICIID;FA;;;{user})")));
+        let (_, file) = split(&canonical(&format!("D:(A;ID;FA;;;SY)(A;ID;FA;;;{user})")));
+        for (path, expected) in [(&instance, &directory), (&config, &file), (&state, &file)] {
+            let (flags, entries) = split(&dacl_sddl(path));
+            assert!(!flags.contains('P'), "{} inherits again: {flags}", path.display());
+            assert_eq!(&entries, expected, "{}", path.display());
+        }
     }
 }
