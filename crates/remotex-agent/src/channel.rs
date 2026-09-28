@@ -1,0 +1,227 @@
+//! The `remotex.video` dynamic virtual channel: opened on the RDP connection this
+//! session is attached to, one message per write, and the gateway's messages read off it
+//! on a thread of its own.
+//!
+//! The protocol is the gateway's (`src/rdp_client/proto/video.rs` holds its whole
+//! description), and the constants here must change with it: [`VERSION`] is what keeps
+//! an agent and a gateway that disagree from streaming past each other.
+
+use std::sync::mpsc::{Receiver, Sender};
+use std::time::{Duration, Instant};
+
+use anyhow::{Context as _, Result, bail};
+use desktop_vp9::Chroma;
+use windows::Win32::Foundation::{CloseHandle, DUPLICATE_SAME_ACCESS, DuplicateHandle, ERROR_IO_PENDING, HANDLE};
+use windows::Win32::Storage::FileSystem::{ReadFile, WriteFile};
+use windows::Win32::System::IO::{CancelIoEx, GetOverlappedResult, OVERLAPPED};
+use windows::Win32::System::RemoteDesktop::{
+    WTS_CHANNEL_OPTION_DYNAMIC, WTS_CHANNEL_OPTION_DYNAMIC_NO_COMPRESS, WTS_CHANNEL_OPTION_DYNAMIC_PRI_HIGH,
+    WTS_CURRENT_SESSION, WTSFreeMemory, WTSVirtualChannelClose, WTSVirtualChannelOpenEx, WTSVirtualChannelQuery,
+    WTSVirtualFileHandle,
+};
+use windows::Win32::System::Threading::{CreateEventW, GetCurrentProcess};
+use windows::core::PCSTR;
+
+const NAME: &[u8] = b"remotex.video\0";
+/// What this agent speaks, which the plan must name.
+pub const VERSION: u8 = 1;
+
+pub const FRAME: u8 = 0x01;
+pub const POINTER: u8 = 0x02;
+pub const POINTER_HIDDEN: u8 = 0x03;
+pub const GAP: u8 = 0x04;
+const PLAN: u8 = 0x81;
+const ECHO: u8 = 0x82;
+const KEYFRAME: u8 = 0x83;
+
+/// What the gateway is to be sent: what it would have coded from the same pixels.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Plan {
+    pub chroma: Chroma,
+    pub quality: u8,
+    pub adaptive: bool,
+}
+
+pub enum Incoming {
+    Plan(Plan),
+    /// A plan in a version this agent does not speak.
+    Foreign(u8),
+    Echo(u32),
+    Keyframe,
+    Closed(String),
+}
+
+/// A frame message's opening: its kind, number and size, ahead of the VP9 frame.
+pub fn frame_header(out: &mut Vec<u8>, seq: u32, size: (u16, u16)) {
+    out.clear();
+    out.push(FRAME);
+    out.extend_from_slice(&seq.to_le_bytes());
+    out.extend_from_slice(&size.0.to_le_bytes());
+    out.extend_from_slice(&size.1.to_le_bytes());
+}
+
+/// A handle another thread may use: the channel's file, read on one thread and
+/// written on another, each with an `OVERLAPPED` of its own.
+#[derive(Clone, Copy)]
+struct Shared(HANDLE);
+// SAFETY: a file handle is a number the kernel resolves, and overlapped reads and
+// writes on one are independent of each other.
+unsafe impl Send for Shared {}
+
+pub struct Channel {
+    wts: HANDLE,
+    file: HANDLE,
+    event: HANDLE,
+    pub incoming: Receiver<Incoming>,
+    reader: Option<std::thread::JoinHandle<()>>,
+}
+
+impl Channel {
+    /// The channel, on this session's RDP connection. Refused where the session is
+    /// not attached over RDP, and where the client there takes no such channel — a
+    /// gateway whose target does not set `agent_passthrough`.
+    pub fn open() -> Result<Self> {
+        unsafe {
+            let flags = WTS_CHANNEL_OPTION_DYNAMIC | WTS_CHANNEL_OPTION_DYNAMIC_PRI_HIGH | WTS_CHANNEL_OPTION_DYNAMIC_NO_COMPRESS;
+            let wts = WTSVirtualChannelOpenEx(WTS_CURRENT_SESSION, PCSTR(NAME.as_ptr()), flags).context("WTSVirtualChannelOpenEx")?;
+            let mut buffer = std::ptr::null_mut();
+            let mut len = 0u32;
+            if let Err(e) = WTSVirtualChannelQuery(wts, WTSVirtualFileHandle, &mut buffer, &mut len) {
+                let _ = WTSVirtualChannelClose(wts);
+                return Err(e).context("WTSVirtualChannelQuery");
+            }
+            let source = *(buffer as *const HANDLE);
+            let mut file = HANDLE::default();
+            let dup = DuplicateHandle(GetCurrentProcess(), source, GetCurrentProcess(), &mut file, 0, false, DUPLICATE_SAME_ACCESS);
+            WTSFreeMemory(buffer);
+            if let Err(e) = dup {
+                let _ = WTSVirtualChannelClose(wts);
+                return Err(e).context("DuplicateHandle");
+            }
+            let event = match CreateEventW(None, true, false, None) {
+                Ok(event) => event,
+                Err(e) => {
+                    let _ = CloseHandle(file);
+                    let _ = WTSVirtualChannelClose(wts);
+                    return Err(e).context("CreateEventW");
+                }
+            };
+            let (tx, incoming) = std::sync::mpsc::channel();
+            let shared = Shared(file);
+            let reader = std::thread::Builder::new().name("channel".into()).spawn(move || read(shared, &tx));
+            let reader = match reader {
+                Ok(reader) => reader,
+                Err(e) => {
+                    let _ = CloseHandle(event);
+                    let _ = CloseHandle(file);
+                    let _ = WTSVirtualChannelClose(wts);
+                    return Err(e).context("the channel's reader");
+                }
+            };
+            Ok(Self { wts, file, event, incoming, reader: Some(reader) })
+        }
+    }
+
+    /// One message, one write: the channel cuts it into its own PDUs and the gateway
+    /// joins them. Returns how long the write took, which is the channel having no
+    /// room.
+    pub fn send(&self, message: &[u8]) -> Result<Duration> {
+        let started = Instant::now();
+        unsafe {
+            let mut ov = OVERLAPPED { hEvent: self.event, ..Default::default() };
+            let mut written = 0u32;
+            if let Err(e) = WriteFile(self.file, Some(message), None, Some(&mut ov))
+                && e.code() != ERROR_IO_PENDING.to_hresult()
+            {
+                return Err(e).context("WriteFile");
+            }
+            GetOverlappedResult(self.file, &ov, &mut written, true).context("GetOverlappedResult")?;
+            if written as usize != message.len() {
+                bail!("short write: {written} of {}", message.len());
+            }
+        }
+        Ok(started.elapsed())
+    }
+}
+
+impl Drop for Channel {
+    fn drop(&mut self) {
+        unsafe {
+            // The reader is parked in a read, which this ends; one it starts between
+            // two cancels, having been between reads at the first, is ended by the next.
+            if let Some(reader) = self.reader.take() {
+                while !reader.is_finished() {
+                    let _ = CancelIoEx(self.file, None);
+                    std::thread::sleep(Duration::from_millis(1));
+                }
+                let _ = reader.join();
+            }
+            let _ = CloseHandle(self.file);
+            let _ = CloseHandle(self.event);
+            let _ = WTSVirtualChannelClose(self.wts);
+        }
+    }
+}
+
+/// The gateway's messages, off the channel until it closes. A read returns one chunk
+/// behind a `CHANNEL_PDU_HEADER`: the whole message's length and the flags that say
+/// where in it the chunk falls.
+fn read(file: Shared, tx: &Sender<Incoming>) {
+    const CHUNK: usize = 1600 + 8;
+    const FIRST: u32 = 1;
+    const LAST: u32 = 2;
+    let closed = |why: String| {
+        let _ = tx.send(Incoming::Closed(why));
+    };
+    let event = match unsafe { CreateEventW(None, true, false, None) } {
+        Ok(event) => event,
+        Err(e) => return closed(format!("CreateEventW: {e}")),
+    };
+    let mut message = Vec::new();
+    let mut chunk = [0u8; CHUNK];
+    loop {
+        let mut got = 0u32;
+        unsafe {
+            let mut ov = OVERLAPPED { hEvent: event, ..Default::default() };
+            if let Err(e) = ReadFile(file.0, Some(&mut chunk), None, Some(&mut ov))
+                && e.code() != ERROR_IO_PENDING.to_hresult()
+            {
+                closed(format!("ReadFile: {e}"));
+                break;
+            }
+            if let Err(e) = GetOverlappedResult(file.0, &ov, &mut got, true) {
+                closed(format!("GetOverlappedResult: {e}"));
+                break;
+            }
+        }
+        let got = got as usize;
+        if got < 8 {
+            continue;
+        }
+        let flags = u32::from_le_bytes(chunk[4..8].try_into().expect("four bytes"));
+        if flags & FIRST != 0 {
+            message.clear();
+        }
+        message.extend_from_slice(&chunk[8..got]);
+        if flags & LAST == 0 {
+            continue;
+        }
+        let said = match message[..] {
+            [PLAN, VERSION, chroma, quality, adaptive] => Incoming::Plan(Plan {
+                chroma: if chroma == 0 { Chroma::Subsampled } else { Chroma::Full },
+                quality,
+                adaptive: adaptive != 0,
+            }),
+            [PLAN, version, ..] => Incoming::Foreign(version),
+            [ECHO, a, b, c, d] => Incoming::Echo(u32::from_le_bytes([a, b, c, d])),
+            [KEYFRAME] => Incoming::Keyframe,
+            _ => continue,
+        };
+        if tx.send(said).is_err() {
+            break;
+        }
+    }
+    unsafe {
+        let _ = CloseHandle(event);
+    }
+}

@@ -4,24 +4,33 @@
 # protocol implementation. The desktop window that shows that SPA,
 # remotex-viewer, is a repository of its own (docs/viewer.md).
 #
+# One version for the whole workspace. `[workspace.package]` below is the only
+# literal `version` in the tree — the root package inherits it with
+# `version.workspace = true`.
+#
 # Note for anyone editing this file: frontend/vite.config.ts regexes the *first*
 # line matching `^version = "…"` out of this manifest to stamp the login screen,
-# so the package's `version` must stay the first such line.
+# so that line must stay the workspace version. `version.workspace = true` does
+# not match the regex (the `.` after `version` breaks it), which is what keeps
+# the root package from shadowing it.
 #
-# The workspace's one other member is the in-session video POC's agent, a
-# Windows-only test binary that root-level cargo commands never build: it is a
-# member so that it codes with the gateway's desktop-vp9, from
-# `[workspace.dependencies]` below, and resolves it through this Cargo.lock.
+# `crates/remotex-agent` is the agent that runs in a Windows session and sends its
+# desktop as VP9 over the session's own RDP connection, for a target with
+# `agent_passthrough`; `-p remotex-agent` picks it. It codes with the gateway's
+# desktop-vp9, from `[workspace.dependencies]` below, through this Cargo.lock.
 [workspace]
 resolver = "3"
-members = ["tests/dvc-video-poc/agent"]
+members = ["crates/remotex-agent"]
 
 [workspace.dependencies]
 desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.5" }
 
+[workspace.package]
+version = "0.0.286"
+
 [package]
 name = "remotex"
-version = "0.0.286"
+version.workspace = true
 license = "MIT"
 edition = "2024"
 

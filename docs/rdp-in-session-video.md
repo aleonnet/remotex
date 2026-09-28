@@ -36,8 +36,12 @@ the session refuses `remotex.video` by name, and an agent in the session has not
 to write to. It is refused off `rdp` and beside `egfx = false`, because the pipeline
 is what carries the desktop wherever the stream cannot. Unlike the Mac's stream it
 waits on no answer of the browser's: the agent codes the profile the plan names,
-which is the browser's own wherever it chose one. The agent is a proof of concept, `tests/dvc-video-poc/agent`, started
-by hand or by the probe: nothing installs it or starts it at logon.
+which is the browser's own wherever it chose one.
+
+The host's side is [remotex-agent](agent.md) (`crates/remotex-agent`), installed by its
+MSI as the `RemotexAgent` service, which starts an agent as the user of each session
+attached over RDP: how it is installed, run and logged is there, and what it says on the
+channel is here.
 
 ## Passed, or not taken
 
@@ -283,12 +287,6 @@ change, which costs a turn of the pipeline's that the resize takes anyway.
 
 ## What is left open
 
-- **An agent on the host.** A service that starts the capture in each session,
-  including across logon, and a supported way to ship and update it. The probe starts
-  the proof of concept by scheduled task in a session that already exists.
-- **A reattach under the stream.** The engine asks the agent for a keyframe and sends
-  nothing until it comes. No probe drives it: `tests/ws_probe.py`'s second `connect`
-  starts a fresh engine, as the session rules have it.
 - **A UAC prompt and the lock screen themselves.** The host measured has UAC switched
   off, so the secure desktop was reached with Ctrl+Alt+Del.
 - **Other hosts.** One with a GPU, where DXGI and a hardware encoder differ; Windows
@@ -304,9 +302,14 @@ Measured against one host: Windows 11 Enterprise, build 26200, in a VM with no G
 animation and a tone.
 
 The probe is `tests/rdp_dvc_video_probe.rs`. The agent is built on `windows-ci-build`
-and started on the target by scheduled task, in the session the probe logs on to;
-what a run produces — the agent binary and log, host and agent frames as PNG — lands
-in `tmp/dvc-video-poc`. Leave an animation and a sound playing on the host, from a
+by `tests/rdp-agent/build.ps1`. Most tests start a session's agent on the target
+themselves, by scheduled task, in the session the probe logs on to, and refuse to while
+the `RemotexAgent` service runs there; `the_service_gives_each_connection_an_agent`,
+`a_reattach_starts_the_stream_over_at_a_keyframe` and
+`removing_the_service_under_the_stream_gives_the_picture_back` want the service,
+installed from the MSI by `tests/rdp-agent/install-service.ps1` and removed by
+`uninstall-service.ps1`, which the last runs itself. What a run produces — the agent binary and logs,
+host and agent frames as PNG — lands in `tmp/rdp-agent`. Leave an animation and a sound playing on the host, from a
 browser: a browser page survives the probe's disconnects, where ffplay's picture
 freezes at the first one.
 
@@ -314,7 +317,7 @@ Build the probe with the `qa` profile. A debug build does not keep up with the h
 and what it counts of the host's frames is skewed by that.
 
 ```sh
-pwsh -File tests/dvc-video-poc/build.ps1
+pwsh -File tests/rdp-agent/build.ps1
 REMOTEX_UAT_TARGET=windows-ent-sandbox RUST_LOG=remotex::rdp_client=info \
   cargo test --profile qa --test rdp_dvc_video_probe <test> -- --ignored --nocapture
 ```
@@ -324,9 +327,12 @@ REMOTEX_UAT_TARGET=windows-ent-sandbox RUST_LOG=remotex::rdp_client=info \
 | `the_stream_carries_the_desktop_and_gives_it_back` | A message of megabytes in one write, the stall and the sound under it, the pointer from the agent and out of the picture, a resize, the agent leaving |
 | `the_secure_desktop_is_the_pipelines_to_show` | Ctrl+Alt+Del: the gap, and the stream back after it |
 | `the_stream_comes_back_on_a_new_connection` | A reconnect with the agent left running |
+| `the_service_gives_each_connection_an_agent` | The installed service: an agent of its own for each connection, none streaming to a connection that refuses the channel |
+| `a_reattach_starts_the_stream_over_at_a_keyframe` | Through a gateway in the test, a browser's socket dropped and reclaimed: the engine resumed, and the new socket sent nothing of the stream before a fresh announcement and the keyframe asked of the agent |
+| `removing_the_service_under_the_stream_gives_the_picture_back` | Removing the MSI while its agent streams: the service stops the agent, and the pipeline takes the picture back on a connection that goes on |
 | `animation_page_survives_reconnects` | Whether the host's animation and sound outlive a disconnect, with no agent |
 
-Two switches of the agent's are the probe's. `--patch` has it paint a small window
+Two switches of `remotex-agent session`, hidden from its help, are the probe's. `--patch` has it paint a small window
 the colour its next frame's number names and wait for the composed screen to show it
 before it captures, so that a frame counts as *fresh* only when the decoded patch
 shows that colour: a captured frame proves nothing if it is the same surface handed

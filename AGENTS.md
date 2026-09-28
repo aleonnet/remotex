@@ -16,6 +16,9 @@ documentation.
   `#[ignore = "slow: …"]` only when the change reaches what it checks. Mark a
   test that waits seconds that way.
 - After frontend JS/TS changes, run the Biome checks in `frontend/`.
+- After `crates/remotex-agent` changes, run `tests/rdp-agent/build.ps1 -Check`,
+  which runs its clippy and tests on `windows-ci-build`. Off Windows the crate is
+  a stub; do not make it build there.
 - Before browser QA of a frontend change, rebuild the gateway and say so: the
   frontend bundle is compiled into the binary, so a running `remotex serve`
   never sees a newer bundle. For source-based iteration, use
@@ -246,11 +249,20 @@ documentation.
   `src/embedded/transport.rs`. Containers must be built through
   `packaging/build-container-binary.sh`, with default features disabled, and must
   never expose `tui`, `serve-embedded`, or `check-config --embedded`.
-- The Windows MSI ships the native binary, `tui` included. Build it with
+- The gateway's Windows MSI ships the native binary, `tui` included. Build it with
   `packaging/build-windows-msi.ps1` on `windows-ci-build` through
   `ci/windows/remote.ps1 ci -Package`, when packaging changes or before a release;
   a plain `ci` rerun stops after the tests. Do not add a service or
-  package-owned live config.
+  package-owned live config to it.
+- `remotex-agent`'s MSI (`packaging/windows/remotex-agent.wxs`) is a separate
+  product for the machine an RDP target is, in the public release beside a zip of
+  the binary; `ci/windows/remote.ps1 ci -Package` builds and verifies it too. It
+  installs the `RemotexAgent` service, which runs as LocalSystem and captures
+  nothing: it starts `remotex-agent session` as the user of each session attached
+  over RDP and stops it when the session is left. Keep the capture in the user's
+  session and out of LocalSystem, and give the agent no configuration, port or
+  connection of its own: the target's `agent_passthrough` decides, and the plan
+  comes on the channel. See [remotex-agent](docs/agent.md).
 - Follow [Packaging](packaging/README.md) for native layouts, prebuilt dependency
   rules, and release workflow.
 - `THIRD-PARTY-NOTICES.txt` is a build output that packaging makes with

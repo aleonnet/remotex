@@ -64,6 +64,9 @@ Windows pick the value up when their app next launches, so quit and reopen the
 browser app. `defaults delete -g NSConvolutionOverride1` restores Apple's radius
 — 26 points on macOS 26, 10 before it.
 
+A Windows host can code its own desktop for an RDP target with
+[`remotex-agent`](docs/agent.md), a service installed there from its own MSI.
+
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/known-issues.md`](docs/known-issues.md) for faults worth recognising rather
 than re-investigating.

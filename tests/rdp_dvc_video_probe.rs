@@ -1,7 +1,7 @@
-//! POC: an in-session Windows agent's VP9 over a dynamic virtual channel of the RDP
-//! connection, carrying the desktop in place of the host's graphics pipeline.
+//! remotex's agent's VP9 over a dynamic virtual channel of the RDP connection, carrying
+//! the desktop in place of the host's graphics pipeline.
 //!
-//! The agent (`tests/dvc-video-poc/agent`) runs in the RDP session, opens
+//! The agent (`crates/remotex-agent`) runs in the RDP session, opens
 //! `remotex.video` with `WTSVirtualChannelOpenEx`, captures the desktop with DXGI
 //! Desktop Duplication, codes it with desktop-vp9 to the plan this end states, and
 //! writes it to the channel beside the pointer's shape. The RDP client
@@ -9,6 +9,11 @@
 //! keyframe, withholds the pipeline's frame acknowledgements while it flows, which
 //! stalls the host's own graphics, and gives the picture back to the pipeline when the
 //! agent cannot see the desktop, the desktop changes size, or the channel closes.
+//!
+//! Most tests start a session's agent themselves, by scheduled task, which the host's
+//! `RemotexAgent` service would otherwise do: they refuse to run beside it. Three test
+//! the service, installed from the agent's MSI: one through a gateway of its own, and one
+//! that removes it.
 //!
 //! Started with `--patch`, the agent paints a small window the colour its next frame's
 //! number names just before it captures, so a frame counts as *fresh* here only when
@@ -26,9 +31,11 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
+use futures_util::{SinkExt as _, StreamExt as _};
 use remotex::rdp_client::proto::rdpsnd;
 use remotex::rdp_client::{AudioSink, Connect, Cursor, Event, Input, Session, VideoFrame, VideoPlan};
 use tokio::sync::mpsc;
+use tokio_tungstenite::tungstenite::Message;
 
 const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
 const OPENING: (u32, u32) = (1280, 800);
@@ -56,10 +63,10 @@ fn nearest(r: u8, g: u8, b: u8) -> usize {
 }
 
 /// Where a run's products go.
-const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tmp/dvc-video-poc");
+const OUT: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/tmp/rdp-agent");
 
 fn script(name: &str, args: &[&str]) {
-    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/dvc-video-poc/");
+    let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rdp-agent/");
     let status = Command::new("pwsh").arg("-NoProfile").arg("-File").arg(format!("{path}{name}")).args(args).status().expect("pwsh");
     println!("{name} {args:?}: {status}");
 }
@@ -74,6 +81,32 @@ fn start_agent(switches: &str) -> tokio::task::JoinHandle<()> {
 /// Stop the agent and bring its log back, the same way.
 fn stop_agent() -> tokio::task::JoinHandle<()> {
     tokio::task::spawn_blocking(|| script("stop-agent.ps1", &[]))
+}
+
+/// Remove the service's MSI with `uninstall-service.ps1`, on a task of its own, as the
+/// session's events are to be taken meanwhile, and within five minutes: `true` when it
+/// finished and succeeded.
+fn uninstall_service() -> tokio::task::JoinHandle<bool> {
+    tokio::spawn(async {
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), "/tests/rdp-agent/uninstall-service.ps1");
+        let mut child = tokio::process::Command::new("pwsh")
+            .args(["-NoProfile", "-File", path])
+            .stdin(std::process::Stdio::null())
+            .kill_on_drop(true)
+            .spawn()
+            .expect("pwsh");
+        match tokio::time::timeout(Duration::from_secs(300), child.wait()).await {
+            Ok(status) => {
+                let status = status.expect("pwsh");
+                println!("uninstall-service.ps1: {status}");
+                status.success()
+            }
+            Err(_) => {
+                println!("uninstall-service.ps1: still running after 5 minutes, stopped");
+                false
+            }
+        }
+    })
 }
 
 /// The host's sound, counted: buffers since the session began.
@@ -463,7 +496,7 @@ async fn connect_to_stream(switches: &str) -> (Session, Receiver) {
 /// as its own shape from the agent and never in the picture, a resize through the
 /// pipeline and back, and the agent leaving.
 #[tokio::test]
-#[ignore = "drives a real RDP host named in tmp/test_uat.toml and the POC agent"]
+#[ignore = "drives a real RDP host named in tmp/test_uat.toml and the agent"]
 async fn the_stream_carries_the_desktop_and_gives_it_back() {
     common::init_logging();
     let (session, mut rx) = connect(true);
@@ -546,7 +579,7 @@ async fn the_stream_carries_the_desktop_and_gives_it_back() {
 /// cannot see the desktop, the pipeline shows the screen, and the stream comes back once
 /// it is dismissed.
 #[tokio::test]
-#[ignore = "drives a real RDP host named in tmp/test_uat.toml and the POC agent"]
+#[ignore = "drives a real RDP host named in tmp/test_uat.toml and the agent"]
 async fn the_secure_desktop_is_the_pipelines_to_show() {
     const ESCAPE: u8 = 0x01;
     const LCONTROL: u8 = 0x1D;
@@ -596,7 +629,7 @@ async fn the_secure_desktop_is_the_pipelines_to_show() {
 /// A reconnect with the agent left running: it opens its channel again on the new
 /// connection and the stream is the picture again, from a keyframe to the new plan.
 #[tokio::test]
-#[ignore = "drives a real RDP host named in tmp/test_uat.toml and the POC agent"]
+#[ignore = "drives a real RDP host named in tmp/test_uat.toml and the agent"]
 async fn the_stream_comes_back_on_a_new_connection() {
     let (session, mut rx) = connect_to_stream("--patch").await;
     phase(&mut rx, "the-stream", 5).await;
@@ -615,6 +648,202 @@ async fn the_stream_comes_back_on_a_new_connection() {
     assert_eq!(flowing.fresh, flowing.decoded);
     drop(session);
     stop_agent().await.unwrap();
+}
+
+/// The installed service gives each connection a session's agent of its own: the
+/// stream comes on a connection that takes it with nothing started by hand, comes again
+/// on the next connection, and stays away from one that refuses the channel, as a
+/// target without `agent_passthrough` does, which the pipeline carries alone.
+#[tokio::test]
+#[ignore = "drives a real RDP host named in tmp/test_uat.toml with the agent's service installed"]
+async fn the_service_gives_each_connection_an_agent() {
+    common::init_logging();
+    for round in 1..=2 {
+        let (session, mut rx) = connect(true);
+        wait_connected(&mut rx).await;
+        let connected = Instant::now();
+        let (came, first) = wait(&mut rx, &format!("connection-{round}-waiting"), 60, Until::Video).await;
+        assert!(came, "the service started no agent that streamed on connection {round}");
+        assert_eq!(first.keyframes, 1);
+        println!("  the stream was the picture {:?} after connection {round}", connected.elapsed());
+        phase(&mut rx, &format!("connection-{round}-running-down"), 5).await;
+        let flowing = phase(&mut rx, &format!("connection-{round}-stream"), 5).await;
+        assert!(flowing.decoded > 0 && flowing.ended == 0);
+        assert_eq!(flowing.host_frames, 0, "the host's graphics are not stalled");
+        drop(session);
+        drop(rx);
+        tokio::time::sleep(Duration::from_secs(5)).await;
+    }
+
+    let (session, mut rx) = connect(false);
+    wait_connected(&mut rx).await;
+    let refused = phase(&mut rx, "refusing-connection", 30).await;
+    assert_eq!(refused.frames, 0);
+    assert!(refused.host_frames > 0, "the pipeline did not carry the desktop");
+    save_host(&session, "5-host-refusing-the-channel");
+    drop(session);
+    drop(rx);
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    let (session, mut rx) = connect(true);
+    wait_connected(&mut rx).await;
+    let (came, _) = wait(&mut rx, "taking-again-waiting", 60, Until::Video).await;
+    assert!(came, "no stream on a connection that takes it, after one that refused it");
+    save_agent(&rx, "6-agent-from-the-service");
+    drop(session);
+}
+
+/// Removing the package while its agent streams: the service stops the session's agent
+/// on its way out, the channel closes, and the pipeline takes the picture back on a
+/// connection that goes on. The host is left without the MSI.
+#[tokio::test]
+#[ignore = "drives a real RDP host named in tmp/test_uat.toml with the agent's service installed, and removes it"]
+async fn removing_the_service_under_the_stream_gives_the_picture_back() {
+    common::init_logging();
+    let (session, mut rx) = connect(true);
+    wait_connected(&mut rx).await;
+    let (came, _) = wait(&mut rx, "waiting-for-the-stream", 60, Until::Video).await;
+    assert!(came, "the service started no agent that streamed");
+    let flowing = phase(&mut rx, "the-stream", 5).await;
+    assert!(flowing.decoded > 0 && flowing.ended == 0);
+
+    let removing = uninstall_service();
+    let (ended, _) = wait(&mut rx, "removing-under-the-stream", 300, Until::Ended).await;
+    assert!(ended, "the stream did not end while the package was removed");
+    let (drew, _) = wait(&mut rx, "the-pipeline-back", 10, Until::HostFrame).await;
+    assert!(drew, "the pipeline did not take the picture back");
+    // The events are taken until the removal is through, which is bounded.
+    while !removing.is_finished() {
+        let started = Instant::now();
+        let p = phase(&mut rx, "the-removal-finishing", 1).await;
+        assert!(started.elapsed() >= Duration::from_secs(1), "the connection ended during the removal");
+        assert_eq!(p.frames, 0, "a stream after its agent was stopped");
+    }
+    assert!(removing.await.unwrap(), "the package was not removed");
+    let after = phase(&mut rx, "without-the-agent", 10).await;
+    assert_eq!(after.frames, 0);
+    assert!(after.host_frames > 0, "the pipeline did not carry the desktop");
+    save_host(&session, "7-host-after-the-removal");
+    drop(session);
+}
+
+/// What a browser was sent on the session socket, of what a reattach turns on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Sent {
+    Picker,
+    Connected,
+    /// A `videoFormat`: the stream passed as it came, or encoded here.
+    Format { passthrough: bool },
+    Unit { keyframe: bool },
+}
+
+/// What was sent after the last announcement of a passed stream: `None` before any.
+fn after_passing(sent: &[Sent]) -> Option<&[Sent]> {
+    let at = sent.iter().rposition(|s| *s == Sent::Format { passthrough: true })?;
+    Some(&sent[at + 1..])
+}
+
+/// Take what the gateway sends on `ws`, acknowledging each batch as a browser that
+/// painted it at once, until `done` says so or `seconds` pass.
+async fn watch(ws: &mut common::Ws, seconds: u64, done: impl Fn(&[Sent]) -> bool) -> (Vec<Sent>, Duration) {
+    let started = Instant::now();
+    let deadline = started + Duration::from_secs(seconds);
+    let mut sent = Vec::new();
+    while !done(&sent) {
+        let message = match tokio::time::timeout_at(deadline.into(), ws.next()).await {
+            Err(_) => break,
+            Ok(Some(Ok(message))) => message,
+            Ok(other) => panic!("the gateway closed the session socket: {other:?}"),
+        };
+        match message {
+            Message::Binary(frame) if frame.first() == Some(&remotex::protocol::batch::FRAME_KIND) => {
+                ws.send(Message::text(common::paint_ack(&frame))).await.unwrap();
+                sent.extend(common::batch_units(&frame).iter().map(|unit| Sent::Unit { keyframe: unit.keyframe }));
+            }
+            Message::Text(text) => {
+                let json: serde_json::Value = serde_json::from_str(&text).unwrap();
+                match json["type"].as_str() {
+                    Some("picker") => sent.push(Sent::Picker),
+                    Some("connected") => sent.push(Sent::Connected),
+                    Some("videoFormat") => {
+                        sent.push(Sent::Format { passthrough: json["passthrough"].as_bool().unwrap() });
+                    }
+                    Some("error") => panic!("the gateway said: {text}"),
+                    _ => {}
+                }
+            }
+            _ => {}
+        }
+    }
+    (sent, started.elapsed())
+}
+
+/// Whether a passed keyframe has come since the stream was last announced as passed.
+fn passed_keyframe(sent: &[Sent]) -> bool {
+    after_passing(sent).is_some_and(|after| after.contains(&Sent::Unit { keyframe: true }))
+}
+
+/// A browser's reattach under the stream, through a gateway: the socket drops, the
+/// same browser comes back on its claim, and the engine it left running is resumed.
+/// The new socket is sent nothing of the stream until a keyframe the engine asks the
+/// agent for, behind a fresh announcement, and the stream goes on passed from there.
+/// The agent is the installed service's.
+#[tokio::test]
+#[ignore = "drives a real RDP host named in tmp/test_uat.toml with the agent's service installed"]
+async fn a_reattach_starts_the_stream_over_at_a_keyframe() {
+    common::init_logging();
+    let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| panic!("set {TARGET_ENV}"));
+    let mut target = common::uat_target(&name);
+    target.agent_passthrough = true;
+    let config = remotex::config::AppConfig {
+        listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
+        targets: vec![target],
+        auth: common::test_auth(),
+        branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
+        dev_hostname: None,
+        meter: None,
+    };
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let addr = listener.local_addr().unwrap();
+    tokio::spawn(async move { axum::serve(listener, remotex::server::router(config, Default::default())).await.unwrap() });
+
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = common::connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, &name).await;
+    let (opening, took) = watch(&mut ws, 60, passed_keyframe).await;
+    assert!(passed_keyframe(&opening), "the agent's stream was never passed: {opening:?}");
+    println!("  the stream was passed {took:?} after the connect");
+    let (flowing, _) = watch(&mut ws, 3, |_| false).await;
+    assert!(!flowing.contains(&Sent::Format { passthrough: false }), "the pipeline took the picture: {flowing:?}");
+    assert!(flowing.contains(&Sent::Unit { keyframe: false }), "the stream did not flow");
+
+    // The socket drops, as a browser's does on a network change or a reload.
+    drop(ws);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+
+    let (status, body) = common::post_session(addr, &cookie, &format!(r#"{{"sessionId":"{token}"}}"#)).await;
+    assert_eq!(status, 200, "the same browser's reclaim was refused: {body}");
+    let token: String = serde_json::from_str::<serde_json::Value>(&body).unwrap()["sessionId"].as_str().unwrap().to_owned();
+    let mut ws = common::connect_ws(addr, &token, &cookie).await;
+    let (back, took) = watch(&mut ws, 20, passed_keyframe).await;
+    println!("  after the reattach: {back:?}");
+    assert_eq!(back.first(), Some(&Sent::Connected), "the engine was not resumed");
+    assert!(!back.contains(&Sent::Picker));
+    assert!(passed_keyframe(&back), "no passed keyframe after the reattach");
+    let first_unit = back.iter().find(|s| matches!(s, Sent::Unit { .. }));
+    assert_eq!(first_unit, Some(&Sent::Unit { keyframe: true }), "a unit ahead of the keyframe the restart needs");
+    let announced = back.iter().position(|s| *s == Sent::Format { passthrough: true }).unwrap();
+    let keyframe = back.iter().position(|s| *s == Sent::Unit { keyframe: true }).unwrap();
+    assert!(announced < keyframe, "the keyframe went out ahead of its announcement");
+    assert!(!back.contains(&Sent::Format { passthrough: false }), "the pipeline took the picture");
+    println!("  the stream was passed again {took:?} after the reattach");
+    let (flowing, _) = watch(&mut ws, 5, |_| false).await;
+    assert!(!flowing.contains(&Sent::Format { passthrough: false }), "the pipeline took the picture: {flowing:?}");
+    assert!(flowing.contains(&Sent::Unit { keyframe: false }), "the stream did not go on after the reattach");
+
+    ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
+    let _ = tokio::time::timeout(Duration::from_secs(5), ws.next()).await;
 }
 
 /// Whether the animation and sound left playing on the host keep going across

@@ -360,7 +360,10 @@ the browser as it came. The encode this gateway does for an RDP target is then t
 host's, and nothing between the host and the browser decodes or encodes a picture.
 The channel's messages, what was measured against a Windows host, and what is left
 open are in
-[A Windows host's video over its own RDP connection](rdp-in-session-video.md).
+[A Windows host's video over its own RDP connection](rdp-in-session-video.md). The agent
+is installed on the host by its own MSI as the `RemotexAgent` service, which runs as
+LocalSystem, captures nothing itself, and starts `remotex-agent session` as the user of
+each session attached over RDP: see [remotex-agent](agent.md).
 
 - **Opted in per target.** `agent_passthrough` is the target's say, as
   `media_passthrough` is for a High Performance Mac, and resolves in

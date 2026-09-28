@@ -1,0 +1,35 @@
+[package]
+name = "remotex-agent"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "Codes a Windows session's desktop as VP9 and sends it to remotex over the session's own RDP connection"
+
+# Windows only: on any other target the binary is a stub that says so, which keeps a
+# workspace-wide cargo command from failing on a crate it cannot build.
+[target.'cfg(windows)'.dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+desktop-vp9.workspace = true
+jiff = { version = "0.2", default-features = false, features = ["std"] }
+windows-service = "0.8"
+windows = { version = "0.62", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Direct3D",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Gdi",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Console",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_Environment",
+    "Win32_System_IO",
+    "Win32_System_LibraryLoader",
+    "Win32_System_RemoteDesktop",
+    "Win32_System_Threading",
+    "Win32_UI_HiDpi",
+    "Win32_UI_WindowsAndMessaging",
+] }

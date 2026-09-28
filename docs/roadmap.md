@@ -197,7 +197,8 @@ has an answer rather than being rediscovered.
   A stream the host codes itself, from an agent in the session over a proprietary
   display side channel carried by a dynamic channel of the same connection, is the
   other way round the pipeline. It is not an RDP graphics codec or decoder
-  extension; the POC is recorded in
+  extension, and it is taken where a target sets `agent_passthrough` and the host runs
+  [remotex-agent](agent.md): see
   [A Windows host's video over its own RDP connection](rdp-in-session-video.md).
 - **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
   the lossless standard encodings on purpose: Tight and TightPNG are vendor

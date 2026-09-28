@@ -219,7 +219,8 @@ password = "change-me"
 # never opens the channel, and wherever the stream cannot be passed as it came — a
 # frame that is not the plan's, the secure desktop, a resize — the graphics pipeline
 # carries the desktop, encoded here. Off, the channel is refused. RDP only, and
-# refused beside `egfx = false`. See docs/rdp-in-session-video.md.
+# refused beside `egfx = false`. The host runs the agent as a service installed from its
+# own MSI: see docs/agent.md, and docs/rdp-in-session-video.md for the stream.
 #agent_passthrough = false
 
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.
