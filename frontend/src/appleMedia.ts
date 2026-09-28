@@ -14,13 +14,14 @@
 // The two halves are asked differently:
 // - The picture, HEVC Range Extensions 4:4:4: `VideoDecoder.isConfigSupported`, which
 //   answered as the decoder then behaved on every browser measured.
-// - The sound: a real decode of one of the Mac's own units. No codec string names
-//   AAC-ELD to both Chrome and Safari — both refuse `mp4a.40.39` — so both are asked
-//   for AAC's `mp4a.40.2`, and they need the AudioSpecificConfig differently: Chrome as
-//   it is, Safari inside an MPEG-4 ES_Descriptor, since the CoreAudio call WebKit reads
-//   it with refuses a bare one and WebKit then decodes as AAC-LC without it. Safari's
-//   `isConfigSupported` says yes to the bare configuration all the same, so only
-//   decoding tells. The configuration that decoded is the one the player then uses
+// - The sound: `AudioDecoder.isConfigSupported`, then a real decode of one of the
+//   Mac's own units in each form it says yes to. No codec string names AAC-ELD to both
+//   Chrome and Safari — both refuse `mp4a.40.39` — so both are asked for AAC's
+//   `mp4a.40.2`, and they need the AudioSpecificConfig differently: Chrome as it is,
+//   Safari inside an MPEG-4 ES_Descriptor, since the CoreAudio call WebKit reads it
+//   with refuses a bare one and WebKit then decodes as AAC-LC without it. Both say
+//   yes to both forms, so a yes only narrows the forms worth decoding and decoding
+//   picks one. The configuration that decoded is the one the player then uses
 //   (`appleEldConfig`).
 //
 // Selection, as with the chroma — but the other way round on a doubt. VP9 and Opus are
@@ -97,8 +98,25 @@ async function decodesPicture(): Promise<boolean> {
   }
 }
 
-/** Whether a decoder configured with `description` turns the unit into sound. */
+/**
+ * Whether the browser says it takes `description`, and a decoder configured with it
+ * then turns the unit into sound.
+ */
 async function decodesSound(description: Uint8Array): Promise<boolean> {
+  const config: AudioDecoderConfig = {
+    codec: ELD_DECODE_CODEC,
+    sampleRate: 48_000,
+    numberOfChannels: 2,
+    description,
+  };
+  try {
+    const support = await AudioDecoder.isConfigSupported(config);
+    if (support.supported !== true) {
+      return false;
+    }
+  } catch {
+    return false;
+  }
   let output = false;
   let failed = false;
   let decoder: AudioDecoder | null = null;
@@ -113,12 +131,7 @@ async function decodesSound(description: Uint8Array): Promise<boolean> {
         failed = true;
       },
     });
-    decoder.configure({
-      codec: ELD_DECODE_CODEC,
-      sampleRate: 48_000,
-      numberOfChannels: 2,
-      description,
-    });
+    decoder.configure(config);
     const data = Uint8Array.from(atob(ELD_UNIT), (c) => c.charCodeAt(0));
     decoder.decode(new EncodedAudioChunk({ type: "key", timestamp: 0, data }));
     const unanswered = new Promise<never>((_, reject) => {

@@ -177,7 +177,8 @@ documentation.
   the key. The Mac's ZRLE rectangles fill the stream's gaps as VP9 encoded here,
   each switch between the two starting at a keyframe, and a PLI is a passed
   stream's repaint. The page answers for the sound by decoding one of the Mac's
-  units, not by asking `isConfigSupported`, and plays it in the form of the
+  units in each form `isConfigSupported` accepts, since it accepts forms that do not
+  decode, and plays it in the form of the
   configuration that decoded (`frontend/src/appleMedia.ts`). Keep it to that
   stream: no other remote's HEVC or sound, and a passed unit is never altered.
   See [Apple's media stream, passed through](docs/architecture.md#apples-media-stream-passed-through).

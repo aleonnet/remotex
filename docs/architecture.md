@@ -370,9 +370,10 @@ Three controls with similar names therefore remain separate:
   the Mac's own units, because no question answers it: Chrome and Safari both
   refuse `mp4a.40.39`, both decode AAC-ELD as `mp4a.40.2`, and they need the
   AudioSpecificConfig in different forms — Chrome as it is, Safari inside an MPEG-4
-  ES_Descriptor — while Safari's `isConfigSupported` says yes to the form it cannot
-  decode ([The sound](apple-vnc-889.md#the-sound)). The page tries the bare form,
-  then the ES_Descriptor, and keeps the one that produced sound. Only a definite
+  ES_Descriptor — while both browsers' `isConfigSupported` say yes to the form they
+  cannot decode ([The sound](apple-vnc-889.md#the-sound)). The page asks
+  `isConfigSupported` about the bare form, then the ES_Descriptor, decodes the unit
+  in each it says yes to, and keeps the first that produced sound. Only a definite
   "yes" to both asks for the stream; VP9 and Opus are what every browser here
   decodes, so a "no", an answer with no verdict, a decoder that fails or never
   answers, and a question that throws all keep them. Measured, Chrome and Safari,

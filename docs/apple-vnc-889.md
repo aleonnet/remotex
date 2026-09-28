@@ -850,7 +850,9 @@ link to a physical Mac has not been observed.
   `FormatInfo` reads `aace`, 48 kHz, stereo, 480 frames per packet, and Safari
   decoded all 3450 units. Chrome 153 on Windows also decoded every unit given the
   bare AudioSpecificConfig, and refused the ES_Descriptor as an unsupported
-  configuration, so the two browsers need different descriptions.
+  configuration, so the two browsers need different descriptions. Both browsers'
+  `isConfigSupported` say yes to both descriptions, the one each cannot decode
+  included.
   FFmpeg's native `aac` (libavcodec 62.28) decoded the capture cleanly at the
   same levels as Chrome and Safari. The gateway's decoder is the pure-Rust port of
   Fraunhofer's fdk-aac decoder that AOSP ships as `platform/external/aac`,

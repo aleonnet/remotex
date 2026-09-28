@@ -1,10 +1,11 @@
 // Whether the page asks for a High Performance Mac's own stream. Only a definite "yes"
 // about both halves does: the picture's probe, and a unit of the sound that actually
-// decoded, in whichever form of its configuration this browser takes.
+// decoded, in whichever form of its configuration this browser both says it takes
+// and takes.
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-type Behaviour = "sound" | "error" | "silent";
+type Behaviour = "sound" | "error" | "silent" | "unsupported";
 
 interface FakeInit {
   output: (data: { close: () => void }) => void;
@@ -45,10 +46,15 @@ function browser(
   picture: () => Promise<{ supported?: boolean }>,
   sound: (description: string) => Behaviour,
   timeoutMs = 2000,
-): { probes: string[]; tried: { codec: string; description: string }[] } {
+): {
+  probes: string[];
+  asked: string[];
+  tried: { codec: string; description: string }[];
+} {
   resetAppleMediaForTests(timeoutMs);
   const asked = {
     probes: [] as string[],
+    asked: [] as string[],
     tried: [] as { codec: string; description: string }[],
   };
   globals.VideoDecoder = {
@@ -63,6 +69,11 @@ function browser(
     }
   };
   globals.AudioDecoder = class {
+    static async isConfigSupported(config: { description: Uint8Array }) {
+      const description = hex(config.description);
+      asked.asked.push(description);
+      return { supported: sound(description) !== "unsupported" };
+    }
     state = "unconfigured";
     behaviour: Behaviour = "silent";
     init: FakeInit;
@@ -138,6 +149,22 @@ test("a browser that decodes only the ES_Descriptor, as Safari does, is played w
   assert.equal(hex(config.description as Uint8Array), DESCRIPTOR);
 });
 
+test("only a form the browser says it takes is decoded", async () => {
+  const asked = browser(yes, (description) =>
+    description === CONFIG ? "unsupported" : "sound",
+  );
+  assert.equal(await chooseAppleMedia(), true);
+  assert.deepEqual(asked.asked, [CONFIG, DESCRIPTOR]);
+  assert.deepEqual(
+    asked.tried.map((t) => t.description),
+    [DESCRIPTOR],
+  );
+
+  const refused = browser(yes, () => "unsupported");
+  assert.equal(await chooseAppleMedia(), false);
+  assert.deepEqual(refused.tried, [], "a form it refuses is never decoded");
+});
+
 test("a picture without the sound, or the sound without the picture, keeps VP9 and Opus", async () => {
   browser(yes, () => "error");
   assert.equal(await chooseAppleMedia(), false);
@@ -155,8 +182,8 @@ test("a picture without the sound, or the sound without the picture, keeps VP9 a
   );
   assert.equal(await chooseAppleMedia(), false);
   assert.deepEqual(
-    asked.tried,
-    [],
+    [asked.asked, asked.tried],
+    [[], []],
     "the sound is not tried for a picture that will not pass",
   );
 });
