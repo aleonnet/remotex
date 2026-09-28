@@ -1491,6 +1491,9 @@ button and `keyboardLock.ts` deliberately does not watch `(display-mode: fullscr
 — arming on that took a lock Chromium never made active, which is the failure it
 looked like a fix for. The way out of the mode is that button again, or holding
 Escape, which is Chromium's own exit from a locked full screen.
+[remotex-viewer](viewer.md) delivers the same mode without asking the browser: it
+fills the monitor on the page's `requestFullscreen` and takes every key from the OS
+while it lasts, and its window is an app window that reserves no chords.
 
 The Command translation table itself is always complete and never changes with
 fullscreen. App windows therefore send every chord in windowed and fullscreen use
@@ -1642,7 +1645,7 @@ retain it. Container artifacts are built separately with
 binary that exposes any embedded CLI surface.
 
 There is still no separate native client: every instance is the same SPA loaded
-by Chrome or Edge from its subdomain. The TUI is process and configuration
+by Chrome, Edge or [remotex-viewer](viewer.md) from its subdomain. The TUI is process and configuration
 control, not another remote-desktop implementation.
 
 ## Configuration and testing
