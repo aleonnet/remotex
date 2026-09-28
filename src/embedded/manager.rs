@@ -343,12 +343,18 @@ fn editor_command(editor: &str, path: &Path) -> Command {
 /// The line is handed over raw, because cmd does not split its command line the
 /// way a program's `argv` is split and an escaped argument would reach it with
 /// its escapes. `/s` strips exactly the outer pair of quotes, leaving
-/// `<editor> "<path>"`, and a Windows path cannot hold a `"` to break out of its
-/// own. `/d` skips any AutoRun a registry sets for cmd.
+/// `<editor> "%REMOTEX_EDIT_PATH%"`. The path arrives in that variable rather than
+/// in the line, because cmd expands `%NAME%` inside quotes too and a directory may
+/// be called `%TEMP%`; what a variable expands to is not expanded again, and a
+/// Windows path cannot hold a `"` to break out of its quotes. `/v:off` keeps a `!`
+/// literal whatever the registry says about delayed expansion, and `/d` skips any
+/// AutoRun it sets.
 #[cfg(windows)]
 fn editor_command(editor: &str, path: &Path) -> Command {
     let mut command = Command::new("cmd.exe");
-    command.raw_arg(format!("/d /s /c \"{editor} \"{}\"\"", path.display()));
+    command
+        .env("REMOTEX_EDIT_PATH", path)
+        .raw_arg(format!("/d /v:off /s /c \"{editor} \"%REMOTEX_EDIT_PATH%\"\""));
     command
 }
 
@@ -1803,6 +1809,24 @@ mod tests {
         let text = std::fs::read_to_string(temp.path().join("remotex.toml")).unwrap();
         assert!(!text.lines().any(|line| line.trim() == "[server]"));
         super::super::check(&text).unwrap();
+    }
+
+    /// A path cmd would read as variables — `%TEMP%`, `!x!` — or as operators
+    /// reaches the editor exactly as it is.
+    #[cfg(windows)]
+    #[tokio::test]
+    async fn the_editor_gets_the_path_exactly_as_it_is() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("%TEMP% & !PATH! ^ (x)");
+        std::fs::create_dir(&dir).unwrap();
+        let path = dir.join("remotex.toml");
+        std::fs::write(&path, "the-right-file").unwrap();
+
+        let output = editor_command("type", &path).output().await.unwrap();
+        let stdout = String::from_utf8_lossy(&output.stdout);
+        let stderr = String::from_utf8_lossy(&output.stderr);
+        assert!(output.status.success(), "{stderr}");
+        assert!(stdout.contains("the-right-file"), "{stdout}");
     }
 
     /// An instance something else serves — another control plane on the same
