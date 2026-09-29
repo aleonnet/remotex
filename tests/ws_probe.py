@@ -512,6 +512,7 @@ async def main() -> int:
                             and not after_resize_sent
                             and viewports
                             and awaiting_viewport is None
+                            and gap_task is None
                         ):
                             after_resize_sent = True
                             awaiting_viewport = viewports.pop(0)
@@ -584,6 +585,8 @@ async def main() -> int:
                             and gap_task is None
                             and viewport_task is None
                         ):
+                            # The first viewport, so a resize does not send it again.
+                            after_resize_sent = True
                             viewport_task = asyncio.create_task(
                                 send_first_viewport_after_delay()
                             )

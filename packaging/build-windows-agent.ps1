@@ -52,6 +52,9 @@ if ($LASTEXITCODE -ne 0 -or $reported -ne "remotex-agent $version") {
 # The runtime from the build tools that linked the executable: VC\Redist holds the same
 # version as VC\Tools.
 $vs = & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -property installationPath
+if ($LASTEXITCODE -ne 0 -or -not $vs) {
+    throw "vswhere found no Visual Studio installation (exit $LASTEXITCODE)"
+}
 $crt = Get-ChildItem "$vs\VC\Redist\MSVC\*\x64\Microsoft.VC*.CRT" -Directory |
     Where-Object { $_.Parent.Parent.Name -match '^\d+(\.\d+)+$' } |
     Sort-Object { [version]$_.Parent.Parent.Name } | Select-Object -Last 1
