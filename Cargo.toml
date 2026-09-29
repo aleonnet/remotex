@@ -297,3 +297,11 @@ strip = false
 lto = false
 codegen-units = 16
 incremental = true
+
+# The RSA-AES tests generate keys, which unoptimised big-integer arithmetic takes
+# seconds over. Dependencies compile once, so optimising these costs nothing after.
+[profile.dev.package.crypto-bigint]
+opt-level = 3
+
+[profile.dev.package.crypto-primes]
+opt-level = 3

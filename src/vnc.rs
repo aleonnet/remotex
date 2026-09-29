@@ -10345,7 +10345,7 @@ mod tests {
     /// held for what the browser's link makes of a frame beyond its distance:
     /// wlshare walks its quality by that round trip, and must see the browser's
     /// delivery in it.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_passed_frames_fence_is_held_for_the_browsers_delivery() {
         let (uplink, sent) = test_uplink();
         // Two batches owed, the older for 250 ms beyond the distance.
@@ -10416,7 +10416,7 @@ mod tests {
     /// A browser that never acknowledges holds a fence no longer than the grace a
     /// window that is not drawing gets, so wlshare, which sends nothing until the
     /// echo, is not stopped by it.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_passed_frames_fence_is_held_no_longer_than_the_limit() {
         let (uplink, sent) = test_uplink();
         // A queue seconds deep ahead of the frame.
@@ -10444,7 +10444,7 @@ mod tests {
     /// The limit runs from when the fence was queued, not from the loop's last turn:
     /// a server that keeps talking — here a Bell every 50 ms — turns the loop far more
     /// often than the limit, and must not hold the echo for as long as it talks.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_held_fence_goes_at_its_deadline_while_the_server_keeps_talking() {
         let (uplink, sent) = test_uplink();
         let feedback = queued_for(Duration::from_secs(2)).await;
@@ -10552,7 +10552,7 @@ mod tests {
 
     /// A held fence that asks for BlockAfter is honoured by holding the reading too:
     /// nothing behind it is read until it has gone back.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_held_block_after_fence_stops_the_reading_until_it_goes() {
         let (uplink, sent) = test_uplink();
         let feedback = queued_for(Duration::from_millis(250)).await;

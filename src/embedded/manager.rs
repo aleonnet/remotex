@@ -1832,7 +1832,7 @@ mod tests {
     /// An instance something else serves — another control plane on the same
     /// directory, or a worker started by hand — is refused before any worker is
     /// spawned, and says why.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn an_instance_another_gateway_holds_is_refused_before_spawning() {
         let root = tempfile::tempdir().unwrap();
         let mut supervisor = Supervisor::open(root.path().to_path_buf(), PathBuf::from("no-such-remotex"))

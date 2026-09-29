@@ -2249,6 +2249,7 @@ mod tests {
     /// link's backlog — is still there for as long as anything at all arrives
     /// from it, and an acknowledgment for every batch does.
     #[tokio::test]
+    #[ignore = "slow: sends for twice the 1.5 s heartbeat timeout"]
     async fn a_browser_that_sends_anything_is_not_expired_for_want_of_a_pong() {
         let target = fake_target(false);
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();

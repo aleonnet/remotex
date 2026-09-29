@@ -9,9 +9,12 @@ documentation.
 - Strict no backward-compatibility or legacy paths.
 - Do not run `cargo fmt`.
 - No squash merges
-- After Rust changes, run `cargo clippy --all-targets -- -D warnings` and
-  `cargo test`, and both again with `--features apple-hp-media` when the change
-  reaches the Apple engine or the media stream.
+- After Rust changes, run `cargo clippy --all-targets --features apple-hp-media
+  -- -D warnings` and `cargo test --lib --features apple-hp-media`, once each.
+  Run the tests under `tests/` (`cargo test --features apple-hp-media --tests`)
+  only when the change reaches what they drive, and a test marked
+  `#[ignore = "slow: …"]` only when the change reaches what it checks. Mark a
+  test that waits seconds that way.
 - After frontend JS/TS changes, run the Biome checks in `frontend/`.
 - Before browser QA of a frontend change, rebuild the gateway and say so: the
   frontend bundle is compiled into the binary, so a running `remotex serve`

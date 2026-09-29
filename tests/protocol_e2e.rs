@@ -2023,6 +2023,7 @@ async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
 /// the fake accepts offers only in an update it would send anyway, and on a still
 /// session nothing asks for one, so this offer goes unanswered.
 #[tokio::test]
+#[ignore = "slow: waits out the 10 s stream start"]
 async fn high_performance_ends_when_the_offer_brings_no_picture() {
     let (mac_port, _requests, _actions, fake_mac) = spawn_fake_mac().await;
     let addr = spawn_app(mac_target(mac_port)).await;
