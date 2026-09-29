@@ -824,13 +824,19 @@ other failures (see [Liveness](#the-stream)).
   than one already received, a duplicate or a straggler, is dropped on both
   legs.
 - **RTCP.** The viewer sends a receiver report on both legs every second. A PLI or
-  FIR brings an IDR within about 30 ms. Remotex sends a PLI after a loss, when
-  a stream starts without an IDR (the first packets can arrive before the socket
-  is bound), and when the decoder falls eight pictures behind, which it warns
-  about; for a passed stream, when the browser's link falls 15 behind and when
-  the browser has to start over. It also sends the rate reports described under
-  [Rate control](#rate-control), every 50 ms on the picture's leg, as Apple's
-  viewer does.
+  FIR brings an IDR within about 30 ms. Besides sender and receiver reports, the
+  Mac accepts a compound packet that starts with PT 192, 193, 204, 205 or 206.
+  - **AVConference's FIR** has two forms, chosen by a per-stream setting: RFC
+    5104's (PT 206, FMT 4) and its own PT 192. The PT 192 form is the sender's
+    SSRC and a list of 16-bit values, not RFC 2032's FIR, which is what a
+    published description calls it.
+  - **Remotex sends a PLI** after a loss, when a stream starts without an IDR
+    (the first packets can arrive before the socket is bound), and when the
+    decoder falls eight pictures behind, which it warns about; for a passed
+    stream, when the browser's link falls 15 behind and when the browser has to
+    start over. It also sends the rate reports described under
+    [Rate control](#rate-control), every 50 ms on the picture's leg, as Apple's
+    viewer does.
 - **Liveness.** Every offer owes its answer, its display's first picture and
   the first sound packet within 10 s, and the running stream an authentic
   packet, SRTP or SRTCP, on each leg every 48 s, 16 of Apple's 3-second
@@ -930,6 +936,15 @@ link to a physical Mac has not been observed.
   about 320 kbit/s. The decoder is configured out of band with
   AudioSpecificConfig `F8 E6 50 00`: object type 39, 48 kHz, stereo, 480-sample
   frames, no SBR, no resilience tools.
+- **What the offer decides.**
+  - **The payloads.** The codec list does not choose the payload; field 4 of the
+    offer's audio stream does. That field is a bitmask of the RTP payload types
+    the viewer takes, one bit each. `0x1000` is 101, and the Mac's screen-sharing
+    sound prefers 101. Apple's viewer sends `0x5E7F` (24191), and so does remotex.
+  - **Not the rate.** The rate is the Mac's own: its screen-sharing sound
+    configuration sets 320,000 bit/s whatever the offer says.
+  - **A published description** reads field 4 as a bitrate the Mac picks a tier
+    from. It is not one.
 - **Decoder.** The gateway decodes AAC-ELD itself (`src/aac_eld.rs`) for a
   browser it sends Opus, and passes it as it came, under `media_passthrough`, to one
   that decodes it. Browsers can decode it.
