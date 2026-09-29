@@ -153,8 +153,15 @@ export function targetNamePattern(name: string): RegExp {
   return new RegExp(`^${escaped}(?!\\S)`);
 }
 
-// Log in and get to a live desktop, which the floating menu's button proves
-// without asserting anything about canvas pixels.
+// Log in and get to a live desktop, which the page says in two steps, neither of
+// them about canvas pixels: the floating menu's button, once the gateway has given
+// this browser the session, and the end of "Waiting for the remote desktop…", once
+// the gateway has reached the remote and announced its desktop.
+//
+// The second is what a spec that then acts on the remote needs. The button alone
+// left a window of a second or so in which the gateway was still logging on, and a
+// value put on a Mac's pasteboard inside it was there before the pasteboard was
+// watched: not a change, never announced, and the spec waited for it in vain.
 //
 // Either landing is accepted, because the server keeps a target session running
 // when its browser goes away: a run that ended on the desktop — or crashed there
@@ -201,6 +208,9 @@ async function landOn(
     await page.getByRole("button", { name: targetNamePattern(target) }).click();
   }
   await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+    timeout: 20_000,
+  });
+  await expect(page.getByText("Waiting for the remote desktop…")).toBeHidden({
     timeout: 20_000,
   });
 }

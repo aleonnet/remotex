@@ -48,7 +48,7 @@ test("a remote clipboard over the limit is reported, not truncated", async ({
 
   // Set *after* the session is up, on purpose: the gateway starts the remote
   // pasteboard watch during connection, so a value that was already there is not
-  // a change and is never read at all.
+  // a change and is never read at all. `logInAndConnect` returns once it is.
   const localSentinel = `remotex-ui-local-${Date.now()}`;
   await page.evaluate(
     (text) => navigator.clipboard.writeText(text),
