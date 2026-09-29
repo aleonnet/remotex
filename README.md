@@ -16,7 +16,9 @@ default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
 With `egfx_passthrough = true` an RDP host's pipeline is passed to the browser,
 which composes it with the gateway's own compositor built to WebAssembly, rather
 than composed and encoded as VP9 here: for a LAN, where it takes nearly all of
-the picture's work off the gateway.
+the picture's work off the gateway. It is **experimental**: run against one
+Windows 11 host, with sound and the clipboard beside it, and not yet with the
+camera or the microphone.
 
 - RDP uses a built-in client, protocol and all: the desktop over the graphics
   pipeline (MS-RDPEGFX) or plain bitmap updates, pointer, keyboard, mouse and

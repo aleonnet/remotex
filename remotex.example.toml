@@ -222,6 +222,10 @@ password = "change-me"
 # reloads or reconnects is logged on to the host's session again rather than
 # resumed, since the host draws against what its client already holds. RDP only,
 # and refused beside `egfx = false`.
+# EXPERIMENTAL. The compositor is the gateway's own and is tested as it is there,
+# and what is passed is checked against a real host, in a headless browser and by
+# hand. That is one Windows 11 host, with `audio` and `clipboard` beside the key;
+# `camera` and `microphone` beside it have not been tried.
 #egfx_passthrough = false
 
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.

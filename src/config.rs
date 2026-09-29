@@ -533,6 +533,12 @@ pub struct TargetConfig {
     /// its cache slots, each codec's own caches — so a browser that comes back has
     /// nothing a running session can be resumed onto: a reattach reconnects the
     /// host instead. See [`RenderPlan::rdp_graphics`].
+    ///
+    /// **Experimental.** The compositor the page runs is the gateway's own and is
+    /// unit tested as it is there, and what is passed is checked against a real
+    /// host, by the probe and by a headless browser. That is one Windows 11 host,
+    /// used with [`Self::audio`] and [`Self::clipboard`] beside this key;
+    /// [`Self::camera`] and [`Self::microphone`] beside it have not been tried.
     #[serde(default)]
     pub egfx_passthrough: bool,
     /// Clipboard bridge: let the browser read and write this target's

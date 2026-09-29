@@ -36,7 +36,7 @@ whose HEVC and AAC-ELD a target with `media_passthrough` passes to a browser tha
 decodes them rather than re-encoding them — see
 [Apple's media stream, passed through](#apples-media-stream-passed-through). An RDP
 target with `egfx_passthrough` is not decoded here either: the host's graphics
-pipeline is passed on for the browser to compose — see
+pipeline is passed on for the browser to compose, which is experimental — see
 [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through). Remote audio is encoded as
 Opus, save that passed AAC-ELD, and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
@@ -468,6 +468,16 @@ acknowledgements, a few percent of a core whatever the desktop is doing. What it
 costs is the browser's work, and the quality walk: what the host draws with is
 sent as it is, so `video_quality`, `render_chroma` and `render_adaptive` reach
 nothing of it.
+
+**Experimental.** The compositor the page runs is the gateway's own, unit tested
+as it is there, and the module built from it is tested as the page loads it.
+What is passed is checked against a real host: `tests/rdp_client_probe.rs`
+composes a passed pipeline beside the session that passed it, and
+`tests/playwright/egfx-passthrough.spec.ts` reads the session socket of a
+headless browser composing one. That host is one Windows 11 machine, used with
+sound and the clipboard beside the key; the camera and the microphone beside it
+have not been tried, and no container stands in for a host that draws through
+the pipeline.
 
 - **The key selects, and no browser's answer does.** The page composes with
   WebAssembly, which every browser that has the two WebCodecs decoders the page

@@ -207,7 +207,8 @@ documentation.
   compositor for the page, and never alter a passed command. The host draws against what its client holds
   and answers a repaint out of its caches, so a reattach starts such a session
   over; do not resume one on a repaint. H.264 stays refused in the capability
-  advertise, and a host that draws with bitmap updates is encoded here as VP9. See
+  advertise, and a host that draws with bitmap updates is encoded here as VP9.
+  Call it experimental wherever it is named to an operator. See
   [RDP's graphics pipeline, passed through](docs/architecture.md#rdps-graphics-pipeline-passed-through).
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
   on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own
