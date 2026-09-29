@@ -128,7 +128,8 @@ ZRLE session on it, a combination the viewer never offers (above):
   session in cleartext after authentication, keystrokes and the media stream's
   keys included. Remotex always asks, in both modes.
 - **Standard's picture.** `ard` asks for ZRLE alone, where Full quality asks for
-  zlib first and Adaptive first for the private codecs remotex cannot decode.
+  zlib first and Adaptive first for
+  [private codecs](#apples-own-framebuffer-encodings) remotex does not decode.
 
 ## Connecting
 
@@ -571,6 +572,70 @@ these. Remotex reads two of them only to step over them:
   flag is 1 while the Mac's keyboard focus is in a secure text field, such as a
   password prompt.
 
+### Apple's own framebuffer encodings
+
+Remotex advertises none of these, but Adaptive quality lists `0x3f3` and `0x3ea`
+first, so a capture of Apple's viewer is full of them. This is read from the
+Mac's encoders and the viewer's decoders.
+
+**`0x3e8`, `0x3e9` and `0x3ea` are zlib with fewer bits per pixel.** A rectangle
+is a `u32` length and that many bytes of zlib. Each encoding keeps its own deflate
+stream from one rectangle to the next, as RFB's zlib (`0x06`, the fourth row)
+keeps one. It inflates to packed rows, each starting on a byte:
+
+| Encoding | Pixel | Row | Deflate level |
+|---|---|---|---|
+| `0x3e8` | 1 bit, most significant first: 1 is white, 0 black | (w + 7) / 8 bytes | 9 |
+| `0x3e9` | 4-bit grey, high nibble first: 15 is white | (w + 1) / 2 bytes | 6 |
+| `0x3ea` | big-endian `u16`, RGB 5-5-5 below an unused top bit | 2w bytes | 1 |
+| `0x06` | the negotiated pixel format | w × bytes per pixel | 1 |
+
+The Mac's grey is (5R + 9G + 2B) / 16. For `0x3e8` it thresholds that grey along
+each row and carries half the error to the next pixel, so the picture is dithered.
+
+**`0x3f3` codes the picture in 8×8 tiles.** A rectangle is a `u32` length, at
+most 100,000,000, then a body whose first byte says what it is:
+- **0, a full update.**
+  - Bytes 1 and 2 are parameters for its DCT tiles.
+  - Bytes 3–5 are a big-endian `u24` offset from the body's start to a data stream.
+  - A command stream starts at byte 6.
+- **1, a partial update,** which refines the tiles of the last full update.
+  - Bytes 1 and 2 are DCT parameters; the Mac sends 14 and 19.
+  - One bit stream starts at byte 3 and gives each tile a 2-bit code: 0 leaves the
+    tile alone, 1 refines its DCT coefficients, 2 repeats the copy the full update
+    made for it, and 3 takes a cached tile.
+  - The stream ends with `mvs` (`0x6d 0x76 0x73`).
+- **2, the quantization tables:** exactly 129 bytes. The 2 is followed by 64
+  luminance entries and 64 chrominance entries, one byte each, in a 0×0 rectangle
+  at 0,0.
+
+The viewer decodes `0x3f3` only into 32-bit pixels, and reads each stream most
+significant bit first.
+
+A full update's command stream starts with one bit the viewer skips. Then it runs
+through the rectangle's tiles in rows, left to right and top to bottom, and edge
+tiles are clipped. Each step is a 3-bit command followed by a repeat count, and
+the command covers that many tiles:
+- **a `0` bit:** one tile;
+- **a `1` bit and a 4-bit n below 15:** n + 2 tiles;
+- **`1`, `1111` and a base-128 number v:** v + 17 tiles. The number is least
+  significant group first, with bit 7 continuing, in at most three bytes.
+
+A command's operands come from the data stream:
+
+| Command | Tile |
+|---|---|
+| 0 | white |
+| 1 | a copy of the previous tile |
+| 2 | a copy of the tile above |
+| 3 | black and white: an 8-bit row mask, then an 8-bit pixel mask for each row whose bit is clear. A set bit is white. |
+| 4 | one or two colours. The first bit says two; the second says to reuse the colours last read in this update instead of reading new ones. A colour is 8-bit Y, then the top six bits of Cb and of Cr. Two colours are followed by command 3's masks, a set bit taking the first colour. |
+| 5 | DCT-coded |
+| 6 | a cached tile, by a 16-bit index |
+| 7 | the cached tile after the last one used |
+
+Both streams end with `0x6d`.
+
 ### The numbers, in both forms
 
 Apple writes its encodings in hex, while the wire and RFB's registry use decimal,
@@ -588,6 +653,10 @@ so remotex logs an unexpected encoding as `1105 (0x451)`.
 | keyboard source | `0x455` | 1109 | |
 | `DeviceInfo` | `0x456` | 1110 | not advertised |
 | media stream | `0x3f2` | 1010 | in a second `SetEncodings` |
+| 1-bit zlib | `0x3e8` | 1000 | not advertised |
+| 4-bit grey zlib | `0x3e9` | 1001 | not advertised |
+| RGB 5-5-5 zlib | `0x3ea` | 1002 | not advertised |
+| 8×8 tiles | `0x3f3` | 1011 | not advertised |
 | ZRLE | `0x10` | 16 | standard RFB |
 | zlib | `0x06` | 6 | standard RFB, not advertised |
 | Raw | `0x00` | 0 | standard RFB |
@@ -950,8 +1019,9 @@ is 10 s overdue.
 
 ## Still unknown
 
-- **Apple's private framebuffer codecs**, `0x3ea` and `0x3f3`: an adaptive,
-  tile-based, JPEG-like codec among them. Neither is advertised.
+- **`0x3f3`'s DCT tiles:** how their coefficients, and a partial update's
+  refinements, are coded
+  ([Apple's own framebuffer encodings](#apples-own-framebuffer-encodings)).
 - **Authentication types 31–36 on the wire.**
 - **Rate control's loose ends**: the second byte of `RCTL`, whether loss lowers
   the target over longer than 30 s, and whether any offer field lowers the
