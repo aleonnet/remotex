@@ -42,7 +42,9 @@ documentation.
   states. A change to what that version describes bumps it and describes the new
   version in [remotex-viewer](docs/viewer.md); the viewer then speaks it.
 - There is one frontend build, compiled from Cargo's `OUT_DIR` into the gateway
-  binary (`src/assets.rs`) and served from its origin root. A standalone frontend
+  binary (`src/assets.rs`) and served from its origin root. It holds one
+  WebAssembly module, built by the frontend's own build from the gateway's sources
+  (`frontend/wasm/egfx`), which takes Rust's `wasm32-unknown-unknown` target. A standalone frontend
   build and the platform-independent release artifact use `frontend/dist`; a
   Cargo build either produces the same bundle in its private output or stages
   that artifact there. Do not add a web root, a `static_dir`, or any run-time path
@@ -193,6 +195,18 @@ documentation.
   configuration that decoded (`frontend/src/appleMedia.ts`). Keep it to that
   stream: no other remote's HEVC or sound, and a passed unit is never altered.
   See [Apple's media stream, passed through](docs/architecture.md#apples-media-stream-passed-through).
+- `egfx_passthrough` on `rdp` passes the host's graphics pipeline (MS-RDPEGFX) to
+  the browser, for a LAN: its commands out of their bulk compression, as `GRAPHICS`
+  records on the session socket behind a `graphicsStart`, and the gateway neither
+  composes nor encodes them. Every browser composes it, so the key alone selects
+  it; do not add a browser question for it. The page composes with the gateway's
+  own compositor, `src/rdp_client`'s modules built to WebAssembly by path
+  (`frontend/wasm/egfx`): do not write a second decoder or compositor for the page,
+  and never alter a passed command. The host draws against what its client holds
+  and answers a repaint out of its caches, so a reattach starts such a session
+  over; do not resume one on a repaint. H.264 stays refused in the capability
+  advertise, and a host that draws with bitmap updates is encoded here as VP9. See
+  [RDP's graphics pipeline, passed through](docs/architecture.md#rdps-graphics-pipeline-passed-through).
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
   on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own
   `/ws/camera` socket, is explicit per session, and is bound to both claim and

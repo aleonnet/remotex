@@ -941,9 +941,8 @@ fn idwt_row(low: &[i16], high: &[i16], dst: &mut [i16]) {
         mean(&even[nh..=nh], &low[nh + 1..nh + 2], &mut odd[nh..=nh]);
         odds = nh + 1;
     }
-    for (pair, (&even, &odd)) in dst.chunks_exact_mut(2).zip(even.iter().zip(&odd[..odds])) {
-        pair[0] = even;
-        pair[1] = odd;
+    for (pair, (&even, &odd)) in dst.as_chunks_mut::<2>().0.iter_mut().zip(even.iter().zip(&odd[..odds])) {
+        *pair = [even, odd];
     }
     if evens > odds {
         dst[2 * odds] = even[odds];
@@ -1303,7 +1302,7 @@ mod tests {
             let mut pairs: Vec<(i16, i16)> = edges.iter().flat_map(|&cb| edges.iter().map(move |&cr| (cb, cr))).collect();
             pairs.truncate(COEFFS);
             let fill = samples(2 * (COEFFS - pairs.len()), u32::from(y as u16));
-            pairs.extend(fill.chunks_exact(2).map(|pair| (pair[0], pair[1])));
+            pairs.extend(fill.as_chunks::<2>().0.iter().map(|pair| (pair[0], pair[1])));
             for (i, (cb, cr)) in pairs.iter().enumerate() {
                 work[i] = y;
                 work[COEFFS + i] = *cb;

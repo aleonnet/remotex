@@ -62,6 +62,7 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
         // one by one: its directory also holds what the build writes.
         "frontend/wasm/egfx/Cargo.toml",
         "frontend/wasm/egfx/Cargo.lock",
+        "frontend/wasm/egfx/.cargo/config.toml",
         "frontend/wasm/egfx/src",
         "src/rdp_client/compositor.rs",
         "src/rdp_client/framebuffer.rs",
@@ -79,10 +80,30 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
     }
 
     let frontend_dir = root.join("frontend");
-    let status = Command::new("bun")
-        .args(["run", "build"])
-        .current_dir(&frontend_dir)
-        .env("REMOTEX_FRONTEND_OUT_DIR", output)
+    let mut bun = Command::new("bun");
+    bun.args(["run", "build"]).current_dir(&frontend_dir).env("REMOTEX_FRONTEND_OUT_DIR", output);
+    // The frontend's build runs Cargo for its WebAssembly module, and that Cargo
+    // must not take this one's for its own: the flags and wrappers this build was
+    // given are for the gateway's target — under `cargo clippy` the wrapper *is*
+    // clippy — the job server's descriptors are not passed down, and a target
+    // directory shared with the build that is waiting on this script is a lock
+    // neither would ever be given.
+    for inherited in [
+        "CARGO_BUILD_TARGET",
+        "CARGO_ENCODED_RUSTFLAGS",
+        "CARGO_MAKEFLAGS",
+        "CLIPPY_ARGS",
+        "CLIPPY_CONF_DIR",
+        "MAKEFLAGS",
+        "MFLAGS",
+        "RUSTC_WORKSPACE_WRAPPER",
+        "RUSTDOCFLAGS",
+        "RUSTFLAGS",
+    ] {
+        bun.env_remove(inherited);
+    }
+    bun.env("CARGO_TARGET_DIR", frontend_dir.join("wasm/egfx/target"));
+    let status = bun
         .status()
         .context("failed to run `bun run build` for the frontend")?;
     ensure!(status.success(), "`bun run build` for the frontend failed");

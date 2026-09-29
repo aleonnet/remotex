@@ -13,6 +13,10 @@ window drives the remote's size, so the desktop is renegotiated at the size aske
 for rather than scaled on the client; plain `vnc`, a High Performance Mac and
 `rdp` can all be handed the window. On RDP a resize is a graphics reset of the
 default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
+With `egfx_passthrough = true` an RDP host's pipeline is passed to the browser,
+which composes it with the gateway's own compositor built to WebAssembly, rather
+than composed and encoded as VP9 here: for a LAN, where it takes nearly all of
+the picture's work off the gateway.
 
 - RDP uses a built-in client, protocol and all: the desktop over the graphics
   pipeline (MS-RDPEGFX) or plain bitmap updates, pointer, keyboard, mouse and

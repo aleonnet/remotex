@@ -34,7 +34,10 @@ or in High Performance with `ard-high-performance` (a virtual display, with its
 picture and sound over the Mac's media stream, as Apple's viewer takes them),
 whose HEVC and AAC-ELD a target with `media_passthrough` passes to a browser that
 decodes them rather than re-encoding them — see
-[Apple's media stream, passed through](#apples-media-stream-passed-through). Remote audio is encoded as
+[Apple's media stream, passed through](#apples-media-stream-passed-through). An RDP
+target with `egfx_passthrough` is not decoded here either: the host's graphics
+pipeline is passed on for the browser to compose — see
+[RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through). Remote audio is encoded as
 Opus, save that passed AAC-ELD, and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
@@ -61,7 +64,7 @@ are experimental — see [Camera frames](#camera-frames) and
 | `session.rs` | target selection, takeover, detach, and reattach |
 | `ws.rs`, `protocol.rs`, `wire.rs` | WebSocket bridge and client wire format |
 | `rdp.rs` | RDP engine: damage, input, cursor, resize, clipboard, over `rdp_client` |
-| `rdp_client/` | the RDP client, protocol and all: `proto/` is the wire format, the rest is the session, framebuffer and input queue |
+| `rdp_client/` | the RDP client, protocol and all: `proto/` is the wire format, the rest is the session, framebuffer and input queue, and the graphics pipeline's compositor, which the page's WebAssembly module is built from too (`frontend/wasm/egfx`) |
 | `rdp_clipboard.rs` | `CF_UNICODETEXT` and the line endings either direction needs |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `vnc_apple_media.rs` | High Performance's media stream: the offer, SRTP, HEVC depacketizing and decoding, and the sound's receiver |
@@ -451,6 +454,66 @@ Three controls with similar names therefore remain separate:
   the library, and ends before it dials the Mac. That is the one session the
   browser's answer turns away.
 
+#### RDP's graphics pipeline, passed through
+
+An `rdp` target composes the host's graphics pipeline here — every codec, the
+surfaces and the caches — and encodes the picture that results as VP9. With
+`egfx_passthrough = true` it does neither: the pipeline's commands go to the
+browser as the host sent them, and the page composes them. It is for a LAN. What
+it saves is the gateway's work, which for a desktop in use was measured at about
+three quarters VP9 encoding and a quarter decoding; passing the commands leaves
+the gateway the connection, the channel's bulk compression and the frame
+acknowledgements, a few percent of a core whatever the desktop is doing. What it
+costs is the browser's work, and the quality walk: what the host draws with is
+sent as it is, so `video_quality`, `render_chroma` and `render_adaptive` reach
+nothing of it.
+
+- **The key selects, and no browser's answer does.** The page composes with
+  WebAssembly, which every browser that has the two WebCodecs decoders the page
+  requires has as well, so there is no question to ask and `render_plan` sets
+  `rdp_graphics` from the key alone. The key is refused on anything but an `rdp`
+  target with its pipeline on.
+- **What passes** (`VideoSink::pass_graphics`). The RDP client still owns the
+  channel: it answers the capability exchange, unwraps the bulk compression —
+  whose history is the connection's — and acknowledges every frame, as it does
+  when it composes (`Graphics::passing` in `src/rdp_client/gfx.rs`). It decodes
+  nothing. What it unwrapped goes to the engine as `Event::Graphics`: whole
+  `RDPGFX` PDUs, headers and all, in order, each run ending at a frame's end or
+  where the host's own packet did. The engine queues each as a `GRAPHICS` record,
+  which takes its share of `QUEUE_BUDGET` like an access unit, so a browser that
+  is behind holds the engine, the engine stops reading the host, and the host
+  slows. H.264 stays refused in the capability advertise, passed or composed.
+- **A pipeline is announced where it starts.** `graphicsStart` goes out when the
+  host confirms the pipeline, ahead of its first command, and again if the host
+  closes the channel and opens another. It says the pipeline starts from nothing,
+  and the page makes a compositor with nothing in it. A `resize` still announces
+  the desktop's size and density, ahead of the run whose ResetGraphics the page's
+  compositor resizes itself by.
+- **The page composes with the gateway's compositor.** `frontend/wasm/egfx` is a
+  binding around `src/rdp_client`'s own modules, named by path and built for
+  `wasm32-unknown-unknown` by the frontend's build (`bun run build:wasm`), so
+  there is one reading of the protocol and its codecs. It runs in the paint
+  worker (`frontend/src/egfxCompositor.ts`): each record is composed in its turn,
+  the output changes at each EndFrame as it does on the host's own clients, and
+  the rectangles a frame painted are copied onto the canvas out of the module's
+  memory. A command that does not decode ends the pipeline there — the
+  compositor no longer holds what the host believes its client does — and the
+  page says so and asks for nothing: the way back is a session that starts.
+- **Nothing is resumed.** The host draws against what its client already holds:
+  surfaces, cache slots, ClearCodec's glyph and bar caches, Progressive's tiles.
+  It answers even a repaint out of them — measured against Windows 11, a
+  compositor that joined with nothing and asked for a repaint was left with most
+  of the desktop wrong, after a graphics reset as after a Suppress Output — so a
+  page that comes back cannot be repaired by the engine that is running. A
+  reattach to a passed pipeline therefore ends the engine and starts another
+  ([Session lifecycle](#session-lifecycle)), which is a logon to the session the
+  host kept. A `refresh` from a page that still holds the pipeline's state is
+  passed to the host as a repaint.
+- **A host without the pipeline is encoded here.** The key asks for the pipeline
+  to be passed, and a server that answers the offer with bitmap updates has none:
+  its picture is decoded and encoded as VP9 at the target's dial, as without the
+  key, and a `videoFormat` rather than a `graphicsStart` opens it.
+
 ### Choosing a chroma
 
 The key takes three answers: the default resolves per browser, and the other two
@@ -733,7 +796,10 @@ the same target after its session socket drops, and it resumes only while the
 running engine is still the one that reattachment resolves to: a reload re-runs
 the chroma question, and an `"auto"` target whose browser comes back with a
 different answer is rebuilt rather than resumed, because the stream that is
-running is one that browser has just said it cannot decode. Opening size, density, display
+running is one that browser has just said it cannot decode. An engine passing an
+RDP host's graphics pipeline is never resumed: the page that comes back holds
+none of what the host draws against
+([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)). Opening size, density, display
 selection, and connection state do not carry into any other session.
 
 Any claim by a different browser — a forced takeover, or a plain claim while
@@ -791,6 +857,7 @@ u8 kind = 0x02 | u8 flags = 0 | u16 record count | u32 sequence | records
 
 TILE     op 0x01: u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
 VIDEO    op 0x03: u8 flags | u16 w | u16 h | u32 len | payload[len]
+GRAPHICS op 0x04: u32 len | commands[len]
 ```
 
 One frame carries every record ready at once, so a backlog does not cost one
@@ -800,7 +867,11 @@ is `0x01` for a keyframe and nothing else — any other bit is rejected the same
 way. A `TILE` record is one rectangle the remote sent, as a PNG, drawn at `(x, y)`
 over what the canvas holds; one of no width, height or payload is rejected. A
 session's records are `VIDEO` unless its desktop is
-[past the ceiling](#tiles-past-the-ceiling).
+[past the ceiling](#tiles-past-the-ceiling), or its target passes an RDP host's
+[graphics pipeline](#rdps-graphics-pipeline-passed-through): a `GRAPHICS` record
+is a run of that pipeline's commands, whole, which means something only after
+every run before it from the `graphicsStart` that began the pipeline. One of no
+length is rejected.
 
 `sequence` starts at one and increases for the lifetime of one session-socket
 attachment. After the paint worker has finished the batch's ordered
@@ -1312,7 +1383,10 @@ and its compositor carries the copies and caches between them, so the desktop is
 lit and sharp; a rectangle that will not decode is left for the host to draw again,
 not made the end of the session. H.264 is refused in the capability advertise: a
 host would hand the parts of the desktop that move like video to it, and a lossy
-video codec would lose detail before the gateway ever encodes the picture.
+video codec would lose detail before the gateway ever encodes the picture. With
+`egfx_passthrough` the same channel is answered and acknowledged here and
+composed in the browser
+([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)).
 `egfx = false` is the bitmap path: the
 server draws with bitmap updates, damage is flushed on the 16 ms guess because those
 carry no frame boundary, and the desktop keeps its opening size — `resize = true` is
@@ -1492,7 +1566,9 @@ data messages inside its encrypted record layer. See [`roadmap.md`](roadmap.md).
 ### Browser SPA
 
 The React SPA has login, target picker, and remote desktop states. It decodes
-the desktop's video stream onto a canvas, applies incoming frames serially, and overlays mouse,
+the desktop's video stream onto a canvas — or composes an RDP host's passed
+graphics pipeline onto it, with the gateway's compositor built to WebAssembly —
+applies incoming frames serially, and overlays mouse,
 keyboard, touch, clipboard, display, and audio controls.
 
 **It refuses to start without a secure context and both WebCodecs decoders**

@@ -184,6 +184,30 @@ warning and the session runs on, since the host draws it again; a PDU whose fram
 is wrong ends the session, as any malformed PDU does. The channel says which codecs
 and commands it carried when it ends, at `info`.
 
+### The pipeline, passed on
+
+`Connect::pass_graphics` — a target's `egfx_passthrough` — has the session hand the
+pipeline's commands to its caller instead of composing them. The channel is
+still this client's: the capability exchange, the bulk compression and each
+frame's acknowledgement are as above, since the history is the connection's and
+the host stops drawing without its acknowledgements. `Graphics::passing` reads
+the commands by their headers alone (`proto/gfx.rs::commands`) and decodes three:
+the confirmation, the reset, whose size the session announces, and each
+EndFrame. Everything the host sent goes out as `Event::Graphics`, whole PDUs in
+order, cut where the session has something of its own to say — before the
+confirmation and the reset, so `Event::FramesMarked` and `Event::Resize` reach
+the caller ahead of the commands that follow them, and after each EndFrame,
+whose `Event::Frame` follows the run that holds it. Nothing is decoded, no
+surface is kept, and the session's framebuffer holds nothing of what the
+pipeline draws.
+
+`rdp_client::Compositor` is the other half: the same compositor, fed the
+commands that were passed. The page's WebAssembly module is a binding around it
+(`frontend/wasm/egfx`), and `tests/rdp_client_probe.rs` composes a real host's
+passed pipeline with it. It is right only for a pipeline it has followed from
+its first command, which is why `Event::FramesMarked` is where a caller starts
+one.
+
 ### Bitmap updates
 
 With `egfx = false` the pipeline is not advertised, so the server draws with bitmap
