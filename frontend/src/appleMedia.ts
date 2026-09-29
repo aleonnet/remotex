@@ -24,10 +24,21 @@
 //   picks one. The configuration that decoded is the one the player then uses
 //   (`appleEldConfig`).
 //
+// EXPERIMENTAL: a picture the browser's `VideoDecoder` refuses can still be decoded
+// in software — libavcodec's HEVC decoder compiled to WebAssembly, with SIMD128 and
+// slice threads (hevcWasmDecoder.ts) — where the gateway was built with the
+// `hevc-wasm` feature, which serves the decoder and makes the page cross-origin
+// isolated, and the browser runs shared-memory SIMD WebAssembly. The page asks the
+// gateway for the decoder rather than assuming it. Chrome on a GPU without HEVC
+// Range Extensions then says yes, decoding the sound itself and the picture here. `?hevc_decoder=software` in the page's URL takes the
+// software decoder even where the browser's own would do, to try it.
+//
 // Selection, as with the chroma — but the other way round on a doubt. VP9 and Opus are
 // what every browser here decodes, so only a definite "yes" asks for the Mac's stream,
 // and anything that throws reads as "no". The one refusal it can lead to is the
 // gateway's: a build without the `apple-hp-media` decoders has nothing else to send.
+
+import { hevcDecoderUrl } from "./gateway.ts";
 
 /**
  * The picture asked about: macwork's stream, 1600×1000, as its sequence parameter
@@ -85,17 +96,107 @@ type Description = (config: Uint8Array) => Uint8Array;
 
 const FORMS: Description[] = [(config) => config, esDescriptor];
 
-let answer: { decodes: boolean; sound: Description | null } | null = null;
+/** Who decodes the Mac's picture: the browser's `VideoDecoder`, or hevc-wasm. */
+export type HevcDecoder = "native" | "software";
 
-async function decodesPicture(): Promise<boolean> {
+let answer: {
+  decodes: boolean;
+  sound: Description | null;
+  picture: HevcDecoder | null;
+} | null = null;
+
+/** A function returning a SIMD128 value, which only a SIMD engine validates. */
+const SIMD_PROBE = Uint8Array.of(
+  0,
+  97,
+  115,
+  109,
+  1,
+  0,
+  0,
+  0,
+  1,
+  5,
+  1,
+  96,
+  0,
+  1,
+  123,
+  3,
+  2,
+  1,
+  0,
+  10,
+  10,
+  1,
+  8,
+  0,
+  65,
+  0,
+  253,
+  15,
+  253,
+  98,
+  11,
+);
+
+/**
+ * Whether the gateway serves the software decoder, this page can run it, and it can
+ * build its pictures.
+ */
+async function decodesPictureInSoftware(): Promise<boolean> {
+  try {
+    // A gateway without the decoder does not isolate the page, and says so first.
+    if (globalThis.crossOriginIsolated !== true) {
+      return false;
+    }
+    if (!WebAssembly.validate(SIMD_PROBE)) {
+      return false;
+    }
+    const memory = new WebAssembly.Memory({
+      initial: 1,
+      maximum: 1,
+      shared: true,
+    });
+    if (!(memory.buffer instanceof SharedArrayBuffer)) {
+      return false;
+    }
+    new VideoFrame(new Uint8Array(12), {
+      format: "I444",
+      codedWidth: 2,
+      codedHeight: 2,
+      timestamp: 0,
+    }).close();
+    const served = await fetch(hevcDecoderUrl("hevc.wasm"), { method: "HEAD" });
+    return served.ok;
+  } catch {
+    return false;
+  }
+}
+
+function softwareRequested(): boolean {
+  return (
+    new URLSearchParams(globalThis.location?.search ?? "").get(
+      "hevc_decoder",
+    ) === "software"
+  );
+}
+
+async function decodesPicture(): Promise<HevcDecoder | null> {
+  if (softwareRequested()) {
+    return (await decodesPictureInSoftware()) ? "software" : null;
+  }
   try {
     const support = await VideoDecoder.isConfigSupported({
       codec: APPLE_HEVC_PROBE,
     });
-    return support.supported === true;
+    if (support.supported === true) {
+      return "native";
+    }
   } catch {
-    return false;
+    // Read as a no, and the software decoder asked.
   }
+  return (await decodesPictureInSoftware()) ? "software" : null;
 }
 
 /**
@@ -158,7 +259,8 @@ export async function chooseAppleMedia(): Promise<boolean> {
     return answer.decodes;
   }
   let sound: Description | null = null;
-  if (await decodesPicture()) {
+  const picture = await decodesPicture();
+  if (picture) {
     for (const form of FORMS) {
       if (await decodesSound(form(ELD_CONFIG))) {
         sound = form;
@@ -166,7 +268,7 @@ export async function chooseAppleMedia(): Promise<boolean> {
       }
     }
   }
-  answer = { decodes: sound !== null, sound };
+  answer = { decodes: sound !== null, sound, picture: sound ? picture : null };
   return answer.decodes;
 }
 
@@ -179,6 +281,14 @@ export function decodesAppleMedia(): boolean {
     throw new Error("decodesAppleMedia() before chooseAppleMedia() resolved");
   }
   return answer.decodes;
+}
+
+/**
+ * Who decodes a passed picture, or null when this page is not passed one. Read by
+ * the paint worker's `init`, which follows `chooseAppleMedia`.
+ */
+export function appleHevcDecoder(): HevcDecoder | null {
+  return answer?.picture ?? null;
 }
 
 /**

@@ -171,7 +171,10 @@ MacPorts' `lib` or MSYS2's `C:\msys64\ucrt64\bin`. On macOS the loaded
 libavcodec decodes through VideoToolbox.
 
 The non-default `apple-hp-media-static` feature links private static archives
-instead, and is in no release artifact.
+instead, and is in no release artifact. Nor is the EXPERIMENTAL `hevc-wasm`
+feature, which serves the page libavcodec's HEVC decoder in WebAssembly: a release
+of `andrewtheguy/hevc-wasm`, pinned by version and SHA-256 in `build.rs`, which
+downloads it with `curl`, or a local build's directory as `REMOTEX_HEVC_WASM_DIR`.
 `libavcodec-hevc-prebuilt` links FFmpeg's libavcodec and libavutil, configured
 down to the HEVC decoder and parser, and on macOS its VideoToolbox hwaccel, which
 links Apple's VideoToolbox, CoreMedia, CoreVideo and CoreFoundation frameworks;

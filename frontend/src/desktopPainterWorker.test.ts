@@ -81,6 +81,7 @@ function harness() {
   host.handle({
     type: "init",
     canvas: canvas as unknown as OffscreenCanvas,
+    softwareHevc: false,
   });
 
   return {

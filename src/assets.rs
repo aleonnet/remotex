@@ -10,6 +10,16 @@
 //! name, so each embedded file's hash is also its `ETag`: a browser that already
 //! holds an asset revalidates it for a 304 instead of downloading it again, and a
 //! redeployed gateway with a changed index answers with a fresh document.
+//!
+//! EXPERIMENTAL: the `hevc-wasm` feature adds the software HEVC decoder
+//! (`frontend/src/hevcWasmDecoder.ts`), a release of andrewtheguy/hevc-wasm that
+//! `build.rs` stages beside the bundle, at `/hevc/` under the names it was built
+//! with: the module starts its slice threads as workers of its own script, found
+//! by its own URL. With the feature every file is served cross-origin isolated
+//! (COOP `same-origin`, COEP `require-corp`) — the page loads nothing from another
+//! origin, and isolation is what gives it `SharedArrayBuffer`, which those threads
+//! share their memory through. Without it `/hevc/` is a 404 and the page, which
+//! asks for the decoder before choosing it, decodes as it did before.
 
 use std::fmt::Write as _;
 
@@ -24,6 +34,22 @@ use rust_embed::{EmbeddedFile, RustEmbed};
 #[derive(RustEmbed)]
 #[folder = "$OUT_DIR/frontend-dist"]
 struct Frontend;
+
+#[cfg(feature = "hevc-wasm")]
+#[derive(RustEmbed)]
+#[folder = "$OUT_DIR/hevc-wasm"]
+struct HevcWasm;
+
+/// A file of the software HEVC decoder, `hevc.js` or `hevc.wasm`.
+#[cfg(feature = "hevc-wasm")]
+fn decoder(name: &str) -> Option<EmbeddedFile> {
+    HevcWasm::get(name)
+}
+
+#[cfg(not(feature = "hevc-wasm"))]
+fn decoder(_: &str) -> Option<EmbeddedFile> {
+    None
+}
 
 const INDEX: &str = "index.html";
 
@@ -41,9 +67,18 @@ pub async fn serve(request: Request) -> Response {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
     }
     let path = request.uri().path().trim_start_matches('/');
-    let file = match Frontend::get(path) {
-        Some(file) if !path.is_empty() => file,
-        _ => index(),
+    let file = if let Some(name) = path.strip_prefix("hevc/") {
+        // Not the page: the decoder is looked for here, and a 200 with the
+        // document would read as having found it.
+        let Some(file) = decoder(name) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        file
+    } else {
+        match Frontend::get(path) {
+            Some(file) if !path.is_empty() => file,
+            _ => index(),
+        }
     };
 
     let etag = etag(&file);
@@ -52,17 +87,34 @@ pub async fn serve(request: Request) -> Response {
         .get(header::IF_NONE_MATCH)
         .is_some_and(|held| *held == etag)
     {
-        return ([(header::ETAG, etag)], StatusCode::NOT_MODIFIED).into_response();
+        return ([(header::ETAG, etag)], ISOLATED, StatusCode::NOT_MODIFIED).into_response();
     }
     (
         [
             (header::CONTENT_TYPE, content_type(&file)),
             (header::ETAG, etag),
         ],
+        ISOLATED,
         Body::from(file.data),
     )
         .into_response()
 }
+
+/// The headers that make the page cross-origin isolated, for the decoder's threads.
+#[cfg(feature = "hevc-wasm")]
+const ISOLATED: [(header::HeaderName, HeaderValue); 2] = [
+    (
+        header::HeaderName::from_static("cross-origin-opener-policy"),
+        HeaderValue::from_static("same-origin"),
+    ),
+    (
+        header::HeaderName::from_static("cross-origin-embedder-policy"),
+        HeaderValue::from_static("require-corp"),
+    ),
+];
+
+#[cfg(not(feature = "hevc-wasm"))]
+const ISOLATED: [(header::HeaderName, HeaderValue); 0] = [];
 
 /// A strong validator from the file's content hash, quoted as the header wants.
 fn etag(file: &EmbeddedFile) -> HeaderValue {
@@ -132,6 +184,38 @@ mod tests {
             .expect("the bundle has a stylesheet");
         let response = get(&format!("/{stylesheet}"), None).await;
         assert_eq!(response.headers()[header::CONTENT_TYPE], "text/css; charset=utf-8");
+    }
+
+    /// With the decoder, the document and its assets are cross-origin isolated,
+    /// revalidated or not, and the decoder's own files are served beside them.
+    #[cfg(feature = "hevc-wasm")]
+    #[tokio::test]
+    async fn the_decoder_is_served_cross_origin_isolated() {
+        let response = get("/", None).await;
+        let etag = response.headers()[header::ETAG].clone();
+        let wasm = get("/hevc/hevc.wasm", None).await;
+        assert_eq!(wasm.status(), StatusCode::OK);
+        assert_eq!(wasm.headers()[header::CONTENT_TYPE], "application/wasm");
+        let script = get("/hevc/hevc.js", None).await;
+        assert_eq!(script.status(), StatusCode::OK);
+        for response in [response, get("/", Some(&etag)).await, wasm, script] {
+            assert_eq!(response.headers()["cross-origin-opener-policy"], "same-origin");
+            assert_eq!(response.headers()["cross-origin-embedder-policy"], "require-corp");
+        }
+        assert_eq!(get("/hevc/other", None).await.status(), StatusCode::NOT_FOUND);
+    }
+
+    /// Without it, `/hevc/` is not found, rather than the document, so the page's
+    /// question reads no; and nothing is isolated.
+    #[cfg(not(feature = "hevc-wasm"))]
+    #[tokio::test]
+    async fn without_the_decoder_nothing_is_isolated() {
+        for path in ["/hevc/hevc.js", "/hevc/hevc.wasm"] {
+            assert_eq!(get(path, None).await.status(), StatusCode::NOT_FOUND, "{path}");
+        }
+        let response = get("/", None).await;
+        assert!(!response.headers().contains_key("cross-origin-opener-policy"));
+        assert!(!response.headers().contains_key("cross-origin-embedder-policy"));
     }
 
     /// A path that is not a file is the page, with a 200: the SPA's own routes have

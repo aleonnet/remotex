@@ -30,6 +30,12 @@
 // time, so there is never a later frame to shake the FIFO loose. Hence the backstop below, which is what makes the promise
 // this file hands out a promise rather than a hope.
 
+import {
+  createWasmHevcDecoder,
+  isHevc,
+  type VideoDecoderLike,
+} from "./hevcWasmDecoder.ts";
+
 /**
  * How to decode the stream, from the gateway's `videoFormat` message.
  *
@@ -84,6 +90,12 @@ export interface DesktopVideo {
 export function createDesktopVideo(
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
+  /**
+   * EXPERIMENTAL: decode a passed HEVC stream in software (hevcWasmDecoder.ts)
+   * rather than with the browser's `VideoDecoder`, which appleMedia.ts found does
+   * not take it.
+   */
+  softwareHevc = false,
 ): DesktopVideo {
   interface Live {
     stream: VideoStream;
@@ -157,6 +169,9 @@ export function createDesktopVideo(
           },
         },
         stallMs,
+        softwareHevc && isHevc(format.decode)
+          ? createWasmHevcDecoder
+          : undefined,
       );
     } catch (e) {
       // A throw from here would escape into the paint loop and drop the batch.
@@ -291,6 +306,8 @@ export function createVideoStream(
   format: VideoFormat,
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
+  makeDecoder: (init: VideoDecoderInit) => VideoDecoderLike = (init) =>
+    new VideoDecoder(init),
 ): VideoStream {
   // FIFO, and that is the whole ordering argument: the encoder produces no frames
   // out of order — no alt-ref frames a decoder would reorder — so
@@ -389,7 +406,7 @@ export function createVideoStream(
     );
   };
 
-  const decoder = new VideoDecoder({
+  const decoder = makeDecoder({
     output: (frame) => settle(frame),
     error: (e) => {
       // Terminal: a decoder that has errored decodes nothing further, and every

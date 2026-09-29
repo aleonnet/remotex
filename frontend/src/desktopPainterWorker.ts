@@ -45,7 +45,12 @@ const GAP = "rgb(26, 26, 26)";
 
 /** What the page sends the worker. `init` arrives exactly once, first. */
 export type PainterCommand =
-  | { type: "init"; canvas: OffscreenCanvas }
+  | {
+      type: "init";
+      canvas: OffscreenCanvas;
+      /** EXPERIMENTAL: decode passed HEVC in software (appleMedia.ts). */
+      softwareHevc: boolean;
+    }
   | {
       type: "frame";
       data: ArrayBuffer;
@@ -217,6 +222,7 @@ export function createPainterWorker(
             onVideoError: (reason) => post({ type: "videoError", reason }),
             onVideoNeedsKeyframe: (reason) =>
               post({ type: "videoNeedsKeyframe", reason }),
+            softwareHevc: command.softwareHevc,
           });
           break;
         case "frame": {

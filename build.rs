@@ -7,6 +7,15 @@ use anyhow::{Context, Result, bail, ensure};
 
 const PREBUILT_FRONTEND: &str = "REMOTEX_PREBUILT_FRONTEND";
 
+/// The EXPERIMENTAL software HEVC decoder the `hevc-wasm` feature serves at
+/// `/hevc/` (src/assets.rs): a release of andrewtheguy/hevc-wasm, pinned by its
+/// version and its archive's SHA-256, or a local build's directory.
+const HEVC_WASM_VERSION: &str = "0.1.0";
+const HEVC_WASM_SHA256: &str =
+    "4a1a758d5157a53e5478982d2a0e2658de31e3a8955496e1c003eaf61a5906f4";
+const HEVC_WASM_DIR: &str = "REMOTEX_HEVC_WASM_DIR";
+const HEVC_WASM_FILES: [&str; 2] = ["hevc.js", "hevc.wasm"];
+
 fn main() -> Result<()> {
     println!("cargo:rerun-if-env-changed={PREBUILT_FRONTEND}");
 
@@ -43,7 +52,80 @@ fn main() -> Result<()> {
         "frontend build produced no {}",
         output.join("index.html").display()
     );
+
+    if env::var_os("CARGO_FEATURE_HEVC_WASM").is_some() {
+        let out = PathBuf::from(env::var_os("OUT_DIR").context("Cargo did not set OUT_DIR")?);
+        stage_hevc_wasm(&root, &out).context("failed to stage the hevc-wasm decoder")?;
+    }
     Ok(())
+}
+
+/// Put `hevc.js` and `hevc.wasm` in `OUT_DIR/hevc-wasm`: from `REMOTEX_HEVC_WASM_DIR`
+/// when it names a local build, or else from the pinned release, downloaded once
+/// and checked against its SHA-256.
+fn stage_hevc_wasm(root: &Path, out: &Path) -> Result<()> {
+    println!("cargo:rerun-if-env-changed={HEVC_WASM_DIR}");
+    let staged = out.join("hevc-wasm");
+    if staged.exists() {
+        fs::remove_dir_all(&staged)
+            .with_context(|| format!("failed to remove {}", staged.display()))?;
+    }
+    fs::create_dir_all(&staged)
+        .with_context(|| format!("failed to create {}", staged.display()))?;
+
+    if let Some(local) = env::var_os(HEVC_WASM_DIR) {
+        let local = root.join(PathBuf::from(local));
+        for file in HEVC_WASM_FILES {
+            let from = local.join(file);
+            println!("cargo:rerun-if-changed={}", from.display());
+            fs::copy(&from, staged.join(file)).with_context(|| {
+                format!("failed to copy {} ({HEVC_WASM_DIR})", from.display())
+            })?;
+        }
+        return Ok(());
+    }
+
+    let name = format!("hevc-wasm-v{HEVC_WASM_VERSION}.tar.gz");
+    let archive = out.join(&name);
+    if !archive.is_file() || sha256_hex(&archive)? != HEVC_WASM_SHA256 {
+        let url = format!(
+            "https://github.com/andrewtheguy/hevc-wasm/releases/download/v{HEVC_WASM_VERSION}/{name}"
+        );
+        let status = Command::new("curl")
+            .args(["-fsSL", "--retry", "3", "-o"])
+            .arg(&archive)
+            .arg(&url)
+            .status()
+            .context("failed to run curl")?;
+        ensure!(status.success(), "curl failed to download {url}");
+        let got = sha256_hex(&archive)?;
+        ensure!(
+            got == HEVC_WASM_SHA256,
+            "{url} has SHA-256 {got}, not the pinned {HEVC_WASM_SHA256}"
+        );
+    }
+    let status = Command::new("tar")
+        .arg("-xzf")
+        .arg(&archive)
+        .arg("-C")
+        .arg(&staged)
+        .args(HEVC_WASM_FILES)
+        .status()
+        .context("failed to run tar")?;
+    ensure!(status.success(), "tar failed to unpack {}", archive.display());
+    Ok(())
+}
+
+fn sha256_hex(path: &Path) -> Result<String> {
+    use sha2::{Digest, Sha256};
+    use std::fmt::Write as _;
+
+    let bytes = fs::read(path).with_context(|| format!("failed to read {}", path.display()))?;
+    let mut hex = String::with_capacity(64);
+    for byte in Sha256::digest(&bytes) {
+        write!(hex, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(hex)
 }
 
 fn build_frontend(root: &Path, output: &Path) -> Result<()> {
