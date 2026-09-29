@@ -3,7 +3,10 @@
 //!
 //! It codes nothing until the gateway's plan arrives, keeps one frame in flight and
 //! sends the next on the echo of the one before, walks its quality by how long the
-//! echoes take, and sends the pointer as its own shape, never in the picture. When it
+//! echoes take, and sends the pointer as its own shape, never in the picture. The next
+//! frame is coded while the one before is in flight, timed to be done as its echo
+//! comes ([`Stream::ahead_in`]), so a frame costs the longer of the coding and the
+//! echo and not their sum. When it
 //! cannot duplicate the desktop — the secure desktop of a UAC prompt or the lock screen
 //! — it says so and tries again until it can, and starts over at a keyframe.
 //!
@@ -45,6 +48,8 @@ const SETTLE_IDLE: Duration = Duration::from_millis(500);
 /// How long an echo may take before the frame is given up as lost. The gateway holds
 /// one half a second at most.
 const ECHO_LOST: Duration = Duration::from_secs(3);
+/// How long the gateway is listened to at a time while there is nothing else to do.
+const LISTEN: Duration = Duration::from_millis(20);
 /// How long between two attempts to duplicate a desktop that is refused.
 const RETRY: Duration = Duration::from_millis(250);
 /// How long after a refused open the channel is tried again, at first...
@@ -78,7 +83,8 @@ fn detach_console() {
 /// video that a host with no GPU decodes and draws in software can take every core, and
 /// Chrome runs its GPU process above normal. And a process with no window is what Windows
 /// throttles as background work, onto efficiency cores where the CPU has them. So it runs
-/// in DWM's class and opts out of the throttling. One frame in flight bounds what it takes.
+/// in DWM's class and opts out of the throttling. One frame in flight and one coded
+/// behind it bound what it takes.
 fn prioritize(log: &mut Log) {
     let throttling = PROCESS_POWER_THROTTLING_STATE {
         Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
@@ -110,10 +116,26 @@ struct InFlight {
     verdict: bool,
 }
 
+/// A frame coded behind the one in flight, which goes out on that one's echo. Its bytes
+/// are the loop's.
+struct Coded {
+    seq: u32,
+    keyframe: bool,
+    /// Whether it is a settle's frame, at the plan's quality.
+    settling: bool,
+    /// The quality it was coded at.
+    quality: u8,
+    captured: Instant,
+}
+
 struct Stream {
     plan: Plan,
     walk: QualityWalk,
     in_flight: Option<InFlight>,
+    coded: Option<Coded>,
+    /// How long the last echo took to come, and the last frame to code.
+    echo_took: Option<Duration>,
+    coding_took: Option<Duration>,
     /// When the last frame that went out was captured, which the next is captured
     /// the walk's interval after.
     captured: Option<Instant>,
@@ -131,11 +153,30 @@ impl Stream {
             plan,
             walk: QualityWalk::new(plan.quality, INTERVAL, plan.adaptive),
             in_flight: None,
+            coded: None,
+            echo_took: None,
+            coding_took: None,
             captured: None,
             coarse_since: None,
             keyframe_owed: true,
             gap_said: false,
         }
+    }
+
+    /// How long until the frame behind the one in flight is to be coded, so that it is
+    /// done as the echo comes: the echo is expected to take what the last one took, and
+    /// the coding what the last frame's did. Coded on the echo, a frame costs the two
+    /// together, which on a host that codes one in the interval's time is half the
+    /// frames; coded any sooner than this, it would be older than it need be by the time
+    /// a slow link takes it. `None` with no frame in flight, with one coded already, and
+    /// before the first echo, which leaves the next frame to the echo.
+    fn ahead_in(&self, now: Instant) -> Option<Duration> {
+        let flight = self.in_flight.as_ref()?;
+        if self.coded.is_some() {
+            return None;
+        }
+        let start = flight.sent + self.echo_took?.saturating_sub(self.coding_took?);
+        Some(start.saturating_duration_since(now))
     }
 }
 
@@ -204,16 +245,20 @@ fn stream(log: &mut Log, switches: Switches) -> Result<()> {
         // was: the gateway closed it, or it could not be written.
         let lost: Option<anyhow::Error> = 'turn: {
             // What the gateway said, waiting for it while there is nothing else to do:
-            // no plan yet, or a frame in flight.
-            let idle = stream.as_ref().is_none_or(|stream| stream.in_flight.is_some());
-            let mut said = if idle {
-                match open.incoming.recv_timeout(Duration::from_millis(20)) {
-                    Ok(said) => Some(said),
-                    Err(RecvTimeoutError::Timeout) => None,
-                    Err(RecvTimeoutError::Disconnected) => Some(Incoming::Closed(anyhow!("the reader stopped"))),
-                }
-            } else {
-                None
+            // no plan yet, or a frame in flight and the one behind it coded or not due.
+            let listen = match &stream {
+                None => Some(LISTEN),
+                Some(stream) if stream.in_flight.is_none() => None,
+                Some(stream) => match stream.ahead_in(Instant::now()) {
+                    None => Some(LISTEN),
+                    Some(Duration::ZERO) => None,
+                    Some(ahead) => Some(ahead.min(LISTEN)),
+                },
+            };
+            let mut said = match listen.map(|listen| open.incoming.recv_timeout(listen)) {
+                Some(Ok(said)) => Some(said),
+                Some(Err(RecvTimeoutError::Disconnected)) => Some(Incoming::Closed(anyhow!("the reader stopped"))),
+                Some(Err(RecvTimeoutError::Timeout)) | None => None,
             };
             loop {
                 let next = match said.take() {
@@ -225,17 +270,17 @@ fn stream(log: &mut Log, switches: Switches) -> Result<()> {
                     },
                 };
                 match next {
-                    Incoming::Said(Said::Plan(plan)) => {
+                    Incoming::Said(Said::Plan(plan), _) => {
                         log.say(format!("the plan: {} at quality {}, {}", plan.chroma.name(), plan.quality, if plan.adaptive { "walked" } else { "held" }));
                         stream = Some(Stream::new(plan));
                         // The encoder is the plan's.
                         capture = None;
                         pointer.dirty = true;
                     }
-                    Incoming::Said(Said::Foreign(version)) => {
+                    Incoming::Said(Said::Foreign(version), _) => {
                         break 'turn Some(anyhow!("the gateway speaks version {version}, this agent {VERSION}"));
                     }
-                    Incoming::Said(Said::Echo(echoed)) => {
+                    Incoming::Said(Said::Echo(echoed), arrived) => {
                         if let Some(stream) = stream.as_mut()
                             && let Some(flight) = stream.in_flight.take_if(|flight| flight.seq == echoed)
                         {
@@ -244,15 +289,18 @@ fn stream(log: &mut Log, switches: Switches) -> Result<()> {
                             open_wait = OPEN_FIRST;
                             last_open_error.clear();
                             open_repeats = false;
-                            let now = Instant::now();
-                            let moved = stream.walk.fenced(now.saturating_duration_since(flight.sent), flight.verdict, now);
+                            // Timed to when it was read, which a frame being coded
+                            // behind it may have kept this loop from.
+                            let took = arrived.saturating_duration_since(flight.sent);
+                            stream.echo_took = Some(took);
+                            let moved = stream.walk.fenced(took, flight.verdict, Instant::now());
                             follow(moved, &mut stream.walk, &mut capture, log);
                             if stream.coarse_since.is_some() {
-                                stream.coarse_since = Some(now);
+                                stream.coarse_since = Some(arrived);
                             }
                         }
                     }
-                    Incoming::Said(Said::Keyframe) => {
+                    Incoming::Said(Said::Keyframe, _) => {
                         if let Some(stream) = stream.as_mut() {
                             stream.keyframe_owed = true;
                         }
@@ -263,12 +311,39 @@ fn stream(log: &mut Log, switches: Switches) -> Result<()> {
             let Some(stream) = stream.as_mut() else {
                 continue 'open;
             };
-            if let Some(flight) = &stream.in_flight {
-                if flight.sent.elapsed() < ECHO_LOST {
-                    continue 'open;
-                }
+            if let Some(flight) = stream.in_flight.take_if(|flight| flight.sent.elapsed() >= ECHO_LOST) {
                 log.say(format!("frame {} was never echoed", flight.seq));
-                stream.in_flight = None;
+            }
+
+            let write = |message: &[u8]| open.send(message).context("writing to the channel");
+
+            // The coded frame goes out once none is in flight: at once when it was coded
+            // on the echo, and on the echo when it was coded behind the frame before.
+            if stream.in_flight.is_none()
+                && let Some(coded) = stream.coded.take()
+            {
+                let sent = Instant::now();
+                let blocked = match write(&out) {
+                    Ok(blocked) => blocked,
+                    Err(e) => break 'turn Some(e),
+                };
+                if coded.keyframe {
+                    stream.keyframe_owed = false;
+                    stream.walk.keyframe(sent);
+                }
+                let verdict = !coded.keyframe && !coded.settling;
+                if verdict {
+                    let moved = stream.walk.written(blocked, true, Instant::now());
+                    follow(moved, &mut stream.walk, &mut capture, log);
+                }
+                stream.coarse_since = stream.walk.coarse(coded.quality).then_some(sent);
+                stream.captured = Some(coded.captured);
+                stream.in_flight = Some(InFlight { seq: coded.seq, sent, verdict });
+                continue 'open;
+            }
+            // Behind a frame in flight the next is coded when it is due, and no other.
+            if stream.in_flight.is_some() && stream.ahead_in(Instant::now()) != Some(Duration::ZERO) {
+                continue 'open;
             }
             // No more often than the interval, which a link slowed past the floor has
             // had doubled.
@@ -278,8 +353,6 @@ fn stream(log: &mut Log, switches: Switches) -> Result<()> {
                 std::thread::sleep(wait.min(Duration::from_millis(20)));
                 continue 'open;
             }
-
-            let write = |message: &[u8]| open.send(message).context("writing to the channel");
 
             if let Some(bytes) = big.take() {
                 // A keyframe's opening byte and nothing a decoder would take: the
@@ -375,23 +448,8 @@ fn stream(log: &mut Log, switches: Switches) -> Result<()> {
             let Some(keyframe) = encoded.context("encoding a frame")? else {
                 continue 'open;
             };
-            let sent = Instant::now();
-            let blocked = match write(&out) {
-                Ok(blocked) => blocked,
-                Err(e) => break 'turn Some(e),
-            };
-            if keyframe {
-                stream.keyframe_owed = false;
-                stream.walk.keyframe(sent);
-            }
-            let verdict = !keyframe && !settling;
-            if verdict {
-                let moved = stream.walk.written(blocked, true, Instant::now());
-                follow(moved, &mut stream.walk, &mut capture, log);
-            }
-            stream.coarse_since = stream.walk.coarse(quality).then_some(sent);
-            stream.captured = Some(capturing);
-            stream.in_flight = Some(InFlight { seq, sent, verdict });
+            stream.coding_took = Some(now.elapsed());
+            stream.coded = Some(Coded { seq, keyframe, settling, quality, captured: capturing });
             seq = seq.wrapping_add(1);
             None
         };

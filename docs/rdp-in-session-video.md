@@ -180,6 +180,11 @@ listen. So the target's keys mean on the agent's stream what they mean on one en
 here. It is fixed for an engine.
 
 The agent keeps one frame in flight and sends the next on the echo of the one before.
+It codes that next frame while the one before is in flight, starting so that it is
+done as the echo is expected, by how long the last echo took and the last frame took
+to code: a frame then costs the longer of the two and not their sum, and on a slow
+link it is no older when it goes out than one coded on the echo. Each echo is timed
+to when it was read off the channel, which the coding may keep the agent's loop from.
 It walks its quality with desktop-vp9's own walk (`QualityWalk::fenced`) by how long
 each echo takes, less the shortest it has seen, and sharpens a desktop that went
 quiet below the plan's quality with one more frame at it. The engine holds each echo
@@ -311,8 +316,8 @@ agent above normal changed nothing, since that only matched Chrome.
 So the agent runs in DWM's priority class, `HIGH_PRIORITY_CLASS`, as the session's
 display work it is. It also opts out of the power throttling Windows gives a process
 with no window as background work, which on a CPU with efficiency cores puts it on
-them. One frame in flight bounds what it takes: a frame is coded only on the echo of
-the one before. A host with no CPU to spare still pays for it: its applications get
+them. One frame in flight and one coded behind it bound what it takes, on half the
+host's cores, two at least and four at most. A host with no CPU to spare still pays for it: its applications get
 less, and the video the browser there draws shows fewer frames, each of which the
 stream carries.
 
@@ -323,9 +328,10 @@ stream carries.
 - **Other hosts.** One with a GPU, where DXGI and a hardware encoder differ; Windows
   Server with the Remote Desktop Session Host role; any Windows generation but the
   one measured.
-- **How fast the agent codes.** It codes VP9 in software, with two threads, on a host
-  that is the user's own desktop. Its priority is set for the CPU it competes for
-  ([above](#the-hosts-cpu)); the thread count is not tuned.
+- **How fast the agent codes.** It codes VP9 in software on a host that is the user's
+  own desktop, and a desktop whose frame takes longer to code than the interval
+  between two is sent at fewer frames than the pipeline carries. Its priority and its
+  threads are set for the CPU it competes for ([above](#the-hosts-cpu)).
 
 ## Running it
 

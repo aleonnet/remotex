@@ -25,8 +25,16 @@ use crate::pointer::{self, PointerState};
 
 /// How long a capture waits for the desktop to change.
 const CAPTURE_WAIT: u32 = 100;
-/// Threads the encoder codes with: the session's own applications keep the rest.
-const THREADS: usize = 2;
+/// The most threads the encoder codes with: past three a desktop the size of most has
+/// little left to share out, and a fourth is for one larger.
+const MOST_THREADS: usize = 4;
+
+/// Threads the encoder codes with on a host of `cores`: half of them, two at least. The
+/// session's own applications keep the rest, which the agent's priority would take
+/// from them.
+fn threads_for(cores: usize) -> usize {
+    (cores / 2).clamp(2, MOST_THREADS)
+}
 
 pub struct Capture {
     device: ID3D11Device,
@@ -88,7 +96,11 @@ impl Capture {
                         let (Ok(width), Ok(height)) = (u16::try_from(mode.Width), u16::try_from(mode.Height)) else {
                             bail!("a {}x{} desktop", mode.Width, mode.Height);
                         };
-                        log.say(format!("duplicating a {width}x{height} desktop, {} at quality {quality}", plan.chroma.name()));
+                        let threads = threads_for(std::thread::available_parallelism().map_or(1, |cores| cores.get()));
+                        log.say(format!(
+                            "duplicating a {width}x{height} desktop, {} at quality {quality}, coded by {threads} threads",
+                            plan.chroma.name()
+                        ));
                         return Ok(Self {
                             device,
                             context,
@@ -97,7 +109,7 @@ impl Capture {
                             size: (width, height),
                             picture: Picture::new(width, height, plan.chroma)?,
                             filled: false,
-                            encoder: Encoder::new(width, height, plan.chroma, quality, THREADS)?,
+                            encoder: Encoder::new(width, height, plan.chroma, quality, threads)?,
                             shape: Vec::new(),
                         });
                     }
@@ -187,5 +199,19 @@ impl Capture {
             self.filled = true;
             Ok(Grab::Picture)
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn the_encoder_has_half_the_cores_between_two_and_four() {
+        assert_eq!(threads_for(1), 2);
+        assert_eq!(threads_for(4), 2);
+        assert_eq!(threads_for(6), 3);
+        assert_eq!(threads_for(8), 4);
+        assert_eq!(threads_for(32), 4);
     }
 }
