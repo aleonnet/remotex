@@ -17,6 +17,8 @@ Linux package managers own the conventional FHS paths directly:
 ```text
 /usr/bin/remotex
 /usr/share/doc/remotex/remotex.example.toml
+/usr/share/doc/remotex/LICENSE
+/usr/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
 The macOS package owns the corresponding local prefix:
@@ -24,6 +26,8 @@ The macOS package owns the corresponding local prefix:
 ```text
 /usr/local/bin/remotex
 /usr/local/share/doc/remotex/remotex.example.toml
+/usr/local/share/doc/remotex/LICENSE
+/usr/local/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
 The Windows package (`.msi`) owns the same tree under the 64-bit Program Files
@@ -32,7 +36,20 @@ directory and puts its `bin` on the machine `PATH`:
 ```text
 C:\Program Files\remotex\bin\remotex.exe
 C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
+C:\Program Files\remotex\share\doc\remotex\LICENSE
+C:\Program Files\remotex\share\doc\remotex\THIRD-PARTY-NOTICES.txt
 ```
+
+Every artifact, container images included, carries remotex's MIT `LICENSE` and
+`THIRD-PARTY-NOTICES.txt`, the notices of what a release build contains that
+remotex did not write: the C libraries linked from their prebuilt archives, whose
+licences are kept in `notices/`, the web client's packages, and the Rust crates
+cargo-about finds under `about.toml`. `third-party-notices.py` writes it (`uv run
+--python 3.13 packaging/third-party-notices.py`, with `bun install` done in
+`frontend/` and `cargo install cargo-about --locked --features cli`), and it names
+the `Cargo.lock` and `frontend/bun.lock` it was made from, which a library test
+holds it to. It covers the default build, not `apple-hp-media-static`, whose
+distributor adds fdk-aac's licence and FFmpeg's LGPL terms.
 
 There is no package wrapper, version directory, active-version symlink, or
 package-managed rollback. The package manager replaces and removes its files.

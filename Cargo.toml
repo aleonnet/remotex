@@ -10,6 +10,7 @@
 [package]
 name = "remotex"
 version = "0.0.285"
+license = "MIT"
 edition = "2024"
 
 [features]

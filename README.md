@@ -442,3 +442,11 @@ A gateway for QA is built with `cargo build --profile qa` into `target/qa`:
 optimised as a release build is, without its link-time optimisation, so a
 change rebuilds in seconds rather than minutes. Artifacts are always built
 `--release`.
+
+## Licence
+
+remotex is under the MIT licence in [`LICENSE`](LICENSE). A release build also
+contains the third-party software listed, with its licences, in
+[`THIRD-PARTY-NOTICES.txt`](THIRD-PARTY-NOTICES.txt), which every artifact carries.
+FFmpeg and fdk-aac, the High Performance decoders, are not in it: the gateway
+loads them from the system.

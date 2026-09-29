@@ -7,7 +7,10 @@
 #   remotex-<version>/
 #   ├── VERSION
 #   ├── bin/remotex                # release binary
-#   └── share/doc/remotex/remotex.example.toml # config template
+#   └── share/doc/remotex/
+#       ├── remotex.example.toml   # config template
+#       ├── LICENSE
+#       └── THIRD-PARTY-NOTICES.txt
 #
 # Run on each target platform you want to ship (macOS builds the mac tarball,
 # Linux builds the linux tarball) — this does not cross-compile.
@@ -58,7 +61,7 @@ cargo build --release
 echo ">> assembling ${pkg}"
 mkdir -p "$root/bin" "$root/share/doc/remotex"
 cp target/release/remotex "$root/bin/remotex"
-cp remotex.example.toml "$root/share/doc/remotex/remotex.example.toml"
+cp remotex.example.toml LICENSE THIRD-PARTY-NOTICES.txt "$root/share/doc/remotex/"
 chmod +x "$root/bin/remotex"
 printf '%s\n' "$version" > "$root/VERSION"
 

@@ -93,7 +93,8 @@ export CARGO_TARGET_DIR="$repo_root/target/full-image"
 (cd "$source" && bash packaging/build-container-binary.sh "$context/bin/remotex")
 
 mkdir -p "$context/share/doc/remotex"
-cp "$source/remotex.example.toml" "$context/share/doc/remotex/remotex.example.toml"
+cp "$source/remotex.example.toml" "$source/LICENSE" "$source/THIRD-PARTY-NOTICES.txt" \
+  "$context/share/doc/remotex/"
 
 version="$("$context/bin/remotex" --version | awk '{print $2}')"
 [ "v${version}" = "$tag" ] \

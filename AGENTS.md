@@ -230,6 +230,10 @@ documentation.
   package-owned live config.
 - Follow [Packaging](packaging/README.md) for native layouts, prebuilt dependency
   rules, and release workflow.
+- `THIRD-PARTY-NOTICES.txt` is generated: after any change to `Cargo.lock` or
+  `frontend/bun.lock`, rerun `packaging/third-party-notices.py` (a library test
+  fails until then), and never edit the file by hand. A new prebuilt C library
+  brings its licence text to `packaging/notices/` and the script's list.
 
 ## Testing and interactive QA
 
