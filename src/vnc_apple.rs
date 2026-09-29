@@ -342,10 +342,10 @@ pub fn set_display_configuration(mode: VirtualMode) -> Vec<u8> {
     display.extend_from_slice(&DYNAMIC_MAX_HEIGHT.to_be_bytes());
     display.extend_from_slice(&0u16.to_be_bytes()); // current_mode_index
     display.extend_from_slice(&0u16.to_be_bytes()); // preferred_mode_index
-    // Native Screen Sharing's full dynamic descriptor sends 7 here. The field is
-    // passed to SLVirtualDisplaySettings as `rotations`; the exact bit meanings are
-    // private, but matching the captured dynamic shape matters more than guessing a
-    // tidier upright-only value.
+    // Native Screen Sharing's full dynamic descriptor sends 7 here. The agent hands
+    // it unchanged to macOS as the virtual display's rotations setting; matching
+    // the captured dynamic shape matters more than guessing a tidier upright-only
+    // value.
     display.extend_from_slice(&7u32.to_be_bytes());
     display.extend_from_slice(&1u16.to_be_bytes()); // mode_count
     debug_assert_eq!(display.len(), DESCRIPTOR_HEAD);
