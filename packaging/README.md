@@ -135,9 +135,10 @@ needs `gh` logged in to an account that can read it, or
 the current release's archive. This FFmpeg is LGPL-2.1-or-later and linked
 statically, which obliges a distributor of a binary to let its recipient
 relink it against a modified FFmpeg (see that repository's README).
-`fdk-aac-rust` (the AAC-ELD sound) is pure Rust and needs nothing prebuilt, but
-carries the Fraunhofer FDK AAC licence, which is not OSI-approved and grants no
-patents. Build it with
+`fdk-aac-prebuilt` (the AAC-ELD sound) links a static archive of Fraunhofer's
+fdk-aac the same way. Its licence is not OSI-approved and grants no patents, so
+its archives are private too: its build script downloads them through `gh`, or
+takes `FDK_AAC_PREBUILT_DIR`. Build it with
 `cargo build --release --features apple-hp-media`. Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
 libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built

@@ -5,11 +5,9 @@
 //! The constants describing it are always compiled: a browser that decodes the
 //! stream is passed it as it came, described by them. The decoder is compiled only
 //! with the `apple-hp-media` feature, for every other browser, whose sound goes as
-//! Opus encoded from the PCM it produces. The decoder is Fraunhofer's own, in
-//! Rust: the port AOSP ships as `platform/external/aac`, `rust/`, cut down to
-//! AAC-ELD for Cargo. Its licence is the same non-OSI-approved "Fraunhofer FDK AAC
-//! Codec Library for Android" text, which is one reason the default build never
-//! links it.
+//! Opus encoded from the PCM it produces. The decoder is Fraunhofer's fdk-aac,
+//! linked from `fdk-aac-prebuilt`'s static archive. Its licence is not
+//! OSI-approved, which is one reason the default build never links it.
 //!
 //! The decoder is configured out of band. RTP carries bare access units with no
 //! header naming the stream, so the AudioSpecificConfig is stated here, once, from
@@ -20,9 +18,9 @@
 //! most of the stream.
 
 #[cfg(feature = "apple-hp-media")]
-use aac::aac_dec::AacDecoderInstance;
-#[cfg(feature = "apple-hp-media")]
 use anyhow::Context as _;
+#[cfg(feature = "apple-hp-media")]
+use fdk_aac::dec::{Decoder, Transport};
 
 /// AudioSpecificConfig for what the Mac sends, bit by bit:
 ///
@@ -45,32 +43,24 @@ pub const FRAME_SAMPLES: usize = 480;
 /// the decoder per frame.
 pub const CHANNELS: usize = 2;
 
-/// Full scale for the 16-bit samples the rest of the audio path carries. The
-/// decoder's own output is normalised floating point, so one multiply is the whole
-/// conversion; 32768 is what matches the fixed-point decoder sample for sample.
-#[cfg(feature = "apple-hp-media")]
-const FULL_SCALE: f32 = 32768.0;
-
 /// One decoder for one stream's access units.
 #[cfg(feature = "apple-hp-media")]
 pub struct EldDecoder {
-    decoder: AacDecoderInstance,
-    /// Scratch for one decoded frame; the decoder writes interleaved `f32`
-    /// normalised to ±1.
-    pcm: Vec<f32>,
+    decoder: Decoder,
+    /// Scratch for one decoded frame; fdk-aac writes interleaved `i16`.
+    pcm: Vec<i16>,
 }
 
 #[cfg(feature = "apple-hp-media")]
 impl EldDecoder {
     pub fn new() -> anyhow::Result<Self> {
-        let mut decoder = AacDecoderInstance::new();
+        let mut decoder = Decoder::new(Transport::Raw).context("open the AAC-ELD decoder")?;
         decoder
             .config_raw(&AUDIO_SPECIFIC_CONFIG)
-            .map_err(|e| anyhow::anyhow!("{e:?}"))
             .context("configure the AAC-ELD decoder for 48 kHz stereo 480-sample frames")?;
         Ok(Self {
             decoder,
-            pcm: vec![0.0; FRAME_SAMPLES * CHANNELS],
+            pcm: vec![0; FRAME_SAMPLES * CHANNELS],
         })
     }
 
@@ -83,28 +73,21 @@ impl EldDecoder {
     /// decoder could not produce at all is an error, and the caller keeps going: the
     /// next unit is independently decodable.
     pub fn decode(&mut self, access_unit: &[u8], out: &mut Vec<u8>) -> anyhow::Result<bool> {
-        let left = self
-            .decoder
-            .fill(access_unit, access_unit.len())
-            .map_err(|e| anyhow::anyhow!("feed the AAC-ELD decoder: {e:?}"))?;
+        let took = self.decoder.fill(access_unit).context("feed the AAC-ELD decoder")?;
         anyhow::ensure!(
-            left == 0,
-            "the AAC-ELD decoder left {left} of a {}-byte access unit unread",
+            took == access_unit.len(),
+            "the AAC-ELD decoder took {took} of a {}-byte access unit",
             access_unit.len()
         );
-        // A decode error is the concealment case: the decoder says so by refusing
-        // the frame while leaving the output it synthesised in the buffer.
-        let (info, concealed) = match self.decoder.decode(&mut self.pcm) {
-            Ok(info) => (info, false),
-            Err((e, info)) if e.is_decode_error() => (info, true),
-            Err((e, _)) => anyhow::bail!("decode an AAC-ELD access unit: {e:?}"),
+        let concealed = match self.decoder.decode_frame(&mut self.pcm) {
+            Ok(()) => false,
+            Err(e) if e.is_concealed() => true,
+            Err(e) => return Err(e).context("decode an AAC-ELD access unit"),
         };
-        let produced =
-            (usize::from(info.frame_size) * usize::from(info.num_channels)).min(self.pcm.len());
+        let produced = self.decoder.decoded_frame_size().min(self.pcm.len());
         out.reserve(produced * 2);
         for sample in &self.pcm[..produced] {
-            let scaled = (sample * FULL_SCALE).round().clamp(-FULL_SCALE, FULL_SCALE - 1.0);
-            out.extend_from_slice(&(scaled as i16).to_le_bytes());
+            out.extend_from_slice(&sample.to_le_bytes());
         }
         Ok(concealed)
     }
@@ -118,7 +101,7 @@ mod tests {
     /// one check that does not need a captured stream.
     #[test]
     fn the_audio_specific_config_is_accepted() {
-        EldDecoder::new().expect("the decoder accepts the AAC-ELD 48 kHz stereo configuration");
+        EldDecoder::new().expect("fdk-aac accepts the AAC-ELD 48 kHz stereo configuration");
     }
 
     /// The bit layout above, re-derived: the constant is the bytes and this is the

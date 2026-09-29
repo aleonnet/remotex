@@ -2535,11 +2535,10 @@ fn spawn_decoder(
 /// out to the bridge, either as they came, for a browser that decodes them, or
 /// through a decoder thread of their own, which hands the bridge PCM.
 ///
-/// Fraunhofer's Rust decoder holds `Rc`s, so it is not `Send` and cannot sit in
-/// the receive task; a thread of its own is the whole accommodation. The thread
-/// ends when this is dropped — which aborting the receive task does — and `stale`
-/// makes it stop at once rather than after draining its queue into a bridge the
-/// next stream may already be filling. Dropping this also withdraws the format the
+/// fdk-aac is blocking C, so it decodes on a thread of its own rather than in the
+/// receive task. The thread ends when this is dropped — which aborting the receive
+/// task does — and `stale` makes it stop at once rather than after draining its
+/// queue into a bridge the next stream may already be filling. Dropping this also withdraws the format the
 /// thread announced, since no more sound will follow it. A decoder that cannot be
 /// opened leaves why in `failed`, and the next unit ends the stream.
 struct Sound {

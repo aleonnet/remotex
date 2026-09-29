@@ -1152,16 +1152,11 @@ link to a physical Mac has not been observed.
   `isConfigSupported` say yes to both descriptions, the one each cannot decode
   included.
   FFmpeg's native `aac` (libavcodec 62.28) decoded the capture cleanly at the
-  same levels as Chrome and Safari. The gateway's decoder is the pure-Rust port of
-  Fraunhofer's fdk-aac decoder that AOSP ships as `platform/external/aac`,
-  `rust/`, cut down to raw AAC-ELD access units
-  ([fdk-aac-rust](https://github.com/andrewtheguy/fdk-aac-rust)). Against
+  same levels as Chrome and Safari. The gateway's decoder is Fraunhofer's
+  fdk-aac, linked from a prebuilt static archive
+  ([fdk-aac-prebuilt](https://github.com/andrewtheguy/fdk-aac-prebuilt)). Against
   AudioToolbox's own AAC-ELD (`afconvert -d "aace@48000#480"`), it decoded every
-  packet and matched the fixed-point C decoder to 86 dB SNR, at about 31 µs per
-  10 ms unit. Fed 200 000 corrupted units with overflow checks on, it concealed
-  or refused them and never panicked, which matters because the gateway aborts
-  on panic. Its instance holds `Rc`s, so it runs on a thread of its own behind a
-  64-unit queue.
+  packet. It runs on a thread of its own behind a 64-unit queue.
 - **Onward.** The decoder's 16-bit PCM goes to the session's audio bridge two
   units at a time, one Opus packet's worth, and from there the same way every
   target's sound goes: Opus on `/ws/audio`. The format is
