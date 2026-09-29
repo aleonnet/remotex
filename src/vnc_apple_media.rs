@@ -218,8 +218,8 @@ fn blob_tail(blob: &mut Proto, codecs: &[(u64, u64, Option<u64>)], f13: u64) {
     blob.uint(16, 0);
 }
 
-/// The audio offer's blob, before compression: `VCMediaNegotiationBlobV2` with one
-/// audio stream whose SSRC is `ssrc`.
+/// The audio offer's blob, before compression: one audio stream, in field 3, whose
+/// SSRC is `ssrc`.
 fn audio_offer_blob(ssrc: u32) -> Vec<u8> {
     let mut blob = Proto::default();
     blob.uint(1, 1);
@@ -228,6 +228,8 @@ fn audio_offer_blob(ssrc: u32) -> Vec<u8> {
     stream.uint(1, u64::from(ssrc));
     stream.uint(2, 0);
     stream.uint(3, 0);
+    // The RTP payload types this side takes, one bit each; `0x1000` is AAC-ELD's
+    // 101. Apple's viewer sends the same `0x5E7F`. The Mac sets the rate itself.
     stream.uint(4, 24_191);
     stream.uint(5, 0);
     stream.uint(6, 0);

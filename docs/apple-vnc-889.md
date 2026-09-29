@@ -8,7 +8,7 @@ macOS update is free to invalidate any of it.
 
 This document states behaviour and the rules remotex follows because of it. The
 evidence behind it is archived outside the repository, in
-`apple-screensharing-audit-2026-09-23_2`:
+`apple-screensharing-audit-2026-09-28`:
 - function-level traces of Apple's viewer, `screensharingd` and
   `ScreensharingAgent`;
 - captures, daemon logs and probe scripts;
@@ -46,7 +46,7 @@ official modes alone.
 |---|---|
 | Two subtypes | Both speak RFB 003.889 with an encrypted record layer, as Apple's viewer answers every Mac. `subtype = "ard"` is Standard mode, sharing the Mac's physical displays at a fixed size. `ard-high-performance` is High Performance mode, sharing one virtual display the Mac creates at the size the client asks for. |
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
-| Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, and `AutoFrameBufferUpdate`. So are the pointer buttons on this revision and the wheel. Each is covered below. |
+| Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
 | Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and its picture from ZRLE until the stream is up and across display changes. |
 | Not implemented | Apple's controls for two virtual displays and fixed presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
@@ -57,8 +57,9 @@ Rule out the Mac's Remote Management permissions before treating an
 authentication failure as a protocol fault. When the account lacks permission,
 the type-30 exchange completes before the Mac refuses, exactly as it does for a
 wrong password. Both Apple subtypes then report
-`VNC authentication failed: <the Mac's reason>`, which does not tell the two
-causes apart.
+`VNC authentication failed: the Mac refused the login (result 1)`, which does not
+tell the two causes apart. The Mac sends no reason with the refusal (see
+[Other login types](#other-login-types)).
 
 Remote Management's default **All users** setting rejects valid account
 credentials. Add the account to the per-user access list and grant at least
@@ -75,10 +76,9 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 Remotex authenticates with type 30 and the account's own password, so it does not
 need that setting.
 
-Apple's viewer also knows private security types 31–36: Diffie-Hellman variants,
-RSA, a preauthorized connection, Kerberos and SRP. Only type 30 has been
-exercised, and only type 30 supplies the key the record layer starts from, so
-remotex offers nothing else.
+A Mac also offers other login types, and Apple's viewer tries some of them before
+type 30 (see [Other login types](#other-login-types)). Only type 30 has been
+exercised, so remotex offers nothing else.
 
 ## The two modes in Apple's viewer
 
@@ -125,7 +125,8 @@ ZRLE session on it, a combination the viewer never offers (above):
   session in cleartext after authentication, keystrokes and the media stream's
   keys included. Remotex always asks, in both modes.
 - **Standard's picture.** `ard` asks for ZRLE alone, where Full quality asks for
-  zlib first and Adaptive first for the private codecs remotex cannot decode.
+  zlib first and Adaptive first for
+  [private codecs](#apples-own-framebuffer-encodings) remotex does not decode.
 
 ## Connecting
 
@@ -133,10 +134,17 @@ Both modes connect the same way until the record layer is up.
 
 1. **Version.** `RFB 003.889`, as Apple's viewer answers every Mac. It sends
    `003.003` to a server that is not a Mac.
-2. **Type 30.** A Diffie-Hellman exchange. `MD5(shared secret)` is the AES-128 key
-   that encrypts the 128-byte credential block (username at 0, password at 64) in
-   **ECB** mode, not the CBC a published description gives. It is also the first
-   key the record layer's rekey is wrapped under.
+2. **Type 30.** A Diffie-Hellman exchange. The Mac sends a `u16` generator, a
+   `u16` key length, the prime and its public key; macOS 26 sends RFC 5054's
+   4096-bit prime with generator 5, so both keys are 512 bytes, not the 1024-bit
+   group with generator 2 a published description gives. Apple's viewer takes key
+   lengths from 64 to 1024 bytes and refuses any other; remotex takes the same.
+   The viewer answers with
+   the 128-byte credential block (username at 0, password at 64), then its public
+   key. `MD5(shared secret)` is the AES-128 key that encrypts the block in **ECB**
+   mode, again not the published CBC. It is also the first key the record layer's
+   rekey is wrapped under. A refusal is the result word alone (see
+   [Other login types](#other-login-types)).
 3. **ClientInit** `0x81`: `0x80` asks for Apple's extended ServerInit, and `0x40`,
    never set, would ask for a session-select exchange remotex does not implement.
 4. **ServerInit**, extended (see below). High Performance ends here, before sending
@@ -149,6 +157,89 @@ Both modes connect the same way until the record layer is up.
    `SetPixelFormat` and the same `SetEncodings`, and High Performance then arms
    `AutoFrameBufferUpdate`. Standard arms it when the first layout names the
    screen being sent.
+
+### Other login types
+
+Remotex speaks only type 30. This is what the Mac's code does with the others;
+only the list and type 30 were measured.
+
+**The list.** To an `RFB 003.889` viewer the Mac lists, in this order:
+- 30, always;
+- 33 (RSA), always;
+- 36 (SRP), unless the Mac has network directory nodes and a preference does not
+  allow SRP for them;
+- 31 and 32 (asking the Mac's user), when **Anyone may request permission to
+  control screen** is on;
+- 2 (the VNC password), when **VNC viewers may control screen with password** is
+  on, or before the Mac's first setup has finished;
+- 35 (Kerberos), when the Mac can do Kerberos and a preference does not disable it.
+
+The test Mac sent `04 1e 21 24 23`: 30, 33, 36 and 35. A Remote Management
+preference can replace the list with one type, and a connection the Mac was told
+to expect gets 34 alone. The Mac refuses a type it did not list.
+
+**The result.** On success the Mac sends SecurityResult `u32` 0. A refusal is the
+`u32` alone: the Mac sends its reason string only to an RFB 3.8 viewer. The Mac
+then left the connection open for the 90 s a test waited; its code closes it
+when the viewer next writes.
+
+**Each type**:
+- **31 and 32** run type 30's exchange, but the Mac ignores the name and password
+  and asks its user to let the viewer in, to observe (31) or to control (32). The
+  Mac refuses keyboard and mouse input from a viewer let in by 31.
+- **33** starts with a `u32` length, then an envelope: a non-zero `u16` version,
+  `RSA1`, a `u16` kind, and the kind's body.
+  - **Kind 0** asks for the Mac's RSA public key. The Mac answers with a `u32`
+    length, `00 01 00 00`, a `u16` n, n bytes of DER, and a zero byte. When it
+    cannot decrypt a later envelope, it answers with the key in the same form,
+    without the zero byte.
+  - **Kind 1** is a plain login. Its body is type 30's 128-byte credential block,
+    under AES-128-ECB with a key the viewer chose, then a little-endian `u16` 256
+    and that key encrypted to the Mac's public key. The Mac answers `u32` 0, then
+    the result. The viewer's key is the one the record layer's rekey is wrapped
+    under.
+  - **Kind 2** carries SRP, and the Mac takes it only when it also listed 36.
+    The body is a `u16` length and SRP's first message, encrypted to the Mac's
+    key; the second message goes in clear in the same envelope. The Mac answers
+    each with a `u32` length, `00 00 00 02`, a `u16` n and n bytes of SRP, and
+    then sends the result.
+- **36** is the same SRP without RSA: after the selector, each message is a `u32`
+  length and SRP bytes in clear, both ways.
+- **34** is for a connection the Mac was told to expect, with a 16-byte key
+  both sides hold beforehand. The Mac sends a 16-byte challenge under AES-ECB
+  with that key, checks the viewer's 16-byte answer, sends 16 bytes back, and
+  then sends the result.
+- **35** starts with the viewer's `u32` 0 and the Mac's `u32` answer. Kerberos
+  tokens follow (not traced), for the service `vnc`. On success the Mac makes a
+  random 16-byte key and sends it as a `u32` length and the key, wrapped by the
+  Kerberos context. That key is the one the rekey is wrapped under.
+
+**SRP.** Each SRP message is a `u32` length, then fields:
+- a `u8`;
+- big numbers with a `u16` length;
+- opaque values with a `u8` length;
+- strings with a `u16` length;
+- a `u64`.
+
+The messages:
+1. The viewer sends an empty string, the user name, an empty string and an empty
+   opaque value.
+2. The Mac answers a zero byte, N, g, the salt, B, the PBKDF2 iteration count
+   and an options string (`mda=SHA-512,replay_detection,conf+int=ChaCha20-Poly1305,kdf=SALTED-SHA512-PBKDF2`).
+   N and g are RFC 5054's 4096-bit group, and the hash is SHA-512. An account
+   that does not exist still gets an answer, with a random salt.
+3. The viewer sends A, its proof M1, the options string again, and an opaque
+   value.
+4. The Mac answers its proof M2, an opaque value, an empty string and a `u32` 0.
+
+The rekey is then wrapped under the first 16 bytes of the SHA-256 of the SRP
+session key. The ChaCha20-Poly1305 in the options string plays no part in the
+record layer.
+
+**Apple's viewer**, logging in with a name and password, tries 33, then 36, then
+30, with Kerberos first or after them depending on its own preference. Asking
+for permission, it tries 32, then 31. Which form of 33 it sends is not
+established.
 
 ### ServerInit's name field is not a name
 
@@ -221,6 +312,17 @@ keys only when the viewer asks with `SetEncryption` command 1, and it switches
 both of its ciphers the moment it sends a rekey. Remotex asks once, during setup.
 It closes the session on any later rekey rather than follow it, because records
 it had already framed under the old key would fail the Mac's check.
+
+**`SetEncryption` (`0x12`)** is a type, a pad byte, a `u16` command and command
+words:
+- **Command 1** is followed by a `u16`, a `u16` count of at most 100, and that
+  many `u32` methods. One of them must be 1, and the Mac then draws a fresh random
+  key and IV and sends the rekey. Remotex sends `12 00 0001 0001 0001 00000001`.
+- **Command 2** is followed by a `u16` and a pad. A 1 makes the Mac decrypt what
+  it receives from then on; any other value turns that off. It does not stop the
+  Mac encrypting what it sends. Remotex sends `12 00 0002 0001 0000`.
+
+A published description reads the two commands as start and stop.
 
 The Mac may send a `MiscStatus` in the cleartext window between `SetEncryption`
 and the rekey, notably after a server restart with stale clipboard state; the
@@ -389,11 +491,11 @@ offered, and that is the only macOS it was tried on.
 | Descriptor field | Value remotex sends |
 |---|---|
 | name | 120 bytes |
-| display flags | 1: dynamic resolution (bit 1 would supply a custom refresh rate) |
+| display flags | 1: dynamic resolution. Bit 1, never sent, tells the Mac to leave the refresh rate alone and ignore the mode's. |
 | display type | 4, virtual |
 | physical size | millimetres, as big-endian `f32` |
 | maximum backing size | 3840×2160, a fixed ceiling |
-| rotations | 7, Apple's captured value; its bits are private |
+| rotations | 7, Apple's captured value. The agent hands it unchanged to macOS as the virtual display's rotations setting. |
 | mode count | 1 |
 
 The mode itself holds:
@@ -471,6 +573,11 @@ distance (`src/vnc.rs`).
 - **Keys with no mapping.** Insert, Pause, Scroll Lock, Print and Menu have none on
   the Mac, and Num Lock arrives as Keypad Clear.
 - **Option.** Option is stripped from ordinary keys unless Command is also held.
+- **Modifier keysyms.** The agent maps modifiers by its own table, in both modes.
+  `Meta_L`/`Meta_R` land on Option. `Alt_L`/`Alt_R`, `Super_L`/`Super_R` and
+  `Hyper_L`/`Hyper_R` all land on Command. Each keeps its side. A by-the-book Alt
+  therefore arrives as Command, so remotex sends a keyboard's Alt keys as Meta
+  (`keymap::apple_keysym`, and [VNC](architecture.md#vnc)).
 
 ### Double-click is chained by the Mac, at a login-time threshold
 
@@ -495,7 +602,12 @@ rectangle.
   a second, 15–33 MB/s of zlib, for two requests. Unarmed, the same screen drew
   nothing after the update asked for.
 - **The interval paces the pushes.** At 1,000,000 the Mac pushed about one update
-  a second, which is what remotex arms with.
+  a second, which is what remotex arms with. The daemon pushes once the interval
+  has passed since its last push.
+- **`0xffffffff` turns the pushes off.** The daemon records whether the word is
+  the all-ones value and pushes nothing while it is. A published description reads
+  the word as a screen id, with all-ones meaning all displays. It is not one:
+  `SetDisplay` selects the screen.
 
 Unpaced pushes cost a client its input. The Mac
 [reads nothing while it writes an update](#resizing-a-high-performance-display-as-measured),
@@ -526,10 +638,50 @@ implies version strings; the body is two numeric version triples:
 | OS version | 26.6.2 |
 | capability bitmap | 32 bytes: the server message types the viewer handles |
 
-A mis-sized body makes the Mac swallow the next message and hang silently. The
-capability bitmap gates whether the Mac sends `MiscStatus` at all.
+A mis-sized body makes the Mac swallow the next message and hang silently. A
+version other than 1 is only logged.
 
-**The pasteboard.** Change notifications need `ViewerInfo`, `SetMode(control)`
+The daemon reads two bits of the capability bitmap, and reads both as clear until
+a `ViewerInfo` arrives:
+- **Bit 20:** it checks this bit before sending every `MiscStatus` (`0x14`)
+  except command 17.
+- **Bit 21:** it checks this bit before forwarding an accessibility message from
+  the agent.
+
+A published description says it reads bit 20 alone.
+
+**`MiscStatus` (`0x14`)** is `14 00 00 04 00 01` and a `u16` command:
+
+| Command | Sent when |
+|---|---|
+| 1 | the Mac's user ends the session, just before the Mac closes it |
+| 2 | the Mac's pasteboard changed |
+| 3 | the Mac needs data for a flavor the viewer promised |
+| 4 | a 2.1 s timer finds nothing sent to the connection for 2 s |
+| 5, 6 | the Mac's displays go to sleep, and wake |
+| 9 | control is allowed, on a `FramebufferUpdateRequest` |
+| 10 | only observing is allowed, on `ViewerInfo` |
+| 11, 12 | the pointer is hidden, and shown again |
+| 13, 14 | the Mac's two busy-cursor notifications |
+| 17 | the Mac's user session changed |
+
+A published description has 12 as the heartbeat and 11 as the user session
+changing. The heartbeat is 4, 11 is the pointer hiding, and the session change is
+17 (`0x11`). Remotex acts on 2 and 3 and steps over the rest.
+
+**`SetMode` (`0x0a`)** is a type, a pad byte and a `u16` mode:
+- **0:** observe;
+- **1:** control;
+- **2:** control with the Mac's own keyboard and mouse inhibited, where the
+  connection may do that.
+
+The Mac refuses a mode above 2, and ignores 1 and 2 on a connection limited to
+observing. The mode also sets how the Mac's Screen Sharing menu shows the session:
+observed, assisted or controlled. Remotex sends 1.
+
+**The pasteboard.** `AutoPasteboard` (`0x15`) is eight bytes with a `u16` at
+byte 2: 1 starts the agent watching the Mac's pasteboard, 2 stops it, and any
+other value is ignored. Change notifications need `ViewerInfo`, `SetMode(control)`
 and `AutoPasteboard(start)`, in that order. Both modes send them in the cleartext
 prelude, and High Performance repeats `AutoPasteboard(start)` after the virtual
 display's layout. The Mac then signals with `MiscStatus`:
@@ -541,6 +693,26 @@ every flavor of every item. A short text selection can therefore arrive inside
 megabytes of other flavors. Remotex streams the archive, keeps only the text, and
 sends empty text as an item with no flavors, which clears the Mac's pasteboard.
 
+- **The fetch** (`0x0b`) is eight bytes. Bit 0 of byte 1 asks for promises only,
+  and the Mac honours it only while `AutoPasteboard` is started. Bytes 4–7 are
+  the viewer's to choose; the Mac echoes them.
+- **The Mac's reply** (`0x1f`) has a 16-byte header:
+  - `1f 00`, then the fetch's promises bit in byte 2 and a pad byte;
+  - the echoed four bytes;
+  - big-endian `u32` uncompressed and compressed sizes;
+  - then the compressed archive.
+
+  A published description calls bytes 4–7 reserved.
+- **The viewer's `0x1f`** has the same header. Bit 0 of byte 2 marks the contents
+  as promises, again only while `AutoPasteboard` is started, and the Mac ignores
+  bytes 4–7. A size over 100 MiB closes the connection.
+- **The archive** is a run of items. Each item is a `u32` flavor count, then
+  that many flavors. A flavor is a counted name, a reserved `u32`, a `u32` count
+  of counted key and value tags, and counted data, every count a big-endian
+  `u32`. A flavor with no data is a promise, and an empty archive clears the
+  pasteboard. A published description reads the first count as the number of
+  items, each holding one flavor.
+
 **Polling pauses behind a fetch.** Framebuffer and pasteboard replies share one
 ordered stream. While a pasteboard fetch is pending, remotex pauses incremental
 polling, so the fetch is not stuck behind a stream of updates.
@@ -549,7 +721,106 @@ polling, so the fetch is not stuck behind a stream of updates.
 keysyms and device information are each a one-rectangle framebuffer update.
 Apple's viewer closes the connection on a server message type it does not know,
 so a reader that falls out of step sees "messages" that are really fragments of
-these.
+these. Remotex reads two of them only to step over them:
+- **Vendor keysyms** (`0x453`) are a fixed table: `u16` 20, then a `u16` version
+  (1), a `u16` count (4), and the keysyms `0x1008FD00` to `0x1008FD03`.
+- **Keyboard source** (`0x455`) is a `u16` giving the name's length plus 8, then
+  a `u16` version (1) and a `u32` flag. After those come a `u16` length and the
+  Mac's current input source as UTF-8, such as `com.apple.keylayout.ABC`. The
+  flag is 1 while the Mac's keyboard focus is in a secure text field, such as a
+  password prompt.
+
+### Messages remotex does not use
+
+Read from the daemon, for a reader of Apple's viewer's captures:
+- **`DeviceInfo` (`0x456`)** is a metadata rectangle of zero geometry. It holds,
+  in order:
+  - a `u16` size of what follows, then `u16` 2, `u32` 1 and a `u32` 0;
+  - three `u16` string lengths, each counting its NUL;
+  - the Mac's model identifier (`hw.model`, or `unknown`) and two colour strings;
+  - a big-endian `u32` housing colour, when the Mac reports one.
+
+  A published description has the housing colour always present.
+- **`EncryptedInputEvent` (`0x10`)**, from the viewer, is 18 bytes: a type, a
+  flag byte, and one AES block the Mac decrypts in ECB under the key
+  authentication produced. Two markers in the block say what it carries, and a
+  marker other than 0 or `0xff` is a decryption error:
+  - **a key,** when byte 0 is `0xff`: byte 1 is the down flag and bytes 2–5 the
+    keysym;
+  - **a pointer event,** when byte 10 is `0xff`: byte 11 is the button mask and
+    bytes 12–15 are x and y as `u16`s.
+
+  Numbers are big-endian.
+- **`SetKeyboardInputSource` (`0x1a`)**, from the viewer, holds:
+  - a type and a pad byte;
+  - a `u16` size of what follows and a `u16` version;
+  - a `u16` length and an input source ID, which the Mac hands to its agent.
+
+  A published description leaves out the pad byte.
+
+### Apple's own framebuffer encodings
+
+Remotex advertises none of these, but Adaptive quality lists `0x3f3` and `0x3ea`
+first, so a capture of Apple's viewer is full of them. This is read from the
+Mac's encoders and the viewer's decoders.
+
+**`0x3e8`, `0x3e9` and `0x3ea` are zlib with fewer bits per pixel.** A rectangle
+is a `u32` length and that many bytes of zlib. Each encoding keeps its own deflate
+stream from one rectangle to the next, as RFB's zlib (`0x06`, the fourth row)
+keeps one. It inflates to packed rows, each starting on a byte:
+
+| Encoding | Pixel | Row | Deflate level |
+|---|---|---|---|
+| `0x3e8` | 1 bit, most significant first: 1 is white, 0 black | (w + 7) / 8 bytes | 9 |
+| `0x3e9` | 4-bit grey, high nibble first: 15 is white | (w + 1) / 2 bytes | 6 |
+| `0x3ea` | big-endian `u16`, RGB 5-5-5 below an unused top bit | 2w bytes | 1 |
+| `0x06` | the negotiated pixel format | w × bytes per pixel | 1 |
+
+The Mac's grey is (5R + 9G + 2B) / 16. For `0x3e8` it thresholds that grey along
+each row and carries half the error to the next pixel, so the picture is dithered.
+
+**`0x3f3` codes the picture in 8×8 tiles.** A rectangle is a `u32` length, at
+most 100,000,000, then a body whose first byte says what it is:
+- **0, a full update.**
+  - Bytes 1 and 2 are parameters for its DCT tiles.
+  - Bytes 3–5 are a big-endian `u24` offset from the body's start to a data stream.
+  - A command stream starts at byte 6.
+- **1, a partial update,** which refines the tiles of the last full update.
+  - Bytes 1 and 2 are DCT parameters; the Mac sends 14 and 19.
+  - One bit stream starts at byte 3 and gives each tile a 2-bit code: 0 leaves the
+    tile alone, 1 refines its DCT coefficients, 2 repeats the copy the full update
+    made for it, and 3 takes a cached tile.
+  - The stream ends with `mvs` (`0x6d 0x76 0x73`).
+- **2, the quantization tables:** exactly 129 bytes. The 2 is followed by 64
+  luminance entries and 64 chrominance entries, one byte each, in a 0×0 rectangle
+  at 0,0.
+
+The viewer decodes `0x3f3` only into 32-bit pixels, and reads each stream most
+significant bit first.
+
+A full update's command stream starts with one bit the viewer skips. Then it runs
+through the rectangle's tiles in rows, left to right and top to bottom, and edge
+tiles are clipped. Each step is a 3-bit command followed by a repeat count, and
+the command covers that many tiles:
+- **a `0` bit:** one tile;
+- **a `1` bit and a 4-bit n below 15:** n + 2 tiles;
+- **`1`, `1111` and a base-128 number v:** v + 17 tiles. The number is least
+  significant group first, with bit 7 continuing, in at most three bytes.
+
+A command's operands come from the data stream:
+
+| Command | Tile |
+|---|---|
+| 0 | white |
+| 1 | a copy of the previous tile |
+| 2 | a copy of the tile above |
+| 3 | black and white: an 8-bit row mask, then an 8-bit pixel mask for each row whose bit is clear. A set bit is white. |
+| 4 | one or two colours. The first bit says two; the second says to reuse the colours last read in this update instead of reading new ones. A colour is 8-bit Y, then the top six bits of Cb and of Cr. Two colours are followed by command 3's masks, a set bit taking the first colour. |
+| 5 | DCT-coded |
+| 6 | a cached tile, by a 16-bit index |
+| 7 | the cached tile after the last one used |
+
+Both streams end with `0x6d`.
 
 ### The numbers, in both forms
 
@@ -568,6 +839,10 @@ so remotex logs an unexpected encoding as `1105 (0x451)`.
 | keyboard source | `0x455` | 1109 | |
 | `DeviceInfo` | `0x456` | 1110 | not advertised |
 | media stream | `0x3f2` | 1010 | in a second `SetEncodings` |
+| 1-bit zlib | `0x3e8` | 1000 | not advertised |
+| 4-bit grey zlib | `0x3e9` | 1001 | not advertised |
+| RGB 5-5-5 zlib | `0x3ea` | 1002 | not advertised |
+| 8×8 tiles | `0x3f3` | 1011 | not advertised |
 | ZRLE | `0x10` | 16 | standard RFB |
 | zlib | `0x06` | 6 | standard RFB, not advertised |
 | Raw | `0x00` | 0 | standard RFB |
@@ -651,8 +926,16 @@ two fields:
 
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
-| `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway for a viewer older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
+| `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
 | `tilesPerFrame` (video stream field 6) | 4 | 1 | Four tiles split a frame into strips of 256 rows. Each strip is coded as a separate picture of one bitstream, in its own sequence-number space with a DONL, and nothing in a packet names its strip. One tile is one picture of the whole display, without DONL. |
+
+The flags are a big-endian `u32`, like the rest of the header: Apple's viewer
+sets its bits and then byte-swaps the word before sending it. A published
+description has the word in host order, which would move every bit to another
+byte. Two other bits exist, and remotex sets neither:
+- bit 1 asks for 60 fps on the second video stream;
+- bit 3 names Apple Remote Desktop, rather than Screen Sharing, as the video
+  client.
 
 **The picture and the sound go together.** A configuration with an empty audio
 offer is refused (`unable to create audio config`, error type 2), and one with an
@@ -727,13 +1010,19 @@ other failures (see [Liveness](#the-stream)).
   than one already received, a duplicate or a straggler, is dropped on both
   legs.
 - **RTCP.** The viewer sends a receiver report on both legs every second. A PLI or
-  FIR brings an IDR within about 30 ms. Remotex sends a PLI after a loss, when
-  a stream starts without an IDR (the first packets can arrive before the socket
-  is bound), and when the decoder falls eight pictures behind, which it warns
-  about; for a passed stream, when the browser's link falls 15 behind and when
-  the browser has to start over. It also sends the rate reports described under
-  [Rate control](#rate-control), every 50 ms on the picture's leg, as Apple's
-  viewer does.
+  FIR brings an IDR within about 30 ms. Besides sender and receiver reports, the
+  Mac accepts a compound packet that starts with PT 192, 193, 204, 205 or 206.
+  - **AVConference's FIR** has two forms, chosen by a per-stream setting: RFC
+    5104's (PT 206, FMT 4) and its own PT 192. The PT 192 form is the sender's
+    SSRC and a list of 16-bit values, not RFC 2032's FIR, which is what a
+    published description calls it.
+  - **Remotex sends a PLI** after a loss, when a stream starts without an IDR
+    (the first packets can arrive before the socket is bound), and when the
+    decoder falls eight pictures behind, which it warns about; for a passed
+    stream, when the browser's link falls 15 behind and when the browser has to
+    start over. It also sends the rate reports described under
+    [Rate control](#rate-control), every 50 ms on the picture's leg, as Apple's
+    viewer does.
 - **Liveness.** Every offer owes its answer, its display's first picture and
   the first sound packet within 10 s, and the running stream an authentic
   packet, SRTP or SRTCP, on each leg every 48 s, 16 of Apple's 3-second
@@ -833,6 +1122,15 @@ link to a physical Mac has not been observed.
   about 320 kbit/s. The decoder is configured out of band with
   AudioSpecificConfig `F8 E6 50 00`: object type 39, 48 kHz, stereo, 480-sample
   frames, no SBR, no resilience tools.
+- **What the offer decides.**
+  - **The payloads.** The codec list does not choose the payload; field 4 of the
+    offer's audio stream does. That field is a bitmask of the RTP payload types
+    the viewer takes, one bit each. `0x1000` is 101, and the Mac's screen-sharing
+    sound prefers 101. Apple's viewer sends `0x5E7F` (24191), and so does remotex.
+  - **Not the rate.** The rate is the Mac's own: its screen-sharing sound
+    configuration sets 320,000 bit/s whatever the offer says.
+  - **A published description** reads field 4 as a bitrate the Mac picks a tier
+    from. It is not one.
 - **Decoder.** The gateway decodes AAC-ELD itself (`src/aac_eld.rs`) for a
   browser it sends Opus, and passes it as it came, under `media_passthrough`, to one
   that decodes it. Browsers can decode it.
@@ -922,9 +1220,11 @@ is 10 s overdue.
 
 ## Still unknown
 
-- **Apple's private framebuffer codecs**, `0x3ea` and `0x3f3`: an adaptive,
-  tile-based, JPEG-like codec among them. Neither is advertised.
-- **Authentication types 31–36 on the wire.**
+- **`0x3f3`'s DCT tiles:** how their coefficients, and a partial update's
+  refinements, are coded
+  ([Apple's own framebuffer encodings](#apples-own-framebuffer-encodings)).
+- **Other login types:** type 35's Kerberos tokens, and which form of type 33
+  Apple's viewer sends ([Other login types](#other-login-types)).
 - **Rate control's loose ends**: the second byte of `RCTL`, whether loss lowers
   the target over longer than 30 s, and whether any offer field lowers the
   20 Mbit/s floor ([Rate control](#rate-control)).

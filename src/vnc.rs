@@ -68,22 +68,16 @@ const SECURITY_VNC_AUTH: u8 = 2;
 /// it and what happens without it. RealVNC's RSA-AES types carry one to
 /// everything else; see [`crate::vnc_rsa_aes`].
 const SECURITY_ARD: u8 = 30;
-/// Largest DH key length accepted from the server, in bytes. macOS sends 128
-/// (a 1024-bit prime); the cap is what keeps a bogus length from turning into
-/// a huge allocation and a very slow modular exponentiation.
-const MAX_ARD_KEY_BYTES: usize = 512;
-/// Smallest DH key length accepted, in bytes. The server picks the group, and
-/// what rides inside it is an account password, so a small prime is not a
-/// server being frugal — it is a shared secret anyone watching the wire can
-/// recover.
-///
-/// 128 bytes: the 1024 bits macOS 26 sends, with no room below it. The 512-bit
-/// group Apple's own documentation calls the "older, less secure method" is
-/// therefore refused rather than downgraded to, which is the point. If a Mac old
-/// enough to still offer it ever turns up, this is what it will fail on, and the
-/// error says so — a refusal being the honest answer for a group that would put
-/// an account password behind precomputation anyone can afford.
-const MIN_ARD_KEY_BYTES: usize = 128;
+/// Largest DH key length accepted from the server, in bytes: 1024, an 8192-bit
+/// group, the most Apple's viewer takes. macOS 26 sends 512, RFC 5054's 4096-bit
+/// prime with generator 5. The cap keeps a bogus length from turning into a huge
+/// allocation and a very slow modular exponentiation.
+const MAX_ARD_KEY_BYTES: usize = 1024;
+/// Smallest DH key length accepted, in bytes: 64, a 512-bit group, the least
+/// Apple's viewer takes. So remotex logs in wherever Apple's viewer does, older
+/// Macs' 512-bit group included, which Apple's own documentation calls the
+/// "older, less secure method".
+const MIN_ARD_KEY_BYTES: usize = 64;
 /// Apple's credential blob: `username[64]`, then `password[64]`, each
 /// null-terminated, the remainder random.
 const ARD_CREDENTIALS_LEN: usize = 128;
@@ -1811,7 +1805,7 @@ async fn connect(
                      did not offer"
                 );
             };
-            read_security_result(&mut reader).await?;
+            read_apple_security_result(&mut reader).await?;
             sock.write_all(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut reader).await?;
             let pass_media = plan.apple_media;
@@ -1899,6 +1893,19 @@ async fn read_security_result<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::R
             read_string(reader).await?
         );
     }
+    Ok(())
+}
+
+/// SecurityResult on Apple's revision, which carries no reason. A Mac sends its
+/// reason string only to an RFB 3.8 viewer; to 003.889 a refusal is the word
+/// alone, and the Mac then keeps the connection open, so waiting for a reason
+/// would only sit out the handshake deadline.
+async fn read_apple_security_result<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<()> {
+    let result = reader.read_u32().await?;
+    anyhow::ensure!(
+        result == 0,
+        "VNC authentication failed: the Mac refused the login (result {result})"
+    );
     Ok(())
 }
 
@@ -5890,8 +5897,9 @@ fn choose_security(
     if let Some(subtype) = subtype.filter(|s| s.apple_authentication()) {
         anyhow::ensure!(
             types.contains(&SECURITY_ARD),
-            "the target is subtype {:?}, whose authentication this server does not \
-             offer (types {types:?}) — it is not macOS Screen Sharing",
+            "the target is subtype {:?}, whose authentication (type 30) this server \
+             does not offer (types {types:?}) — either it is not macOS Screen Sharing, \
+             or the Mac's Remote Management settings limit it to another login type",
             subtype.name()
         );
         return Ok(SECURITY_ARD);
@@ -5988,8 +5996,9 @@ async fn ard_authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     );
     debug!("vnc: Apple DH authentication as {username:?}, {}-bit prime", key_len * 8);
 
+    // Twice the key length, as Apple's viewer draws it.
     let mut rng = rand::rng();
-    let mut private = vec![0u8; key_len];
+    let mut private = vec![0u8; 2 * key_len];
     let mut filler = [0u8; ARD_CREDENTIALS_LEN];
     rng.fill_bytes(&mut private);
     rng.fill_bytes(&mut filler);
@@ -6238,6 +6247,26 @@ mod tests {
         assert_eq!(Dialect::Apple889.client_init(), 0x81);
     }
 
+    /// A Mac refuses a 003.889 login with the result word and nothing after it,
+    /// and leaves the connection open, so the refusal must be reported from the
+    /// word alone.
+    #[tokio::test]
+    async fn an_apple_refusal_is_reported_without_waiting_for_a_reason() {
+        let (mut mac, mut client) = tokio::io::duplex(64);
+        mac.write_all(&1u32.to_be_bytes()).await.unwrap();
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_apple_security_result(&mut client),
+        )
+        .await
+        .expect("answered from the word alone")
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("refused the login"), "{err:#}");
+
+        mac.write_all(&0u32.to_be_bytes()).await.unwrap();
+        read_apple_security_result(&mut client).await.unwrap();
+    }
+
     /// macvm's enhanced name field (macOS 26.6.2), read as a bitmap, and a plain
     /// name, which has none.
     #[test]
@@ -6369,9 +6398,8 @@ mod tests {
     async fn a_full_dh_exchange_hands_the_server_the_credentials_back() {
         use aes::cipher::{BlockCipherDecrypt as _, KeyInit as _};
 
-        // The group macOS sends, and now the smallest this client accepts: 128
-        // bytes of it.
-        let key_len = MIN_ARD_KEY_BYTES;
+        // A 1024-bit group keeps the arithmetic quick; macOS sends 4096 bits.
+        let key_len = 128;
         let prime = {
             let mut bytes = vec![0xffu8; key_len];
             bytes[key_len - 1] = 0x97; // 2^1024 - 105, prime
@@ -6411,8 +6439,8 @@ mod tests {
     }
 
     /// The server chooses the group and we have to live in it, so every way that
-    /// choice can be unusable is refused before any arithmetic: a prime small
-    /// enough to break — with an account password riding inside it — a zero one,
+    /// choice can be unusable is refused before any arithmetic: a key length
+    /// outside what Apple's viewer takes, a zero prime,
     /// which `BigUint::modpow` answers with a panic rather than a number, and a
     /// public key whose shared secret anyone could predict.
     #[tokio::test]
@@ -6437,11 +6465,6 @@ mod tests {
 
         let too_small = authenticate(offer(MIN_ARD_KEY_BYTES - 1, 0xff)).await;
         assert!(too_small.contains("outside the"), "{too_small}");
-        // Named for what it is rather than left to the arithmetic above: 64
-        // bytes is the 512-bit group Apple used to use, and refusing it is the
-        // reason the floor exists.
-        let legacy = authenticate(offer(64, 0xff)).await;
-        assert!(legacy.contains("outside the"), "{legacy}");
         let too_large = authenticate(offer(MAX_ARD_KEY_BYTES + 1, 0xff)).await;
         assert!(too_large.contains("outside the"), "{too_large}");
         // Long enough, and still no group at all.
