@@ -166,7 +166,7 @@ pub async fn run(
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = VideoSink::new("rdp", frame_tx, plan, feedback, TileSupport::None);
-    session(config, display, input_rx, audio, uplinks, &sink).await;
+    session(config, plan.rdp_graphics, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }
 
@@ -196,6 +196,7 @@ impl AudioSink for Sound {
 
 async fn session(
     config: TargetConfig,
+    pass_graphics: bool,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     audio: Option<Arc<AudioBridge>>,
@@ -203,7 +204,8 @@ async fn session(
     sink: &VideoSink,
 ) {
     let opening = opening_layout(&config, display);
-    let (session, mut events) = Session::start(connect_config(&config, opening, audio, &uplinks));
+    let (session, mut events) =
+        Session::start(connect_config(&config, opening, pass_graphics, audio, &uplinks));
     // The feeds exist from here, so the camera and mic sockets' traffic has somewhere to
     // go before the desktop does: a plug made while the host is still connecting waits in
     // the session's queue for the enumeration channel.
@@ -245,6 +247,7 @@ async fn session(
         events,
         Flags {
             resize: config.resize,
+            pass_graphics,
             clipboard: config.clipboard,
             default_size: config.default_size(),
         },
@@ -356,6 +359,7 @@ fn opening_layout(config: &TargetConfig, display: Option<HostDisplay>) -> Layout
 fn connect_config(
     config: &TargetConfig,
     opening: Layout,
+    pass_graphics: bool,
     audio: Option<Arc<AudioBridge>>,
     uplinks: &Uplinks,
 ) -> Connect {
@@ -373,6 +377,7 @@ fn connect_config(
         scale_percent: if config.resize { opening.density.percent() } else { 0 },
         resize: config.resize,
         egfx: config.egfx(),
+        pass_graphics,
         clipboard: config.clipboard,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
         camera: uplinks.camera.as_ref().map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
@@ -385,6 +390,9 @@ fn connect_config(
 /// only ever read from the same place.
 struct Flags {
     resize: bool,
+    /// Whether the host's graphics pipeline is passed to the browser rather than
+    /// composed here ([`RenderPlan::rdp_graphics`]).
+    pass_graphics: bool,
     /// Whether this target bridges its clipboard ([`TargetConfig::clipboard`]), which
     /// is what opened the channel — so a browser that sends the clipboard pair anyway
     /// is answered as a session with no clipboard rather than as one with an empty
@@ -875,7 +883,7 @@ async fn active_loop(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    let Flags { resize, clipboard: clipboard_enabled, default_size } = flags;
+    let Flags { resize, pass_graphics, clipboard: clipboard_enabled, default_size } = flags;
     let input = session.input();
     let framebuffer = session.framebuffer();
 
@@ -1001,7 +1009,17 @@ async fn active_loop(
                     }
                     // Known before the first marked paint arrives, so that paint is
                     // never the leading-edge flush of a frame still being drawn.
-                    Event::FramesMarked => frame_marks = true,
+                    Event::FramesMarked => {
+                        frame_marks = true;
+                        // On a target that passes the pipeline this is where one
+                        // begins, and the browser composes it from here.
+                        if pass_graphics {
+                            sink.graphics_start().await?;
+                        }
+                    }
+                    // The pipeline's commands, for the browser to compose. Waiting
+                    // here for the browser's queue is waiting to read the host.
+                    Event::Graphics(commands) => sink.pass_graphics(commands).await?,
                     Event::Cursor(cursor) => pointer.set(cursor),
                     Event::ResizeReady { max_area } => {
                         debug!("rdp: the remote offers dynamic resize, up to {max_area} pixels");
@@ -1130,6 +1148,15 @@ async fn active_loop(
                     // Not part of the repaint: the pixels carry no pointer, and
                     // the server only names a shape when it changes.
                     sink.msg(pointer.attached()).await?;
+                    // A passed pipeline has no repaint this end can make: the
+                    // framebuffer holds nothing of it. The host is asked instead,
+                    // which repairs a browser that still holds the pipeline's state
+                    // and no other — one without it is given a session that starts
+                    // ([`crate::session::SessionManager::attach`]).
+                    if sink.passing() {
+                        input.refresh();
+                        continue;
+                    }
                     send_damage(
                         framebuffer,
                         Rect {
@@ -1960,6 +1987,7 @@ mod tests {
             adaptive: false,
             chroma: crate::config::Chroma::Subsampled,
             apple_media: false,
+            rdp_graphics: false,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("test", frame_tx, plan, feedback, crate::encode::TileSupport::None);

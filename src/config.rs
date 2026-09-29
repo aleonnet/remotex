@@ -304,6 +304,13 @@ pub struct RenderPlan {
     /// set, and a browser that said it decodes both. None of the fields above reach
     /// such a picture.
     pub apple_media: bool,
+    /// An RDP host's graphics pipeline passes as it came, for the browser to
+    /// compose, rather than composed here and encoded as VP9:
+    /// [`TargetConfig::egfx_passthrough`] set. Every browser composes it, so no
+    /// answer of a browser's is read. The fields above reach only the picture of a
+    /// host that answers the offer of the pipeline with bitmap updates, which is
+    /// encoded here as always.
+    pub rdp_graphics: bool,
 }
 
 /// What the attached browser said its decoders take, from its session socket
@@ -348,6 +355,9 @@ impl RenderPlan {
     fn card(&self, chroma_slot: Option<&str>) -> String {
         if self.apple_media {
             return "the Mac's HEVC and AAC-ELD, passed through".to_owned();
+        }
+        if self.rdp_graphics {
+            return "the host's graphics pipeline, passed through".to_owned();
         }
         // Always named, because with `auto` the default there is no chroma a card
         // may leave unsaid: an unnamed one would read as 4:2:0 selected on a
@@ -511,6 +521,20 @@ pub struct TargetConfig {
     /// ([`TargetConfig::egfx`]).
     #[serde(default)]
     pub egfx: Option<bool>,
+    /// Pass an RDP host's graphics pipeline to the browser, which composes it, as
+    /// the host sent it: its commands out of their bulk compression, rather than
+    /// the desktop composed here and encoded as VP9. For a LAN: what the host
+    /// draws with is sent as it is, with no quality walk behind it, so
+    /// [`Self::video_quality`], [`Self::render_chroma`] and the adaptive keys
+    /// govern only the VP9 of a host that draws with bitmap updates instead.
+    /// Refused on anything but an `rdp` target with its pipeline on.
+    ///
+    /// The pipeline is drawn against what the client already holds — its surfaces,
+    /// its cache slots, each codec's own caches — so a browser that comes back has
+    /// nothing a running session can be resumed onto: a reattach reconnects the
+    /// host instead. See [`RenderPlan::rdp_graphics`].
+    #[serde(default)]
+    pub egfx_passthrough: bool,
     /// Clipboard bridge: let the browser read and write this target's
     /// clipboard, through the floating menu's Clipboard panel. Off by default —
     /// a remote desktop's clipboard often holds whatever was last copied there,
@@ -736,7 +760,8 @@ impl TargetConfig {
             ChromaChoice::Auto => decoders.chroma,
         };
         let apple_media = self.media_passthrough && decoders.apple_media;
-        RenderPlan { quality, adaptive, chroma, apple_media }
+        let rdp_graphics = self.egfx_passthrough;
+        RenderPlan { quality, adaptive, chroma, apple_media, rdp_graphics }
     }
 
     /// The render dial for a reader with no browser in front of it — the TUI's
@@ -760,6 +785,9 @@ impl TargetConfig {
             ChromaChoice::Auto => Some("chroma auto"),
             ChromaChoice::Subsampled | ChromaChoice::Full => None,
         };
+        if self.egfx_passthrough {
+            return self.render_plan(Decoders { chroma: Chroma::Subsampled, apple_media: false }).card(slot);
+        }
         let card = self.render_plan(Decoders { chroma: Chroma::Subsampled, apple_media: false }).card(slot);
         if self.media_passthrough {
             format!("{card} · the Mac's stream passed where the browser takes it")
@@ -1416,6 +1444,14 @@ impl ConfigFile {
                  microphone extension on a generic vnc target. Remove the key.",
                 target.name,
                 target.subtype.map_or("apple", Subtype::name)
+            );
+            // The pipeline is RDP's, and passing it needs it on.
+            anyhow::ensure!(
+                !target.egfx_passthrough || (target.protocol == Protocol::Rdp && target.egfx()),
+                "target {:?} sets egfx_passthrough, which passes an RDP host's graphics pipeline \
+                 to the browser, on a target without one: only an rdp target has it, and \
+                 egfx = false turns it off. Remove the key.",
+                target.name
             );
             // The one stream there is to pass is High Performance's.
             anyhow::ensure!(
@@ -2614,6 +2650,7 @@ mod tests {
                     adaptive: true,
                     chroma: decoder,
                     apple_media: false,
+                    rdp_graphics: false,
                 }
             );
         }
@@ -2629,6 +2666,7 @@ mod tests {
                 adaptive: true,
                 chroma: Chroma::Subsampled,
                 apple_media: false,
+                rdp_graphics: false,
             }
         );
     }
@@ -2656,6 +2694,7 @@ mod tests {
             adaptive: true,
             chroma,
             apple_media: false,
+            rdp_graphics: false,
         };
         assert_eq!(video("", Chroma::Full), stream(Chroma::Full));
         assert_eq!(video("", Chroma::Subsampled), stream(Chroma::Subsampled));
@@ -3342,6 +3381,44 @@ mod tests {
         assert!(!config.targets[0].egfx(), "the bitmap path is one key away");
     }
 
+    /// `egfx_passthrough` is the pipeline's key: every browser composes it, so the
+    /// key alone makes the plan, and a target with no pipeline to pass refuses it.
+    #[test]
+    fn egfx_passthrough_passes_the_pipeline_of_an_rdp_target_that_has_one() {
+        let rdp = |extra: &str| {
+            ConfigFile::parse(&format!(
+                r#"
+                [server]
+                {}
+
+                [[targets]]
+                name = "win"
+                protocol = "rdp"
+                username = "u"
+                password = "p"
+                host = "10.0.0.5"
+                {extra}
+                "#,
+                site_passwd_line()
+            ))
+            .and_then(ConfigFile::resolve)
+        };
+        let passed = rdp("egfx_passthrough = true").unwrap().targets.remove(0);
+        for chroma in [Chroma::Subsampled, Chroma::Full] {
+            let plan = passed.render_plan(Decoders { chroma, apple_media: false });
+            assert!(plan.rdp_graphics, "no answer of a browser's decides it");
+            assert_eq!(plan.describe(), "the host's graphics pipeline, passed through");
+        }
+        assert_eq!(passed.render_summary(), "the host's graphics pipeline, passed through");
+        let plain = rdp("").unwrap().targets.remove(0);
+        assert!(!plain.render_plan(Decoders { chroma: Chroma::Full, apple_media: false }).rdp_graphics);
+
+        let err = rdp("egfx = false\negfx_passthrough = true").unwrap_err();
+        assert!(format!("{err:#}").contains("egfx = false turns it off"), "{err:#}");
+        let err = ConfigFile::parse(&vnc_toml("egfx_passthrough = true")).and_then(ConfigFile::resolve).unwrap_err();
+        assert!(format!("{err:#}").contains("only an rdp target has it"), "{err:#}");
+    }
+
     /// An RDP resize is a graphics reset, so the bitmap path has none to offer and
     /// the pair is refused by name rather than left inert.
     #[test]
@@ -3497,7 +3574,7 @@ mod tests {
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false });
         assert_eq!(plan.describe(), "video q80 4:2:0 · adaptive");
     }
 
@@ -3509,7 +3586,7 @@ mod tests {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false });
         assert_eq!(plan.describe(), "video q80 4:2:0");
     }
 

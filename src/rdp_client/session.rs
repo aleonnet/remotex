@@ -62,6 +62,17 @@ pub struct Connect {
     /// updates on the share at the opening size, which is the path every other
     /// server takes anyway.
     pub egfx: bool,
+    /// Whether the graphics pipeline's commands are handed to the caller instead of
+    /// composed here ([`Event::Graphics`]), for a caller that has them composed
+    /// somewhere else.
+    ///
+    /// The channel is still this client's: it unwraps the bulk compression, answers
+    /// the capability exchange and acknowledges every frame. What it stops doing is
+    /// decoding — no [`Event::Paint`] follows a command, and the framebuffer holds
+    /// nothing of what the pipeline draws. Means nothing without [`Connect::egfx`],
+    /// and nothing for a host that answers the offer with bitmap updates, which are
+    /// decoded into the framebuffer as always.
+    pub pass_graphics: bool,
     /// Whether to open MS-RDPECLIP, which is what makes the clipboard side of
     /// [`Input`] do anything.
     ///
@@ -132,6 +143,17 @@ pub enum Event {
     /// marks no frames, so a consumer keeps whatever pacing it had and treats this as
     /// the upgrade it is.
     Frame,
+    /// The graphics pipeline's commands, for a session configured with
+    /// [`Connect::pass_graphics`]: whole PDUs as the host sent them, out of their
+    /// bulk compression, in order. A run ends at a frame's end or where the host's
+    /// own PDU did, and the [`Event::Frame`] that follows one has been acknowledged
+    /// to the host by then.
+    ///
+    /// They are meaningful only from the pipeline's first command on: a surface, a
+    /// cache slot and each codec's own state are built by the commands before.
+    /// [`Event::FramesMarked`] is where a pipeline begins, and it is sent again when
+    /// a host closes the channel and opens another.
+    Graphics(Vec<u8>),
     /// The server confirmed the graphics pipeline, so every [`Event::Paint`] from
     /// here on arrives inside a frame that ends in an [`Event::Frame`]. Sent before
     /// the first such paint, so a consumer pacing frames itself stops guessing
@@ -806,7 +828,10 @@ impl<'a> Active<'a> {
                 audio: wants_audio,
                 ..Dynamics::default()
             },
-            graphics: config.egfx.then(Graphics::new),
+            graphics: config.egfx.then(|| match config.pass_graphics {
+                true => Graphics::passing(),
+                false => Graphics::new(),
+            }),
             resize_ready: false,
             pending_resize: None,
             clip_ready: false,
@@ -1028,7 +1053,7 @@ impl<'a> Active<'a> {
                 dvc::Message::Close { channel } if dynamics.graphics == Some(channel) => {
                     debug!("rdp: the host closed the graphics channel");
                     dynamics.graphics = None;
-                    *graphics = Some(Graphics::new());
+                    *graphics = graphics.as_ref().map(Graphics::fresh);
                     (vec![dvc::close(channel)], Vec::new())
                 }
                 // The sound, on the channel a current host prefers for it. Every
@@ -1131,6 +1156,7 @@ impl<'a> Active<'a> {
                     self.announce_desktop(width, height).await;
                 }
                 gfx::Update::Paint(rect) => self.paint(rect),
+                gfx::Update::Passed(commands) => self.send(Event::Graphics(commands)).await,
                 gfx::Update::Frame { id, decoded } => {
                     self.send(Event::Frame).await;
                     self.acknowledge_frame(id, decoded).await?;

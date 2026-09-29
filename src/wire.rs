@@ -2,7 +2,7 @@
 //! messages flush the pending batch to preserve ordering against the access units
 //! and tiles around them, and batches are bounded.
 
-use crate::protocol::{self, ServerMsg, Tile, VideoUnit, WireFrame, batch};
+use crate::protocol::{self, GraphicsUnit, ServerMsg, Tile, VideoUnit, WireFrame, batch};
 
 /// Record bytes per batch, below client WebSocket limits and large enough to
 /// amortize per-frame overhead.
@@ -79,6 +79,7 @@ impl Wire {
                             self.push(Record::Tile(tile), &mut frames)?;
                         }
                     }
+                    ServerMsg::Graphics(unit) => self.push(Record::Graphics(unit), &mut frames)?,
                     // Audio has no pixel-order dependency, so do not delay it
                     // behind the current batch.
                     ServerMsg::Audio(packets) => {
@@ -136,6 +137,11 @@ impl Wire {
                     tile.write_record(&mut frame);
                     tile.held
                 }
+                Record::Graphics(unit) => {
+                    self.totals.graphics(unit.record_len());
+                    unit.write_record(&mut frame);
+                    unit.held
+                }
             });
         }
         self.pending_bytes = 0;
@@ -149,6 +155,7 @@ impl Wire {
 enum Record {
     Video(VideoUnit),
     Tile(Tile),
+    Graphics(GraphicsUnit),
 }
 
 impl Record {
@@ -156,6 +163,7 @@ impl Record {
         match self {
             Record::Video(unit) => unit.record_len(),
             Record::Tile(tile) => tile.record_len(),
+            Record::Graphics(unit) => unit.record_len(),
         }
     }
 }
@@ -174,6 +182,9 @@ pub struct Totals {
     /// Tiles and their record bytes.
     pub tiles: u64,
     pub tile_bytes: u64,
+    /// Runs of a passed graphics pipeline and their record bytes.
+    pub graphics: u64,
+    pub graphics_bytes: u64,
     /// Audio packets and their binary-frame bytes. On a separate socket, so on any
     /// one `Wire` these and the video counters are mutually exclusive.
     pub audio_frames: u64,
@@ -209,6 +220,11 @@ impl Totals {
         self.tile_bytes += len as u64;
     }
 
+    fn graphics(&mut self, len: usize) {
+        self.graphics += 1;
+        self.graphics_bytes += len as u64;
+    }
+
     fn text(&mut self, len: usize) {
         self.text_frames += 1;
         self.text_bytes += len as u64;
@@ -219,8 +235,9 @@ impl std::fmt::Display for Totals {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} binary frames / {} bytes carrying {} video records / {} bytes \
-             and {} tile records / {} bytes, {} text frames / {} bytes, largest binary {} bytes, \
+            "{} binary frames / {} bytes carrying {} video records / {} bytes, \
+             {} tile records / {} bytes and {} graphics records / {} bytes, \
+             {} text frames / {} bytes, largest binary {} bytes, \
              {} audio frames / {} bytes carrying {} opus packets",
             self.binary_frames,
             self.binary_bytes,
@@ -228,6 +245,8 @@ impl std::fmt::Display for Totals {
             self.video_bytes,
             self.tiles,
             self.tile_bytes,
+            self.graphics,
+            self.graphics_bytes,
             self.text_frames,
             self.text_bytes,
             self.largest_binary,
@@ -488,6 +507,40 @@ mod tests {
         assert_eq!(seen, vec![(TILE, 1), (TILE, 2), (TILE, 3)]);
         assert_eq!(wire.totals.tiles, 3);
         assert_eq!(wire.totals.video, 0);
+    }
+
+    /// A run of a passed graphics pipeline is a record in its place: whole, in order
+    /// with the units around it, and behind the message that starts its pipeline.
+    #[test]
+    fn graphics_runs_are_records_in_their_place() {
+        let run = |seed: u8, len: usize| {
+            ServerMsg::Graphics(crate::protocol::GraphicsUnit { data: vec![seed; len], held: Held::default() })
+        };
+        let mut wire = Wire::default();
+        let frames = wire.encode(vec![ServerMsg::GraphicsStart, run(1, 5), run(2, 700), resize(), run(3, 1)]).unwrap();
+        let WireFrame::Text(text) = &frames[0] else {
+            panic!("the start goes out first, as text: {:?}", frames[0]);
+        };
+        assert_eq!(text, r#"{"type":"graphicsStart"}"#);
+
+        // Parsed by hand: op, then a length, then the commands.
+        let mut seen = Vec::new();
+        for frame in binary(&frames) {
+            let count = usize::from(u16::from_le_bytes([frame[2], frame[3]]));
+            let mut at = batch::HEADER_LEN;
+            for _ in 0..count {
+                assert_eq!(frame[at], 0x04, "a GRAPHICS record");
+                let len = u32::from_le_bytes([frame[at + 1], frame[at + 2], frame[at + 3], frame[at + 4]]) as usize;
+                let commands = &frame[at + 5..at + 5 + len];
+                assert!(commands.iter().all(|b| *b == commands[0]), "the run is whole");
+                seen.push((commands[0], len));
+                at += 5 + len;
+            }
+            assert_eq!(at, frame.len(), "records must exactly fill the frame");
+        }
+        assert_eq!(seen, vec![(1, 5), (2, 700), (3, 1)]);
+        assert_eq!(binary(&frames).len(), 2, "the resize between them flushed the first batch");
+        assert_eq!((wire.totals.graphics, wire.totals.graphics_bytes), (3, 5 + 700 + 1 + 3 * 5));
     }
 
     /// A unit's share of the queue budget rides the batch it went out in.

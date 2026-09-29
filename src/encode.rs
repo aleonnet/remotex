@@ -29,7 +29,7 @@ use desktop_vp9::walk::{LAG_CLEAR, QualityWalk};
 
 use crate::config::{Chroma, RenderPlan};
 use crate::feedback::LinkFeedback;
-use crate::protocol::{Held, ServerMsg, Tile, VideoUnit};
+use crate::protocol::{GraphicsUnit, Held, ServerMsg, Tile, VideoUnit};
 use crate::stream::{DesktopStream, Produced, Round};
 use crate::shadow::Rect;
 use crate::video;
@@ -223,6 +223,10 @@ struct Shared {
     /// Tiles sent while [`Self::tiling`], and their PNG bytes.
     tiles: AtomicU64,
     tile_bytes: AtomicU64,
+    /// Runs of a graphics pipeline passed ([`VideoSink::pass_graphics`]), and their
+    /// bytes.
+    graphics: AtomicU64,
+    graphics_bytes: AtomicU64,
     /// Of [`Self::units`], those a decoder could start from, and what they cost. Read
     /// together: see [`Totals`].
     keyframes: AtomicU64,
@@ -276,6 +280,8 @@ impl Shared {
             encoded_bytes: AtomicU64::new(0),
             tiles: AtomicU64::new(0),
             tile_bytes: AtomicU64::new(0),
+            graphics: AtomicU64::new(0),
+            graphics_bytes: AtomicU64::new(0),
             keyframes: AtomicU64::new(0),
             keyframe_bytes: AtomicU64::new(0),
             skipped: AtomicU64::new(0),
@@ -666,6 +672,37 @@ impl VideoSink {
         Ok(true)
     }
 
+    /// An RDP host's graphics pipeline starts here, from nothing, and is the picture
+    /// from now on ([`Self::pass_graphics`]): said ahead of its first command, and
+    /// again for a pipeline the host closed and opened anew.
+    ///
+    /// What the mirror holds of a picture encoded here is left where it is. Such a
+    /// picture is a host's bitmap updates, which a host that has confirmed its
+    /// pipeline sends no more of.
+    pub async fn graphics_start(&self) -> anyhow::Result<()> {
+        self.shared.passing.store(true, Ordering::Relaxed);
+        self.push(Pending::Msg(ServerMsg::GraphicsStart)).await
+    }
+
+    /// Queue a run of an RDP host's graphics pipeline as the next record, untouched:
+    /// whole commands out of their bulk compression, for the browser to compose
+    /// ([`crate::rdp_client::Event::Graphics`]).
+    ///
+    /// As [`Self::pass`] in what the queue does — the run takes its size out of
+    /// [`QUEUE_BUDGET`] and goes out in order with the messages around it, so a
+    /// browser that is behind holds the engine, and through it the host — and unlike
+    /// it in having no restart: nothing in a pipeline is a keyframe, and a run is
+    /// never dropped for one. A browser that needs the picture from the start is
+    /// given a session that starts.
+    pub async fn pass_graphics(&self, commands: Vec<u8>) -> anyhow::Result<()> {
+        self.shared.passing.store(true, Ordering::Relaxed);
+        let bytes = commands.len();
+        let held = self.hold(bytes).await;
+        self.shared.graphics.fetch_add(1, Ordering::Relaxed);
+        self.shared.graphics_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
+        self.push(Pending::Msg(ServerMsg::Graphics(GraphicsUnit { data: commands, held }))).await
+    }
+
     /// Whether the picture is the remote's stream passed through ([`Self::pass`]).
     pub fn passing(&self) -> bool {
         self.shared.passing.load(Ordering::Relaxed)
@@ -797,7 +834,7 @@ impl VideoSink {
     /// zeroes says nothing.
     fn report(&self) {
         let totals = Totals::of(&self.shared);
-        if totals.units > 0 || totals.tiles > 0 {
+        if totals.units > 0 || totals.tiles > 0 || totals.graphics > 0 {
             info!("{}: encode totals: {totals}", self.engine);
         }
     }
@@ -1063,6 +1100,8 @@ struct Totals {
     encoded_bytes: u64,
     tiles: u64,
     tile_bytes: u64,
+    graphics: u64,
+    graphics_bytes: u64,
     keyframes: u64,
     keyframe_bytes: u64,
     skipped: u64,
@@ -1082,6 +1121,8 @@ impl Totals {
             encoded_bytes: shared.encoded_bytes.load(Ordering::Relaxed),
             tiles: shared.tiles.load(Ordering::Relaxed),
             tile_bytes: shared.tile_bytes.load(Ordering::Relaxed),
+            graphics: shared.graphics.load(Ordering::Relaxed),
+            graphics_bytes: shared.graphics_bytes.load(Ordering::Relaxed),
             keyframes: shared.keyframes.load(Ordering::Relaxed),
             keyframe_bytes: shared.keyframe_bytes.load(Ordering::Relaxed),
             skipped: shared.skipped.load(Ordering::Relaxed),
@@ -1099,6 +1140,7 @@ impl fmt::Display for Totals {
         write!(
             f,
             "{} access unit(s) / {} bytes, {} tile(s) / {} bytes, \
+             {} graphics run(s) / {} bytes passed, \
              {} keyframe(s) / {} bytes, {} skipped, \
              {} round(s) coarsened (lowest quality {}), \
              {}µs encoding in {}µs of waiting, engine stalled {}µs",
@@ -1106,6 +1148,8 @@ impl fmt::Display for Totals {
             self.encoded_bytes,
             self.tiles,
             self.tile_bytes,
+            self.graphics,
+            self.graphics_bytes,
             self.keyframes,
             self.keyframe_bytes,
             self.skipped,
@@ -1150,7 +1194,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, chroma: Chroma::Subsampled, apple_media: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1178,6 +1222,47 @@ mod tests {
             "a resize of a source that can tile did not say which carriage follows"
         );
         (sink, frame_rx)
+    }
+
+    /// A passed graphics pipeline is announced where it starts, goes out run for run in
+    /// order with the messages around it, and stops the stream encoded here: nothing of
+    /// the mirror is encoded while it is the picture.
+    #[tokio::test]
+    async fn a_graphics_pipeline_is_passed_in_order_and_nothing_is_encoded_beside_it() {
+        let (sink, mut rx) = video_sink(64, 32).await;
+        sink.graphics_start().await.unwrap();
+        sink.pass_graphics(vec![1; 40]).await.unwrap();
+        sink.msg(ServerMsg::Resize { w: 32, h: 32, scale: UNSCALED }).await.unwrap();
+        sink.pass_graphics(vec![2; 9]).await.unwrap();
+        assert!(sink.passing());
+        assert!(sink.due_at().await.is_none(), "there is nothing to come back and encode");
+        sink.frame().await.unwrap();
+        sink.flush().await;
+
+        let out = drain(&mut rx, 4).await;
+        assert!(matches!(out[0], ServerMsg::GraphicsStart));
+        assert!(matches!(&out[1], ServerMsg::Graphics(run) if run.data == vec![1; 40]));
+        assert!(matches!(out[2], ServerMsg::Resize { w: 32, h: 32, .. }));
+        assert!(matches!(&out[3], ServerMsg::Graphics(run) if run.data == vec![2; 9]));
+        assert!(rx.try_recv().is_err(), "and no access unit beside them");
+    }
+
+    /// A passed run takes its size out of the queue's budget, so a browser that is
+    /// behind holds the engine — and through it the host — rather than the queue
+    /// growing.
+    #[tokio::test]
+    async fn a_passed_graphics_run_holds_its_share_of_the_budget() {
+        let (sink, mut rx) = video_sink(64, 32).await;
+        sink.pass_graphics(vec![0; QUEUE_BUDGET as usize]).await.unwrap();
+        sink.flush().await;
+        let held = drain(&mut rx, 1).await;
+        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_graphics(vec![0; 16])).await;
+        assert!(waiting.is_err(), "the budget is spent, so the next run waits");
+        drop(held);
+        tokio::time::timeout(Duration::from_secs(1), sink.pass_graphics(vec![0; 16]))
+            .await
+            .expect("the share came back with the run")
+            .unwrap();
     }
 
     /// The opening byte of a profile 0 VP9 frame — the 4:2:0 these sinks' plan asks
@@ -1764,7 +1849,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), TileSupport::None);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -1890,7 +1975,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false };
         let shared = Shared::new(plan, feedback(), TileSupport::None);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

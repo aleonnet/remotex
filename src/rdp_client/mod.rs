@@ -85,6 +85,7 @@
 //! - **One monitor.** [`Input::resize`] sends a layout of exactly one.
 
 mod camera;
+mod compositor;
 mod connect;
 mod error;
 mod framebuffer;
@@ -96,6 +97,7 @@ pub mod proto;
 mod session;
 
 pub use camera::{Camera, CameraFeed, CameraSink, Fed};
+pub use compositor::{Composed, Compositor};
 pub use microphone::{MicrophoneFeed, MicrophoneSink};
 pub use error::Error;
 pub use framebuffer::{Frame, Framebuffer, Rect};

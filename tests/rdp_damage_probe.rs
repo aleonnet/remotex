@@ -72,6 +72,7 @@ fn connect() -> (Session, Receiver<Event>) {
         scale_percent: 0,
         resize: target.resize,
         egfx: target.egfx(),
+        pass_graphics: false,
         clipboard: target.clipboard,
         audio: target.audio.then(|| Box::new(Silence) as Box<dyn AudioSink>),
         // A camera draws nothing, and one the browser never plugs costs the host a
