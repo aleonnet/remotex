@@ -358,8 +358,10 @@ Desktop Duplication, codes it with the same `desktop-vp9` crate at the plan this
 gateway states, and writes each frame to `remotex.video`, which the gateway passes to
 the browser as it came. The encode this gateway does for an RDP target is then the
 host's, and nothing between the host and the browser decodes or encodes a picture.
-The channel's messages, what was measured against a Windows host, and what is left
-open are in
+**Experimental**, and for a setup where the host is the better place to encode: a
+gateway on a slow machine, or a link from the host to the gateway slower than the one
+from the gateway to the browser. The host pays for the encode in CPU. The channel's
+messages, what was measured against a Windows host, and what is left open are in
 [A Windows host's video over its own RDP connection](rdp-in-session-video.md). The agent
 is installed on the host by its own MSI as the `RemotexAgent` service, which runs as
 LocalSystem, captures nothing itself, and starts `remotex-agent session` as the user of

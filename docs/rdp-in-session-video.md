@@ -6,6 +6,15 @@ the host encodes its desktop as VP9 and the gateway passes each frame to the bro
 as it came, so the encode this gateway does for an RDP target moves to the host and
 nothing in between decodes or encodes a picture.
 
+**Experimental.** It has been measured against one host, and the stall it relies on
+([below](#withholding-frame-acknowledgements-stalls-the-hosts-graphics)) is measured
+Windows behavior, not a specification. It is for a setup where the host is the better
+place to encode: a gateway on a slow machine, or a link from the host to the gateway
+slower than the one from the gateway to the browser, which then carries the VP9 the
+browser is sent rather than the graphics pipeline's own codecs. The host pays for the
+encode, and one with no CPU to spare is better left on the pipeline
+([The host's CPU](#the-hosts-cpu)).
+
 Windows has no extension point for a codec in its RDP graphics pipeline
 (`Microsoft::Windows::RDS::Graphics`): its encoders are its own, and the only video
 among them, H.264, is the lossy source the RDP client refuses on purpose
