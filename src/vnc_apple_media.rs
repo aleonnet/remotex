@@ -14,10 +14,10 @@
 //!
 //! A target takes this path with `subtype = "ard-high-performance"`. Everything but
 //! the two decoders — offers, replies, SRTP, depacketizing, the receiver, and
-//! passing the stream on — is compiled in every build; the `apple-hp-media`
-//! feature adds the decoders. A build without it takes the subtype only with
-//! `media_passthrough`, refused at config parse otherwise, and ends the session
-//! of a browser that cannot decode the stream before it dials the Mac.
+//! passing the stream on — is the gateway's own; the decoders are FFmpeg's
+//! libavcodec and fdk-aac, loaded from the system (`crate::libav`,
+//! `crate::aac_eld`). A gateway whose host lacks either ends the session of a
+//! browser that cannot decode the stream before it dials the Mac.
 //!
 //! The offer is two AVConference negotiation blobs, rebuilt field by field from the
 //! ones Apple's client produced ([`audio_offer_blob`], [`video_offer_blob`]). The
@@ -1291,35 +1291,46 @@ pub struct Picture {
 /// since a larger display has more rows to share out. Frame threads would hold
 /// each picture back by one per thread, so there are none. These threads take no
 /// part in a picture VideoToolbox decodes.
-#[cfg(feature = "apple-hp-media")]
-const DECODE_THREADS: std::os::raw::c_int = 4;
+const DECODE_THREADS: &std::ffi::CStr = c"4";
 
 /// FFmpeg's HEVC decoder, one context for the session: HEVC access units in,
-/// pictures out.
+/// pictures out. libavcodec is the system's or, with `apple-hp-media-static`, the
+/// one linked in (`crate::libav`).
 ///
 /// On macOS the context is handed a VideoToolbox device, and FFmpeg's VideoToolbox
 /// hwaccel gives each picture to VideoToolbox, which for HEVC is asked to enable
-/// its hardware decoder, not required to use it. A Mac with no device to open
-/// decodes on the CPU, and so does a stream the hwaccel fails to start on: FFmpeg
-/// asks for a format again without VideoToolbox's, and `prefer_videotoolbox`
-/// takes a software one. A picture VideoToolbox fails once started is an error,
-/// not decoded on the CPU instead. Either way the pictures are the same: HEVC
-/// decoding is exact.
-#[cfg(feature = "apple-hp-media")]
+/// its hardware decoder, not required to use it. A context with a device is
+/// offered VideoToolbox's pictures first by FFmpeg's own format choice, which
+/// asks again without them when the hwaccel fails to start on a stream, so a
+/// stream VideoToolbox will not take, or a Mac with no device to open, decodes on
+/// the CPU. A picture VideoToolbox fails once started is an error, not decoded on
+/// the CPU instead. Either way the pictures are the same: HEVC decoding is exact.
 struct Hevc {
-    ctx: *mut avcodec_hevc_sys::AVCodecContext,
-    packet: *mut avcodec_hevc_sys::AVPacket,
-    frame: *mut avcodec_hevc_sys::AVFrame,
+    api: &'static crate::libav::Api,
+    ctx: *mut std::ffi::c_void,
+    packet: *mut crate::libav::Packet,
+    frame: *mut crate::libav::Frame,
     /// A VideoToolbox picture, copied out of its pixel buffer.
-    copy: *mut avcodec_hevc_sys::AVFrame,
+    copy: *mut crate::libav::Frame,
+    /// The pixel formats read, by this libavutil's numbers.
+    formats: PixelFormats,
     /// The access unit as an Annex B byte stream, kept between units.
     stream: Vec<u8>,
     /// What decoded the last picture, logged whenever it changes.
     decoded_by: Option<DecodedBy>,
 }
 
+/// The pixel formats a picture comes in, looked up by name.
+#[derive(Clone, Copy)]
+struct PixelFormats {
+    yuv444p: std::ffi::c_int,
+    yuv420p: std::ffi::c_int,
+    nv24: std::ffi::c_int,
+    nv12: std::ffi::c_int,
+    videotoolbox: std::ffi::c_int,
+}
+
 /// What decoded a picture.
-#[cfg(feature = "apple-hp-media")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DecodedBy {
     VideoToolbox,
@@ -1329,30 +1340,35 @@ enum DecodedBy {
 // SAFETY: the context, packet and frame are created, used and freed on one thread
 // at a time — the decoder thread that owns this value. libavcodec's slice threads
 // work only inside a call to it.
-#[cfg(feature = "apple-hp-media")]
 unsafe impl Send for Hevc {}
 
-#[cfg(feature = "apple-hp-media")]
 impl Hevc {
     /// `hardware` hands the pictures to VideoToolbox where this is a Mac that has
     /// it; without it, or anywhere else, they decode on the CPU.
     fn new(hardware: bool) -> anyhow::Result<Self> {
-        use avcodec_hevc_sys::*;
-        use std::os::raw::c_int;
-
+        let api = crate::libav::api()?;
         // SAFETY: every allocation is checked before use, and `Drop` frees each of
-        // them, taking null for any that failed.
+        // them, taking null for any that failed. Names are NUL-terminated.
         unsafe {
             // FFmpeg would print its complaints about a damaged unit to stderr,
             // outside the gateway's log. The failed call is reported instead.
-            av_log_set_level(AV_LOG_QUIET);
-            let codec = avcodec_find_decoder(AVCodecID_AV_CODEC_ID_HEVC);
+            (api.av_log_set_level)(crate::libav::LOG_QUIET);
+            let codec = (api.avcodec_find_decoder_by_name)(c"hevc".as_ptr());
             anyhow::ensure!(!codec.is_null(), "libavcodec has no HEVC decoder");
+            let format = |name: &std::ffi::CStr| (api.av_get_pix_fmt)(name.as_ptr());
             let decoder = Self {
-                ctx: avcodec_alloc_context3(codec),
-                packet: av_packet_alloc(),
-                frame: av_frame_alloc(),
-                copy: av_frame_alloc(),
+                api,
+                ctx: (api.avcodec_alloc_context3)(codec),
+                packet: (api.av_packet_alloc)(),
+                frame: (api.av_frame_alloc)(),
+                copy: (api.av_frame_alloc)(),
+                formats: PixelFormats {
+                    yuv444p: format(c"yuv444p"),
+                    yuv420p: format(c"yuv420p"),
+                    nv24: format(c"nv24"),
+                    nv12: format(c"nv12"),
+                    videotoolbox: format(c"videotoolbox_vld"),
+                },
                 stream: Vec::new(),
                 decoded_by: None,
             };
@@ -1364,26 +1380,33 @@ impl Hevc {
                 "libavcodec could not allocate a decoder"
             );
             if hardware {
-                attach_videotoolbox(decoder.ctx);
+                attach_videotoolbox(api, decoder.ctx);
             }
             // The Mac codes with wavefront parallel processing, so its rows decode
-            // on slice threads. See DECODE_THREADS.
-            (*decoder.ctx).thread_count = DECODE_THREADS;
-            (*decoder.ctx).thread_type = FF_THREAD_SLICE as c_int;
-            // A unit that does not decode fails its call rather than being skipped
-            // in silence, so the receive task asks for a keyframe.
-            (*decoder.ctx).err_recognition |= AV_EF_EXPLODE as c_int;
-            let err = avcodec_open2(decoder.ctx, codec, std::ptr::null_mut());
-            anyhow::ensure!(err >= 0, "libavcodec could not open the HEVC decoder: {}", text(err));
+            // on slice threads. See DECODE_THREADS. A unit that does not decode
+            // fails its call rather than being skipped in silence, so the receive
+            // task asks for a keyframe.
+            for (name, value) in [(c"threads", DECODE_THREADS), (c"thread_type", c"slice"), (c"err_detect", c"+explode")] {
+                let err = (api.av_opt_set)(decoder.ctx, name.as_ptr(), value.as_ptr(), 0);
+                anyhow::ensure!(
+                    err >= 0,
+                    "libavcodec refused {}={}: {}",
+                    name.to_string_lossy(),
+                    value.to_string_lossy(),
+                    text(api, err)
+                );
+            }
+            let err = (api.avcodec_open2)(decoder.ctx, codec, std::ptr::null_mut());
+            anyhow::ensure!(err >= 0, "libavcodec could not open the HEVC decoder: {}", text(api, err));
             Ok(decoder)
         }
     }
 
     /// Decode one access unit, returning the picture it completed, if any.
     fn decode(&mut self, unit: &AccessUnit) -> anyhow::Result<Option<Picture>> {
-        use avcodec_hevc_sys::*;
-        use std::os::raw::c_int;
+        use std::ffi::c_int;
 
+        let api = self.api;
         self.stream.clear();
         for nal in unit {
             self.stream.extend_from_slice(&[0, 0, 0, 1]);
@@ -1395,39 +1418,42 @@ impl Hevc {
         unsafe {
             (*self.packet).data = self.stream.as_mut_ptr();
             (*self.packet).size = size;
-            let err = avcodec_send_packet(self.ctx, self.packet);
+            let err = (api.avcodec_send_packet)(self.ctx, self.packet);
             (*self.packet).data = std::ptr::null_mut();
             (*self.packet).size = 0;
-            anyhow::ensure!(err >= 0, "libavcodec refused an access unit: {}", text(err));
+            anyhow::ensure!(err >= 0, "libavcodec refused an access unit: {}", text(api, err));
             let mut picture = None;
             loop {
-                let err = avcodec_receive_frame(self.ctx, self.frame);
-                if err == AVERROR_EAGAIN {
+                let err = (api.avcodec_receive_frame)(self.ctx, self.frame);
+                if err == crate::libav::EAGAIN {
                     break;
                 }
-                anyhow::ensure!(err >= 0, "libavcodec: {}", text(err));
+                anyhow::ensure!(err >= 0, "libavcodec: {}", text(api, err));
                 // A later picture of the same unit replaces an earlier one: only
-                // the newest is shown.
-                let range = (*self.frame).color_range;
-                let decoded_by = if (*self.frame).format == AVPixelFormat_AV_PIX_FMT_VIDEOTOOLBOX {
+                // the newest is shown. The decoder sets the context's range from
+                // the stream's parameters, which a copy out of VideoToolbox does
+                // not carry.
+                let mut range = 0;
+                (api.av_opt_get_int)(self.ctx, c"color_range".as_ptr(), 0, &mut range);
+                let decoded_by = if (*self.frame).format == self.formats.videotoolbox {
                     DecodedBy::VideoToolbox
                 } else {
                     DecodedBy::Software
                 };
                 let rgb = match decoded_by {
                     DecodedBy::VideoToolbox => {
-                        let err = av_hwframe_transfer_data(self.copy, self.frame, 0);
+                        let err = (api.av_hwframe_transfer_data)(self.copy, self.frame, 0);
                         let rgb = if err < 0 {
-                            Err(anyhow::anyhow!("could not copy a VideoToolbox picture out: {}", text(err)))
+                            Err(anyhow::anyhow!("could not copy a VideoToolbox picture out: {}", text(api, err)))
                         } else {
-                            to_rgb(&*self.copy, range)
+                            to_rgb(api, &self.formats, &*self.copy, range)
                         };
-                        av_frame_unref(self.copy);
+                        (api.av_frame_unref)(self.copy);
                         rgb
                     }
-                    DecodedBy::Software => to_rgb(&*self.frame, range),
+                    DecodedBy::Software => to_rgb(api, &self.formats, &*self.frame, range),
                 };
-                av_frame_unref(self.frame);
+                (api.av_frame_unref)(self.frame);
                 if self.decoded_by != Some(decoded_by) {
                     match decoded_by {
                         DecodedBy::VideoToolbox => log::info!("vnc: the Mac's HEVC is decoded by VideoToolbox"),
@@ -1442,87 +1468,65 @@ impl Hevc {
     }
 }
 
-/// Give `ctx` a VideoToolbox device and ask for its pictures. A Mac with no device
-/// to open decodes in software, and says so.
+/// Give `ctx` a VideoToolbox device, whose pictures FFmpeg then prefers. A Mac
+/// with no device to open, or a libavcodec whose context this cannot place it in,
+/// decodes in software, and says so.
 ///
 /// # Safety
 ///
-/// `ctx` must be an allocated context that has not been opened.
-#[cfg(all(feature = "apple-hp-media", target_os = "macos"))]
-unsafe fn attach_videotoolbox(ctx: *mut avcodec_hevc_sys::AVCodecContext) {
-    use avcodec_hevc_sys::*;
-
+/// `ctx` must be an allocated context of `api`'s libavcodec that has not been
+/// opened.
+#[cfg(target_os = "macos")]
+unsafe fn attach_videotoolbox(api: &crate::libav::Api, ctx: *mut std::ffi::c_void) {
+    let Some(offset) = crate::libav::hw_device_ctx(api) else {
+        // SAFETY: a plain version query.
+        let version = unsafe { (api.avcodec_version)() } >> 16;
+        log::warn!("vnc: libavcodec {version} is not one VideoToolbox is set up on here, so the Mac's HEVC decodes in software");
+        return;
+    };
     let mut device = std::ptr::null_mut();
     // SAFETY: `device` is written only on success, and then owned here.
     let err = unsafe {
-        av_hwdevice_ctx_create(&mut device, AVHWDeviceType_AV_HWDEVICE_TYPE_VIDEOTOOLBOX, std::ptr::null(), std::ptr::null_mut(), 0)
+        let kind = (api.av_hwdevice_find_type_by_name)(c"videotoolbox".as_ptr());
+        (api.av_hwdevice_ctx_create)(&mut device, kind, std::ptr::null(), std::ptr::null_mut(), 0)
     };
     if err < 0 {
-        log::warn!("vnc: no VideoToolbox device, so the Mac's HEVC decodes in software: {}", text(err));
+        log::warn!("vnc: no VideoToolbox device, so the Mac's HEVC decodes in software: {}", text(api, err));
         return;
     }
-    // SAFETY: the context takes a reference of its own and frees it with itself;
-    // this one is dropped once it has. A failed reference leaves the context
-    // without a device, which decodes in software.
+    // SAFETY: `offset` is `hw_device_ctx`'s place in this libavcodec's context,
+    // which is null until set. The context takes a reference of its own and frees
+    // it with itself; this one is dropped once it has. A failed reference leaves
+    // the context without a device, which decodes in software.
     unsafe {
-        (*ctx).hw_device_ctx = av_buffer_ref(device);
-        if !(*ctx).hw_device_ctx.is_null() {
-            (*ctx).get_format = Some(prefer_videotoolbox);
-        }
-        av_buffer_unref(&mut device);
+        ctx.byte_add(offset).cast::<*mut std::ffi::c_void>().write((api.av_buffer_ref)(device));
+        (api.av_buffer_unref)(&mut device);
     }
 }
 
 /// No VideoToolbox off macOS: the pictures decode in software.
-#[cfg(all(feature = "apple-hp-media", not(target_os = "macos")))]
-unsafe fn attach_videotoolbox(_ctx: *mut avcodec_hevc_sys::AVCodecContext) {}
+#[cfg(not(target_os = "macos"))]
+unsafe fn attach_videotoolbox(_api: &crate::libav::Api, _ctx: *mut std::ffi::c_void) {}
 
-/// Choose VideoToolbox's pictures when the decoder offers them, and its default
-/// otherwise. FFmpeg asks again, without them, when the hwaccel fails to start on a
-/// stream, which is how a stream VideoToolbox will not take decodes in software.
-#[cfg(all(feature = "apple-hp-media", target_os = "macos"))]
-unsafe extern "C" fn prefer_videotoolbox(
-    ctx: *mut avcodec_hevc_sys::AVCodecContext,
-    formats: *const avcodec_hevc_sys::AVPixelFormat,
-) -> avcodec_hevc_sys::AVPixelFormat {
-    use avcodec_hevc_sys::*;
-
-    // SAFETY: FFmpeg's list, ended by AV_PIX_FMT_NONE.
-    unsafe {
-        let mut at = formats;
-        while *at != AVPixelFormat_AV_PIX_FMT_NONE {
-            if *at == AVPixelFormat_AV_PIX_FMT_VIDEOTOOLBOX {
-                return *at;
-            }
-            at = at.add(1);
-        }
-        avcodec_default_get_format(ctx, formats)
-    }
-}
-
-#[cfg(feature = "apple-hp-media")]
 impl Drop for Hevc {
     fn drop(&mut self) {
-        use avcodec_hevc_sys::*;
-
         // SAFETY: freed exactly once, here; each call takes null and nulls its
         // pointer.
         unsafe {
-            avcodec_free_context(&mut self.ctx);
-            av_packet_free(&mut self.packet);
-            av_frame_free(&mut self.frame);
-            av_frame_free(&mut self.copy);
+            (self.api.avcodec_free_context)(&mut self.ctx);
+            (self.api.av_packet_free)(&mut self.packet);
+            (self.api.av_frame_free)(&mut self.frame);
+            (self.api.av_frame_free)(&mut self.copy);
         }
     }
 }
 
-#[cfg(feature = "apple-hp-media")]
-fn text(err: std::os::raw::c_int) -> String {
-    let mut text = [0 as std::os::raw::c_char; avcodec_hevc_sys::AV_ERROR_MAX_STRING_SIZE as usize];
+fn text(api: &crate::libav::Api, err: std::ffi::c_int) -> String {
+    let mut text = [0 as std::ffi::c_char; crate::libav::ERROR_TEXT];
     // SAFETY: `av_strerror` writes a NUL-terminated description of any code, known
     // or not, within the length it is given.
     unsafe {
-        avcodec_hevc_sys::av_strerror(err, text.as_mut_ptr(), text.len());
+        (api.av_strerror)(err, text.as_mut_ptr(), text.len());
         std::ffi::CStr::from_ptr(text.as_ptr()).to_string_lossy().into_owned()
     }
 }
@@ -1537,21 +1541,24 @@ fn text(err: std::os::raw::c_int) -> String {
 ///
 /// `frame` must be a picture libavcodec just returned, or a copy of one, and has not
 /// yet been unreferenced.
-#[cfg(feature = "apple-hp-media")]
-unsafe fn to_rgb(frame: &avcodec_hevc_sys::AVFrame, range: avcodec_hevc_sys::AVColorRange) -> anyhow::Result<Picture> {
-    use avcodec_hevc_sys::*;
+unsafe fn to_rgb(
+    api: &crate::libav::Api,
+    formats: &PixelFormats,
+    frame: &crate::libav::Frame,
+    range: i64,
+) -> anyhow::Result<Picture> {
     use yuv::{YuvBiPlanarImage, YuvConversionMode, YuvPlanarImage, YuvRange, YuvStandardMatrix};
 
     // (format, planar, 4:4:4)
     let read = [
-        (AVPixelFormat_AV_PIX_FMT_YUV444P, true, true),
-        (AVPixelFormat_AV_PIX_FMT_YUV420P, true, false),
-        (AVPixelFormat_AV_PIX_FMT_NV24, false, true),
-        (AVPixelFormat_AV_PIX_FMT_NV12, false, false),
+        (formats.yuv444p, true, true),
+        (formats.yuv420p, true, false),
+        (formats.nv24, false, true),
+        (formats.nv12, false, false),
     ];
     let Some(&(_, planar, full)) = read.iter().find(|(format, ..)| *format == frame.format) else {
         // SAFETY: a static string for any known format, and null for any other.
-        let name = unsafe { av_get_pix_fmt_name(frame.format) };
+        let name = unsafe { (api.av_get_pix_fmt_name)(frame.format) };
         let name = if name.is_null() {
             format!("pixel format {}", frame.format)
         } else {
@@ -1568,7 +1575,7 @@ unsafe fn to_rgb(frame: &avcodec_hevc_sys::AVFrame, range: avcodec_hevc_sys::AVC
         // `stride` bytes each.
         (unsafe { std::slice::from_raw_parts(frame.data[channel], stride * rows) }, stride as u32)
     };
-    let range = if range == AVColorRange_AVCOL_RANGE_JPEG { YuvRange::Full } else { YuvRange::Limited };
+    let range = if range == crate::libav::RANGE_FULL { YuvRange::Full } else { YuvRange::Limited };
     let mut rgb = vec![0u8; width * height * 3];
     let stride = width as u32 * 3;
     let (y_plane, y_stride) = plane(0, height);
@@ -1958,14 +1965,6 @@ impl MediaStream {
 
     /// Bind the ports the Mac named and start receiving on them.
     fn receive(&self, ports: (u16, u16)) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-        // The engine refuses a stream it would decode before it dials the Mac in a
-        // build without the decoders (`vnc::session`), so this is only the
-        // statement of why.
-        #[cfg(not(feature = "apple-hp-media"))]
-        anyhow::ensure!(
-            matches!(self.pictures, Outlet::Passed(_)),
-            "this remotex was built without the apple-hp-media feature, so it cannot decode the media stream"
-        );
         Ok(tokio::spawn(Receiver::bind(self, ports)?.run()))
     }
 }
@@ -1993,19 +1992,16 @@ pub const STREAM_SILENCE: std::time::Duration = std::time::Duration::from_secs(4
 
 /// Access units the HEVC decoder thread may be behind by. Reaching it drops the
 /// unit, which costs a keyframe: every later picture predicts from it.
-#[cfg(feature = "apple-hp-media")]
 const DECODE_QUEUE: usize = 8;
 
 /// AAC-ELD units the sound's decoder thread may be behind by. A unit costs tens of
 /// microseconds to decode, so this is a ceiling rather than a working depth, and
 /// reaching it drops the newest unit: 10 ms of sound, and nothing after it
 /// depends on it.
-#[cfg(feature = "apple-hp-media")]
 const SOUND_QUEUE: usize = 64;
 
 /// Access units per wave buffer handed to the bridge: two 10 ms units, one Opus
 /// packet's worth, so the encoder downstream completes a packet per buffer.
-#[cfg(feature = "apple-hp-media")]
 const UNITS_PER_WAVE: usize = 2;
 
 /// The least time between two keyframe requests. The Mac answers one in tens of
@@ -2218,7 +2214,6 @@ impl Receiver {
         let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let passed = matches!(self.pictures, Outlet::Passed(_));
         let mut onward = match &self.pictures {
-            #[cfg(feature = "apple-hp-media")]
             Outlet::Decoded(pictures) => {
                 let (units, decoder) = spawn_decoder(
                     pictures.clone(),
@@ -2226,11 +2221,6 @@ impl Receiver {
                     std::sync::Arc::clone(&self.failed),
                 );
                 Onward::Decoder(units, decoder)
-            }
-            // Refused by `MediaStream::receive` before any receiver is bound.
-            #[cfg(not(feature = "apple-hp-media"))]
-            Outlet::Decoded(_) => {
-                return fail(&self.failed, anyhow::anyhow!("no decoder for the media stream in this build"));
             }
             Outlet::Passed(units) => Onward::Browser(Passer::default(), units.clone()),
         };
@@ -2417,7 +2407,6 @@ impl Receiver {
         log::warn!("vnc: the Mac's media receiver stopped: {failure:#}");
         fail(&self.failed, failure);
         match onward {
-            #[cfg(feature = "apple-hp-media")]
             Onward::Decoder(units, decoder) => {
                 drop(units);
                 let _ = tokio::task::spawn_blocking(move || decoder.join()).await;
@@ -2435,7 +2424,6 @@ impl Receiver {
 /// Where the receiver sends each access unit it reassembles.
 enum Onward {
     /// The decoder thread, whose pictures the session encodes as VP9.
-    #[cfg(feature = "apple-hp-media")]
     Decoder(std::sync::mpsc::SyncSender<AccessUnit>, std::thread::JoinHandle<()>),
     /// The read loop, which passes each unit to the browser as it came.
     Browser(Passer, tokio::sync::mpsc::Sender<Option<PassedUnit>>),
@@ -2456,7 +2444,6 @@ enum Sent {
 impl Onward {
     fn send(&mut self, unit: AccessUnit) -> Sent {
         match self {
-            #[cfg(feature = "apple-hp-media")]
             Self::Decoder(units, _) => match units.try_send(unit) {
                 Ok(()) => Sent::Queued,
                 Err(std::sync::mpsc::TrySendError::Full(_)) => Sent::Full(DECODE_QUEUE),
@@ -2478,7 +2465,6 @@ impl Onward {
     /// What the units go to, for the log.
     fn name(&self) -> &'static str {
         match self {
-            #[cfg(feature = "apple-hp-media")]
             Self::Decoder(..) => "the HEVC decoder",
             Self::Browser(..) => "the browser's link",
         }
@@ -2499,7 +2485,6 @@ fn fail(failed: &Failure, error: anyhow::Error) {
 /// the receive task drops it.
 /// `keyframe` is how it says a unit failed to decode, which the receive task turns
 /// into a PLI. A decoder that cannot be opened leaves why in `failed`.
-#[cfg(feature = "apple-hp-media")]
 fn spawn_decoder(
     pictures: tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>,
     keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -2535,11 +2520,10 @@ fn spawn_decoder(
 /// out to the bridge, either as they came, for a browser that decodes them, or
 /// through a decoder thread of their own, which hands the bridge PCM.
 ///
-/// Fraunhofer's Rust decoder holds `Rc`s, so it is not `Send` and cannot sit in
-/// the receive task; a thread of its own is the whole accommodation. The thread
-/// ends when this is dropped — which aborting the receive task does — and `stale`
-/// makes it stop at once rather than after draining its queue into a bridge the
-/// next stream may already be filling. Dropping this also withdraws the format the
+/// fdk-aac is blocking C, so it decodes on a thread of its own rather than in the
+/// receive task. The thread ends when this is dropped — which aborting the receive
+/// task does — and `stale` makes it stop at once rather than after draining its
+/// queue into a bridge the next stream may already be filling. Dropping this also withdraws the format the
 /// thread announced, since no more sound will follow it. A decoder that cannot be
 /// opened leaves why in `failed`, and the next unit ends the stream.
 struct Sound {
@@ -2552,7 +2536,6 @@ struct Sound {
 /// Where [`Sound`] sends each unit.
 enum SoundLeg {
     /// The decoder thread's queue, and the flag that stops it.
-    #[cfg(feature = "apple-hp-media")]
     Decoded {
         units: std::sync::mpsc::SyncSender<Vec<u8>>,
         stale: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -2571,7 +2554,6 @@ impl Sound {
         Self { leg, bridge, packets: 0, forged: 0 }
     }
 
-    #[cfg(feature = "apple-hp-media")]
     fn decoder(bridge: &std::sync::Arc<crate::audio::AudioBridge>, failed: Failure) -> SoundLeg {
         use crate::aac_eld::{CHANNELS, EldDecoder, FRAME_SAMPLES};
 
@@ -2628,14 +2610,6 @@ impl Sound {
         SoundLeg::Decoded { units, stale, overrun: 0 }
     }
 
-    /// Refused by `MediaStream::receive` before any receiver is bound, so never
-    /// reached; the stream fails rather than play nothing.
-    #[cfg(not(feature = "apple-hp-media"))]
-    fn decoder(_: &std::sync::Arc<crate::audio::AudioBridge>, failed: Failure) -> SoundLeg {
-        fail(&failed, anyhow::anyhow!("no AAC-ELD decoder in this build"));
-        SoundLeg::Passed
-    }
-
     /// One authenticated, decrypted RTP packet of the sound leg: one AAC-ELD
     /// access unit, 10 ms of 48 kHz stereo. An error is a decoder that has stopped;
     /// a passed unit cannot fail.
@@ -2650,7 +2624,6 @@ impl Sound {
             );
         }
         match &mut self.leg {
-            #[cfg(feature = "apple-hp-media")]
             SoundLeg::Decoded { units, overrun, .. } => match units.try_send(unit.to_vec()) {
                 Ok(()) => {}
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
@@ -2677,7 +2650,6 @@ impl Sound {
 }
 
 /// Peak and RMS of 16-bit PCM, accumulated until taken.
-#[cfg(feature = "apple-hp-media")]
 #[derive(Default)]
 struct Level {
     peak: u16,
@@ -2685,7 +2657,6 @@ struct Level {
     samples: u64,
 }
 
-#[cfg(feature = "apple-hp-media")]
 impl Level {
     fn add(&mut self, pcm: &[u8]) {
         for sample in pcm.as_chunks::<2>().0.iter().map(|s| i16::from_le_bytes(*s)) {
@@ -2709,7 +2680,6 @@ impl Level {
 
 impl Drop for Sound {
     fn drop(&mut self) {
-        #[cfg(feature = "apple-hp-media")]
         if let SoundLeg::Decoded { stale, .. } = &self.leg {
             stale.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -3112,7 +3082,6 @@ mod tests {
     /// pixels of its last picture as ffmpeg converts them. The two conversions
     /// round differently, by a step at most.
     #[test]
-    #[cfg(feature = "apple-hp-media")]
     fn a_444_stream_decodes_to_the_colours_ffmpeg_converts_it_to() {
         let (pictures, decoded_by) = decode_fixture(false);
         assert_eq!(decoded_by, Some(DecodedBy::Software));
@@ -3126,7 +3095,6 @@ mod tests {
     /// decoder to reach, and elsewhere there is no VideoToolbox, so both decode in
     /// software.
     #[test]
-    #[cfg(feature = "apple-hp-media")]
     fn the_same_stream_decodes_to_the_same_colours_through_videotoolbox() {
         let (pictures, decoded_by) = decode_fixture(true);
         if cfg!(target_os = "macos") && !virtual_mac() {
@@ -3136,7 +3104,6 @@ mod tests {
     }
 
     /// The fixture's pictures, and what decoded the last.
-    #[cfg(feature = "apple-hp-media")]
     fn decode_fixture(hardware: bool) -> (Vec<Picture>, Option<DecodedBy>) {
         let units = fixture_units();
         assert_eq!(units.len(), 3);
@@ -3147,14 +3114,12 @@ mod tests {
     }
 
     /// Whether this Mac is a virtual machine, from the kernel's `kern.hv_vmm_present`.
-    #[cfg(feature = "apple-hp-media")]
     fn virtual_mac() -> bool {
         let out = std::process::Command::new("sysctl").args(["-n", "kern.hv_vmm_present"]).output().unwrap();
         assert!(out.status.success(), "sysctl -n kern.hv_vmm_present failed");
         String::from_utf8_lossy(&out.stdout).trim() == "1"
     }
 
-    #[cfg(feature = "apple-hp-media")]
     fn assert_the_fixture_colours(pictures: &[Picture]) {
         let last = pictures.last().unwrap();
         assert_eq!(last.size, (64, 48));

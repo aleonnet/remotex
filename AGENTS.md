@@ -10,8 +10,11 @@ documentation.
 - Do not run `cargo fmt`.
 - No squash merges
 - After Rust changes, run `cargo clippy --all-targets -- -D warnings` and
-  `cargo test`, and both again with `--features apple-hp-media` when the change
-  reaches the Apple engine or the media stream.
+  `cargo test --lib`, once each. Run the tests under `tests/`
+  (`cargo test --tests`)
+  only when the change reaches what they drive, and a test marked
+  `#[ignore = "slow: …"]` only when the change reaches what it checks. Mark a
+  test that waits seconds that way.
 - After frontend JS/TS changes, run the Biome checks in `frontend/`.
 - Before browser QA of a frontend change, rebuild the gateway and say so: the
   frontend bundle is compiled into the binary, so a running `remotex serve`
@@ -112,8 +115,9 @@ documentation.
   socket: which VP9 profile its decoder takes, for `render_chroma = "auto"`, and
   whether it decodes a High Performance Mac's HEVC and AAC-ELD, for
   `media_passthrough`. The gateway *selects* on the answers and never refuses a
-  client for them, save a build without the `apple-hp-media` decoders facing a
-  browser that cannot take the Mac's stream, which has nothing else to send. Do
+  client for them, save a gateway whose host lacks FFmpeg or fdk-aac, the High
+  Performance decoders, facing a browser that cannot take the Mac's stream,
+  which has nothing else to send. Do
   not grow them into a capability negotiation or another reason to turn a session
   away. Preserve the announced
   configuration and color-space behavior described in
@@ -155,12 +159,13 @@ documentation.
   SRTP, every packet authenticated before it is decrypted and every report sent
   as SRTCP. The Mac refuses one leg without the other, so the target always
   carries sound and takes no `audio` key. While the sound leg runs the Mac mutes
-  its own output, so it plays nothing to an AirPlay speaker. Its two decoders
-  are the non-default `apple-hp-media` feature, which no release artifact
-  enables; a build without it takes the subtype only with `media_passthrough`,
-  and ends the session of a browser that cannot decode the stream before it
-  dials the Mac. Only the decoders sit behind the feature: the offers, SRTP, the
-  receiver and passing compile in every build. Zlib carries its picture only
+  its own output, so it plays nothing to an AirPlay speaker. Its two decoders,
+  FFmpeg's libavcodec and fdk-aac, are the system's shared libraries, loaded on
+  every platform when a session needs them, so no build links either and every
+  build, release artifacts included, has them. Only the non-default
+  `apple-hp-media-static` feature links their private static archives instead.
+  A gateway whose host lacks either ends the session of a browser that cannot
+  decode the stream before it dials the Mac. Zlib carries its picture only
   until the stream is up and across display changes, and a stream that fails
   ends the session, as in Apple's viewer. Its offer carries Apple's bitrate
   entries and the gateway sends Apple's rate reports, with the delay measured to
@@ -225,6 +230,10 @@ documentation.
   package-owned live config.
 - Follow [Packaging](packaging/README.md) for native layouts, prebuilt dependency
   rules, and release workflow.
+- `THIRD-PARTY-NOTICES.txt` is generated: after any change to `Cargo.lock` or
+  `frontend/bun.lock`, rerun `packaging/third-party-notices.py` (a library test
+  fails until then), and never edit the file by hand. A new prebuilt C library
+  brings its licence text to `packaging/notices/` and the script's list.
 
 ## Testing and interactive QA
 

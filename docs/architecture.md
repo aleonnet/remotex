@@ -439,12 +439,11 @@ Three controls with similar names therefore remain separate:
   the page found at load. Claim-bound eviction, the queue and its dropping of the
   oldest unit are the Opus path's; there is no bitrate to walk and no silence to
   shed.
-- **Without the decoders.** Only the decoders are behind `apple-hp-media`: the
-  offers, SRTP, the receiver and passing compile in every build. A build without
-  them accepts `ard-high-performance` only with `media_passthrough = true`, since
-  a target that decodes has nothing to run on, and a browser that cannot take the
-  stream has nothing to be sent: the engine tells it so and ends before it dials
-  the Mac. That is the one session the browser's answer turns away.
+- **Without the decoders.** The decoders are the host's FFmpeg and fdk-aac,
+  loaded when a session needs them. On a host without either, a browser that
+  cannot take the stream has nothing to be sent: the engine tells it so, naming
+  the library, and ends before it dials the Mac. That is the one session the
+  browser's answer turns away.
 
 ### Choosing a chroma
 
@@ -689,7 +688,7 @@ colour this decoder takes, for `render_chroma = "auto"` to resolve against
 Mac's HEVC and AAC-ELD, for `media_passthrough` to pass them. Each selects between
 streams the gateway is willing to send. A wrong answer costs a picture, not a
 desktop, save in the one case where the gateway has only one stream to send: a
-build without the `apple-hp-media` decoders ends the session of a browser that
+gateway whose host lacks the Mac's decoders ends the session of a browser that
 says no to the Mac's stream
 ([Apple's media stream, passed through](#apples-media-stream-passed-through)).
 
@@ -1423,9 +1422,8 @@ resend the same full descriptor with the requested mode, and the Mac's answering
 display layout sets the actual framebuffer geometry. There is no client-side
 resize mode or one-shot button. The Mac supplies that virtual display the way
 it does to Apple's viewer: as HEVC over its media stream, offered once the display has
-settled and decoded in the gateway by FFmpeg's libavcodec (`src/vnc_apple_media.rs`), in a
-gateway built with the `apple-hp-media` feature, or passed to a browser that decodes
-it under `media_passthrough`. ZRLE rectangles carry the
+settled and decoded in the gateway by the host's FFmpeg libavcodec (`src/vnc_apple_media.rs`),
+or passed to a browser that decodes it under `media_passthrough`. ZRLE rectangles carry the
 picture until the stream delivers and across every display change. A stream the
 Mac refuses, that brings no picture or no sound, or that stops ends the session,
 as it ends Apple's viewer's. While it runs, polling holds to one pixel, which still brings

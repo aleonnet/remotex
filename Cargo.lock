@@ -3,18 +3,6 @@
 version = 4
 
 [[package]]
-name = "aac"
-version = "0.2.0"
-source = "git+https://github.com/andrewtheguy/fdk-aac-rust?tag=v0.2.0#848480085cf3c173402a7b59d685cc24ceed575b"
-dependencies = [
- "arrayvec",
- "bitflags 2.13.1",
- "itertools",
- "num-complex",
- "paste",
-]
-
-[[package]]
 name = "addchain"
 version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -116,12 +104,6 @@ name = "anyhow"
 version = "1.0.104"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
-
-[[package]]
-name = "arrayvec"
-version = "0.7.8"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d3fb67a6e08acf24fdeccbac2cb6ac4305825bd1f117462e0e6f2f193345ad56"
 
 [[package]]
 name = "async-dnssd"
@@ -799,8 +781,8 @@ dependencies = [
 
 [[package]]
 name = "desktop-vp9"
-version = "0.0.4"
-source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.4#1647f6d0dfe2d5e019c7c64a6be037519331e048"
+version = "0.0.5"
+source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.5#b4f1c659d9d48c0ee9f821de7b275ba0e854622b"
 dependencies = [
  "libvpx-prebuilt-sys",
  "log",
@@ -923,12 +905,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "either"
-version = "1.18.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "252afb9ae5eaa683babdc6a068b3f5726eb19e05070c731f9b2a23a7c3e8ed34"
-
-[[package]]
 name = "elliptic-curve"
 version = "0.14.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1015,6 +991,11 @@ checksum = "1e6853b52649d4ac5c0bd02320cddc5ba956bdb407c4b75a2c6b75bf51500f8c"
 dependencies = [
  "simd-adler32",
 ]
+
+[[package]]
+name = "fdk-aac-prebuilt-sys"
+version = "0.1.0"
+source = "git+https://github.com/andrewtheguy/fdk-aac-prebuilt?tag=v2.0.3-20260921052032-4cad928#4cad928cce0b2078a852f69b690982c5c4b901f5"
 
 [[package]]
 name = "ff"
@@ -1537,15 +1518,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a6cb138bb79a146c1bd460005623e142ef0181e3d0219cb493e02f7d08a35695"
 
 [[package]]
-name = "itertools"
-version = "0.10.5"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "b0fd2260e829bddf4cb6ea802289de2f86d6a7a690192fbe91b3f46e0f2c8473"
-dependencies = [
- "either",
-]
-
-[[package]]
 name = "itoa"
 version = "1.0.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1624,6 +1596,16 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
 
 [[package]]
 name = "libopus-prebuilt-sys"
@@ -1930,12 +1912,6 @@ dependencies = [
  "smallvec",
  "windows-link",
 ]
-
-[[package]]
-name = "paste"
-version = "1.0.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "57c0d7b74b563b49d38dae00a0c37d4d6de9b432382b2892f0574ddcae73fd0a"
 
 [[package]]
 name = "pbkdf2"
@@ -2342,9 +2318,8 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.285"
+version = "0.0.286"
 dependencies = [
- "aac",
  "aes",
  "anyhow",
  "axum",
@@ -2357,12 +2332,14 @@ dependencies = [
  "desktop-vp9",
  "eax",
  "env_logger",
+ "fdk-aac-prebuilt-sys",
  "flacenc",
  "flate2",
  "futures-util",
  "hmac",
  "libavcodec-hevc-prebuilt-sys",
  "libc",
+ "libloading",
  "log",
  "md-5 0.11.0",
  "num-bigint 0.4.8",

@@ -83,7 +83,7 @@ if [ "$os" = macos ]; then
   payload="$stage/payload"
   mkdir -p "$payload/usr/local/bin" "$payload/usr/local/share/doc/remotex"
   cp "$release/bin/remotex" "$payload/usr/local/bin/remotex"
-  cp "$release/share/doc/remotex/remotex.example.toml" "$payload/usr/local/share/doc/remotex/remotex.example.toml"
+  cp "$release/share/doc/remotex/"* "$payload/usr/local/share/doc/remotex/"
   output="dist/remotex-macos-${asset_arch}.pkg"
   pkgbuild \
     --root "$payload" \
@@ -94,7 +94,9 @@ if [ "$os" = macos ]; then
 
   pkgutil --payload-files "$output" > "$stage/pkg-contents"
   grep -qx './usr/local/bin/remotex' "$stage/pkg-contents"
-  grep -qx './usr/local/share/doc/remotex/remotex.example.toml' "$stage/pkg-contents"
+  for doc in remotex.example.toml LICENSE THIRD-PARTY-NOTICES.txt; do
+    grep -qx "./usr/local/share/doc/remotex/$doc" "$stage/pkg-contents"
+  done
   echo ">> wrote $output"
   exit 0
 fi
@@ -105,7 +107,7 @@ command -v rpmbuild >/dev/null 2>&1 || { echo "rpmbuild is required" >&2; exit 1
 payload="$stage/payload"
 mkdir -p "$payload/usr/bin" "$payload/usr/share/doc/remotex"
 cp "$release/bin/remotex" "$payload/usr/bin/remotex"
-cp "$release/share/doc/remotex/remotex.example.toml" "$payload/usr/share/doc/remotex/remotex.example.toml"
+cp "$release/share/doc/remotex/"* "$payload/usr/share/doc/remotex/"
 
 # '-' separates the Debian revision, so a SemVer prerelease has to become '~',
 # which sorts before everything: '0.0.1-rc.1-1' would otherwise sort *after* the
@@ -126,6 +128,10 @@ mkdir -p "$deb_root/DEBIAN"
   echo "Section: net"
   echo "Priority: optional"
   echo "Depends: ca-certificates, libc6 (>= 2.39)"
+  # High Performance's decoders, loaded at run time (src/libav.rs,
+  # src/aac_eld.rs): any libavcodec the gateway loads, and fdk-aac, which is
+  # Debian's non-free and Ubuntu's multiverse, so apt skips it where those are off.
+  echo "Recommends: libavcodec63 | libavcodec62 | libavcodec61 | libavcodec60, libfdk-aac2t64 | libfdk-aac2"
   echo "Homepage: https://github.com/andrewtheguy/remotex"
   echo "Description: Single-user browser remote desktop gateway"
   echo " Connects a browser to RDP, VNC, and macOS Screen Sharing targets."
@@ -136,7 +142,9 @@ dpkg-deb --build --root-owner-group "$deb_root" "$deb_output"
 [ "$(dpkg-deb --field "$deb_output" Package)" = remotex ]
 dpkg-deb --contents "$deb_output" > "$stage/deb-contents"
 grep -q '\./usr/bin/remotex$' "$stage/deb-contents"
-grep -q '\./usr/share/doc/remotex/remotex.example.toml$' "$stage/deb-contents"
+for doc in remotex.example.toml LICENSE THIRD-PARTY-NOTICES.txt; do
+  grep -q "\./usr/share/doc/remotex/$doc\$" "$stage/deb-contents"
+done
 echo ">> wrote $deb_output"
 
 # RPM does not accept SemVer's '-' in Version or '+' in either Version or
@@ -155,7 +163,7 @@ spec="$rpm_top/SPECS/remotex.spec"
   echo "Version: $rpm_version"
   echo 'Release: 1'
   echo 'Summary: Single-user browser remote desktop gateway'
-  echo 'License: LicenseRef-remotex'
+  echo 'License: MIT'
   echo 'URL: https://github.com/andrewtheguy/remotex'
   echo 'Requires: ca-certificates'
   echo
@@ -173,6 +181,8 @@ spec="$rpm_top/SPECS/remotex.spec"
   echo '%files'
   echo '/usr/bin/remotex'
   echo '/usr/share/doc/remotex/remotex.example.toml'
+  echo '%license /usr/share/doc/remotex/LICENSE'
+  echo '%license /usr/share/doc/remotex/THIRD-PARTY-NOTICES.txt'
 } > "$spec"
 
 rpmbuild -bb \
@@ -186,5 +196,7 @@ rpm_output="dist/remotex-linux-${asset_arch}.rpm"
 cp "$rpm_built" "$rpm_output"
 rpm -qpl "$rpm_output" > "$stage/rpm-contents"
 grep -qx '/usr/bin/remotex' "$stage/rpm-contents"
-grep -qx '/usr/share/doc/remotex/remotex.example.toml' "$stage/rpm-contents"
+for doc in remotex.example.toml LICENSE THIRD-PARTY-NOTICES.txt; do
+  grep -qx "/usr/share/doc/remotex/$doc" "$stage/rpm-contents"
+done
 echo ">> wrote $rpm_output"

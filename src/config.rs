@@ -85,10 +85,10 @@ pub enum Subtype {
     ///
     /// The picture and the sound go together — the Mac refuses one without the
     /// other, and mutes its own output while the sound leg runs — so the target
-    /// always carries sound and takes no `audio` key. Only a
-    /// build with the `apple-hp-media` feature has the two decoders; any other
-    /// accepts the subtype only with [`TargetConfig::media_passthrough`], and
-    /// refuses a browser that cannot take the stream it passes.
+    /// always carries sound and takes no `audio` key. The two decoders are
+    /// loaded from the system when a session needs them; a gateway whose host
+    /// lacks them refuses a browser that cannot take the stream, and passes it to
+    /// one that can with [`TargetConfig::media_passthrough`].
     ArdHighPerformance,
 }
 
@@ -309,8 +309,8 @@ pub struct RenderPlan {
 /// What the attached browser said its decoders take, from its session socket
 /// ([`crate::ws`]): the two questions the page asks once at load and states on every
 /// session socket it opens. Each *selects* a stream; the only refusal either leads
-/// to is a build without the `apple-hp-media` decoders facing a browser that cannot
-/// take the Mac's stream.
+/// to is a gateway without the Mac's decoders' libraries facing a browser that
+/// cannot take the Mac's stream.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Decoders {
     /// The most colour it takes, which resolves [`ChromaChoice::Auto`].
@@ -493,7 +493,7 @@ pub struct TargetConfig {
     /// the display, and on every target that is not a Mac.
     ///
     /// What it is for: a resizable Mac session, at the window's size and density,
-    /// in a gateway without the `apple-hp-media` decoders or on a Mac where the
+    /// in a gateway without the Mac's decoders' libraries or on a Mac where the
     /// media stream cannot reach it.
     #[serde(default)]
     pub virtual_display: bool,
@@ -646,8 +646,8 @@ pub struct TargetConfig {
     ///
     /// The browser selects, as it does a chroma: it states on its session socket
     /// whether it decodes both halves, and one that says no is sent VP9 and Opus as
-    /// if this key were unset — by a build with the `apple-hp-media` decoders. A
-    /// build without them has nothing to send such a browser and refuses it. See
+    /// if this key were unset. A gateway whose host lacks the decoders' libraries
+    /// has nothing to send such a browser and refuses it. See
     /// [`RenderPlan::apple_media`].
     #[serde(default)]
     pub media_passthrough: bool,
@@ -1233,19 +1233,6 @@ impl ConfigFile {
             if target.port == 0 {
                 target.port = target.protocol.default_port();
             }
-            // The media stream's decoders are the `apple-hp-media` feature's. Without
-            // them a target can still pass the stream to a browser that decodes it,
-            // and the engine refuses any other browser.
-            anyhow::ensure!(
-                !target.media_stream() || cfg!(feature = "apple-hp-media") || target.media_passthrough,
-                "target {:?} is subtype \"ard-high-performance\", and this remotex was built \
-                 without the apple-hp-media feature, which has its decoders. Set \
-                 `media_passthrough = true` to pass the stream to browsers that decode it \
-                 (any other browser is then refused), build with `--features apple-hp-media`, \
-                 or use subtype \"ard\" — with the unofficial `virtual_display = true` for a \
-                 resizable virtual display without the stream.",
-                target.name
-            );
             // The virtual display is Standard mode's one unofficial extra. High
             // Performance always has one, so the key would say nothing there, and
             // nothing but a Mac has one to open.
@@ -2801,15 +2788,10 @@ mod tests {
         )
     }
 
-    /// A `vnc` target body, with whatever keys the case is about.
-    /// The Apple subtypes this build accepts: High Performance only where the
-    /// `apple-hp-media` feature gives it its decoders.
-    const APPLE_SUBTYPES: &[&str] = if cfg!(feature = "apple-hp-media") {
-        &["ard", "ard-high-performance"]
-    } else {
-        &["ard"]
-    };
+    /// The Apple subtypes.
+    const APPLE_SUBTYPES: &[&str] = &["ard", "ard-high-performance"];
 
+    /// A `vnc` target body, with whatever keys the case is about.
     fn vnc_toml(extra: &str) -> String {
         format!(
             r#"
@@ -2944,9 +2926,6 @@ mod tests {
             ("", "only subtype \"ard\" takes"),
         ];
         for (subtype, reason) in refused {
-            if subtype.contains("high-performance") && !cfg!(feature = "apple-hp-media") {
-                continue;
-            }
             let err = ConfigFile::parse(&vnc_toml(&format!("{subtype}virtual_display = true")))
                 .unwrap_err();
             assert!(format!("{err:#}").contains(reason), "{err:#}");
@@ -2963,7 +2942,6 @@ mod tests {
     /// The high-performance subtype carries the same account credentials and native
     /// Apple pasteboard as plain `ard`, and requests a virtual display at
     /// width/height.
-    #[cfg(feature = "apple-hp-media")]
     #[test]
     fn the_high_performance_subtype_accepts_clipboard_and_resize() {
         let hp = |extra: &str| {
@@ -2994,7 +2972,6 @@ mod tests {
     /// `media_passthrough` passes the Mac's stream only to a browser that said it
     /// decodes it, and every other browser gets the VP9 plan the key leaves
     /// untouched. It is the media stream's key, refused on any target without one.
-    #[cfg(feature = "apple-hp-media")]
     #[test]
     fn media_passthrough_is_the_browsers_to_select_on_a_high_performance_target() {
         let hp = |extra: &str| {
@@ -3415,7 +3392,6 @@ mod tests {
 
     /// High Performance brings the Mac's sound on its own media stream, beside the
     /// picture: always on, and not the target's to switch.
-    #[cfg(feature = "apple-hp-media")]
     #[test]
     fn high_performance_carries_its_media_streams_sound() {
         let target = "[[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard-high-performance\"\n\
@@ -3444,23 +3420,6 @@ mod tests {
         ))
         .unwrap();
         assert_eq!(rated.targets[0].audio_plan().bitrate_bps, 128_000);
-    }
-
-    /// A build without the decoders refuses a High Performance target that would
-    /// decode, by name, and says what to set, build or use instead. One that passes
-    /// the stream needs no decoder, and is accepted.
-    #[cfg(not(feature = "apple-hp-media"))]
-    #[test]
-    fn a_build_without_the_decoders_takes_high_performance_only_passed() {
-        let hp = "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"";
-        let err = ConfigFile::parse(&vnc_toml(hp)).unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("without the apple-hp-media feature"), "{rendered}");
-        assert!(rendered.contains("media_passthrough = true"), "{rendered}");
-        assert!(rendered.contains("subtype \"ard\""), "{rendered}");
-
-        let passed = ConfigFile::parse(&vnc_toml(&format!("{hp}\nmedia_passthrough = true"))).unwrap();
-        assert!(passed.targets[0].media_passthrough);
     }
 
     /// The pre-negotiation format follows the engine: CD quality is what RDP is

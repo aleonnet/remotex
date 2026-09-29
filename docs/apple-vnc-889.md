@@ -29,7 +29,7 @@ layer.
 | `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, ZRLE until it is up | AAC-ELD over the media stream |
 
 `ard-high-performance` is High Performance as Apple's viewer has it. Decoding its
-stream needs a gateway built with the `apple-hp-media` feature; any other gateway
+stream needs FFmpeg and fdk-aac on the gateway's host; without them the gateway
 runs it only with `media_passthrough`, for browsers that decode the stream.
 
 **Unofficial:** `virtual_display = true` on an `ard` target keeps that row's
@@ -873,14 +873,13 @@ came, described by the AudioSpecificConfig below, and ZRLE's rectangles fill the
 picture's gaps as VP9 encoded here. A PLI is its repaint. See
 [Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through).
 
-The two decoders are the `apple-hp-media` Cargo feature, off by default and in
-no release artifact: FFmpeg's HEVC decoder for the picture (libavcodec,
-LGPL-2.1-or-later, linked statically) and Fraunhofer's AAC-ELD decoder for the
-sound (a licence that is not OSI-approved). A build without the feature refuses an
-`ard-high-performance` target without `media_passthrough` when it reads the config,
-and ends the session of a browser that cannot decode the stream before it dials the
-Mac. The rest of the module — the offers, the replies, SRTP, the depacketizer, the
-receiver and passing — is compiled and tested in every build.
+The two decoders are FFmpeg's HEVC decoder for the picture (libavcodec,
+LGPL-2.1-or-later) and Fraunhofer's AAC-ELD decoder for the sound (fdk-aac, a
+licence that is not OSI-approved), loaded from the system's shared libraries when
+a session needs them, so no build links either; the `apple-hp-media-static`
+Cargo feature links them statically instead. A gateway that finds either missing
+ends the session of a browser that cannot decode the stream before it dials the
+Mac.
 
 ### Negotiation
 
@@ -964,8 +963,8 @@ other failures (see [Liveness](#the-stream)).
   single NAL units, aggregation packets, fragmentation units.
 - **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
   transfer, Display P3 primaries, with wavefront parallel processing
-  (`entropy_coding_sync_enabled_flag`) and no tiles. The prebuilt libavcodec
-  (FFmpeg 9.0.2, configured down to the HEVC decoder) decodes it. On one
+  (`entropy_coding_sync_enabled_flag`) and no tiles. libavcodec (FFmpeg 9.0.2,
+  the prebuilt one configured down to the HEVC decoder) decodes it. On one
   core of an i5-8500T a 1600×1000 picture takes 14–23 ms, too slow for 60 a
   second. Remotex gives the decoder four slice threads, which decode a
   picture's rows in parallel and took 7–14 ms; frame threads would hold each
@@ -1152,16 +1151,12 @@ link to a physical Mac has not been observed.
   `isConfigSupported` say yes to both descriptions, the one each cannot decode
   included.
   FFmpeg's native `aac` (libavcodec 62.28) decoded the capture cleanly at the
-  same levels as Chrome and Safari. The gateway's decoder is the pure-Rust port of
-  Fraunhofer's fdk-aac decoder that AOSP ships as `platform/external/aac`,
-  `rust/`, cut down to raw AAC-ELD access units
-  ([fdk-aac-rust](https://github.com/andrewtheguy/fdk-aac-rust)). Against
+  same levels as Chrome and Safari. The gateway's decoder is Fraunhofer's
+  fdk-aac, the system's shared library or, with `apple-hp-media-static`, a
+  prebuilt static archive
+  ([fdk-aac-prebuilt](https://github.com/andrewtheguy/fdk-aac-prebuilt)). Against
   AudioToolbox's own AAC-ELD (`afconvert -d "aace@48000#480"`), it decoded every
-  packet and matched the fixed-point C decoder to 86 dB SNR, at about 31 µs per
-  10 ms unit. Fed 200 000 corrupted units with overflow checks on, it concealed
-  or refused them and never panicked, which matters because the gateway aborts
-  on panic. Its instance holds `Rc`s, so it runs on a thread of its own behind a
-  64-unit queue.
+  packet. It runs on a thread of its own behind a 64-unit queue.
 - **Onward.** The decoder's 16-bit PCM goes to the session's audio bridge two
   units at a time, one Opus packet's worth, and from there the same way every
   target's sound goes: Opus on `/ws/audio`. The format is

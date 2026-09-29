@@ -1523,17 +1523,20 @@ async fn session(
     microphone: Option<Arc<crate::mic::MicBridge>>,
     sink: &VideoSink,
 ) {
-    // A build without the decoders has nothing to send a browser that cannot take
-    // the Mac's stream, and says so before dialling the Mac rather than after its
-    // offer: the config accepts such a target only with `media_passthrough`.
-    if config.media_stream() && !plan.apple_media && !cfg!(feature = "apple-hp-media") {
-        warn!("vnc: refusing a browser that does not decode the Mac's stream, in a build without its decoders");
+    // A gateway whose host lacks the decoders' libraries has nothing to send a
+    // browser that cannot take the Mac's stream, and says so, naming the library,
+    // before dialling the Mac rather than after its offer.
+    if config.media_stream()
+        && !plan.apple_media
+        && let Err(e) = crate::libav::load().and_then(|()| crate::aac_eld::load())
+    {
+        warn!("vnc: refusing a browser that does not decode the Mac's stream: {e:#}");
         let _ = sink
             .msg(ServerMsg::Error {
-                message: "This browser does not decode the Mac's HEVC and AAC-ELD, and this \
-                          remotex was built without the apple-hp-media feature, whose decoders \
-                          would send it VP9 and Opus instead."
-                    .to_owned(),
+                message: format!(
+                    "This browser does not decode the Mac's HEVC and AAC-ELD, and this \
+                     remotex cannot decode them to send VP9 and Opus instead: {e:#}"
+                ),
             })
             .await;
         return;
@@ -10345,7 +10348,7 @@ mod tests {
     /// held for what the browser's link makes of a frame beyond its distance:
     /// wlshare walks its quality by that round trip, and must see the browser's
     /// delivery in it.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_passed_frames_fence_is_held_for_the_browsers_delivery() {
         let (uplink, sent) = test_uplink();
         // Two batches owed, the older for 250 ms beyond the distance.
@@ -10416,7 +10419,7 @@ mod tests {
     /// A browser that never acknowledges holds a fence no longer than the grace a
     /// window that is not drawing gets, so wlshare, which sends nothing until the
     /// echo, is not stopped by it.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_passed_frames_fence_is_held_no_longer_than_the_limit() {
         let (uplink, sent) = test_uplink();
         // A queue seconds deep ahead of the frame.
@@ -10444,7 +10447,7 @@ mod tests {
     /// The limit runs from when the fence was queued, not from the loop's last turn:
     /// a server that keeps talking — here a Bell every 50 ms — turns the loop far more
     /// often than the limit, and must not hold the echo for as long as it talks.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_held_fence_goes_at_its_deadline_while_the_server_keeps_talking() {
         let (uplink, sent) = test_uplink();
         let feedback = queued_for(Duration::from_secs(2)).await;
@@ -10552,7 +10555,7 @@ mod tests {
 
     /// A held fence that asks for BlockAfter is honoured by holding the reading too:
     /// nothing behind it is read until it has gone back.
-    #[tokio::test]
+    #[tokio::test(start_paused = true)]
     async fn a_held_block_after_fence_stops_the_reading_until_it_goes() {
         let (uplink, sent) = test_uplink();
         let feedback = queued_for(Duration::from_millis(250)).await;

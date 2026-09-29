@@ -17,6 +17,8 @@ Linux package managers own the conventional FHS paths directly:
 ```text
 /usr/bin/remotex
 /usr/share/doc/remotex/remotex.example.toml
+/usr/share/doc/remotex/LICENSE
+/usr/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
 The macOS package owns the corresponding local prefix:
@@ -24,6 +26,8 @@ The macOS package owns the corresponding local prefix:
 ```text
 /usr/local/bin/remotex
 /usr/local/share/doc/remotex/remotex.example.toml
+/usr/local/share/doc/remotex/LICENSE
+/usr/local/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
 The Windows package (`.msi`) owns the same tree under the 64-bit Program Files
@@ -32,7 +36,20 @@ directory and puts its `bin` on the machine `PATH`:
 ```text
 C:\Program Files\remotex\bin\remotex.exe
 C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
+C:\Program Files\remotex\share\doc\remotex\LICENSE
+C:\Program Files\remotex\share\doc\remotex\THIRD-PARTY-NOTICES.txt
 ```
+
+Every artifact, container images included, carries remotex's MIT `LICENSE` and
+`THIRD-PARTY-NOTICES.txt`, the notices of what a release build contains that
+remotex did not write: the C libraries linked from their prebuilt archives, whose
+licences are kept in `notices/`, the web client's packages, and the Rust crates
+cargo-about finds under `about.toml`. `third-party-notices.py` writes it (`uv run
+--python 3.13 packaging/third-party-notices.py`, with `bun install` done in
+`frontend/` and `cargo install cargo-about --locked --features cli`), and it names
+the `Cargo.lock` and `frontend/bun.lock` it was made from, which a library test
+holds it to. It covers the default build, not `apple-hp-media-static`, whose
+distributor adds fdk-aac's licence and FFmpeg's LGPL terms.
 
 There is no package wrapper, version directory, active-version symlink, or
 package-managed rollback. The package manager replaces and removes its files.
@@ -60,7 +77,7 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `REMOTEX_CONTAINER_FEATURES` |
-| `publish-full-image.sh` | build a release tag's linux/amd64 image with `apple-hp-media`, from this checkout, and push it to the private `ghcr.io/andrewtheguy/remotex-full` |
+| `publish-full-image.sh` | build a release tag's linux/amd64 image with Debian's libavcodec and fdk-aac installed and push it to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 
@@ -120,25 +137,39 @@ needs no CMake, assembler, pkg-config, libclang, vcpkg, or system copies of
 those libraries. `LIBVPX_PREBUILT_DIR` and `LIBOPUS_PREBUILT_DIR` select locally
 built archives.
 
-The non-default `apple-hp-media` feature, which `ard-high-performance` targets
-need to decode the Mac's stream (without it they run only with
-`media_passthrough`, for browsers that decode the stream), adds two decoders and
-is in no release artifact because of their licences. `libavcodec-hevc-prebuilt` (the HEVC picture) links static archives of
-FFmpeg's libavcodec and libavutil, configured down to the HEVC decoder and
-parser, and on macOS its VideoToolbox hwaccel, which links Apple's VideoToolbox,
-CoreMedia, CoreVideo and CoreFoundation frameworks. Its archives are private:
-its build script downloads the latest release
-of `andrewtheguy/libavcodec-hevc-prebuilt-archives` through `gh`, so a build
-needs `gh` logged in to an account that can read it, or
-`LIBAVCODEC_HEVC_PREBUILT_DIR` pointing at archives built locally.
-`publish-full-image.sh` refuses that override and checks that the image linked
-the current release's archive. This FFmpeg is LGPL-2.1-or-later and linked
-statically, which obliges a distributor of a binary to let its recipient
+`ard-high-performance` targets decode the Mac's stream with two decoders whose
+licences keep them out of every artifact: FFmpeg's libavcodec
+(LGPL-2.1-or-later) for the HEVC picture and Fraunhofer's fdk-aac, whose licence
+is not OSI-approved and grants no patents, for the AAC-ELD sound. No build
+compiles or links either: the gateway loads the system's shared libraries when a
+session needs them (`src/libav.rs`, `src/aac_eld.rs`), and a host without them
+runs those targets only with `media_passthrough`, for browsers that decode the
+stream. The `.deb` recommends the Linux ones, the public container image carries
+neither and the private one `publish-full-image.sh` builds carries Debian's;
+elsewhere they are installed by hand:
+
+| | libavcodec (FFmpeg 6.1 to 9) | fdk-aac |
+|---|---|---|
+| Linux | `libavcodec.so.60` to `.63`, e.g. Debian's `libavcodec61` | `libfdk-aac.so.2`, `libfdk-aac2t64`, `libfdk-aac2` before trixie (Debian non-free, Ubuntu multiverse) |
+| macOS | `libavcodec.60.dylib` to `.63`, `brew install ffmpeg` | `libfdk-aac.2.dylib`, `brew install fdk-aac` |
+| Windows | `avcodec-60.dll` to `-63`, MSYS2's `mingw-w64-ucrt-x86_64-ffmpeg` | `libfdk-aac-2.dll`, MSYS2's `mingw-w64-ucrt-x86_64-fdk-aac` |
+
+Each is looked for by the platform loader's own search, then in Homebrew's and
+MacPorts' `lib` or MSYS2's `C:\msys64\ucrt64\bin`. On macOS the loaded
+libavcodec decodes through VideoToolbox.
+
+The non-default `apple-hp-media-static` feature links private static archives
+instead, and is in no release artifact.
+`libavcodec-hevc-prebuilt` links FFmpeg's libavcodec and libavutil, configured
+down to the HEVC decoder and parser, and on macOS its VideoToolbox hwaccel, which
+links Apple's VideoToolbox, CoreMedia, CoreVideo and CoreFoundation frameworks;
+its build script downloads the latest release of
+`andrewtheguy/libavcodec-hevc-prebuilt-archives` through `gh`, or takes
+`LIBAVCODEC_HEVC_PREBUILT_DIR`.
+FFmpeg linked statically obliges a distributor of a binary to let its recipient
 relink it against a modified FFmpeg (see that repository's README).
-`fdk-aac-rust` (the AAC-ELD sound) is pure Rust and needs nothing prebuilt, but
-carries the Fraunhofer FDK AAC licence, which is not OSI-approved and grants no
-patents. Build it with
-`cargo build --release --features apple-hp-media`. Do not restore
+`fdk-aac-prebuilt` links fdk-aac the same way, from its own private archives,
+through `gh` or `FDK_AAC_PREBUILT_DIR`. Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
 libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
 with `--enable-realtime-only`; additional features need a separately built

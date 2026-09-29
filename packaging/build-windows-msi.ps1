@@ -9,7 +9,10 @@
 #   C:\Program Files\remotex\
 #   ├── VERSION
 #   ├── bin\remotex.exe
-#   └── share\doc\remotex\remotex.example.toml
+#   └── share\doc\remotex\
+#       ├── remotex.example.toml
+#       ├── LICENSE
+#       └── THIRD-PARTY-NOTICES.txt
 #
 # Runs on Windows under PowerShell 7 with cargo, the MSVC toolchain and WiX 5 on PATH
 # (`dotnet tool install --global wix --version 5.0.2`; the UI extension the wizard pages
@@ -67,7 +70,7 @@ try {
     if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
     New-Item -ItemType Directory -Force -Path "$stage\bin", "$stage\share\doc\remotex" | Out-Null
     Copy-Item $exe "$stage\bin\remotex.exe"
-    Copy-Item 'remotex.example.toml' "$stage\share\doc\remotex\remotex.example.toml"
+    Copy-Item 'remotex.example.toml', 'LICENSE', 'THIRD-PARTY-NOTICES.txt' "$stage\share\doc\remotex\"
     # Bare LF and no BOM, like the tarball's VERSION.
     [System.IO.File]::WriteAllText("$stage\VERSION", "$version`n")
 
