@@ -364,9 +364,9 @@ Desktop Duplication, codes it with the same `desktop-vp9` crate at the plan this
 gateway states, and writes each frame to `remotex.video`, which the gateway passes to
 the browser as it came. The encode this gateway does for an RDP target is then the
 host's, and nothing between the host and the browser decodes or encodes a picture.
-**Experimental**, and for a setup where the host is the better place to encode: a
-gateway on a slow machine, or a link from the host to the gateway slower than the one
-from the gateway to the browser. The host pays for the encode in CPU. The channel's
+**Experimental**, and for a setup where the host is the better place to encode, such
+as a gateway on a slow machine. The host pays for the encode in CPU, and codes its
+desktop twice, since its graphics pipeline goes on beside the stream. The channel's
 messages, what was measured against a Windows host, and what is left open are in
 [A Windows host's video over its own RDP connection](rdp-in-session-video.md). The agent
 is installed on the host by its own MSI as the `RemotexAgent` service, which runs as
@@ -398,15 +398,14 @@ each session attached over RDP: see [remotex-agent](agent.md).
   desktop until the agent says it cannot see the desktop, a frame arrives at another
   size, or the channel closes. The session reports a frame as `Event::Video` and the
   pipeline's return as `Event::VideoEnded`.
-- **The host's own graphics are stalled beside it.** While the stream is the picture
-  the session withholds the pipeline's frame acknowledgements, and a Windows host
-  stops drawing 11 or 12 frames later, so the desktop is coded once. The session
-  resumes them, with the suspend sentinel MS-RDPEGFX specifies, when the pipeline
-  takes the picture back, and the host repaints what changed without being asked.
-  The stall is measured Windows behavior and not the protocol's; a host that went on
-  drawing would be decoded into a framebuffer nothing is sent from. Suppress Output,
-  the protocol's own switch, is not used: it switches the session's display off and
-  the agent's capture with it.
+- **The host's own graphics go on beside it.** The pipeline's frames are
+  acknowledged under the stream as on any session and decoded into the framebuffer,
+  which nothing is sent from while the stream is the picture, so the host codes the
+  desktop twice and the link from it carries both. Nothing stops the host's
+  graphics: withholding acknowledgements stalls a Windows host's drawing and is
+  suspected of freezing a GPU host's display, and Suppress Output, the
+  protocol's own switch, switches the session's display off and the agent's capture
+  with it.
 - **Passed as it came** (`VideoSink::pass`), as wlshare's frame is: its size held to
   the ceiling, the configuration announced ahead of it the plan's chroma's string for
   its size, its bytes taking their share of `QUEUE_BUDGET`. The mirror, the rounds,
@@ -414,9 +413,9 @@ each session attached over RDP: see [remotex-agent](agent.md).
   settles its stream itself.
 - **The gaps are VP9 encoded here.** The secure desktop — a UAC prompt, the lock
   screen — is refused a capture in the user's session, so the agent says so and the
-  pipeline shows it. A resize is a turn of the pipeline's too, since the host's
-  graphics reset waits for the acknowledgements. At each the engine sends the whole
-  desktop at the pipeline's next frame, which starts the stream encoded here over at
+  pipeline shows it. A resize is a turn of the pipeline's too, since the agent's
+  first frame at the new size is not the desktop's. At each the engine sends the
+  whole desktop from the framebuffer, which starts the stream encoded here over at
   a keyframe behind its own announcement (`VideoSink::damage`), and the agent's
   stream coming back starts at a keyframe the same way: the turns a High Performance
   Mac's passed stream takes with its rectangles.
@@ -427,11 +426,11 @@ each session attached over RDP: see [remotex-agent](agent.md).
 - **A restart waits for a keyframe.** A reattach resets the render and asks the agent
   for a keyframe; the frames still coded against the old picture are dropped until
   it arrives, and it goes out behind a fresh `VideoFormat`.
-- **The pointer comes from the agent**, as its own shape and never in the picture.
-  A host whose graphics are stalled sends no pointer updates either, so the agent
-  sends the shape Desktop Duplication hands over beside the picture, and the session
-  reports it as the `Event::Cursor` a host's own update is. While the pipeline
-  carries the picture the host's own updates are the ones that count.
+- **The pointer comes from the agent** while the stream is the picture, as its own
+  shape and never in the picture: the agent sends the shape Desktop Duplication
+  hands over beside the picture, in step with its frames, and the session reports
+  it as the `Event::Cursor` a host's own update is, holding the host's own until
+  the pipeline carries the picture again, when they are the ones that count.
 
 #### Apple's media stream, passed through
 

@@ -6,14 +6,12 @@ the host encodes its desktop as VP9 and the gateway passes each frame to the bro
 as it came, so the encode this gateway does for an RDP target moves to the host and
 nothing in between decodes or encodes a picture.
 
-**Experimental.** It has been measured against one host, and the stall it relies on
-([below](#withholding-frame-acknowledgements-stalls-the-hosts-graphics)) is measured
-Windows behavior, not a specification. It is for a setup where the host is the better
-place to encode: a gateway on a slow machine, or a link from the host to the gateway
-slower than the one from the gateway to the browser, which then carries the VP9 the
-browser is sent rather than the graphics pipeline's own codecs. The host pays for the
-encode, and one with no CPU to spare is better left on the pipeline
-([The host's CPU](#the-hosts-cpu)).
+**Experimental.** It has been measured against one host. It is for a setup where the
+host is the better place to encode, such as a gateway on a slow machine. The host's
+graphics pipeline goes on beside the stream
+([below](#the-hosts-graphics-go-on-beside-the-stream)), so the host codes its desktop
+twice and the link from it carries both. The host pays for the encode, and one with no
+CPU to spare is better left on the pipeline ([The host's CPU](#the-hosts-cpu)).
 
 Windows has no extension point for a codec in its RDP graphics pipeline
 (`Microsoft::Windows::RDS::Graphics`): its encoders are its own, and the only video
@@ -77,7 +75,7 @@ the graphics pipeline, decoded here and encoded here as VP9.
 one RDP connection, one Windows session
 ├── input, Display Control, clipboard, sound: ordinary RDP
 ├── the graphics pipeline: carries the picture until the agent's stream does,
-│   stalled while it does, and carries it again in every gap
+│   goes on unseen while it does, and carries it again in every gap
 └── proprietary display side channel "remotex.video" (an RDP DVC)
     ├── agent → gateway: frames, the pointer's shape, "I cannot see the desktop"
     └── gateway → agent: the plan, an echo per frame, "send a keyframe"
@@ -146,12 +144,11 @@ The pipeline carries the desktop, and the stream carries it instead while it flo
   desktop, when a frame arrives at any size but the desktop's, and when the channel
   closes.
 
-While the stream is the picture the session hands each frame up as `Event::Video`
-and withholds the pipeline's frame acknowledgements, which is what stalls the host's
-own graphics ([below](#withholding-frame-acknowledgements-stalls-the-hosts-graphics)).
-When the pipeline takes the picture back the session resumes them and says
-`Event::VideoEnded`. The caller never drives the acknowledgements: a channel that
-closes under a stalled pipeline would otherwise leave nobody to resume it.
+While the stream is the picture the session hands each frame up as `Event::Video`,
+and the pipeline goes on beside it, its frames acknowledged and decoded into the
+framebuffer as on any session
+([below](#the-hosts-graphics-go-on-beside-the-stream)). When the pipeline takes the
+picture back the session says `Event::VideoEnded`.
 
 ### What the engine does with it
 
@@ -159,13 +156,11 @@ closes under a stalled pipeline would otherwise leave nobody to resume it.
   ceiling a stream encoded here is, the configuration announced ahead of it is the
   plan's chroma's string for its size, and its bytes take their share of
   `QUEUE_BUDGET`. The browser is told `passthrough: true`.
-- **The framebuffer is stale under the stream.** The host draws 11 or 12 more frames
-  after the first acknowledgement is withheld, which the client decodes and the
-  engine sends nothing of.
+- **The framebuffer is current under the stream**, and the engine sends nothing of it.
 - **A gap is VP9 encoded here.** At `Event::VideoEnded` the engine forgets what the
-  shadow claims, asks the host to repaint, and at the pipeline's next frame sends the
-  whole desktop, which starts the stream encoded here over at a keyframe behind its
-  own announcement (`VideoSink::damage`). The stream coming back starts at a
+  shadow claims and sends the whole desktop from the framebuffer, which starts the
+  stream encoded here over at a keyframe behind its own announcement
+  (`VideoSink::damage`). The stream coming back starts at a
   keyframe the same way. These are the turns a High Performance Mac's passed stream
   and its ZRLE rectangles take
   ([The gaps are VP9 encoded here](architecture.md#apples-media-stream-passed-through)).
@@ -196,14 +191,12 @@ this gateway alone: the hold wlshare's fences are given
 ### A resize
 
 A resize is a frame of another size, and so a turn of the pipeline's. Display Control
-resizes the session under the stream; the agent's duplication is lost at the mode
-change and it duplicates again at the new size; its first frame there is not the
-desktop's size as the pipeline last described it, so the pipeline takes the picture
-back. The acknowledgements resume, and with them comes the host's graphics reset for
-the new size, which had been waiting for them. The engine resizes as it does on any
-RDP session, and the agent is asked for a keyframe of the desktop as it now is.
-Measured, the pipeline had the picture 0.7 s after the resize was asked for and the
-stream had it back 1.7 s after.
+resizes the session under the stream, and the host resets its graphics for the new
+size as on any session; the agent's duplication is lost at the mode change and it
+duplicates again at the new size; its first frame there is not the desktop's size as
+the pipeline last described it, so the pipeline takes the picture back. The engine
+resizes as it does on any RDP session, and the agent is asked for a keyframe of the
+desktop as it now is.
 
 Nothing special-cases the request. A size the host changes to unasked takes the same
 path, and so does a layout the host ignores, which changes nothing.
@@ -217,74 +210,42 @@ converted to the straight-alpha RGBA the RDP client's own pointer decoder produc
 inverted pixels as the same checkerboard. The session hands it up as the
 `Event::Cursor` a host's own pointer update is.
 
-It has to come from the agent, because a host whose graphics are stalled sends no
-pointer updates either. Crossing the desktop on one path, the host sent 20 shapes
-with its frames acknowledged and none with them withheld; parked over a window that
-shows the animated busy ring, 99 and none. Under the stream the same two brought 13
-and 31 shapes from the agent.
-
-While the pipeline carries the picture the host's own updates are the ones that
-count. The agent's latest is kept, and goes out ahead of the stream's first frame.
+While the stream is the picture the pointer is the agent's, in step with the frames it
+comes with, and the host's own updates are held; the host's latest goes out when the
+pipeline takes the picture back. While the pipeline carries the picture the host's own
+updates are the ones that count. The agent's latest is kept, and goes out ahead of the
+stream's first frame.
 
 That the picture holds no pointer was checked where one would show: with the pointer
 parked on the probe's patch, a flat colour, every pixel of the patch in every frame
 was the colour painted.
 
-## Withholding frame acknowledgements stalls the host's graphics
+## The host's graphics go on beside the stream
 
-A graphics pipeline host keeps a list of the frames the client has not yet
-acknowledged with `RDPGFX_FRAME_ACKNOWLEDGE_PDU` ([MS-RDPEGFX] 3.2.1.2 and
-2.2.2.13). How many it lets pile up is not in the specification. This host stops at
-11 or 12: a client that stops acknowledging stops the host's graphics, and the
-desktop is then coded once, by the agent, not twice.
+The session acknowledges every frame of the graphics pipeline
+(`RDPGFX_FRAME_ACKNOWLEDGE_PDU`, [MS-RDPEGFX] 2.2.2.13) whether or not the stream is
+the picture, and decodes it into the framebuffer, which nothing is sent from while the
+stream is. The host therefore codes its desktop twice, once in its pipeline and once
+in the agent, and the link from it carries both; in return the framebuffer is the
+desktop whenever the pipeline takes the picture back, and the host's own pointer
+updates go on.
 
-This is a measured modern-Windows behavior, not the protocol's. It has to be
-remeasured on each supported Windows generation rather than inferred from the
-specification, and the design does not depend on it for anything but the saving: a
-host that went on drawing would be decoded into a framebuffer nothing is sent from,
-and only the newest withheld acknowledgement is kept, so the client's state stays
-bounded whatever a host does.
+Nothing stops the host's graphics under the stream:
 
-- **The display stays on.** Capture stays fresh throughout, and it follows the
-  desktop: keystrokes reach the session and the agent's frames show the result.
-- **Sound is untouched**: 5 or 6 buffers every second, which is 44.1 kHz 16-bit
-  stereo, before the stall, through it and across the resume.
-- **The pointer is not**: see [The pointer](#the-pointer).
-- **The graphics reset waits.** Display Control still resizes the session, and the
-  host's reset for the new size comes only once acknowledgements resume.
-- **The resume is specified.** The client sends the newest withheld frame with the
-  `0xFFFFFFFF` suspend sentinel, which has the host clear its outstanding frames
-  without waiting on them, and the next EndFrame's ordinary acknowledgement opts back
-  in ([MS-RDPEGFX] 2.2.2.13). The host's first frame came 23 to 66 ms later, after
-  stalls of 10 and of 30 seconds. An ordinary acknowledgement of the newest frame
-  resumed it the same way and as fast; the sentinel is kept because it is the half
-  that is specified.
-- **The host repaints what changed, unasked.** With Start opened under the stall,
-  1709 of the 3639 blocks compared differed between the host's picture here and the
-  agent's; five seconds after the resume none did.
-
-### What does not stop the host's graphics
-
-**Suppress Output** ([MS-RDPBCGR] 2.2.11.3) is the protocol's way to turn a host's
-display updates off: once it is processed, "the server MUST stop or resume sending
-graphics updates" ([MS-RDPBCGR] 3.3.5.11.2). It switches the session's display off
-and capture with it. Within 1.5 s of the PDU, Desktop Duplication fails with
-`DXGI_ERROR_ACCESS_LOST`; duplicating the output again and a GDI `BitBlt` of the
-screen are both refused with `E_ACCESSDENIED`, and `GetPixel` returns a stale value,
-for as long as updates stay off. The input desktop stays `Default`: the session is
-not locked, its display is switched off. None of that is specified. The DXGI
-reference gives `DXGI_ERROR_ACCESS_LOST` for a desktop switch, a mode change or a
-change of DWM or full-screen state ([`AcquireNextFrame`]), and `E_ACCESSDENIED` for
-an application without access to the current desktop image
-([`DuplicateOutput`]); neither names Suppress Output.
-
-**A reported queue depth** is the one flow control the specification describes: a
-server SHOULD throttle by the `queueDepth` a client reports, the bytes of graphics it
-holds unprocessed ([MS-RDPEGFX] 3.2.5.13). This host does not. It sent 33 frames a
-second with 0 reported, with 64 MB and with `0xFFFFFFFE`.
-
-**The specified opt-out**, an acknowledgement carrying the suspend sentinel, is the
-opposite of a stall: the host then waits on no acknowledgement at all.
+- **Withholding acknowledgements** stalls them. A pipeline host keeps a list of the
+  frames the client has not acknowledged, and how many it lets pile up is not in the
+  specification; a Windows host stopped drawing at 11 or 12, and sent no pointer
+  updates while it stood. It is not done: a host with a GPU froze its display minutes
+  into a stream under it, and the stall is the suspect.
+- **Suppress Output** ([MS-RDPBCGR] 2.2.11.3), the protocol's way to turn a host's
+  display updates off, switches the session's display off and capture with it. Within
+  1.5 s of the PDU, Desktop Duplication fails with `DXGI_ERROR_ACCESS_LOST`;
+  duplicating the output again and a GDI `BitBlt` of the screen are both refused with
+  `E_ACCESSDENIED`, and `GetPixel` returns a stale value, for as long as updates stay
+  off.
+- **A reported queue depth**, the one flow control the specification describes
+  ([MS-RDPEGFX] 3.2.5.13), is not honoured: the host sent 33 frames a second with 0
+  reported, with 64 MB and with `0xFFFFFFFE`.
 
 ## The secure desktop
 
@@ -310,7 +271,8 @@ the session runs. At normal priority the agent has only the CPU they leave. On t
 host measured, a browser playing a video took every core, drawing it in software for
 want of a GPU from a GPU process Chrome runs above normal priority, and the stream
 fell to a few frames a second. The pipeline carried the same desktop smoothly, since
-the host's own encoder is cheap and the VP9 encode ran on this gateway. Running the
+the host's own encoder is cheap and the VP9 encode ran on this gateway. Under the
+stream the host pays for both, since its pipeline goes on beside it. Running the
 agent above normal changed nothing, since that only matched Chrome.
 
 So the agent runs in DWM's priority class, `HIGH_PRIORITY_CLASS`, as the session's
@@ -362,7 +324,7 @@ REMOTEX_UAT_TARGET=windows-ent-sandbox RUST_LOG=remotex::rdp_client=info \
 
 | Test | What it shows |
 |---|---|
-| `the_stream_carries_the_desktop_and_gives_it_back` | A message of megabytes in one write, the stall and the sound under it, the pointer from the agent and out of the picture, a resize, the agent leaving |
+| `the_stream_carries_the_desktop_and_gives_it_back` | A message of megabytes in one write, the sound under it, the pointer from the agent and out of the picture, a resize, the agent leaving |
 | `the_secure_desktop_is_the_pipelines_to_show` | Ctrl+Alt+Del: the gap, and the stream back after it |
 | `the_stream_comes_back_on_a_new_connection` | A reconnect with the agent left running |
 | `the_service_gives_each_connection_an_agent` | The installed service: an agent of its own for each connection, none streaming to a connection that refuses the channel |

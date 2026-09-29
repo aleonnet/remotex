@@ -671,9 +671,10 @@ pub struct TargetConfig {
     /// carries the desktop as if this key were unset. Unset, the channel is refused
     /// by name and no agent's stream is taken. See docs/rdp-in-session-video.md.
     ///
-    /// Experimental, and for a setup where the host is the better place to encode:
-    /// a gateway on a slow machine, or a slower link from the host to the gateway
-    /// than from the gateway to the browser. The host pays for the encode in CPU.
+    /// Experimental, and for a setup where the host is the better place to encode,
+    /// such as a gateway on a slow machine. The host pays for the encode in CPU, and
+    /// its graphics pipeline goes on beside the stream, so it codes the desktop twice
+    /// and the link from it carries both.
     #[serde(default)]
     pub agent_passthrough: bool,
 }

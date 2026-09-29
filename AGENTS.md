@@ -154,17 +154,17 @@ documentation.
   came — a frame that is not the plan's — it is not taken and the pipeline carries
   the desktop. The pipeline also carries every gap: the secure desktop,
   which the agent cannot see, a resize, a closed channel, each switch starting at a
-  keyframe. While the stream is the picture the session withholds the pipeline's
-  frame acknowledgements, which stalls the host's own graphics and its pointer
-  updates with them, so the pointer comes from the agent as its own shape, never
-  drawn into the picture. Do not take the stream without the key, add a port or
-  logon of the agent's own, framing of its own on the channel's messages, Suppress
-  Output to stop the host's graphics, or a session that ends for want of the
-  agent. Treat the stall as measured Windows behavior, not a specification. Call
-  the key and `remotex-agent` experimental wherever they are named, and present
-  them as moving the encode to the host where the setup favours it — a gateway on
-  a slow machine, a slower link from the host to the gateway than to the browser
-  — never as a better picture than the pipeline's. See
+  keyframe. The pipeline goes on beside the stream, every frame acknowledged, so the
+  host codes the desktop twice; never stop the host's graphics to save that —
+  withheld acknowledgements, suspected of freezing a GPU host's display, or
+  Suppress Output.
+  While the stream is the picture the pointer comes from the agent as its own shape,
+  never drawn into the picture, and the host's own is held. Do not take the stream
+  without the key, add a port or logon of the agent's own, framing of its own on
+  the channel's messages, or a session that ends for want of the agent. Call the
+  key and `remotex-agent` experimental wherever they are named, and present them as
+  moving the encode to the host where the setup favours it, such as a gateway on a
+  slow machine — never as a better picture than the pipeline's. See
   [An RDP host's stream, passed through](docs/architecture.md#an-rdp-hosts-stream-passed-through)
   and [A Windows host's video over its own RDP connection](docs/rdp-in-session-video.md).
 - Remote audio uses its own `/ws/audio` socket and queue; opening the socket is
