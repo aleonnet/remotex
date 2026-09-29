@@ -170,12 +170,35 @@ export function createFramePainter(options: {
     return video;
   };
 
+  // The end of a pipeline this page can no longer follow. Its compositor holds what
+  // the host believes its client does only while it has composed every command, so
+  // one that refused a command or was never given one is not fed again; and nothing
+  // is asked of the gateway, since a host answers a repaint out of the caches this
+  // compositor no longer has. Said once: what follows is the same fact.
+  const endPipeline = (broken: Pipeline, why: string) => {
+    if (broken.broken) {
+      return;
+    }
+    broken.broken = true;
+    broken.compositor?.close();
+    broken.compositor = null;
+    videoComplained = false;
+    options.onVideoError(
+      `This browser could not compose the host's graphics (${why}). Reload the page to start the session over.`,
+    );
+  };
+
   // Every unit is part of one chain, so a dropped batch cuts it: the deltas after it
   // name a picture this decoder never made. Restarted rather than fed them, and a
   // keyframe asked for, exactly as a failed decoder is. A dropped tile is pixels
   // nothing will send again, so it asks the same way: the gateway answers with a
-  // full update from the remote.
+  // full update from the remote. A pipeline's dropped batch is commands its
+  // compositor never composed, which no repaint brings back, so it ends there.
   const dropMalformed = () => {
+    if (pipeline) {
+      endPipeline(pipeline, "a batch of its commands arrived malformed");
+      return;
+    }
     video?.restart();
     options.onVideoNeedsKeyframe("a malformed batch was dropped");
   };
@@ -198,13 +221,7 @@ export function createFramePainter(options: {
     try {
       run = compositor.compose(record.data);
     } catch (error) {
-      current.broken = true;
-      current.compositor = null;
-      compositor.close();
-      videoComplained = false;
-      options.onVideoError(
-        `This browser could not compose the host's graphics (${describe(error)}). Reload the page to start the session over.`,
-      );
+      endPipeline(current, describe(error));
       return;
     }
     const context = options.context();

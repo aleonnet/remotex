@@ -110,7 +110,10 @@ interface Session {
   batches: Batch[];
   /** Binary frames that were not batches. */
   badKinds: number[];
-  /** Runs that arrived before any `graphicsStart` said a pipeline had begun. */
+  /**
+   * Runs that arrived on a session before its own `graphicsStart` said a pipeline
+   * had begun. Counted over every session watched.
+   */
   unannounced: number;
   /** The sequences the page acknowledged, as it sent them. */
   acknowledged: number[];
@@ -129,6 +132,9 @@ function watchSession(page: Page): Session {
     if (new URL(ws.url()).pathname !== "/ws") {
       return;
     }
+    // Whether this session's pipeline has been announced: a socket's own, and a
+    // session's own on it, so the one before cannot answer for the one after.
+    let started = false;
     ws.on("framesent", ({ payload }) => {
       if (typeof payload !== "string") {
         return;
@@ -138,19 +144,25 @@ function watchSession(page: Page): Session {
         seen.acknowledged.push(message.sequence);
       }
     });
+    const control = (text: string) => {
+      const message = JSON.parse(text);
+      if (typeof message.type !== "string") {
+        return;
+      }
+      seen.controlTypes.push(message.type);
+      if (message.type === "connected") {
+        seen.connected = { render: message.render };
+        // A session that starts is a socket's count starting over.
+        seen.batches = [];
+        seen.acknowledged = [];
+        started = false;
+      } else if (message.type === "graphicsStart") {
+        started = true;
+      }
+    };
     ws.on("framereceived", ({ payload }) => {
       if (typeof payload === "string") {
-        const message = JSON.parse(payload);
-        if (typeof message.type !== "string") {
-          return;
-        }
-        seen.controlTypes.push(message.type);
-        if (message.type === "connected") {
-          seen.connected = { render: message.render };
-          // A session that starts is a socket's count starting over.
-          seen.batches = [];
-          seen.acknowledged = [];
-        }
+        control(payload);
         return;
       }
       const kind = payload.readUInt8(0);
@@ -159,7 +171,7 @@ function watchSession(page: Page): Session {
         return;
       }
       const batch = parseBatch(payload);
-      if (!seen.controlTypes.includes("graphicsStart")) {
+      if (!started) {
         seen.unannounced += batch.runs.length;
       }
       seen.batches.push(batch);
@@ -202,7 +214,7 @@ test.describe("a target that passes its graphics pipeline", () => {
     expect(seen.badKinds, "binary frames that were not batches").toEqual([]);
     expect(
       seen.unannounced,
-      "runs that arrived before any graphicsStart",
+      "runs that arrived before their session's graphicsStart",
     ).toBe(0);
     expect(
       seen.controlTypes,
@@ -278,7 +290,10 @@ test.describe("a target that passes its graphics pipeline", () => {
     const after = seen.controlTypes.slice(before);
     expect(after).toContain("connected");
     expect(after).toContain("graphicsStart");
-    expect(seen.unannounced).toBe(0);
+    expect(
+      seen.unannounced,
+      "runs that arrived before their session's graphicsStart",
+    ).toBe(0);
     expect(seen.batches[0]?.sequence).toBe(1);
     await expect(page.getByRole("alert")).toHaveCount(0);
 

@@ -711,16 +711,65 @@ test("clear() ends a pipeline, and a run of the attachment before is not painted
   }
 });
 
-test("a graphics record of no length is malformed", async () => {
+test("a malformed batch ends a pipeline: what it held is never composed, and no repaint is asked for", async () => {
+  installImageData();
+  try {
+    const { made, load } = fakeCompositors();
+    const p = graphicsPainter(load);
+    p.startGraphics();
+    await p.draw(graphicsFrame([[1]]));
+    // A record of no length is malformed, and the batch is dropped whole.
+    await p.draw(graphicsFrame([[2], []]));
+    await p.draw(graphicsFrame([[3]]));
+    await p.draw(graphicsFrame([[]]));
+    assert.deepEqual(
+      made[0].fed,
+      [[1]],
+      "nothing is composed after the dropped batch",
+    );
+    assert.equal(made[0].closed, true);
+    assert.equal(put.length, 1);
+    const said = videoErrors.filter((error) => error !== null);
+    assert.equal(said.length, 1, "the end of a pipeline is said once");
+    assert.match(said[0] ?? "", /could not compose the host's graphics/);
+    assert.deepEqual(
+      videoKeyframeAsks,
+      [],
+      "no repaint repairs a pipeline: the host answers one out of its caches",
+    );
+  } finally {
+    globalThis.ImageData = realImageData;
+  }
+});
+
+test("a malformed batch ahead of the module's load leaves no compositor made", async () => {
   const { made, load } = fakeCompositors();
   const p = graphicsPainter(load);
   p.startGraphics();
   await p.draw(graphicsFrame([[]]));
-  assert.deepEqual(
-    made.flatMap((compositor) => compositor.fed),
-    [],
-  );
-  assert.equal(videoKeyframeAsks.length, 1);
+  await p.draw(graphicsFrame([[1]]));
+  assert.deepEqual(made, []);
+  assert.deepEqual(put, []);
+  assert.deepEqual(videoKeyframeAsks, []);
+});
+
+test("a pipeline that starts after one ended is composed", async () => {
+  installImageData();
+  try {
+    const { made, load } = fakeCompositors();
+    const p = graphicsPainter(load);
+    p.startGraphics();
+    await p.draw(graphicsFrame([[]]));
+    p.startGraphics();
+    await p.draw(graphicsFrame([[5]]));
+    assert.deepEqual(
+      made.map((compositor) => compositor.fed),
+      [[[5]]],
+    );
+    assert.equal(videoErrors.at(-1), null, "the next pipeline retracts it");
+  } finally {
+    globalThis.ImageData = realImageData;
+  }
 });
 
 test("a tile is drawn where the remote put it, and needs no stream", async () => {
