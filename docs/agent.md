@@ -10,10 +10,10 @@ the protocol, the rules the gateway holds the stream to and what was measured ar
 
 **Experimental.** It has been measured against one Windows host, and what it relies on
 in the host's graphics is measured behavior, not a specification. Its use is to move the
-encode to the host where the setup favours it: a gateway on a slow machine, or a link
-from the host to the gateway slower than the one from the gateway to the browser, which
-then carries the VP9 the browser is sent in place of the graphics pipeline's own codecs.
-The host pays for the encode in CPU, beside everything its session runs, so a host with
+encode to the host where the setup favours it, such as a gateway on a slow machine.
+The host's graphics pipeline goes on beside the stream, so the host codes its desktop
+twice and the link from it carries both. The host pays for the encode in CPU, beside
+everything its session runs, so a host with
 none to spare, such as one drawing a video in software for want of a GPU, shows its
 desktop more smoothly without it
 ([The host's CPU](rdp-in-session-video.md#the-hosts-cpu)).

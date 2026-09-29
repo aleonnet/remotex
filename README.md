@@ -66,9 +66,8 @@ browser app. `defaults delete -g NSConvolutionOverride1` restores Apple's radius
 
 A Windows host can code its own desktop for an RDP target with
 [`remotex-agent`](docs/agent.md), a service installed there from its own MSI. It is
-**experimental**, and for a setup where the host is the better place to encode: a
-gateway on a slow machine, or a slower link from the host to the gateway than from the
-gateway to the browser.
+**experimental**, and for a setup where the host is the better place to encode, such
+as a gateway on a slow machine.
 
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/known-issues.md`](docs/known-issues.md) for faults worth recognising rather

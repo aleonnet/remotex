@@ -32,7 +32,7 @@ desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0
 remotex-video-channel = { path = "crates/remotex-video-channel" }
 
 [workspace.package]
-version = "0.0.289"
+version = "0.0.290"
 
 [package]
 name = "remotex"

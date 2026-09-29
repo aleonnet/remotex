@@ -6,9 +6,9 @@
 //! Desktop Duplication, codes it with desktop-vp9 to the plan this end states, and
 //! writes it to the channel beside the pointer's shape. The RDP client
 //! (`src/rdp_client/proto/video.rs`) takes the stream as the picture from its first
-//! keyframe, withholds the pipeline's frame acknowledgements while it flows, which
-//! stalls the host's own graphics, and gives the picture back to the pipeline when the
-//! agent cannot see the desktop, the desktop changes size, or the channel closes.
+//! keyframe, while the host's own graphics go on beside it, and gives the picture back
+//! to the pipeline when the agent cannot see the desktop, the desktop changes size, or
+//! the channel closes.
 //!
 //! Most tests start a session's agent themselves, by scheduled task, which the host's
 //! `RemotexAgent` service would otherwise do: they refuse to run beside it. Three test
@@ -492,7 +492,7 @@ async fn connect_to_stream(switches: &str) -> (Session, Receiver) {
 }
 
 /// The stream takes the picture and gives it back: a frame of megabytes in one write,
-/// the host's graphics stalled beside the stream and the sound going on, the pointer
+/// the host's graphics and the sound going on beside the stream, the pointer
 /// as its own shape from the agent and never in the picture, a resize through the
 /// pipeline and back, and the agent leaving.
 #[tokio::test]
@@ -516,22 +516,19 @@ async fn the_stream_carries_the_desktop_and_gives_it_back() {
     // so it arrived as the stream's first frame and the first to decode came after.
     assert_eq!(opening.largest, BIG, "the channel did not carry {BIG} bytes as one message");
 
-    let running_down = phase(&mut rx, "the-stream-begins", 10).await;
-    assert!(running_down.host_frames <= 16, "the host went on drawing: {} frames", running_down.host_frames);
     let flowing = phase(&mut rx, "the-stream", 10).await;
-    assert_eq!(flowing.host_frames, 0, "the host's graphics are not stalled");
+    assert!(flowing.host_frames > 0, "the host's graphics stopped under the stream");
     assert_eq!(flowing.fresh, flowing.decoded, "a stale frame");
     assert!(flowing.sound > 0, "the sound stopped under the stream");
     assert_eq!(flowing.patch_foreign, 0, "something drawn into the patch");
     println!("  differing blocks, host against agent, under the stream: {:?}", differing_blocks(&session, &rx));
 
     // The pointer: crossing the desktop its shape changes, and the shapes come from
-    // the agent, the host's own updates being stalled with its graphics.
+    // the agent, the host's own updates being held while the stream is the picture.
     let crossing = sweeps(&input);
     let swept = phase(&mut rx, "the-stream+sweeps", 9).await;
     crossing.await.unwrap();
     assert!(swept.cursors > 0, "no pointer shape came while the pointer crossed the desktop");
-    assert_eq!(swept.host_frames, 0);
     // Parked on the patch, where a pointer in the picture would be seen.
     input.mouse_move(PATCH.0 as u16 - 30, PATCH.1 as u16 - 30);
     let parked = phase(&mut rx, "the-stream+pointer-on-patch", 5).await;
@@ -566,8 +563,8 @@ async fn the_stream_carries_the_desktop_and_gives_it_back() {
     let left = Instant::now();
     let mut back = Phase::default();
     let drew = rx.run(&mut back, Instant::now() + Duration::from_secs(10), Until::HostFrame).await;
-    println!("  the host drew again {:?} after the agent's channel closed", left.elapsed());
-    assert!(drew, "the host's graphics never resumed");
+    println!("  the host's next frame came {:?} after the agent's channel closed", left.elapsed());
+    assert!(drew, "the host drew nothing after the agent's channel closed");
     stopping.await.unwrap();
     let after = phase(&mut rx, "the-pipeline-again", 8).await;
     assert!(after.host_frames > 0 && after.frames == 0 && after.sound > 0);
@@ -666,10 +663,9 @@ async fn the_service_gives_each_connection_an_agent() {
         assert!(came, "the service started no agent that streamed on connection {round}");
         assert_eq!(first.keyframes, 1);
         println!("  the stream was the picture {:?} after connection {round}", connected.elapsed());
-        phase(&mut rx, &format!("connection-{round}-running-down"), 5).await;
         let flowing = phase(&mut rx, &format!("connection-{round}-stream"), 5).await;
         assert!(flowing.decoded > 0 && flowing.ended == 0);
-        assert_eq!(flowing.host_frames, 0, "the host's graphics are not stalled");
+        assert!(flowing.host_frames > 0, "the host's graphics stopped under the stream");
         drop(session);
         drop(rx);
         tokio::time::sleep(Duration::from_secs(5)).await;

@@ -221,18 +221,10 @@ is echoed to the agent from here, since the agent sends its next frame on the ec
 one that does is echoed by the caller, with `Input::echo_video`, once it has gone on
 to whoever is watching. `Input::video_keyframe` asks the agent for a keyframe.
 
-While the stream is the picture the client leaves the pipeline's frames
-unacknowledged and keeps the newest of them. A Windows host stops drawing 11 or 12
-frames later, so the desktop is coded once. Those last frames are decoded into the
-framebuffer like any others, which is then stale until the pipeline draws again: a
-caller sends nothing of it under the stream. When the pipeline takes the picture
-back the client sends the frame it kept with `queueDepth` `0xFFFFFFFF`, the suspend
-sentinel, which has the host clear the frames it holds outstanding without waiting
-on them, and acknowledges the next EndFrame as usual, which opts back in
-(MS-RDPEGFX 2.2.2.13). The host draws again within tens of milliseconds and repaints
-what changed meanwhile without being asked. The session does this itself and no
-caller drives it, because the channel may close with the pipeline stalled and only
-the session is there to see it.
+The pipeline goes on beside the stream, every frame acknowledged as on any
+session, so the host codes the desktop twice and the framebuffer stays current: a
+caller sends nothing of it under the stream, and has the whole desktop to send the
+moment the pipeline takes the picture back.
 
 A message the client cannot read — an unknown kind, a frame of another profile than
 the plan's, a pointer past 384 pixels a side — closes the channel and leaves the
@@ -300,9 +292,8 @@ already where the mouse is, and nothing here can move a hardware pointer.
 
 Under [an agent's stream](#an-agents-stream-in-the-pipelines-place) the shape comes
 from the agent instead, on its channel, and reaches the caller as the same
-`Event::Cursor`. It has to: a Windows host whose graphics are stalled sends no
-pointer updates either. Measured on one path across the desktop, the host sent 20
-shapes with its frames acknowledged and none with them withheld. The agent's picture
+`Event::Cursor`, in step with the frames it comes with; the host's own updates are
+held meanwhile, and its latest follows `Event::VideoEnded`. The agent's picture
 holds no pointer, as the framebuffer holds none: Desktop Duplication hands the
 desktop over without it. While the pipeline carries the picture the host's own
 updates are the ones that count, and the agent's latest shape is kept for the
@@ -337,12 +328,11 @@ capabilities PDU and honoured 6.7 s into the same session. The ladder lives in t
 engine (`LAYOUT_RETRY_DELAYS`), because a retry needs a clock and a policy and the
 client owns neither.
 
-Under [an agent's stream](#an-agents-stream-in-the-pipelines-place) the host still
-resizes the session, but its graphics reset waits for the acknowledgements the
-client is withholding. The agent's first frame at the new size is what ends the
-wait: it is not the desktop's size as the pipeline last described it, so the
-pipeline takes the picture back, the acknowledgements resume, and the reset
-arrives as it does on any session.
+Under [an agent's stream](#an-agents-stream-in-the-pipelines-place) the host
+resizes the session and resets its graphics as on any session. The agent's first
+frame at the new size is not the desktop's size as the pipeline last described it,
+so the pipeline takes the picture back, and the stream returns at a keyframe of the
+new size.
 
 ## The clipboard (MS-RDPECLIP)
 
@@ -575,11 +565,3 @@ and `rdpsnd` named without `rdpdr` all look from here exactly like a working
 session in which nothing happens. That is why the probes assert on what the *host* does — that it opens a
 channel, takes a format list, resets the graphics to the size that was asked for —
 rather than on what this client sent.
-
-The stall under an agent's stream is measured as well, and is the one the client
-leans on rather than works around: nothing in MS-RDPEGFX says a host stops drawing
-for want of acknowledgements, or that its pointer updates stop with it. It is to be
-measured again on each Windows generation, and the client is written to stay
-correct without it — a host that went on drawing would be decoded into a
-framebuffer nothing is sent from, and one acknowledgement is kept however many are
-withheld.

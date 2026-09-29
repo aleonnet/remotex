@@ -951,14 +951,9 @@ async fn active_loop(
     let mut frame_marks = false;
 
     // Whether an agent in the session carries the picture with a stream of its own,
-    // passed to the browser as it came ([`Event::Video`]). The host's graphics are
-    // stalled beside it, so the framebuffer is stale and nothing of it is sent.
+    // passed to the browser as it came ([`Event::Video`]). The host's graphics go on
+    // beside it into the framebuffer, and nothing of them is sent.
     let mut streaming = false;
-    // The pipeline took the picture back and owes the browser all of it: what the
-    // framebuffer held went stale under the stream, and the shadow knows nothing of
-    // what the stream showed. Paid at the pipeline's next frame, once the host has
-    // drawn what changed.
-    let mut repaint_owed = false;
     // The echoes the agent's frames are owed, each held for the queue ahead of its
     // frame on the browser's link ([`VideoSink::fence_hold`]), in order.
     let mut echoes: VecDeque<(Instant, u32)> = VecDeque::new();
@@ -1017,25 +1012,13 @@ async fn active_loop(
                     anyhow::bail!("the RDP client stopped reporting");
                 };
                 match event {
-                    // The last frames the host drew before its graphics stalled
-                    // under the agent's stream: the stream is the picture.
+                    // The host's own graphics under the agent's stream, which is the
+                    // picture: the framebuffer keeps them for when it is not.
                     Event::Paint(_) | Event::Frame if streaming => {}
                     Event::Paint(rect) => {
                         // Staged rather than sent: whether this goes out now or at
                         // the deadline is decided once, at the end of the loop.
                         stage_damage(&mut pending_damage, damaged(rect));
-                    }
-                    // The pipeline's first frame since it took the picture back: the
-                    // host has drawn what changed under the stream, and the whole
-                    // desktop goes out, as the stream encoded here.
-                    Event::Frame if repaint_owed => {
-                        frame_marks = true;
-                        repaint_owed = false;
-                        pending_damage.clear();
-                        shadow.forget();
-                        send_damage(framebuffer, whole(desktop), &mut shadow, sink).await?;
-                        damage_flushed = Instant::now();
-                        damage_due = None;
                     }
                     // The server says this is where its frame ends, which is the fact
                     // the damage interval was built to guess at: everything staged
@@ -1068,7 +1051,6 @@ async fn active_loop(
                         if !streaming {
                             info!("rdp: an agent in the session carries the picture, passed as it comes");
                             streaming = true;
-                            repaint_owed = false;
                             // Staged damage names pixels the stream carries now.
                             pending_damage.clear();
                             damage_due = None;
@@ -1080,14 +1062,19 @@ async fn active_loop(
                         info!("rdp: the host's own graphics carry the picture again");
                         streaming = false;
                         refused = false;
-                        repaint_owed = true;
                         // The frames that went on are the browser's whatever follows.
                         for (_, seq) in echoes.drain(..) {
                             input.echo_video(seq);
                         }
-                        // A still desktop draws nothing unasked, and the repaint
-                        // waits for a frame.
-                        input.refresh();
+                        // The framebuffer is the desktop as the host drew it under the
+                        // stream, and the shadow knows nothing of what the stream
+                        // showed: the whole desktop goes out, as the stream encoded
+                        // here.
+                        pending_damage.clear();
+                        shadow.forget();
+                        send_damage(framebuffer, whole(desktop), &mut shadow, sink).await?;
+                        damage_flushed = Instant::now();
+                        damage_due = None;
                     }
                     Event::ResizeReady { max_area } => {
                         debug!("rdp: the remote offers dynamic resize, up to {max_area} pixels");
@@ -1218,14 +1205,11 @@ async fn active_loop(
                     sink.msg(pointer.attached()).await?;
                     if streaming {
                         // The picture is the agent's stream, which starts over at the
-                        // keyframe asked for here; the framebuffer is stale under it.
+                        // keyframe asked for here.
                         input.video_keyframe();
                         continue;
                     }
                     send_damage(framebuffer, whole(desktop), &mut shadow, sink).await?;
-                    // The whole desktop has gone out, which is all the repaint the
-                    // pipeline owed for taking the picture back.
-                    repaint_owed = false;
                     // A repaint is a frame. Without this, the whole repaint would
                     // sit in the video mirror unsent, while the shadow already
                     // counts every pixel of it as delivered.

@@ -198,16 +198,17 @@ pub enum Event {
     ClipboardWanted { format: u32 },
     Cursor(Cursor),
     /// One frame of an in-session agent's stream, the whole desktop, which carries the
-    /// picture from its first frame until [`Event::VideoEnded`]: the framebuffer goes
-    /// stale meanwhile, because the host's own graphics are stalled beside the stream,
-    /// and the pointer still arrives as [`Event::Cursor`], from the agent. Every frame
-    /// is owed an [`Input::echo_video`] once it has gone on to whoever is watching,
-    /// which is what the agent sends the next one on.
+    /// picture from its first frame until [`Event::VideoEnded`]. The host's own graphics
+    /// go on beside the stream, acknowledged as ever, so the framebuffer stays current;
+    /// the pointer arrives as [`Event::Cursor`] from the agent meanwhile, and the host's
+    /// is held. Every frame is owed an [`Input::echo_video`] once it has gone on to
+    /// whoever is watching, which is what the agent sends the next one on.
     Video(video::Frame),
     /// The graphics pipeline carries the picture again, as [`Event::Paint`] and
     /// [`Event::Frame`]: the agent cannot see the desktop, the desktop is changing
-    /// size, or its channel closed. The host repaints what changed under the stream
-    /// without being asked.
+    /// size, or its channel closed. The framebuffer is the desktop as the host last
+    /// drew it, and the host's latest pointer, held under the stream, follows as
+    /// [`Event::Cursor`].
     VideoEnded,
     /// The session is over, and the channel is about to close. `Ok(())` is an
     /// orderly disconnection from either side.
@@ -565,15 +566,9 @@ struct Active<'a> {
     recorder: Option<Recorder>,
     /// An in-session agent's stream, for a session that takes one.
     video: Option<video::Stream>,
-    /// The newest graphics frame left unacknowledged while the agent's stream is the
-    /// picture, which is what stalls the host's own graphics beside it. Only the newest:
-    /// it is the one the resume names, and keeping one bounds this whatever a host does
-    /// with frames nobody acknowledges.
-    held_ack: Option<(u32, u32)>,
-    /// The host was told to stop waiting for acknowledgements when the stream ended,
-    /// and waits for none until one is sent again: the next frame's is, even under a
-    /// stream begun meanwhile, or the host would never stall beside it.
-    acks_suspended: bool,
+    /// The host's own pointer, held while the agent's stream is the picture and its
+    /// pointer the agent's, for when the pipeline carries the picture again.
+    host_cursor: Option<Cursor>,
     /// Device redirection's channel, named for the sound's sake alone, and its
     /// handshake — see [`rdpdr`].
     devices: Option<Joined>,
@@ -820,8 +815,7 @@ impl<'a> Active<'a> {
             capture: camera.map(|camera| Capture { proto: rdpecam::Rdpecam::new(&camera.name), sink: camera.sink }),
             recorder: microphone.map(|sink| Recorder { proto: rdpeai::Rdpeai::new(), sink }),
             video: config.video.filter(|_| config.egfx).map(video::Stream::new),
-            held_ack: None,
-            acks_suspended: false,
+            host_cursor: None,
             devices,
             rdpdr: rdpdr::Rdpdr::new(),
             share: Share::from(&demand),
@@ -990,7 +984,7 @@ impl<'a> Active<'a> {
                 self.paint(rect);
             }
             if let Some(cursor) = cursor {
-                self.send(Event::Cursor(cursor)).await;
+                self.on_host_cursor(cursor).await;
             }
         }
         Ok(())
@@ -1032,7 +1026,7 @@ impl<'a> Active<'a> {
     async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
         let (replies, updates, watched) = {
             let Self {
-                chunks, incoming, dynamics, graphics, sound, capture, recorder, video, held_ack, acks_suspended, framebuffer, share, ..
+                chunks, incoming, dynamics, graphics, sound, capture, recorder, video, framebuffer, share, ..
             } = self;
             let pdu = match chunks.push(payload)? {
                 Chunk::Whole(pdu) => pdu,
@@ -1066,10 +1060,6 @@ impl<'a> Active<'a> {
                     debug!("rdp: the host closed the graphics channel");
                     dynamics.graphics = None;
                     *graphics = Some(Graphics::new());
-                    // A held acknowledgement names this channel's frame; a channel
-                    // opened again numbers its own, and waits on every one of them.
-                    *held_ack = None;
-                    *acks_suspended = false;
                     (vec![dvc::close(channel)], Vec::new())
                 }
                 // The sound, on the channel a current host prefers for it. Every
@@ -1298,48 +1288,34 @@ impl<'a> Active<'a> {
         let (Some(channel), Some(dynamic)) = (self.dynamics.graphics, self.dynamic) else {
             return Ok(()); // the channel closed under the frame; nothing to answer on
         };
-        // The agent's stream is the picture: a Windows host stops drawing once a few
-        // of its frames stand unacknowledged, and so codes the desktop once, not twice.
-        // A host told to stop waiting is first opted back in, by this frame's.
-        if self.video.as_ref().is_some_and(video::Stream::flowing) && !self.acks_suspended {
-            self.held_ack = Some((frame, decoded));
-            return Ok(());
-        }
-        self.acks_suspended = false;
         let ack = gfx_proto::frame_acknowledge(frame, decoded);
         self.write_channel(dynamic, &dvc::data(channel, &ack)?).await
     }
 
-    /// Resume after the host's graphics frames went unacknowledged under the agent's
-    /// stream. The suspend sentinel names the most recently decoded frame and has the
-    /// host clear every frame it holds outstanding without waiting on it, and the next
-    /// EndFrame's ordinary acknowledgement opts back in ([MS-RDPEGFX] 2.2.2.13), sent
-    /// whether or not a stream has begun again by then ([`Self::acknowledge_frame`]).
-    async fn resume_frame_acknowledgements(&mut self) -> Result<()> {
-        let Some((frame, decoded)) = self.held_ack.take() else {
-            return Ok(());
-        };
-        let (Some(channel), Some(dynamic)) = (self.dynamics.graphics, self.dynamic) else {
-            return Ok(());
-        };
-        let ack = gfx_proto::suspend_frame_acknowledgement(frame, decoded);
-        self.acks_suspended = true;
-        self.write_channel(dynamic, &dvc::data(channel, &ack)?).await
+    /// The host's own pointer update, handed up unless the agent's stream is the
+    /// picture: its pointer is the agent's then, and the host's latest waits for the
+    /// stream to end.
+    async fn on_host_cursor(&mut self, cursor: Cursor) {
+        if self.video.as_ref().is_some_and(video::Stream::flowing) {
+            self.host_cursor = Some(cursor);
+        } else {
+            self.send(Event::Cursor(cursor)).await;
+        }
     }
 
     /// What the agent's stream said, acted on.
     async fn on_video(&mut self, output: video::Output) -> Result<()> {
         match output {
-            // Nothing to do at once: the acknowledgements stop with the next EndFrame.
-            video::Output::Began => {}
             video::Output::Frame(frame) => self.send(Event::Video(frame)).await,
             video::Output::Pointer(video::Pointer::Hidden) => self.send(Event::Cursor(Cursor::Hidden)).await,
             video::Output::Pointer(video::Pointer::Shape(shape)) => {
                 self.send(Event::Cursor(Cursor::Image(shape.into()))).await;
             }
             video::Output::Ended => {
-                self.resume_frame_acknowledgements().await?;
                 self.send(Event::VideoEnded).await;
+                if let Some(cursor) = self.host_cursor.take() {
+                    self.send(Event::Cursor(cursor)).await;
+                }
             }
         }
         Ok(())

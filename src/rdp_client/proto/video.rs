@@ -15,8 +15,8 @@
 //! whole desktop, one in flight at a time: the next waits for the **echo** of the one
 //! before, which this end sends once the frame has gone on to whoever is watching, so
 //! that the agent's quality walk reads the whole path. Beside them travels the
-//! **pointer**, as its own shape and never in the picture, because a host whose graphics
-//! are stalled sends none of its own. A **gap** says the agent cannot see the desktop —
+//! **pointer**, as its own shape and never in the picture, which is the pointer while the
+//! stream is the picture, in step with the frames it comes with. A **gap** says the agent cannot see the desktop —
 //! the secure desktop of a UAC prompt or the lock screen, which a capture in the user's
 //! session is refused — and this end may ask for a **keyframe**.
 //!
@@ -28,12 +28,11 @@
 //!
 //! The graphics pipeline carries the desktop, and the agent's stream carries it instead
 //! while it flows: from a keyframe the size of the desktop, until a gap, a frame of any
-//! other size, or the channel closing. [`Stream`] keeps that one decision. While the
-//! stream is the picture the session withholds the pipeline's frame acknowledgements,
-//! which stalls the host's own graphics so the desktop is not encoded twice, and resumes
-//! them when the pipeline carries the picture again. A resize is a frame of another size
-//! and so a turn of the pipeline's: the host's graphics reset waits for the
-//! acknowledgements, and the stream comes back at a keyframe of the new size.
+//! other size, or the channel closing. [`Stream`] keeps that one decision. The pipeline
+//! goes on beside the stream, its frames acknowledged as ever, so the host codes the
+//! desktop twice and the pipeline's picture is current whenever it takes over. A resize
+//! is a frame of another size and so a turn of the pipeline's, and the stream comes back
+//! at a keyframe of the new size.
 //!
 //! # Passed, or not taken
 //!
@@ -101,12 +100,9 @@ pub enum Pointer {
 /// What a turn amounted to, beyond the messages it put on the wire.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum Output {
-    /// The stream is the picture from the frame that follows: the pipeline's frames go
-    /// unacknowledged.
-    Began,
     Frame(Frame),
     Pointer(Pointer),
-    /// The pipeline carries the picture again: its acknowledgements resume.
+    /// The pipeline carries the picture again.
     Ended,
 }
 
@@ -227,7 +223,6 @@ impl Stream {
             }
             info!("rdp: the agent's stream carries the desktop, {}x{}", frame.width, frame.height);
             self.flowing = true;
-            turn.outputs.push(Output::Began);
             if let Some(pointer) = self.pointer.clone() {
                 turn.outputs.push(Output::Pointer(pointer));
             }
@@ -314,7 +309,8 @@ mod tests {
         let mut stream = Stream::new(PLAN_444);
         stream.opened();
         let turn = stream.push(&frame(1, (1280, 800), true), DESKTOP).unwrap();
-        assert_eq!(turn.outputs.first(), Some(&Output::Began));
+        assert!(matches!(&turn.outputs[..], [Output::Frame(_)]));
+        assert!(stream.flowing());
         stream
     }
 
@@ -344,7 +340,7 @@ mod tests {
 
         let turn = stream.push(&frame(6, (1280, 800), true), DESKTOP).unwrap();
         assert!(turn.replies.is_empty(), "a frame that goes on is echoed by whoever takes it");
-        let [Output::Began, Output::Frame(first)] = &turn.outputs[..] else { panic!("{:?}", turn.outputs) };
+        let [Output::Frame(first)] = &turn.outputs[..] else { panic!("{:?}", turn.outputs) };
         assert_eq!((first.seq, first.keyframe, first.width, first.height), (6, true, 1280, 800));
         assert!(stream.flowing());
 
@@ -367,7 +363,7 @@ mod tests {
 
         assert_eq!(stream.reset().replies, vec![vec![0x83]]);
         let turn = stream.push(&frame(4, (1600, 900), true), (1600, 900)).unwrap();
-        assert!(matches!(&turn.outputs[..], [Output::Began, Output::Frame(_)]));
+        assert!(matches!(&turn.outputs[..], [Output::Frame(_)]));
     }
 
     /// The secure desktop: the agent says so, and comes back at a keyframe unasked.
@@ -377,7 +373,7 @@ mod tests {
         assert_eq!(stream.push(&[GAP], DESKTOP).unwrap(), Turn { replies: Vec::new(), outputs: vec![Output::Ended] });
         assert_eq!(stream.push(&[GAP], DESKTOP).unwrap(), Turn::default(), "said once");
         let turn = stream.push(&frame(9, (1280, 800), true), DESKTOP).unwrap();
-        assert!(matches!(&turn.outputs[..], [Output::Began, Output::Frame(_)]));
+        assert!(matches!(&turn.outputs[..], [Output::Frame(_)]));
     }
 
     #[test]
@@ -397,7 +393,7 @@ mod tests {
         stream.opened();
         assert!(stream.push(&pointer(2), DESKTOP).unwrap().outputs.is_empty());
         let turn = stream.push(&frame(1, (1280, 800), true), DESKTOP).unwrap();
-        let [Output::Began, Output::Pointer(Pointer::Shape(shape)), Output::Frame(_)] = &turn.outputs[..] else {
+        let [Output::Pointer(Pointer::Shape(shape)), Output::Frame(_)] = &turn.outputs[..] else {
             panic!("{:?}", turn.outputs)
         };
         assert_eq!((shape.width, shape.height, shape.hotspot_x, shape.hotspot_y), (2, 2, 1, 0));
@@ -437,7 +433,8 @@ mod tests {
 
         let mut stream = Stream::new(Plan { chroma: Chroma::Subsampled, ..PLAN_444 });
         stream.opened();
-        assert!(stream.push(&subsampled, DESKTOP).unwrap().outputs.contains(&Output::Began));
+        stream.push(&subsampled, DESKTOP).unwrap();
+        assert!(stream.flowing());
         assert!(stream.push(&frame(2, (1280, 800), false), DESKTOP).is_err(), "a 4:4:4 frame for a 4:2:0 plan");
     }
 
