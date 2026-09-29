@@ -7,6 +7,9 @@
 //! cannot duplicate the desktop — the secure desktop of a UAC prompt or the lock screen
 //! — it says so and tries again until it can, and starts over at a keyframe.
 //!
+//! It runs as display work, in DWM's priority class and never throttled as background
+//! work ([`prioritize`]).
+//!
 //! A channel that cannot be opened is tried again, less often each time up to
 //! [`OPEN_MOST`]: the session is between connections, or attached to a gateway whose
 //! target does not take the stream, which refuses the channel by name. So is one that
@@ -22,6 +25,10 @@ use desktop_vp9::walk::{Pace, QualityWalk};
 use remotex_video_channel::{GAP, Plan, Said, VERSION, frame_header};
 use windows::Win32::System::Console::{FreeConsole, GetConsoleProcessList};
 use windows::Win32::System::RemoteDesktop::ProcessIdToSessionId;
+use windows::Win32::System::Threading::{
+    GetCurrentProcess, HIGH_PRIORITY_CLASS, PROCESS_POWER_THROTTLING_CURRENT_VERSION, PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+    PROCESS_POWER_THROTTLING_STATE, ProcessPowerThrottling, SetPriorityClass, SetProcessInformation,
+};
 use windows::Win32::UI::HiDpi::{DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext};
 
 use crate::capture::{Capture, Grab};
@@ -63,6 +70,34 @@ fn detach_console() {
     let mut attached = [0u32; 2];
     if unsafe { GetConsoleProcessList(&mut attached) } == 1 {
         let _ = unsafe { FreeConsole() };
+    }
+}
+
+/// The agent is the session's display, as DWM is, and takes the CPU it needs before the
+/// applications it shows. At normal priority it has what they leave: a desktop playing a
+/// video that a host with no GPU decodes and draws in software can take every core, and
+/// Chrome runs its GPU process above normal. And a process with no window is what Windows
+/// throttles as background work, onto efficiency cores where the CPU has them. So it runs
+/// in DWM's class and opts out of the throttling. One frame in flight bounds what it takes.
+fn prioritize(log: &mut Log) {
+    let throttling = PROCESS_POWER_THROTTLING_STATE {
+        Version: PROCESS_POWER_THROTTLING_CURRENT_VERSION,
+        ControlMask: PROCESS_POWER_THROTTLING_EXECUTION_SPEED,
+        StateMask: 0,
+    };
+    unsafe {
+        if let Err(e) = SetPriorityClass(GetCurrentProcess(), HIGH_PRIORITY_CLASS) {
+            log.say(format!("the priority class stays as it was: {e}"));
+        }
+        let set = SetProcessInformation(
+            GetCurrentProcess(),
+            ProcessPowerThrottling,
+            (&raw const throttling).cast(),
+            size_of::<PROCESS_POWER_THROTTLING_STATE>() as u32,
+        );
+        if let Err(e) = set {
+            log.say(format!("power throttling stays the system's to decide: {e}"));
+        }
     }
 }
 
@@ -121,6 +156,7 @@ fn stream(log: &mut Log, switches: Switches) -> Result<()> {
         let _ = ProcessIdToSessionId(std::process::id(), &mut session);
     }
     log.say(format!("remotex-agent {} in session {session}", env!("CARGO_PKG_VERSION")));
+    prioritize(log);
     let patch = if switches.patch { Some(Patch::new()?) } else { None };
     let mut big = switches.big;
     let mut channel: Option<Channel> = None;

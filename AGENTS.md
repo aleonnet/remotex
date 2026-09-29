@@ -160,7 +160,11 @@ documentation.
   drawn into the picture. Do not take the stream without the key, add a port or
   logon of the agent's own, framing of its own on the channel's messages, Suppress
   Output to stop the host's graphics, or a session that ends for want of the
-  agent. Treat the stall as measured Windows behavior, not a specification. See
+  agent. Treat the stall as measured Windows behavior, not a specification. Call
+  the key and `remotex-agent` experimental wherever they are named, and present
+  them as moving the encode to the host where the setup favours it — a gateway on
+  a slow machine, a slower link from the host to the gateway than to the browser
+  — never as a better picture than the pipeline's. See
   [An RDP host's stream, passed through](docs/architecture.md#an-rdp-hosts-stream-passed-through)
   and [A Windows host's video over its own RDP connection](docs/rdp-in-session-video.md).
 - Remote audio uses its own `/ws/audio` socket and queue; opening the socket is

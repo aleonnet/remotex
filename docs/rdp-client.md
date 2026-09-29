@@ -38,9 +38,9 @@ The desktop, the pointer, keyboard, mouse, resize, the clipboard, sound, and a
 camera going the other way. No touch: it is announced only by a host that opens MS-RDPEI, which this client never
 asks for. What it would take is in [`roadmap.md`](roadmap.md).
 
-One thing it carries is not RDP's: the desktop as a VP9 stream that an agent in the
-session codes itself, on a dynamic channel the agent opens, which then stands in for
-the graphics pipeline — see
+One thing it carries is not RDP's, and it is experimental: the desktop as a VP9 stream
+that an agent in the session codes itself, on a dynamic channel the agent opens, which
+then stands in for the graphics pipeline — see
 [An agent's stream in the pipeline's place](#an-agents-stream-in-the-pipelines-place).
 
 ## The connection sequence

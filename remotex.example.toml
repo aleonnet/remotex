@@ -214,8 +214,11 @@ password = "change-me"
 
 # Take the desktop as VP9 from remotex's agent in the Windows session, on a dynamic
 # channel of the RDP connection (opt-in), and pass it to the browser as the agent
-# coded it: the encode moves from this gateway to the host. The agent is told this
-# target's video keys, resolved, and codes to them. A session with no agent running
+# coded it: the encode moves from this gateway to the host. EXPERIMENTAL. For a
+# setup where the host is the better place to encode: this gateway on a slow machine,
+# or a slower link from the host to here than from here to the browser. The host pays
+# for the encode, so one with no CPU to spare is better left on the graphics pipeline.
+# The agent is told this target's video keys, resolved, and codes to them. A session with no agent running
 # never opens the channel, and wherever the stream cannot be passed as it came — a
 # frame that is not the plan's, the secure desktop, a resize — the graphics pipeline
 # carries the desktop, encoded here. Off, the channel is refused. RDP only, and

@@ -6,6 +6,15 @@ the host encodes its desktop as VP9 and the gateway passes each frame to the bro
 as it came, so the encode this gateway does for an RDP target moves to the host and
 nothing in between decodes or encodes a picture.
 
+**Experimental.** It has been measured against one host, and the stall it relies on
+([below](#withholding-frame-acknowledgements-stalls-the-hosts-graphics)) is measured
+Windows behavior, not a specification. It is for a setup where the host is the better
+place to encode: a gateway on a slow machine, or a link from the host to the gateway
+slower than the one from the gateway to the browser, which then carries the VP9 the
+browser is sent rather than the graphics pipeline's own codecs. The host pays for the
+encode, and one with no CPU to spare is better left on the pipeline
+([The host's CPU](#the-hosts-cpu)).
+
 Windows has no extension point for a codec in its RDP graphics pipeline
 (`Microsoft::Windows::RDS::Graphics`): its encoders are its own, and the only video
 among them, H.264, is the lossy source the RDP client refuses on purpose
@@ -289,6 +298,24 @@ up, and the stream was the picture again 369 ms after Escape.
 The same message covers a duplication that is refused for a moment across a mode
 change, which costs a turn of the pipeline's that the resize takes anyway.
 
+## The host's CPU
+
+The encode moves to the host, and on the host it competes with every application
+the session runs. At normal priority the agent has only the CPU they leave. On the
+host measured, a browser playing a video took every core, drawing it in software for
+want of a GPU from a GPU process Chrome runs above normal priority, and the stream
+fell to a few frames a second. The pipeline carried the same desktop smoothly, since
+the host's own encoder is cheap and the VP9 encode ran on this gateway. Running the
+agent above normal changed nothing, since that only matched Chrome.
+
+So the agent runs in DWM's priority class, `HIGH_PRIORITY_CLASS`, as the session's
+display work it is. It also opts out of the power throttling Windows gives a process
+with no window as background work, which on a CPU with efficiency cores puts it on
+them. One frame in flight bounds what it takes: a frame is coded only on the echo of
+the one before. A host with no CPU to spare still pays for it: its applications get
+less, and the video the browser there draws shows fewer frames, each of which the
+stream carries.
+
 ## What is left open
 
 - **A UAC prompt and the lock screen themselves.** The host measured has UAC switched
@@ -297,7 +324,8 @@ change, which costs a turn of the pipeline's that the resize takes anyway.
   Server with the Remote Desktop Session Host role; any Windows generation but the
   one measured.
 - **How fast the agent codes.** It codes VP9 in software, with two threads, on a host
-  that is the user's own desktop. Nothing here judges its frame rate or tunes it.
+  that is the user's own desktop. Its priority is set for the CPU it competes for
+  ([above](#the-hosts-cpu)); the thread count is not tuned.
 
 ## Running it
 

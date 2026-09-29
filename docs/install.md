@@ -89,7 +89,8 @@ The machine an `rdp` target is can run `remotex-agent`, which codes the desktop 
 there and sends it on the RDP connection, for a target with `agent_passthrough = true`
 to pass to the browser. Its own `remotex-agent-windows-x86_64.msi`, installed on that
 machine, not on the gateway's, runs it as the `RemotexAgent` service: see
-[remotex-agent](agent.md).
+[remotex-agent](agent.md). It is experimental, and [its page](agent.md) says which
+setups it is for.
 
 ## First configuration
 
