@@ -255,8 +255,9 @@ documentation.
   never expose `tui`, `serve-embedded`, or `check-config --embedded`.
 - The gateway's Windows MSI ships the native binary, `tui` included. Build it with
   `packaging/build-windows-msi.ps1` on `windows-ci-build` through
-  `ci/windows/remote.ps1 ci -Package`, when packaging changes or before a release;
-  a plain `ci` rerun stops after the tests. Do not add a service or
+  `ci/windows/remote.ps1 ci -Package` when packaging changes, and only then: release
+  CI builds and install-tests both MSIs itself, so a release with no packaging change
+  skips it. A plain `ci` rerun stops after the tests. Do not add a service or
   package-owned live config to it.
 - `remotex-agent`'s MSI (`packaging/windows/remotex-agent.wxs`) is a separate
   product for the machine an RDP target is, in the public release beside a zip of
