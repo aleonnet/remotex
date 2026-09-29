@@ -436,8 +436,10 @@ impl Graphics {
                     .map(|(_, held)| held.pixels.len())
                     .sum::<usize>()
                     + self.progressive.as_ref().map_or(0, |progressive| progressive.held_except(surface));
+                // Summed with the overflow looked for: the largest surface the wire
+                // can name is within a megabyte of what 32 bits count to.
                 anyhow::ensure!(
-                    held + bytes <= MAX_DESKTOP_BYTES,
+                    held.checked_add(bytes).is_some_and(|total| total <= MAX_DESKTOP_BYTES),
                     "the host created a {width}x{height} graphics surface, which with the {} MiB \
                      of surfaces it already has is more than the {} MiB this client will hold",
                     held >> 20,
@@ -1167,6 +1169,11 @@ mod tests {
         let framebuffer = Framebuffer::new();
         let mut graphics = Graphics::new();
         let err = graphics.receive(&packet(&[create(1, 32766, 32766)]), &framebuffer).unwrap_err();
+        assert!(format!("{err}").contains("32766x32766"), "{err}");
+        // And beside a surface already held, where the two together are past what 32
+        // bits count to.
+        receive(&mut graphics, &framebuffer, &[create(1, 1024, 1024)]);
+        let err = graphics.receive(&packet(&[create(2, 32766, 32766)]), &framebuffer).unwrap_err();
         assert!(format!("{err}").contains("32766x32766"), "{err}");
         let err = graphics.receive(&packet(&[reset(32766, 32766)]), &framebuffer).unwrap_err();
         assert!(format!("{err}").contains("32766x32766"), "{err}");
