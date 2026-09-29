@@ -18,20 +18,20 @@ edition = "2024"
 # expose process supervision or its private worker surface.
 default = ["embedded-gateway"]
 embedded-gateway = ["dep:crossterm", "dep:libc", "dep:windows-sys"]
-# Apple High Performance's media stream (src/vnc_apple_media.rs, src/aac_eld.rs):
-# the Mac's picture as HEVC and its sound as AAC-ELD, both over SRTP, which a
-# target turns on with `subtype = "ard-high-performance"`. The two decoders are
-# the feature: FFmpeg's HEVC decoder (LGPL, linked statically) and Fraunhofer's
-# AAC-ELD decoder, fdk-aac, whose licence is not OSI-approved and which the
-# gateway loads from the system's shared library at run time. So it is off by
-# default and in no release artifact; an operator builds
+# Apple High Performance's media stream (src/vnc_apple_media.rs, src/aac_eld.rs,
+# src/libav.rs): the Mac's picture as HEVC and its sound as AAC-ELD, both over
+# SRTP, which a target turns on with `subtype = "ard-high-performance"`. The two
+# decoders are the feature: FFmpeg's libavcodec (LGPL) and Fraunhofer's fdk-aac,
+# whose licence is not OSI-approved. The gateway loads both from the system's
+# shared libraries when a session needs them, so the feature compiles and links
+# neither. It is off by default and in no release artifact; an operator builds
 # `cargo build --release --features apple-hp-media`. Any other build takes that
 # subtype only with `media_passthrough`, passing the stream to a browser that
 # decodes it.
-apple-hp-media = ["dep:avcodec-hevc-sys", "dep:libloading"]
-# The same, with fdk-aac linked from `fdk-aac-prebuilt`'s private static archive
-# rather than loaded from the system, for a build that brings its own.
-apple-hp-media-static = ["apple-hp-media", "dep:fdk-aac-prebuilt-sys"]
+apple-hp-media = ["dep:libloading"]
+# The same, with both decoders linked from their private static archives rather
+# than loaded from the system, for a build that brings its own.
+apple-hp-media-static = ["apple-hp-media", "dep:avcodec-hevc-sys", "dep:fdk-aac-prebuilt-sys"]
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -89,26 +89,20 @@ desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0
 # (src/vnc_apple_media.rs). Pure Rust with AVX2 and NEON paths chosen at run time —
 # no C, no assembler, the same bargain as above.
 yuv = "0.8"
-# FFmpeg's HEVC decoder, for High Performance's HEVC screen video
-# (src/vnc_apple_media.rs), behind the `apple-hp-media` feature above: the Mac's
-# picture over its media stream, decoded here and re-encoded as VP9. The same
-# bargain as libvpx above — its sys crate downloads a prebuilt static archive of
-# libavcodec and libavutil, configured down to the HEVC decoder and parser (and on
-# macOS its VideoToolbox hwaccel), and compiles no C. The archives are private:
-# building needs `gh` logged in to an account that can read them, or
-# `LIBAVCODEC_HEVC_PREBUILT_DIR`. This FFmpeg is
-# LGPL-2.1-or-later, linked statically; the prebuilt repository's README says
-# what that obliges.
-avcodec-hevc-sys = { package = "libavcodec-hevc-prebuilt-sys", git = "https://github.com/andrewtheguy/libavcodec-hevc-prebuilt", tag = "v9.0.2-20260928041244-5fdbab1", optional = true }
-# AAC-ELD, for the same stream's sound, behind the same feature: Fraunhofer's
-# fdk-aac, loaded from the system's shared library (src/aac_eld.rs names it per
-# platform), so no build compiles or links it.
+# The `apple-hp-media` decoders, loaded from the system's shared libraries:
+# libavcodec for the Mac's HEVC picture, re-encoded here as VP9, and fdk-aac for
+# its AAC-ELD sound (src/libav.rs and src/aac_eld.rs name them per platform), so
+# no build compiles or links either.
 libloading = { version = "0.9", optional = true }
-# `apple-hp-media-static` links it instead, from the prebuilt bargain `opus` and
-# `desktop-vp9` make: a static archive the sys crate downloads, no C++ toolchain,
-# no cmake. Its archives are private for the licence's sake: building needs `gh`
-# logged in to an account that can read them, or `FDK_AAC_PREBUILT_DIR`. The tag
-# pins the crate; the archives are the latest release's.
+# `apple-hp-media-static` links them instead, from the prebuilt bargain `opus`
+# and `desktop-vp9` make: static archives the sys crates download, compiling no
+# C. libavcodec's are configured down to the HEVC decoder and parser (and on
+# macOS its VideoToolbox hwaccel); that FFmpeg is LGPL-2.1-or-later, linked
+# statically, and the prebuilt repository's README says what that obliges. Both
+# sets of archives are private: building needs `gh` logged in to an account that
+# can read them, or `LIBAVCODEC_HEVC_PREBUILT_DIR` and `FDK_AAC_PREBUILT_DIR`.
+# The tags pin the crates; the archives are the latest releases'.
+avcodec-hevc-sys = { package = "libavcodec-hevc-prebuilt-sys", git = "https://github.com/andrewtheguy/libavcodec-hevc-prebuilt", tag = "v9.0.2-20260928041244-5fdbab1", optional = true }
 fdk-aac-prebuilt-sys = { git = "https://github.com/andrewtheguy/fdk-aac-prebuilt", tag = "v2.0.3-20260921052032-4cad928", optional = true }
 # Remote audio: resample redirected PCM and encode bare Opus packets.
 #

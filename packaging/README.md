@@ -123,28 +123,35 @@ built archives.
 The non-default `apple-hp-media` feature, which `ard-high-performance` targets
 need to decode the Mac's stream (without it they run only with
 `media_passthrough`, for browsers that decode the stream), adds two decoders and
-is in no release artifact because of their licences. `libavcodec-hevc-prebuilt` (the HEVC picture) links static archives of
-FFmpeg's libavcodec and libavutil, configured down to the HEVC decoder and
-parser, and on macOS its VideoToolbox hwaccel, which links Apple's VideoToolbox,
-CoreMedia, CoreVideo and CoreFoundation frameworks. Its archives are private:
-its build script downloads the latest release
-of `andrewtheguy/libavcodec-hevc-prebuilt-archives` through `gh`, so a build
-needs `gh` logged in to an account that can read it, or
-`LIBAVCODEC_HEVC_PREBUILT_DIR` pointing at archives built locally.
-`publish-full-image.sh` refuses that override and checks that the image linked
-the current release's archive. This FFmpeg is LGPL-2.1-or-later and linked
-statically, which obliges a distributor of a binary to let its recipient
+is in no release artifact because of their licences: FFmpeg's libavcodec
+(LGPL-2.1-or-later) for the HEVC picture and Fraunhofer's fdk-aac, whose licence
+is not OSI-approved and grants no patents, for the AAC-ELD sound. Build it with
+`cargo build --release --features apple-hp-media`. That build compiles and links
+neither: the gateway loads the system's shared libraries when a session needs
+them (`src/libav.rs`, `src/aac_eld.rs`):
+
+| | libavcodec (FFmpeg 6.1 to 9) | fdk-aac |
+|---|---|---|
+| Linux | `libavcodec.so.60` to `.63`, e.g. Debian's `libavcodec61` | `libfdk-aac.so.2`, `libfdk-aac2` (Debian non-free, Ubuntu multiverse) |
+| macOS | `libavcodec.60.dylib` to `.63`, `brew install ffmpeg` | `libfdk-aac.2.dylib`, `brew install fdk-aac` |
+| Windows | `avcodec-60.dll` to `-63`, MSYS2's `mingw-w64-ucrt-x86_64-ffmpeg` | `libfdk-aac-2.dll`, MSYS2's `mingw-w64-ucrt-x86_64-fdk-aac` |
+
+Each is looked for by the platform loader's own search, then in Homebrew's and
+MacPorts' `lib` or MSYS2's `C:\msys64\ucrt64\bin`. On macOS the loaded
+libavcodec decodes through VideoToolbox.
+
+`apple-hp-media-static` links private static archives instead.
+`libavcodec-hevc-prebuilt` links FFmpeg's libavcodec and libavutil, configured
+down to the HEVC decoder and parser, and on macOS its VideoToolbox hwaccel, which
+links Apple's VideoToolbox, CoreMedia, CoreVideo and CoreFoundation frameworks;
+its build script downloads the latest release of
+`andrewtheguy/libavcodec-hevc-prebuilt-archives` through `gh`, or takes
+`LIBAVCODEC_HEVC_PREBUILT_DIR`. `publish-full-image.sh` builds with it, refuses
+that override and checks that the image linked the current release's archive.
+FFmpeg linked statically obliges a distributor of a binary to let its recipient
 relink it against a modified FFmpeg (see that repository's README).
-The AAC-ELD sound is Fraunhofer's fdk-aac, whose licence is not OSI-approved and
-grants no patents. The gateway links none of it: it loads the system's shared
-library when a session needs one (`src/aac_eld.rs`), `libfdk-aac.so.2` from
-`libfdk-aac2` (Debian non-free, Ubuntu multiverse), `libfdk-aac.2.dylib` from
-Homebrew or MacPorts, and `libfdk-aac-2.dll` from MSYS2's
-`mingw-w64-ucrt-x86_64-fdk-aac`, whose DLL needs only the UCRT and runs beside
-`remotex.exe` or from `PATH`. `apple-hp-media-static` links `fdk-aac-prebuilt`'s
-static archive instead. Its archives are private too: its build script downloads
-them through `gh`, or takes `FDK_AAC_PREBUILT_DIR`. Build it with
-`cargo build --release --features apple-hp-media`. Do not restore
+`fdk-aac-prebuilt` links fdk-aac the same way, from its own private archives,
+through `gh` or `FDK_AAC_PREBUILT_DIR`. Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
 libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
 with `--enable-realtime-only`; additional features need a separately built

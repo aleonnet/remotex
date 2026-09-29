@@ -116,7 +116,7 @@ documentation.
   whether it decodes a High Performance Mac's HEVC and AAC-ELD, for
   `media_passthrough`. The gateway *selects* on the answers and never refuses a
   client for them, save a gateway without the `apple-hp-media` decoders — a build
-  without the feature, or one whose host has no fdk-aac library — facing a
+  without the feature, or one whose host lacks FFmpeg or fdk-aac — facing a
   browser that cannot take the Mac's stream, which has nothing else to send. Do
   not grow them into a capability negotiation or another reason to turn a session
   away. Preserve the announced
@@ -161,8 +161,9 @@ documentation.
   carries sound and takes no `audio` key. While the sound leg runs the Mac mutes
   its own output, so it plays nothing to an AirPlay speaker. Its two decoders
   are the non-default `apple-hp-media` feature, which no release artifact
-  enables. It loads fdk-aac from the system's shared library on every platform,
-  and `apple-hp-media-static` links the private static archive instead. A build
+  enables. It loads libavcodec and fdk-aac from the system's shared libraries
+  on every platform, and `apple-hp-media-static` links the private static
+  archives instead. A build
   without it takes the subtype only with `media_passthrough`,
   and ends the session of a browser that cannot decode the stream before it
   dials the Mac. Only the decoders sit behind the feature: the offers, SRTP, the

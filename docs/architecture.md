@@ -444,8 +444,8 @@ Three controls with similar names therefore remain separate:
   them accepts `ard-high-performance` only with `media_passthrough = true`, since
   a target that decodes has nothing to run on, and a browser that cannot take the
   stream has nothing to be sent: the engine tells it so and ends before it dials
-  the Mac. A build with them that finds no fdk-aac library on its host is the
-  same, and names the library. That is the one session the browser's answer
+  the Mac. A build with them whose host lacks FFmpeg or fdk-aac is the same,
+  and names the library. That is the one session the browser's answer
   turns away.
 
 ### Choosing a chroma

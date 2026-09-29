@@ -208,15 +208,16 @@ that fails ends the session, as it does in Apple's viewer. A playing
 video does not delay the Mac's reading of the input, as RFB pixels' deflate does. The Mac refuses the picture without the sound, and
 mutes its own speakers while it streams, so the target always carries sound, and
 nothing reaches an AirPlay speaker the Mac plays to. It is **experimental**. Decoding
-the stream needs a gateway built with `--features apple-hp-media`, which links FFmpeg's
-HEVC decoder (LGPL); no release artifact carries it. Its sound decoder, Fraunhofer's
-fdk-aac (licence not OSI-approved), is loaded from the system when a session needs it:
-`libfdk-aac2` on Debian (non-free) and Ubuntu (multiverse), `brew install fdk-aac` on
-macOS, and on Windows `libfdk-aac-2.dll` from MSYS2's `mingw-w64-ucrt-x86_64-fdk-aac`,
-on `PATH` or beside `remotex.exe`. `--features apple-hp-media-static` links it into the
-binary instead. Any other build runs the subtype only with `media_passthrough = true`,
-and it, like a gateway that finds no fdk-aac, refuses a browser that cannot decode the
-stream. See
+the stream needs a gateway built with `--features apple-hp-media`; no release artifact
+carries it. Its decoders, FFmpeg's libavcodec (LGPL, 6.1 to 9) and Fraunhofer's fdk-aac
+(licence not OSI-approved), are loaded from the system when a session needs them:
+`libavcodec61` (or 60 to 63) and `libfdk-aac2` on Debian (non-free) and Ubuntu
+(multiverse), `brew install ffmpeg fdk-aac` on macOS, and on Windows MSYS2's
+`mingw-w64-ucrt-x86_64-ffmpeg` and `mingw-w64-ucrt-x86_64-fdk-aac`, whose DLLs are found
+in `C:\msys64\ucrt64\bin`, on `PATH` or beside `remotex.exe`.
+`--features apple-hp-media-static` links both into the binary instead. Any other build
+runs the subtype only with `media_passthrough = true`, and it, like a gateway that finds
+either library missing, refuses a browser that cannot decode the stream. See
 [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
 Every Apple subtype supports the native Apple pasteboard when `clipboard =

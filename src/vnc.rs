@@ -1538,19 +1538,19 @@ async fn session(
             .await;
         return;
     }
-    // A build that loads its sound decoder from the system has none on a host
-    // without the library, which is the same as a build without it.
+    // A build that loads its decoders from the system has none on a host without
+    // the libraries, which is the same as a build without them.
     #[cfg(feature = "apple-hp-media")]
     if config.media_stream()
         && !plan.apple_media
-        && let Err(e) = crate::aac_eld::load()
+        && let Err(e) = crate::libav::load().and_then(|()| crate::aac_eld::load())
     {
         warn!("vnc: refusing a browser that does not decode the Mac's stream: {e:#}");
         let _ = sink
             .msg(ServerMsg::Error {
                 message: format!(
-                    "This browser does not decode the Mac's AAC-ELD, and this remotex \
-                     cannot decode it to send Opus instead: {e:#}"
+                    "This browser does not decode the Mac's HEVC and AAC-ELD, and this \
+                     remotex cannot decode them to send VP9 and Opus instead: {e:#}"
                 ),
             })
             .await;

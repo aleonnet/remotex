@@ -875,11 +875,11 @@ picture's gaps as VP9 encoded here. A PLI is its repaint. See
 
 The two decoders are the `apple-hp-media` Cargo feature, off by default and in
 no release artifact: FFmpeg's HEVC decoder for the picture (libavcodec,
-LGPL-2.1-or-later, linked statically) and Fraunhofer's AAC-ELD decoder for the
-sound (fdk-aac, a licence that is not OSI-approved), loaded from the system's
-shared library when a session needs it, or linked statically with
-`apple-hp-media-static`. A gateway that finds no library ends the session the way
-a build without the feature does. A build without the feature refuses an
+LGPL-2.1-or-later) and Fraunhofer's AAC-ELD decoder for the sound (fdk-aac, a
+licence that is not OSI-approved), loaded from the system's shared libraries when
+a session needs them, or linked statically with `apple-hp-media-static`. A
+gateway that finds either missing ends the session the way a build without the
+feature does. A build without the feature refuses an
 `ard-high-performance` target without `media_passthrough` when it reads the config,
 and ends the session of a browser that cannot decode the stream before it dials the
 Mac. The rest of the module — the offers, the replies, SRTP, the depacketizer, the
@@ -967,8 +967,8 @@ other failures (see [Liveness](#the-stream)).
   single NAL units, aggregation packets, fragmentation units.
 - **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
   transfer, Display P3 primaries, with wavefront parallel processing
-  (`entropy_coding_sync_enabled_flag`) and no tiles. The prebuilt libavcodec
-  (FFmpeg 9.0.2, configured down to the HEVC decoder) decodes it. On one
+  (`entropy_coding_sync_enabled_flag`) and no tiles. libavcodec (FFmpeg 9.0.2,
+  the prebuilt one configured down to the HEVC decoder) decodes it. On one
   core of an i5-8500T a 1600×1000 picture takes 14–23 ms, too slow for 60 a
   second. Remotex gives the decoder four slice threads, which decode a
   picture's rows in parallel and took 7–14 ms; frame threads would hold each
