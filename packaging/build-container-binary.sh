@@ -2,10 +2,6 @@
 # Build the container-only gateway binary. Containers expose only the deployed
 # `serve` shape; the process-local managed-instance surface is a native concern.
 #
-# REMOTEX_SOURCE_DIR is the tree to build when it is not the one this script sits
-# in: publish-full-image.sh builds a tag's source with this checkout's script,
-# since a tag holds whatever script it was cut with.
-#
 # REMOTEX_CONTAINER_FEATURES names the non-default features an operator's own
 # image adds (`apple-hp-media-static`); release CI leaves it unset.
 # Whatever it names, the checks below still refuse a binary that carries the
@@ -15,7 +11,6 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 output="$(realpath -m "${1:-tmp/container-bin/remotex}")"
-cd "${REMOTEX_SOURCE_DIR:-$repo_root}"
 features="${REMOTEX_CONTAINER_FEATURES:-}"
 
 echo ">> building container gateway without default features${features:+, but with ${features}}"

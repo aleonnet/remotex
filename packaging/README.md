@@ -60,7 +60,7 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `REMOTEX_CONTAINER_FEATURES` |
-| `publish-full-image.sh` | build a release tag's linux/amd64 image with `apple-hp-media-static`, from this checkout, and push it to the private `ghcr.io/andrewtheguy/remotex-full` |
+| `publish-full-image.sh` | build a release tag's linux/amd64 image with Debian's libavcodec and fdk-aac installed and push it to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 
@@ -127,7 +127,9 @@ is not OSI-approved and grants no patents, for the AAC-ELD sound. No build
 compiles or links either: the gateway loads the system's shared libraries when a
 session needs them (`src/libav.rs`, `src/aac_eld.rs`), and a host without them
 runs those targets only with `media_passthrough`, for browsers that decode the
-stream. The `.deb` recommends the Linux ones; elsewhere they are installed by hand:
+stream. The `.deb` recommends the Linux ones, the public container image carries
+neither and the private one `publish-full-image.sh` builds carries Debian's;
+elsewhere they are installed by hand:
 
 | | libavcodec (FFmpeg 6.1 to 9) | fdk-aac |
 |---|---|---|
@@ -146,8 +148,7 @@ down to the HEVC decoder and parser, and on macOS its VideoToolbox hwaccel, whic
 links Apple's VideoToolbox, CoreMedia, CoreVideo and CoreFoundation frameworks;
 its build script downloads the latest release of
 `andrewtheguy/libavcodec-hevc-prebuilt-archives` through `gh`, or takes
-`LIBAVCODEC_HEVC_PREBUILT_DIR`. `publish-full-image.sh` builds with it, refuses
-that override and checks that the image linked the current release's archive.
+`LIBAVCODEC_HEVC_PREBUILT_DIR`.
 FFmpeg linked statically obliges a distributor of a binary to let its recipient
 relink it against a modified FFmpeg (see that repository's README).
 `fdk-aac-prebuilt` links fdk-aac the same way, from its own private archives,
