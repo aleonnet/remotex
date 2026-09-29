@@ -8,7 +8,7 @@ macOS update is free to invalidate any of it.
 
 This document states behaviour and the rules remotex follows because of it. The
 evidence behind it is archived outside the repository, in
-`apple-screensharing-audit-2026-09-23_2`:
+`apple-screensharing-audit-2026-09-28`:
 - function-level traces of Apple's viewer, `screensharingd` and
   `ScreensharingAgent`;
 - captures, daemon logs and probe scripts;
@@ -46,7 +46,7 @@ official modes alone.
 |---|---|
 | Two subtypes | Both speak RFB 003.889 with an encrypted record layer, as Apple's viewer answers every Mac. `subtype = "ard"` is Standard mode, sharing the Mac's physical displays at a fixed size. `ard-high-performance` is High Performance mode, sharing one virtual display the Mac creates at the size the client asks for. |
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
-| Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, and `AutoFrameBufferUpdate`. So are the pointer buttons on this revision and the wheel. Each is covered below. |
+| Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
 | Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and its picture from ZRLE until the stream is up and across display changes. |
 | Not implemented | Apple's controls for two virtual displays and fixed presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
@@ -76,9 +76,12 @@ Remotex authenticates with type 30 and the account's own password, so it does no
 need that setting.
 
 Apple's viewer also knows private security types 31–36: Diffie-Hellman variants,
-RSA, a preauthorized connection, Kerberos and SRP. Only type 30 has been
-exercised, and only type 30 supplies the key the record layer starts from, so
-remotex offers nothing else.
+RSA, a preauthorized connection, Kerberos and SRP. Each of them leaves the Mac
+holding the key the record layer starts from, just as type 30 does. Type 30's key
+is the MD5 of its Diffie-Hellman secret. SRP (36), and RSA (33) in its SRP form,
+use the first 16 bytes of the SHA-256 of the SRP session key. Kerberos (35) uses
+a random key the Mac generates and sends to the viewer. Only type 30 has been
+exercised, so remotex offers nothing else.
 
 ## The two modes in Apple's viewer
 
@@ -389,11 +392,11 @@ offered, and that is the only macOS it was tried on.
 | Descriptor field | Value remotex sends |
 |---|---|
 | name | 120 bytes |
-| display flags | 1: dynamic resolution (bit 1 would supply a custom refresh rate) |
+| display flags | 1: dynamic resolution. Bit 1, never sent, tells the Mac to leave the refresh rate alone and ignore the mode's. |
 | display type | 4, virtual |
 | physical size | millimetres, as big-endian `f32` |
 | maximum backing size | 3840×2160, a fixed ceiling |
-| rotations | 7, Apple's captured value; its bits are private |
+| rotations | 7, Apple's captured value. The agent hands it unchanged to macOS as the virtual display's rotations setting. |
 | mode count | 1 |
 
 The mode itself holds:
@@ -471,6 +474,11 @@ distance (`src/vnc.rs`).
 - **Keys with no mapping.** Insert, Pause, Scroll Lock, Print and Menu have none on
   the Mac, and Num Lock arrives as Keypad Clear.
 - **Option.** Option is stripped from ordinary keys unless Command is also held.
+- **Modifier keysyms.** The agent maps modifiers by its own table, in both modes.
+  `Meta_L`/`Meta_R` land on Option. `Alt_L`/`Alt_R`, `Super_L`/`Super_R` and
+  `Hyper_L`/`Hyper_R` all land on Command. Each keeps its side. A by-the-book Alt
+  therefore arrives as Command, so remotex sends a keyboard's Alt keys as Meta
+  (`keymap::apple_keysym`, and [VNC](architecture.md#vnc)).
 
 ### Double-click is chained by the Mac, at a login-time threshold
 
@@ -495,7 +503,12 @@ rectangle.
   a second, 15–33 MB/s of zlib, for two requests. Unarmed, the same screen drew
   nothing after the update asked for.
 - **The interval paces the pushes.** At 1,000,000 the Mac pushed about one update
-  a second, which is what remotex arms with.
+  a second, which is what remotex arms with. The daemon pushes once the interval
+  has passed since its last push.
+- **`0xffffffff` turns the pushes off.** The daemon records whether the word is
+  the all-ones value and pushes nothing while it is. A published description reads
+  the word as a screen id, with all-ones meaning all displays. It is not one:
+  `SetDisplay` selects the screen.
 
 Unpaced pushes cost a client its input. The Mac
 [reads nothing while it writes an update](#resizing-a-high-performance-display-as-measured),
@@ -549,7 +562,14 @@ polling, so the fetch is not stuck behind a stream of updates.
 keysyms and device information are each a one-rectangle framebuffer update.
 Apple's viewer closes the connection on a server message type it does not know,
 so a reader that falls out of step sees "messages" that are really fragments of
-these.
+these. Remotex reads two of them only to step over them:
+- **Vendor keysyms** (`0x453`) are a fixed table: `u16` 20, then a `u16` version
+  (1), a `u16` count (4), and the keysyms `0x1008FD00` to `0x1008FD03`.
+- **Keyboard source** (`0x455`) is a `u16` giving the name's length plus 8, then
+  a `u16` version (1) and a `u32` flag. After those come a `u16` length and the
+  Mac's current input source as UTF-8, such as `com.apple.keylayout.ABC`. The
+  flag is 1 while the Mac's keyboard focus is in a secure text field, such as a
+  password prompt.
 
 ### The numbers, in both forms
 
@@ -651,8 +671,16 @@ two fields:
 
 | Field | Apple's viewer | Remotex | Why |
 |---|---|---|---|
-| `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway for a viewer older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
+| `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
 | `tilesPerFrame` (video stream field 6) | 4 | 1 | Four tiles split a frame into strips of 256 rows. Each strip is coded as a separate picture of one bitstream, in its own sequence-number space with a DONL, and nothing in a packet names its strip. One tile is one picture of the whole display, without DONL. |
+
+The flags are a big-endian `u32`, like the rest of the header: Apple's viewer
+sets its bits and then byte-swaps the word before sending it. A published
+description has the word in host order, which would move every bit to another
+byte. Two other bits exist, and remotex sets neither:
+- bit 1 asks for 60 fps on the second video stream;
+- bit 3 names Apple Remote Desktop, rather than Screen Sharing, as the video
+  client.
 
 **The picture and the sound go together.** A configuration with an empty audio
 offer is refused (`unable to create audio config`, error type 2), and one with an
