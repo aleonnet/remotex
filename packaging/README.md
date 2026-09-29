@@ -135,10 +135,15 @@ needs `gh` logged in to an account that can read it, or
 the current release's archive. This FFmpeg is LGPL-2.1-or-later and linked
 statically, which obliges a distributor of a binary to let its recipient
 relink it against a modified FFmpeg (see that repository's README).
-`fdk-aac-prebuilt` (the AAC-ELD sound) links a static archive of Fraunhofer's
-fdk-aac the same way. Its licence is not OSI-approved and grants no patents, so
-its archives are private too: its build script downloads them through `gh`, or
-takes `FDK_AAC_PREBUILT_DIR`. Build it with
+The AAC-ELD sound is Fraunhofer's fdk-aac, whose licence is not OSI-approved and
+grants no patents. The gateway links none of it: it loads the system's shared
+library when a session needs one (`src/aac_eld.rs`), `libfdk-aac.so.2` from
+`libfdk-aac2` (Debian non-free, Ubuntu multiverse), `libfdk-aac.2.dylib` from
+Homebrew or MacPorts, and `libfdk-aac-2.dll` from MSYS2's
+`mingw-w64-ucrt-x86_64-fdk-aac`, whose DLL needs only the UCRT and runs beside
+`remotex.exe` or from `PATH`. `apple-hp-media-static` links `fdk-aac-prebuilt`'s
+static archive instead. Its archives are private too: its build script downloads
+them through `gh`, or takes `FDK_AAC_PREBUILT_DIR`. Build it with
 `cargo build --release --features apple-hp-media`. Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
 libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built

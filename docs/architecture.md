@@ -444,7 +444,9 @@ Three controls with similar names therefore remain separate:
   them accepts `ard-high-performance` only with `media_passthrough = true`, since
   a target that decodes has nothing to run on, and a browser that cannot take the
   stream has nothing to be sent: the engine tells it so and ends before it dials
-  the Mac. That is the one session the browser's answer turns away.
+  the Mac. A build with them that finds no fdk-aac library on its host is the
+  same, and names the library. That is the one session the browser's answer
+  turns away.
 
 ### Choosing a chroma
 
@@ -689,7 +691,7 @@ colour this decoder takes, for `render_chroma = "auto"` to resolve against
 Mac's HEVC and AAC-ELD, for `media_passthrough` to pass them. Each selects between
 streams the gateway is willing to send. A wrong answer costs a picture, not a
 desktop, save in the one case where the gateway has only one stream to send: a
-build without the `apple-hp-media` decoders ends the session of a browser that
+gateway without the `apple-hp-media` decoders ends the session of a browser that
 says no to the Mac's stream
 ([Apple's media stream, passed through](#apples-media-stream-passed-through)).
 

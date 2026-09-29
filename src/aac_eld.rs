@@ -5,9 +5,15 @@
 //! The constants describing it are always compiled: a browser that decodes the
 //! stream is passed it as it came, described by them. The decoder is compiled only
 //! with the `apple-hp-media` feature, for every other browser, whose sound goes as
-//! Opus encoded from the PCM it produces. The decoder is Fraunhofer's fdk-aac,
-//! linked from `fdk-aac-prebuilt`'s static archive. Its licence is not
-//! OSI-approved, which is one reason the default build never links it.
+//! Opus encoded from the PCM it produces.
+//!
+//! The decoder is Fraunhofer's fdk-aac, whose licence is not OSI-approved and
+//! grants no patents, so no build carries it by default. The gateway loads the
+//! system's shared library the first time a session needs it (see [`load`]):
+//! `libfdk-aac.so.2` on Linux, `libfdk-aac.2.dylib` on macOS and
+//! `libfdk-aac-2.dll` on Windows. The `apple-hp-media-static` feature links
+//! `fdk-aac-prebuilt`'s private static archive instead, for a build that brings
+//! its own. Either way the six calls below are the whole interface.
 //!
 //! The decoder is configured out of band. RTP carries bare access units with no
 //! header naming the stream, so the AudioSpecificConfig is stated here, once, from
@@ -16,11 +22,6 @@
 //! frames it decoded 375 cleanly and concealed two; every other reading — 512-sample
 //! frames, the resilience flags, SBR — either refused the configuration or concealed
 //! most of the stream.
-
-#[cfg(feature = "apple-hp-media")]
-use anyhow::Context as _;
-#[cfg(feature = "apple-hp-media")]
-use fdk_aac::dec::{Decoder, Transport};
 
 /// AudioSpecificConfig for what the Mac sends, bit by bit:
 ///
@@ -43,25 +44,208 @@ pub const FRAME_SAMPLES: usize = 480;
 /// the decoder per frame.
 pub const CHANNELS: usize = 2;
 
+#[cfg(feature = "apple-hp-media")]
+mod fdk {
+    //! fdk-aac's decoder calls, as `aacdecoder_lib.h` declares them. Its enums
+    //! cross as `int`.
+
+    use std::os::raw::{c_int, c_uint, c_void};
+
+    pub type Handle = *mut c_void;
+
+    /// `TT_MP4_RAW`: bare access units, configured with `aacDecoder_ConfigRaw`.
+    pub const TT_MP4_RAW: c_int = 0;
+    pub const AAC_DEC_OK: c_int = 0;
+    /// `aac_dec_decode_error_start` to `_end`: the unit was damaged and the frame
+    /// written is a concealed one.
+    pub const CONCEALED: std::ops::RangeInclusive<c_int> = 0x4000..=0x4fff;
+
+    /// The head of `CStreamInfo`: the three fields read here, which have led it in
+    /// every fdk-aac release.
+    #[repr(C)]
+    pub struct StreamInfoHead {
+        pub _sample_rate: c_int,
+        pub frame_size: c_int,
+        pub num_channels: c_int,
+    }
+
+    pub struct Api {
+        pub open: unsafe extern "C" fn(transport: c_int, layers: c_uint) -> Handle,
+        pub config_raw: unsafe extern "C" fn(Handle, conf: *mut *mut u8, length: *const c_uint) -> c_int,
+        pub fill: unsafe extern "C" fn(
+            Handle,
+            buffer: *mut *mut u8,
+            size: *const c_uint,
+            bytes_valid: *mut c_uint,
+        ) -> c_int,
+        pub decode_frame: unsafe extern "C" fn(Handle, pcm: *mut i16, samples: c_int, flags: c_uint) -> c_int,
+        pub stream_info: unsafe extern "C" fn(Handle) -> *const StreamInfoHead,
+        pub close: unsafe extern "C" fn(Handle),
+        /// Keeps the loaded library mapped for as long as the pointers above live.
+        #[cfg(not(feature = "apple-hp-media-static"))]
+        pub _library: libloading::Library,
+    }
+}
+
+/// Linked from `fdk-aac-prebuilt-sys`, whose build script supplies the archive.
+#[cfg(feature = "apple-hp-media-static")]
+use fdk_aac_prebuilt_sys as _;
+
+#[cfg(feature = "apple-hp-media-static")]
+unsafe extern "C" {
+    fn aacDecoder_Open(transport: std::os::raw::c_int, layers: std::os::raw::c_uint) -> fdk::Handle;
+    fn aacDecoder_ConfigRaw(
+        decoder: fdk::Handle,
+        conf: *mut *mut u8,
+        length: *const std::os::raw::c_uint,
+    ) -> std::os::raw::c_int;
+    fn aacDecoder_Fill(
+        decoder: fdk::Handle,
+        buffer: *mut *mut u8,
+        size: *const std::os::raw::c_uint,
+        bytes_valid: *mut std::os::raw::c_uint,
+    ) -> std::os::raw::c_int;
+    fn aacDecoder_DecodeFrame(
+        decoder: fdk::Handle,
+        pcm: *mut i16,
+        samples: std::os::raw::c_int,
+        flags: std::os::raw::c_uint,
+    ) -> std::os::raw::c_int;
+    fn aacDecoder_GetStreamInfo(decoder: fdk::Handle) -> *const fdk::StreamInfoHead;
+    fn aacDecoder_Close(decoder: fdk::Handle);
+}
+
+/// fdk-aac, from the static archive linked into this build.
+#[cfg(feature = "apple-hp-media-static")]
+fn api() -> anyhow::Result<&'static fdk::Api> {
+    static API: fdk::Api = fdk::Api {
+        open: aacDecoder_Open,
+        config_raw: aacDecoder_ConfigRaw,
+        fill: aacDecoder_Fill,
+        decode_frame: aacDecoder_DecodeFrame,
+        stream_info: aacDecoder_GetStreamInfo,
+        close: aacDecoder_Close,
+    };
+    Ok(&API)
+}
+
+/// Where the system's fdk-aac is looked for, in order. A bare name is the
+/// platform loader's own search; the paths are where Homebrew, MacPorts and MSYS2
+/// install it, which that search does not reach.
+#[cfg(all(feature = "apple-hp-media", not(feature = "apple-hp-media-static")))]
+const LIBRARY: &[&str] = if cfg!(target_os = "macos") {
+    &[
+        "libfdk-aac.2.dylib",
+        "/opt/homebrew/lib/libfdk-aac.2.dylib",
+        "/usr/local/lib/libfdk-aac.2.dylib",
+        "/opt/local/lib/libfdk-aac.2.dylib",
+    ]
+} else if cfg!(windows) {
+    &["libfdk-aac-2.dll", r"C:\msys64\ucrt64\bin\libfdk-aac-2.dll"]
+} else {
+    &["libfdk-aac.so.2"]
+};
+
+/// How to get the library [`LIBRARY`] names, for the error that says it is missing.
+#[cfg(all(feature = "apple-hp-media", not(feature = "apple-hp-media-static")))]
+const INSTALL: &str = if cfg!(target_os = "macos") {
+    "install it with `brew install fdk-aac`"
+} else if cfg!(windows) {
+    "install MSYS2's mingw-w64-ucrt-x86_64-fdk-aac, or put its libfdk-aac-2.dll beside \
+     remotex.exe or on PATH"
+} else {
+    "install libfdk-aac2 (Debian's non-free, Ubuntu's multiverse) or your \
+     distribution's fdk-aac"
+};
+
+/// fdk-aac, loaded from the system on the first call that finds it. A failure is
+/// not remembered, so a library installed while the gateway runs is found by the
+/// next session.
+#[cfg(all(feature = "apple-hp-media", not(feature = "apple-hp-media-static")))]
+fn api() -> anyhow::Result<&'static fdk::Api> {
+    use anyhow::Context as _;
+
+    static API: std::sync::OnceLock<fdk::Api> = std::sync::OnceLock::new();
+    if let Some(api) = API.get() {
+        return Ok(api);
+    }
+    let mut refused = Vec::new();
+    for name in LIBRARY {
+        // SAFETY: fdk-aac's initialisers set up nothing but its own tables.
+        match unsafe { libloading::Library::new(*name) } {
+            Ok(library) => {
+                let api = resolve(library).with_context(|| format!("load fdk-aac from {name}"))?;
+                return Ok(API.get_or_init(|| api));
+            }
+            Err(e) => refused.push(format!("{name}: {e}")),
+        }
+    }
+    anyhow::bail!(
+        "the AAC-ELD decoder, fdk-aac, is not installed: {INSTALL} ({})",
+        refused.join("; ")
+    )
+}
+
+#[cfg(all(feature = "apple-hp-media", not(feature = "apple-hp-media-static")))]
+fn resolve(library: libloading::Library) -> anyhow::Result<fdk::Api> {
+    // SAFETY: each symbol is typed as `aacdecoder_lib.h` declares it, and the
+    // library is kept in the table the pointers are copied into.
+    unsafe {
+        Ok(fdk::Api {
+            open: *library.get(b"aacDecoder_Open\0")?,
+            config_raw: *library.get(b"aacDecoder_ConfigRaw\0")?,
+            fill: *library.get(b"aacDecoder_Fill\0")?,
+            decode_frame: *library.get(b"aacDecoder_DecodeFrame\0")?,
+            stream_info: *library.get(b"aacDecoder_GetStreamInfo\0")?,
+            close: *library.get(b"aacDecoder_Close\0")?,
+            _library: library,
+        })
+    }
+}
+
+/// Load the decoder now: a session finds out before it dials the Mac that there
+/// is none, and says why.
+#[cfg(feature = "apple-hp-media")]
+pub fn load() -> anyhow::Result<()> {
+    api().map(|_| ())
+}
+
 /// One decoder for one stream's access units.
 #[cfg(feature = "apple-hp-media")]
 pub struct EldDecoder {
-    decoder: Decoder,
+    api: &'static fdk::Api,
+    handle: fdk::Handle,
     /// Scratch for one decoded frame; fdk-aac writes interleaved `i16`.
     pcm: Vec<i16>,
 }
 
+// SAFETY: the handle is used by one thread at a time, whichever owns this value;
+// fdk-aac keeps no thread-local state.
+#[cfg(feature = "apple-hp-media")]
+unsafe impl Send for EldDecoder {}
+
 #[cfg(feature = "apple-hp-media")]
 impl EldDecoder {
     pub fn new() -> anyhow::Result<Self> {
-        let mut decoder = Decoder::new(Transport::Raw).context("open the AAC-ELD decoder")?;
-        decoder
-            .config_raw(&AUDIO_SPECIFIC_CONFIG)
-            .context("configure the AAC-ELD decoder for 48 kHz stereo 480-sample frames")?;
-        Ok(Self {
-            decoder,
+        let api = api()?;
+        // SAFETY: `open` returns a handle or null; the handle is closed by `Drop`.
+        let handle = unsafe { (api.open)(fdk::TT_MP4_RAW, 1) };
+        anyhow::ensure!(!handle.is_null(), "fdk-aac could not open an AAC-ELD decoder");
+        let decoder = Self {
+            api,
+            handle,
             pcm: vec![0; FRAME_SAMPLES * CHANNELS],
-        })
+        };
+        let mut conf = AUDIO_SPECIFIC_CONFIG.as_ptr().cast_mut();
+        let length = AUDIO_SPECIFIC_CONFIG.len() as std::os::raw::c_uint;
+        // SAFETY: fdk-aac reads `length` bytes behind `conf` and only advances its
+        // own copy of the pointer; it never writes through it.
+        let status = unsafe { (api.config_raw)(handle, &mut conf, &length) };
+        anyhow::ensure!(
+            status == fdk::AAC_DEC_OK,
+            "fdk-aac refused the AAC-ELD 48 kHz stereo 480-sample configuration (error {status:#x})"
+        );
+        Ok(decoder)
     }
 
     /// Decode one access unit into interleaved little-endian 16-bit PCM appended to
@@ -73,23 +257,48 @@ impl EldDecoder {
     /// decoder could not produce at all is an error, and the caller keeps going: the
     /// next unit is independently decodable.
     pub fn decode(&mut self, access_unit: &[u8], out: &mut Vec<u8>) -> anyhow::Result<bool> {
-        let took = self.decoder.fill(access_unit).context("feed the AAC-ELD decoder")?;
+        let mut buffer = access_unit.as_ptr().cast_mut();
+        let size = access_unit.len() as std::os::raw::c_uint;
+        let mut left = size;
+        // SAFETY: as in `new`, fdk-aac copies the unit and advances only its own
+        // pointer; `left` is set to what it did not take.
+        let status = unsafe { (self.api.fill)(self.handle, &mut buffer, &size, &mut left) };
+        anyhow::ensure!(status == fdk::AAC_DEC_OK, "fdk-aac refused an AAC-ELD access unit (error {status:#x})");
         anyhow::ensure!(
-            took == access_unit.len(),
-            "the AAC-ELD decoder took {took} of a {}-byte access unit",
+            left == 0,
+            "the AAC-ELD decoder took {} of a {}-byte access unit",
+            size - left,
             access_unit.len()
         );
-        let concealed = match self.decoder.decode_frame(&mut self.pcm) {
-            Ok(()) => false,
-            Err(e) if e.is_concealed() => true,
-            Err(e) => return Err(e).context("decode an AAC-ELD access unit"),
+        // SAFETY: `pcm` holds as many samples as it is said to.
+        let status = unsafe {
+            (self.api.decode_frame)(self.handle, self.pcm.as_mut_ptr(), self.pcm.len() as _, 0)
         };
-        let produced = self.decoder.decoded_frame_size().min(self.pcm.len());
+        let concealed = match status {
+            fdk::AAC_DEC_OK => false,
+            status if fdk::CONCEALED.contains(&status) => true,
+            status => anyhow::bail!("fdk-aac could not decode an AAC-ELD access unit (error {status:#x})"),
+        };
+        // SAFETY: the decoder has decoded a frame, so its stream information is set;
+        // it is read before the next call can change it.
+        let produced = unsafe {
+            let info = &*(self.api.stream_info)(self.handle);
+            (info.frame_size.max(0) as usize) * (info.num_channels.max(0) as usize)
+        };
+        let produced = produced.min(self.pcm.len());
         out.reserve(produced * 2);
         for sample in &self.pcm[..produced] {
             out.extend_from_slice(&sample.to_le_bytes());
         }
         Ok(concealed)
+    }
+}
+
+#[cfg(feature = "apple-hp-media")]
+impl Drop for EldDecoder {
+    fn drop(&mut self) {
+        // SAFETY: the handle came from `open` and is closed once.
+        unsafe { (self.api.close)(self.handle) }
     }
 }
 

@@ -209,9 +209,14 @@ video does not delay the Mac's reading of the input, as RFB pixels' deflate does
 mutes its own speakers while it streams, so the target always carries sound, and
 nothing reaches an AirPlay speaker the Mac plays to. It is **experimental**. Decoding
 the stream needs a gateway built with `--features apple-hp-media`, which links FFmpeg's
-HEVC decoder (LGPL) and Fraunhofer's AAC-ELD decoder (licence not OSI-approved); no
-release artifact carries it. Any other build runs the subtype only with
-`media_passthrough = true`, and refuses a browser that cannot decode the stream. See
+HEVC decoder (LGPL); no release artifact carries it. Its sound decoder, Fraunhofer's
+fdk-aac (licence not OSI-approved), is loaded from the system when a session needs it:
+`libfdk-aac2` on Debian (non-free) and Ubuntu (multiverse), `brew install fdk-aac` on
+macOS, and on Windows `libfdk-aac-2.dll` from MSYS2's `mingw-w64-ucrt-x86_64-fdk-aac`,
+on `PATH` or beside `remotex.exe`. `--features apple-hp-media-static` links it into the
+binary instead. Any other build runs the subtype only with `media_passthrough = true`,
+and it, like a gateway that finds no fdk-aac, refuses a browser that cannot decode the
+stream. See
 [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
 Every Apple subtype supports the native Apple pasteboard when `clipboard =

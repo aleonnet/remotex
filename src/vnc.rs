@@ -1538,6 +1538,24 @@ async fn session(
             .await;
         return;
     }
+    // A build that loads its sound decoder from the system has none on a host
+    // without the library, which is the same as a build without it.
+    #[cfg(feature = "apple-hp-media")]
+    if config.media_stream()
+        && !plan.apple_media
+        && let Err(e) = crate::aac_eld::load()
+    {
+        warn!("vnc: refusing a browser that does not decode the Mac's stream: {e:#}");
+        let _ = sink
+            .msg(ServerMsg::Error {
+                message: format!(
+                    "This browser does not decode the Mac's AAC-ELD, and this remotex \
+                     cannot decode it to send Opus instead: {e:#}"
+                ),
+            })
+            .await;
+        return;
+    }
     // The budget covers the RFB handshake, which can stall on a host that accepts
     // the connection and then says nothing — no socket timeout catches that. The
     // TCP connect has its own deadline inside the helper, so a slow one is

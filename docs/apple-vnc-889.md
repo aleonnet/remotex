@@ -876,7 +876,10 @@ picture's gaps as VP9 encoded here. A PLI is its repaint. See
 The two decoders are the `apple-hp-media` Cargo feature, off by default and in
 no release artifact: FFmpeg's HEVC decoder for the picture (libavcodec,
 LGPL-2.1-or-later, linked statically) and Fraunhofer's AAC-ELD decoder for the
-sound (a licence that is not OSI-approved). A build without the feature refuses an
+sound (fdk-aac, a licence that is not OSI-approved), loaded from the system's
+shared library when a session needs it, or linked statically with
+`apple-hp-media-static`. A gateway that finds no library ends the session the way
+a build without the feature does. A build without the feature refuses an
 `ard-high-performance` target without `media_passthrough` when it reads the config,
 and ends the session of a browser that cannot decode the stream before it dials the
 Mac. The rest of the module — the offers, the replies, SRTP, the depacketizer, the
@@ -1153,7 +1156,8 @@ link to a physical Mac has not been observed.
   included.
   FFmpeg's native `aac` (libavcodec 62.28) decoded the capture cleanly at the
   same levels as Chrome and Safari. The gateway's decoder is Fraunhofer's
-  fdk-aac, linked from a prebuilt static archive
+  fdk-aac, the system's shared library or, with `apple-hp-media-static`, a
+  prebuilt static archive
   ([fdk-aac-prebuilt](https://github.com/andrewtheguy/fdk-aac-prebuilt)). Against
   AudioToolbox's own AAC-ELD (`afconvert -d "aace@48000#480"`), it decoded every
   packet. It runs on a thread of its own behind a 64-unit queue.

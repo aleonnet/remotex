@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # Build the image release CI never publishes — remotex with `apple-hp-media`, the
 # feature an `ard-high-performance` target needs and a release artifact may not
-# carry — and push it to the operator's private registry,
+# carry, as `apple-hp-media-static`, since the image has no system fdk-aac to load
+# — and push it to the operator's private registry,
 # ghcr.io/andrewtheguy/remotex-full, under the tag's own name (v0.0.262).
 #
 # The tags it builds are release tags: the release workflow builds every public
@@ -40,7 +41,7 @@ set -euo pipefail
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
-features=apple-hp-media
+features=apple-hp-media-static
 registry=ghcr.io
 package=andrewtheguy/remotex-full
 image="${registry}/${package}"

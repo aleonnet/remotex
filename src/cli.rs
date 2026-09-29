@@ -21,6 +21,8 @@ pub const FEATURES: &[&str] = &[
     "embedded-gateway",
     #[cfg(feature = "apple-hp-media")]
     "apple-hp-media",
+    #[cfg(feature = "apple-hp-media-static")]
+    "apple-hp-media-static",
 ];
 
 /// [`FEATURES`] as a terminal and the log spell them.

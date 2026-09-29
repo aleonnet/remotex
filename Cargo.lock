@@ -993,14 +993,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fdk-aac-prebuilt"
-version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/fdk-aac-prebuilt?tag=v2.0.3-20260921052032-4cad928#4cad928cce0b2078a852f69b690982c5c4b901f5"
-dependencies = [
- "fdk-aac-prebuilt-sys",
-]
-
-[[package]]
 name = "fdk-aac-prebuilt-sys"
 version = "0.1.0"
 source = "git+https://github.com/andrewtheguy/fdk-aac-prebuilt?tag=v2.0.3-20260921052032-4cad928#4cad928cce0b2078a852f69b690982c5c4b901f5"
@@ -1604,6 +1596,16 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libloading"
+version = "0.9.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "754ca22de805bb5744484a5b151a9e1a8e837d5dc232c2d7d8c2e3492edc8b60"
+dependencies = [
+ "cfg-if",
+ "windows-link",
+]
 
 [[package]]
 name = "libopus-prebuilt-sys"
@@ -2330,13 +2332,14 @@ dependencies = [
  "desktop-vp9",
  "eax",
  "env_logger",
- "fdk-aac-prebuilt",
+ "fdk-aac-prebuilt-sys",
  "flacenc",
  "flate2",
  "futures-util",
  "hmac",
  "libavcodec-hevc-prebuilt-sys",
  "libc",
+ "libloading",
  "log",
  "md-5 0.11.0",
  "num-bigint 0.4.8",
