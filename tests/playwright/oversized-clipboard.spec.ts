@@ -114,11 +114,12 @@ test("a remote clipboard over the limit is reported, not truncated", async ({
     name: "Reveal remote clipboard content",
   });
   await expect(reopened).toBeVisible({ timeout: 20_000 });
-  await expect(reopened).toContainText(
-    `LEN ${Buffer.byteLength(afterValue)}B`,
-  );
+  await expect(reopened).toContainText(`LEN ${Buffer.byteLength(afterValue)}B`);
   await expect(reopened).not.toContainText("Too large to transfer");
 
+  // Closed before leaving: the panel is a sheet along the bottom of the window,
+  // and the menu's button can be under it.
+  await page.getByRole("button", { name: "Close clipboard" }).click();
   await returnToPicker(page);
   expect(pageErrors).toEqual([]);
 });

@@ -14,6 +14,7 @@ const USERNAME = process.env.REMOTEX_PLAYWRIGHT_USERNAME;
 const PASSWORD = process.env.REMOTEX_PLAYWRIGHT_PASSWORD;
 const MAC_SSH = process.env.REMOTEX_PLAYWRIGHT_MAC_SSH;
 const SSH_TIMEOUT_MS = 10_000;
+const LEAVE_TIMEOUT_MS = 10_000;
 const REQUIRED_ENV: Record<string, string | undefined> = {
   REMOTEX_PLAYWRIGHT_USERNAME: USERNAME,
   REMOTEX_PLAYWRIGHT_PASSWORD: PASSWORD,
@@ -45,12 +46,17 @@ export const SCREEN_SHARING_ENDPOINT =
 /// and this file already shells out for the pasteboard. A probe that cannot run at
 /// all (no `nc`) answers `true`: the point is to skip a *known* absent service, not
 /// to guess at one.
+///
+/// `-G`, the connect timeout, is macOS's `nc` alone: anywhere else it is an option
+/// `nc` does not know, which exits non-zero like a refused connection and skipped
+/// every live-Mac spec. There `-w` bounds the connect as well.
 function screenSharingIsListening(endpoint: string): boolean {
   const at = endpoint.lastIndexOf(":");
   const host = at > 0 ? endpoint.slice(0, at) : endpoint;
   const port = at > 0 ? endpoint.slice(at + 1) : "";
+  const connectTimeout = process.platform === "darwin" ? ["-G", "2"] : [];
   try {
-    execFileSync("nc", ["-z", "-G", "2", "-w", "2", host, port], {
+    execFileSync("nc", ["-z", ...connectTimeout, "-w", "2", host, port], {
       stdio: "ignore",
       timeout: SSH_TIMEOUT_MS,
     });
@@ -236,9 +242,17 @@ export async function openClipboardPanel(page: Page): Promise<void> {
 // Hand the session back to the picker, so the next spec starts where this one
 // did. Every spec here does this on the way out, most of them through
 // `leaveSession` below.
+//
+// The clicks have a timeout of their own. Without one a button that cannot be
+// clicked — under a panel a spec left open — is retried until the test's timeout,
+// and then again for as long under the `afterEach` that cleans up.
 export async function returnToPicker(page: Page): Promise<void> {
-  await page.getByRole("button", { name: "Open menu" }).click();
-  await page.getByRole("button", { name: "Switch target" }).click();
+  await page
+    .getByRole("button", { name: "Open menu" })
+    .click({ timeout: LEAVE_TIMEOUT_MS });
+  await page
+    .getByRole("button", { name: "Switch target" })
+    .click({ timeout: LEAVE_TIMEOUT_MS });
   await expect(
     page.getByRole("heading", { name: "Pick a target" }),
   ).toBeVisible();
@@ -248,16 +262,23 @@ export async function returnToPicker(page: Page): Promise<void> {
 // spec threw halfway, so a failing run does not leave the gateway's one slot sitting
 // on a desktop for the next spec to take over.
 //
-// Both steps are conditional, because cleanup runs after failures and a hook that
+// Every step is conditional, because cleanup runs after failures and a hook that
 // threw would bury the real one under a second. The drawer is closed first for the
 // reason `returnToPicker` opens it: the toggle is one button that reads "Close menu"
 // while the drawer is open, so a spec that failed with it open would send the click
-// below looking for a button that is not there. A docked panel needs nothing — it
-// carries its own close, and the toggle beside it already says "Open menu".
+// below looking for a button that is not there. A panel is closed too: it is a
+// sheet along the bottom of the window, which the toggle can be under, and a spec
+// that failed with one open would leave the click below nothing to land on.
 export async function leaveSession(page: Page): Promise<void> {
   const drawer = page.getByRole("button", { name: "Close menu" });
   if (await drawer.isVisible()) {
-    await drawer.click();
+    await drawer.click({ timeout: LEAVE_TIMEOUT_MS });
+  }
+  const panel = page.getByRole("button", {
+    name: /^Close (clipboard|display picker|soft keyboard)$/,
+  });
+  if (await panel.first().isVisible()) {
+    await panel.first().click({ timeout: LEAVE_TIMEOUT_MS });
   }
   if (await page.getByRole("button", { name: "Open menu" }).isVisible()) {
     await returnToPicker(page);
