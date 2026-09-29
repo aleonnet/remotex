@@ -24,7 +24,9 @@ use windows::Win32::System::Threading::{CreateEventW, GetCurrentProcess};
 use windows::core::PCSTR;
 
 pub enum Incoming {
-    Said(Said),
+    /// What the gateway said, and when it was read: the loop that takes it may be
+    /// coding a frame.
+    Said(Said, Instant),
     /// The channel cannot be read any more, and why.
     Closed(anyhow::Error),
 }
@@ -179,7 +181,7 @@ fn read(file: Shared, tx: &Sender<Incoming>) {
         let Some(said) = Said::read(&message) else {
             continue;
         };
-        if tx.send(Incoming::Said(said)).is_err() {
+        if tx.send(Incoming::Said(said, Instant::now())).is_err() {
             break;
         }
     }
