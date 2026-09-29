@@ -34,6 +34,7 @@ import {
   createWasmHevcDecoder,
   isHevc,
   type VideoDecoderLike,
+  type VideoDecoderLikeInit,
 } from "./hevcWasmDecoder.ts";
 
 /**
@@ -306,7 +307,7 @@ export function createVideoStream(
   format: VideoFormat,
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
-  makeDecoder: (init: VideoDecoderInit) => VideoDecoderLike = (init) =>
+  makeDecoder: (init: VideoDecoderLikeInit) => VideoDecoderLike = (init) =>
     new VideoDecoder(init),
 ): VideoStream {
   // FIFO, and that is the whole ordering argument: the encoder produces no frames
@@ -408,6 +409,9 @@ export function createVideoStream(
 
   const decoder = makeDecoder({
     output: (frame) => settle(frame),
+    // A decoder that says a unit completed no picture (hevcWasmDecoder.ts): that
+    // unit is settled, so the next picture resolves its own unit and not this one.
+    noPicture: () => settle(null),
     error: (e) => {
       // Terminal: a decoder that has errored decodes nothing further, and every
       // frame after this one depends on frames it did not produce.

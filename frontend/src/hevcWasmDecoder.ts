@@ -10,7 +10,9 @@
 // error callback — so `createVideoStream` (videoDecoder.ts) runs it exactly as it
 // runs the browser's: the same keyframe gate, the same FIFO of promises, the same
 // stall backstop. Unlike a `VideoDecoder`, it keeps the pairing that stream only
-// hopes for: the decode worker answers every unit with one picture or with none.
+// hopes for: the decode worker answers every unit with one picture or with none,
+// and a none is `noPicture`, which settles that unit's entry to null rather than
+// leaving it for the next picture to resolve.
 
 /** What the paint worker sends the decode worker. */
 export type HevcCommand =
@@ -33,6 +35,15 @@ export type HevcEvent =
    * that failed to decode.
    */
   | { type: "failed"; id: number; name: string; message: string };
+
+/** What `createVideoStream` builds a decoder with. */
+export interface VideoDecoderLikeInit extends VideoDecoderInit {
+  /**
+   * A unit decoded to no picture. Only a decoder that answers every unit calls it;
+   * `VideoDecoder` never does.
+   */
+  noPicture?: () => void;
+}
 
 /** The part of `VideoDecoder` that `createVideoStream` uses. */
 export interface VideoDecoderLike {
@@ -96,7 +107,7 @@ export function isHevc(codec: string): boolean {
 
 /** A `VideoDecoder` for HEVC, decoding in the decode worker. */
 export function createWasmHevcDecoder(
-  init: VideoDecoderInit,
+  init: VideoDecoderLikeInit,
 ): VideoDecoderLike {
   const id = nextId++;
   let state: CodecState = "unconfigured";
@@ -149,10 +160,12 @@ export function createWasmHevcDecoder(
         onEvent: (event) => {
           if (event.type === "failed") {
             fail(event.name, event.message);
-          } else if (state === "configured" && event.frame) {
+          } else if (state !== "configured") {
+            event.frame?.close();
+          } else if (event.frame) {
             init.output(event.frame);
           } else {
-            event.frame?.close();
+            init.noPicture?.();
           }
         },
       });
