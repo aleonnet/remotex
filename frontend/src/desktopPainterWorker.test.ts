@@ -51,6 +51,9 @@ function harness() {
     setVideoFormat(format) {
       calls.push(`format:${format.decode}`);
     },
+    startGraphics() {
+      calls.push("graphics");
+    },
   };
 
   const ctx = {
@@ -171,6 +174,33 @@ test("resize and videoFormat hold their place behind a stalled draw", async () =
     },
     { type: "resized", seq: 7 },
   ]);
+});
+
+test("a graphics pipeline starts in its place, behind the frames before it", async () => {
+  // The run after the start must find a compositor with nothing in it, and the
+  // frames before it must not: both are what the order is for.
+  const h = harness();
+  h.stall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(1),
+    sequence: 1,
+    generation: 1,
+  });
+  await settled();
+  h.host.handle({ type: "graphicsStart" });
+  h.unstall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(2),
+    sequence: 2,
+    generation: 1,
+  });
+  await settled();
+  assert.deepEqual(h.calls, ["draw"]);
+  h.release();
+  await settled();
+  assert.deepEqual(h.calls, ["draw", "graphics", "draw"]);
 });
 
 test("a later batch reports the time it waited behind earlier paint", async () => {

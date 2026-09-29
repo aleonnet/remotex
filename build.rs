@@ -57,6 +57,23 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
         "frontend/tsconfig.app.json",
         "frontend/tsconfig.node.json",
         "frontend/vite.config.ts",
+        // The page's compositor for a passed graphics pipeline, built to
+        // WebAssembly from the gateway's own sources (frontend/wasm/egfx). Named
+        // one by one: its directory also holds what the build writes.
+        "frontend/wasm/egfx/Cargo.toml",
+        "frontend/wasm/egfx/Cargo.lock",
+        "frontend/wasm/egfx/src",
+        "src/rdp_client/compositor.rs",
+        "src/rdp_client/framebuffer.rs",
+        "src/rdp_client/gfx.rs",
+        "src/rdp_client/proto/bitmap.rs",
+        "src/rdp_client/proto/clear.rs",
+        "src/rdp_client/proto/gfx.rs",
+        "src/rdp_client/proto/nsc.rs",
+        "src/rdp_client/proto/planar.rs",
+        "src/rdp_client/proto/progressive.rs",
+        "src/rdp_client/proto/wire.rs",
+        "src/rdp_client/proto/zgfx.rs",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }

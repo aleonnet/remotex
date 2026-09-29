@@ -1319,6 +1319,16 @@ mod tests {
         });
         // A command that does not decode is the end of what can be trusted.
         assert!(compositor.compose(&[0x09, 0, 0, 0, 0xFF, 0, 0, 0]).is_err());
+
+        // Read as RGBA, what was painted is opaque and what never was is not drawn.
+        let mut opaque = Compositor::opaque();
+        opaque.compose(&opening).unwrap();
+        opaque.compose(&frame).unwrap();
+        opaque.framebuffer().with(|picture| {
+            let at = (picture.width as usize + 1) * 4;
+            assert_eq!(picture.pixels[at..at + 4], [30, 20, 10, 0xFF]);
+            assert_eq!(picture.pixels[..4], [0; 4]);
+        });
     }
 
     #[test]

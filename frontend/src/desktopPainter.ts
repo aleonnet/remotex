@@ -68,6 +68,8 @@ export interface DesktopPainter {
   /** Recompose what is already painted under `view`, or show it whole. */
   setView(view: MosaicView | null, seq: number): void;
   setVideoFormat(format: VideoFormat): void;
+  /** An RDP host's graphics pipeline starts, for the worker to compose. */
+  startGraphics(): void;
   /** The attachment boundary: wipe the bitmap and the decoder. */
   clear(): void;
 }
@@ -142,6 +144,9 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
     },
     setVideoFormat(format) {
       post({ type: "videoFormat", format });
+    },
+    startGraphics() {
+      post({ type: "graphicsStart" });
     },
     clear() {
       post({ type: "clear" });

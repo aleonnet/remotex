@@ -1,12 +1,22 @@
-import { type BatchRecord, decodeBatchFrame } from "./protocol.ts";
+import {
+  type EgfxCompositor,
+  type EgfxFactory,
+  loadEgfx,
+} from "./egfxCompositor.ts";
+import {
+  type BatchRecord,
+  decodeBatchFrame,
+  type GraphicsMsg,
+} from "./protocol.ts";
 import {
   createDesktopVideo,
   type DesktopVideo,
   type VideoFormat,
 } from "./videoDecoder.ts";
 
-// The browser SPA's batch draw loop: each batch's records — access units and tiles —
-// decoded in wire order and drawn onto the canvas. The decoder lives here rather than beside each caller:
+// The browser SPA's batch draw loop: each batch's records — access units, tiles and
+// runs of an RDP host's graphics pipeline — decoded or composed in wire order and
+// drawn onto the canvas. The decoder lives here rather than beside each caller:
 // it belongs to exactly one attachment, and `clear` is the one place that ends it.
 
 // The destination's 2D context. A union rather than the element's alone because
@@ -36,6 +46,12 @@ export interface FramePainter {
    * exactly as a failing decode does.
    */
   setVideoFormat(format: VideoFormat): void;
+  /**
+   * Adopt a `graphicsStart`: an RDP host's graphics pipeline begins, from nothing,
+   * and the GRAPHICS records after it are the picture. Whatever decoder or
+   * compositor stood before is done with.
+   */
+  startGraphics(): void;
 }
 
 export function createFramePainter(options: {
@@ -58,6 +74,11 @@ export function createFramePainter(options: {
    * are answered in different places.
    */
   onVideoNeedsKeyframe: (reason: string) => void;
+  /**
+   * Where compositors come from: the WebAssembly module, loaded once. Injectable
+   * for a test, which has the module's bytes and nothing to fetch them from.
+   */
+  loadCompositor?: () => Promise<EgfxFactory>;
 }): FramePainter {
   // Which attachment the decoder belongs to. `clear()` is the attachment boundary and
   // is not queued behind draws — an eviction closes the socket from under whatever
@@ -67,6 +88,30 @@ export function createFramePainter(options: {
 
   // The decoder, built on the first announcement or unit.
   let video: DesktopVideo | null = null;
+
+  // The pipeline being composed, from its `graphicsStart`. `compositor` is null
+  // until the module has loaded, and for good once `broken`: a compositor that
+  // refused a command no longer holds what the host believes its client does, and
+  // nothing composed from it afterwards could be trusted.
+  interface Pipeline {
+    compositor: EgfxCompositor | null;
+    broken: boolean;
+    ready: Promise<void>;
+  }
+  let pipeline: Pipeline | null = null;
+  const loadCompositor = options.loadCompositor ?? (() => loadEgfx());
+
+  const releasePipeline = () => {
+    pipeline?.compositor?.close();
+    if (pipeline) {
+      pipeline.compositor = null;
+      pipeline.broken = true;
+    }
+    pipeline = null;
+  };
+
+  const describe = (error: unknown) =>
+    error instanceof Error ? error.message : String(error);
 
   // What is on screen about video, and whether a painted frame may take it down.
   //
@@ -98,6 +143,7 @@ export function createFramePainter(options: {
   };
 
   const releaseVideo = () => {
+    releasePipeline();
     video?.close();
     video = null;
     videoComplained = false;
@@ -134,12 +180,61 @@ export function createFramePainter(options: {
     options.onVideoNeedsKeyframe("a malformed batch was dropped");
   };
 
+  // One run of the pipeline, composed and painted when its turn comes. Everything a
+  // run needs is what the runs before it left, so nothing here starts early: the
+  // module's load is waited for in place, and a run for a pipeline that has been
+  // replaced, broken or never started is dropped.
+  const compose = async (record: GraphicsMsg, born: number) => {
+    const current = pipeline;
+    if (!current) {
+      return;
+    }
+    await current.ready;
+    const compositor = current.compositor;
+    if (generation !== born || current !== pipeline || !compositor) {
+      return;
+    }
+    let run: ReturnType<EgfxCompositor["compose"]>;
+    try {
+      run = compositor.compose(record.data);
+    } catch (error) {
+      current.broken = true;
+      current.compositor = null;
+      compositor.close();
+      videoComplained = false;
+      options.onVideoError(
+        `This browser could not compose the host's graphics (${describe(error)}). Reload the page to start the session over.`,
+      );
+      return;
+    }
+    const context = options.context();
+    if (!context || run.width === 0 || run.height === 0) {
+      return;
+    }
+    const image = new ImageData(run.pixels, run.width, run.height);
+    for (let i = 0; i + 3 < run.painted.length; i += 4) {
+      context.putImageData(
+        image,
+        0,
+        0,
+        run.painted[i],
+        run.painted[i + 1],
+        run.painted[i + 2],
+        run.painted[i + 3],
+      );
+    }
+  };
+
   // One record's picture: a decoded frame for a unit, a decoded PNG for a tile.
   // Null when there is nothing to draw — a decoder that dropped the unit has said so
-  // itself, and a tile that would not decode asks for a repaint here.
+  // itself, and a tile that would not decode asks for a repaint here. A run of the
+  // pipeline has no picture of its own: it is composed in its turn.
   const decode = (
     record: BatchRecord,
   ): Promise<VideoFrame | ImageBitmap | null> => {
+    if (record.kind === "graphics") {
+      return Promise.resolve(null);
+    }
     if (record.kind === "video") {
       return desktopVideo().decode(
         { w: record.w, h: record.h },
@@ -156,7 +251,10 @@ export function createFramePainter(options: {
     });
   };
 
-  const paint = (record: BatchRecord, image: VideoFrame | ImageBitmap) => {
+  const paint = (
+    record: Exclude<BatchRecord, GraphicsMsg>,
+    image: VideoFrame | ImageBitmap,
+  ) => {
     const context = options.context();
     if (record.kind === "tile") {
       context?.drawImage(image, record.x, record.y);
@@ -191,6 +289,11 @@ export function createFramePainter(options: {
       // the slowest. Drawing in order is what lets a later tile cover an earlier one.
       const decodes = records.map(decode);
       for (let i = 0; i < records.length; i += 1) {
+        const record = records[i];
+        if (record.kind === "graphics") {
+          await compose(record, born);
+          continue;
+        }
         const image = await decodes[i];
         if (!image) {
           continue;
@@ -201,7 +304,7 @@ export function createFramePainter(options: {
           image.close();
           continue;
         }
-        paint(records[i], image);
+        paint(record, image);
         image.close();
       }
     },
@@ -209,7 +312,35 @@ export function createFramePainter(options: {
       generation += 1;
       releaseVideo();
     },
+    startGraphics() {
+      releaseVideo();
+      const starting: Pipeline = {
+        compositor: null,
+        broken: false,
+        ready: Promise.resolve(),
+      };
+      starting.ready = loadCompositor().then(
+        (make) => {
+          // Replaced or cleared while the module loaded: nothing to make one for.
+          if (!starting.broken) {
+            starting.compositor = make();
+          }
+        },
+        (error: unknown) => {
+          if (!starting.broken) {
+            starting.broken = true;
+            options.onVideoError(
+              `This browser could not load the graphics compositor (${describe(error)}).`,
+            );
+          }
+        },
+      );
+      pipeline = starting;
+    },
     setVideoFormat(format) {
+      // A stream takes the picture back from a pipeline: a host that draws with
+      // bitmap updates after all, which the gateway encodes.
+      releasePipeline();
       if (refused !== null && format.decode !== refused) {
         // Not the configuration that was refused, so the refusal no longer stands —
         // but the banner stays until a frame paints, as any other complaint's does.

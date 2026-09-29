@@ -34,6 +34,8 @@ pub struct Composed {
 pub struct Compositor {
     graphics: Graphics,
     framebuffer: Framebuffer,
+    /// Whether what is painted is made opaque — see [`Self::opaque`].
+    opaque: bool,
 }
 
 impl Default for Compositor {
@@ -44,7 +46,15 @@ impl Default for Compositor {
 
 impl Compositor {
     pub fn new() -> Self {
-        Self { graphics: Graphics::new(), framebuffer: Framebuffer::new() }
+        Self { graphics: Graphics::new(), framebuffer: Framebuffer::new(), opaque: false }
+    }
+
+    /// A compositor whose framebuffer is read as RGBA: every rectangle it paints
+    /// has its fourth byte set to 255, where the decoders leave zero. What has
+    /// never been painted stays zero throughout, which such a reader does not
+    /// draw.
+    pub fn opaque() -> Self {
+        Self { opaque: true, ..Self::new() }
     }
 
     /// Compose one run of commands, as [`Event::Graphics`](super::Event::Graphics)
@@ -61,7 +71,12 @@ impl Compositor {
                     composed.resized = Some((width, height));
                     composed.painted.clear();
                 }
-                Update::Paint(rect) => composed.painted.push(rect),
+                Update::Paint(rect) => {
+                    if self.opaque {
+                        self.framebuffer.seal(rect);
+                    }
+                    composed.painted.push(rect);
+                }
                 Update::Frame { .. } => composed.frames += 1,
                 Update::Confirmed | Update::Passed(_) => {}
             }

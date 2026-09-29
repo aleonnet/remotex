@@ -1,0 +1,31 @@
+# The page's compositor for an RDP host's graphics pipeline, passed through
+# (`egfx_passthrough`): the gateway's own, compiled to WebAssembly. The sources
+# are the gateway's — src/lib.rs names them by path — so there is one compositor,
+# and this crate is the binding around it.
+#
+# Built by `bun run build:wasm` in frontend/, into pkg/.
+[package]
+name = "remotex-egfx"
+version = "0.0.0"
+license = "MIT"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+thiserror = "2"
+wasm-bindgen = "0.2"
+
+# For speed, not size: this decodes a desktop's every frame.
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"
+
+[package.metadata.wasm-pack.profile.release]
+wasm-opt = ["-O3", "--enable-bulk-memory", "--enable-nontrapping-float-to-int"]

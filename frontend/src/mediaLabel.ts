@@ -97,12 +97,15 @@ export function renderLabel(plan: string, tiling: boolean): string {
   return tiling ? "PNG tiles: the desktop is past what video carries" : plan;
 }
 
-/** The wire fields of `videoFormat`. */
+/** The wire fields of `videoFormat`, or a pipeline this browser composes. */
 export interface VideoStreamInfo {
   decode: string;
   // The remote's own stream, passed through untouched — wlshare's VP9, a High
   // Performance Mac's HEVC — rather than one the gateway encoded.
   passthrough: boolean;
+  // Not a stream at all: an RDP host's graphics pipeline, composed here
+  // (`graphicsStart`). No decoder is configured and `decode` names nothing.
+  composed?: boolean;
 }
 
 /**
@@ -120,6 +123,9 @@ export function videoLabel(
   }
   if (!stream) {
     return "Waiting for the video format";
+  }
+  if (stream.composed) {
+    return "Not in use: the host's graphics pipeline is composed by this browser";
   }
   return `${stream.decode} · ${stream.passthrough ? "passthrough from the remote" : "encoded by the gateway"}`;
 }

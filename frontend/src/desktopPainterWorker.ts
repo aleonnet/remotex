@@ -78,6 +78,8 @@ export type PainterCommand =
    */
   | { type: "view"; view: MosaicView | null; seq: number }
   | { type: "videoFormat"; format: VideoFormat }
+  /** An RDP host's graphics pipeline starts, and this worker composes it. */
+  | { type: "graphicsStart" }
   /** The attachment boundary: wipe the bitmap and the decoder. */
   | { type: "clear" };
 
@@ -289,6 +291,9 @@ export function createPainterWorker(
           break;
         case "videoFormat":
           queued(() => painter?.setVideoFormat(command.format));
+          break;
+        case "graphicsStart":
+          queued(() => painter?.startGraphics());
           break;
         case "clear":
           // Out of the chain, and starting a new one — see the module comment.

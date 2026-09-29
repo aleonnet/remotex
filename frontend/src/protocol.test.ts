@@ -10,6 +10,7 @@ import { test } from "node:test";
 import {
   batchFrameSequence,
   clickCount,
+  decodeBatchFrame,
   mouseButtonBit,
   mouseButtonFromEvent,
   wheelUnitFromEvent,
@@ -32,6 +33,29 @@ test("screen batch sequences start at one; zero is not an attachment sequence", 
   assert.equal(batchFrameSequence(frame.buffer), null);
   frame[4] = 1;
   assert.equal(batchFrameSequence(frame.buffer), 1);
+});
+
+test("a graphics record is its commands, whole, among the records around it", () => {
+  // Transcribed from `batch` in src/protocol.rs: op 0x04, a u32 length, the commands.
+  const frame = new Uint8Array([
+    0x02, 0x00, 0x02, 0x00, 0x05, 0x00, 0x00, 0x00, 0x04, 0x03, 0x00, 0x00,
+    0x00, 0xaa, 0xbb, 0xcc, 0x04, 0x01, 0x00, 0x00, 0x00, 0xdd,
+  ]).buffer;
+  const records = decodeBatchFrame(frame);
+  assert.deepEqual(
+    records?.map((record) => [record.kind, [...record.data]]),
+    [
+      ["graphics", [0xaa, 0xbb, 0xcc]],
+      ["graphics", [0xdd]],
+    ],
+  );
+  // Cut short, and with a length of nothing: neither is a smaller record.
+  assert.equal(decodeBatchFrame(frame.slice(0, frame.byteLength - 1)), null);
+  const empty = new Uint8Array([
+    0x02, 0x00, 0x01, 0x00, 0x05, 0x00, 0x00, 0x00, 0x04, 0x00, 0x00, 0x00,
+    0x00,
+  ]).buffer;
+  assert.equal(decodeBatchFrame(empty), null);
 });
 
 test("an ordinary click run is passed through as the browser counted it", () => {
