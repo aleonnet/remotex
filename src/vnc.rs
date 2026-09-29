@@ -68,21 +68,22 @@ const SECURITY_VNC_AUTH: u8 = 2;
 /// it and what happens without it. RealVNC's RSA-AES types carry one to
 /// everything else; see [`crate::vnc_rsa_aes`].
 const SECURITY_ARD: u8 = 30;
-/// Largest DH key length accepted from the server, in bytes. macOS sends 128
-/// (a 1024-bit prime); the cap is what keeps a bogus length from turning into
-/// a huge allocation and a very slow modular exponentiation.
+/// Largest DH key length accepted from the server, in bytes. macOS 26 sends
+/// exactly this: RFC 5054's 4096-bit prime, with generator 5. The cap is what
+/// keeps a bogus length from turning into a huge allocation and a very slow
+/// modular exponentiation.
 const MAX_ARD_KEY_BYTES: usize = 512;
 /// Smallest DH key length accepted, in bytes. The server picks the group, and
 /// what rides inside it is an account password, so a small prime is not a
 /// server being frugal — it is a shared secret anyone watching the wire can
 /// recover.
 ///
-/// 128 bytes: the 1024 bits macOS 26 sends, with no room below it. The 512-bit
-/// group Apple's own documentation calls the "older, less secure method" is
-/// therefore refused rather than downgraded to, which is the point. If a Mac old
-/// enough to still offer it ever turns up, this is what it will fail on, and the
-/// error says so — a refusal being the honest answer for a group that would put
-/// an account password behind precomputation anyone can afford.
+/// 128 bytes: a 1024-bit group, and no room below it. The 512-bit group Apple's
+/// own documentation calls the "older, less secure method" is therefore refused
+/// rather than downgraded to, which is the point. If a Mac old enough to still
+/// offer it ever turns up, this is what it will fail on, and the error says so —
+/// a refusal being the honest answer for a group that would put an account
+/// password behind precomputation anyone can afford.
 const MIN_ARD_KEY_BYTES: usize = 128;
 /// Apple's credential blob: `username[64]`, then `password[64]`, each
 /// null-terminated, the remainder random.
@@ -1811,7 +1812,7 @@ async fn connect(
                      did not offer"
                 );
             };
-            read_security_result(&mut reader).await?;
+            read_apple_security_result(&mut reader).await?;
             sock.write_all(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut reader).await?;
             let pass_media = plan.apple_media;
@@ -1899,6 +1900,19 @@ async fn read_security_result<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::R
             read_string(reader).await?
         );
     }
+    Ok(())
+}
+
+/// SecurityResult on Apple's revision, which carries no reason. A Mac sends its
+/// reason string only to an RFB 3.8 viewer; to 003.889 a refusal is the word
+/// alone, and the Mac then keeps the connection open, so waiting for a reason
+/// would only sit out the handshake deadline.
+async fn read_apple_security_result<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<()> {
+    let result = reader.read_u32().await?;
+    anyhow::ensure!(
+        result == 0,
+        "VNC authentication failed: the Mac refused the login (result {result})"
+    );
     Ok(())
 }
 
@@ -6238,6 +6252,26 @@ mod tests {
         assert_eq!(Dialect::Apple889.client_init(), 0x81);
     }
 
+    /// A Mac refuses a 003.889 login with the result word and nothing after it,
+    /// and leaves the connection open, so the refusal must be reported from the
+    /// word alone.
+    #[tokio::test]
+    async fn an_apple_refusal_is_reported_without_waiting_for_a_reason() {
+        let (mut mac, mut client) = tokio::io::duplex(64);
+        mac.write_all(&1u32.to_be_bytes()).await.unwrap();
+        let err = tokio::time::timeout(
+            Duration::from_secs(2),
+            read_apple_security_result(&mut client),
+        )
+        .await
+        .expect("answered from the word alone")
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("refused the login"), "{err:#}");
+
+        mac.write_all(&0u32.to_be_bytes()).await.unwrap();
+        read_apple_security_result(&mut client).await.unwrap();
+    }
+
     /// macvm's enhanced name field (macOS 26.6.2), read as a bitmap, and a plain
     /// name, which has none.
     #[test]
@@ -6369,8 +6403,8 @@ mod tests {
     async fn a_full_dh_exchange_hands_the_server_the_credentials_back() {
         use aes::cipher::{BlockCipherDecrypt as _, KeyInit as _};
 
-        // The group macOS sends, and now the smallest this client accepts: 128
-        // bytes of it.
+        // The smallest group this client accepts, 128 bytes, to keep the
+        // arithmetic quick; macOS sends 512.
         let key_len = MIN_ARD_KEY_BYTES;
         let prime = {
             let mut bytes = vec![0xffu8; key_len];

@@ -46,7 +46,7 @@ official modes alone.
 |---|---|
 | Two subtypes | Both speak RFB 003.889 with an encrypted record layer, as Apple's viewer answers every Mac. `subtype = "ard"` is Standard mode, sharing the Mac's physical displays at a fixed size. `ard-high-performance` is High Performance mode, sharing one virtual display the Mac creates at the size the client asks for. |
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
-| Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
+| Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
 | Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
 | Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and its picture from ZRLE until the stream is up and across display changes. |
 | Not implemented | Apple's controls for two virtual displays and fixed presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
@@ -57,8 +57,9 @@ Rule out the Mac's Remote Management permissions before treating an
 authentication failure as a protocol fault. When the account lacks permission,
 the type-30 exchange completes before the Mac refuses, exactly as it does for a
 wrong password. Both Apple subtypes then report
-`VNC authentication failed: <the Mac's reason>`, which does not tell the two
-causes apart.
+`VNC authentication failed: the Mac refused the login (result 1)`, which does not
+tell the two causes apart. The Mac sends no reason with the refusal (see
+[Other login types](#other-login-types)).
 
 Remote Management's default **All users** setting rejects valid account
 credentials. Add the account to the per-user access list and grant at least
@@ -75,12 +76,8 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 Remotex authenticates with type 30 and the account's own password, so it does not
 need that setting.
 
-Apple's viewer also knows private security types 31–36: Diffie-Hellman variants,
-RSA, a preauthorized connection, Kerberos and SRP. Each of them leaves the Mac
-holding the key the record layer starts from, just as type 30 does. Type 30's key
-is the MD5 of its Diffie-Hellman secret. SRP (36), and RSA (33) in its SRP form,
-use the first 16 bytes of the SHA-256 of the SRP session key. Kerberos (35) uses
-a random key the Mac generates and sends to the viewer. Only type 30 has been
+A Mac also offers other login types, and Apple's viewer tries some of them before
+type 30 (see [Other login types](#other-login-types)). Only type 30 has been
 exercised, so remotex offers nothing else.
 
 ## The two modes in Apple's viewer
@@ -137,10 +134,15 @@ Both modes connect the same way until the record layer is up.
 
 1. **Version.** `RFB 003.889`, as Apple's viewer answers every Mac. It sends
    `003.003` to a server that is not a Mac.
-2. **Type 30.** A Diffie-Hellman exchange. `MD5(shared secret)` is the AES-128 key
-   that encrypts the 128-byte credential block (username at 0, password at 64) in
-   **ECB** mode, not the CBC a published description gives. It is also the first
-   key the record layer's rekey is wrapped under.
+2. **Type 30.** A Diffie-Hellman exchange. The Mac sends a `u16` generator, a
+   `u16` key length, the prime and its public key; macOS 26 sends RFC 5054's
+   4096-bit prime with generator 5, so both keys are 512 bytes, not the 1024-bit
+   group with generator 2 a published description gives. The viewer answers with
+   the 128-byte credential block (username at 0, password at 64), then its public
+   key. `MD5(shared secret)` is the AES-128 key that encrypts the block in **ECB**
+   mode, again not the published CBC. It is also the first key the record layer's
+   rekey is wrapped under. A refusal is the result word alone (see
+   [Other login types](#other-login-types)).
 3. **ClientInit** `0x81`: `0x80` asks for Apple's extended ServerInit, and `0x40`,
    never set, would ask for a session-select exchange remotex does not implement.
 4. **ServerInit**, extended (see below). High Performance ends here, before sending
@@ -153,6 +155,89 @@ Both modes connect the same way until the record layer is up.
    `SetPixelFormat` and the same `SetEncodings`, and High Performance then arms
    `AutoFrameBufferUpdate`. Standard arms it when the first layout names the
    screen being sent.
+
+### Other login types
+
+Remotex speaks only type 30. This is what the Mac's code does with the others;
+only the list and type 30 were measured.
+
+**The list.** To an `RFB 003.889` viewer the Mac lists, in this order:
+- 30, always;
+- 33 (RSA), always;
+- 36 (SRP), unless the Mac has network directory nodes and a preference does not
+  allow SRP for them;
+- 31 and 32 (asking the Mac's user), when **Anyone may request permission to
+  control screen** is on;
+- 2 (the VNC password), when **VNC viewers may control screen with password** is
+  on, or before the Mac's first setup has finished;
+- 35 (Kerberos), when the Mac can do Kerberos and a preference does not disable it.
+
+The test Mac sent `04 1e 21 24 23`: 30, 33, 36 and 35. A Remote Management
+preference can replace the list with one type, and a connection the Mac was told
+to expect gets 34 alone. The Mac refuses a type it did not list.
+
+**The result.** On success the Mac sends SecurityResult `u32` 0. A refusal is the
+`u32` alone: the Mac sends its reason string only to an RFB 3.8 viewer. The Mac
+then left the connection open for the 90 s a test waited; its code closes it
+when the viewer next writes.
+
+**Each type**:
+- **31 and 32** run type 30's exchange, but the Mac ignores the name and password
+  and asks its user to let the viewer in, to observe (31) or to control (32). The
+  Mac refuses keyboard and mouse input from a viewer let in by 31.
+- **33** starts with a `u32` length, then an envelope: a non-zero `u16` version,
+  `RSA1`, a `u16` kind, and the kind's body.
+  - **Kind 0** asks for the Mac's RSA public key. The Mac answers with a `u32`
+    length, `00 01 00 00`, a `u16` n, n bytes of DER, and a zero byte. When it
+    cannot decrypt a later envelope, it answers with the key in the same form,
+    without the zero byte.
+  - **Kind 1** is a plain login. Its body is type 30's 128-byte credential block,
+    under AES-128-ECB with a key the viewer chose, then a little-endian `u16` 256
+    and that key encrypted to the Mac's public key. The Mac answers `u32` 0, then
+    the result. The viewer's key is the one the record layer's rekey is wrapped
+    under.
+  - **Kind 2** carries SRP, and the Mac takes it only when it also listed 36.
+    The body is a `u16` length and SRP's first message, encrypted to the Mac's
+    key; the second message goes in clear in the same envelope. The Mac answers
+    each with a `u32` length, `00 00 00 02`, a `u16` n and n bytes of SRP, and
+    then sends the result.
+- **36** is the same SRP without RSA: after the selector, each message is a `u32`
+  length and SRP bytes in clear, both ways.
+- **34** is for a connection the Mac was told to expect, with a 16-byte key
+  both sides hold beforehand. The Mac sends a 16-byte challenge under AES-ECB
+  with that key, checks the viewer's 16-byte answer, sends 16 bytes back, and
+  then sends the result.
+- **35** starts with the viewer's `u32` 0 and the Mac's `u32` answer. Kerberos
+  tokens follow (not traced), for the service `vnc`. On success the Mac makes a
+  random 16-byte key and sends it as a `u32` length and the key, wrapped by the
+  Kerberos context. That key is the one the rekey is wrapped under.
+
+**SRP.** Each SRP message is a `u32` length, then fields:
+- a `u8`;
+- big numbers with a `u16` length;
+- opaque values with a `u8` length;
+- strings with a `u16` length;
+- a `u64`.
+
+The messages:
+1. The viewer sends an empty string, the user name, an empty string and an empty
+   opaque value.
+2. The Mac answers a zero byte, N, g, the salt, B, the PBKDF2 iteration count
+   and an options string (`mda=SHA-512,replay_detection,conf+int=ChaCha20-Poly1305,kdf=SALTED-SHA512-PBKDF2`).
+   N and g are RFC 5054's 4096-bit group, and the hash is SHA-512. An account
+   that does not exist still gets an answer, with a random salt.
+3. The viewer sends A, its proof M1, the options string again, and an opaque
+   value.
+4. The Mac answers its proof M2, an opaque value, an empty string and a `u32` 0.
+
+The rekey is then wrapped under the first 16 bytes of the SHA-256 of the SRP
+session key. The ChaCha20-Poly1305 in the options string plays no part in the
+record layer.
+
+**Apple's viewer**, logging in with a name and password, tries 33, then 36, then
+30, with Kerberos first or after them depending on its own preference. Asking
+for permission, it tries 32, then 31. Which form of 33 it sends is not
+established.
 
 ### ServerInit's name field is not a name
 
@@ -1136,7 +1221,8 @@ is 10 s overdue.
 - **`0x3f3`'s DCT tiles:** how their coefficients, and a partial update's
   refinements, are coded
   ([Apple's own framebuffer encodings](#apples-own-framebuffer-encodings)).
-- **Authentication types 31–36 on the wire.**
+- **Other login types:** type 35's Kerberos tokens, and which form of type 33
+  Apple's viewer sends ([Other login types](#other-login-types)).
 - **Rate control's loose ends**: the second byte of `RCTL`, whether loss lowers
   the target over longer than 30 s, and whether any offer field lowers the
   20 Mbit/s floor ([Rate control](#rate-control)).
