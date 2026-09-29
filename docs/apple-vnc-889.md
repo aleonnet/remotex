@@ -226,6 +226,17 @@ both of its ciphers the moment it sends a rekey. Remotex asks once, during setup
 It closes the session on any later rekey rather than follow it, because records
 it had already framed under the old key would fail the Mac's check.
 
+**`SetEncryption` (`0x12`)** is a type, a pad byte, a `u16` command and command
+words:
+- **Command 1** is followed by a `u16`, a `u16` count of at most 100, and that
+  many `u32` methods. One of them must be 1, and the Mac then draws a fresh random
+  key and IV and sends the rekey. Remotex sends `12 00 0001 0001 0001 00000001`.
+- **Command 2** is followed by a `u16` and a pad. A 1 makes the Mac decrypt what
+  it receives from then on; any other value turns that off. It does not stop the
+  Mac encrypting what it sends. Remotex sends `12 00 0002 0001 0000`.
+
+A published description reads the two commands as start and stop.
+
 The Mac may send a `MiscStatus` in the cleartext window between `SetEncryption`
 and the rekey, notably after a server restart with stale clipboard state; the
 client must step over it.
@@ -540,10 +551,50 @@ implies version strings; the body is two numeric version triples:
 | OS version | 26.6.2 |
 | capability bitmap | 32 bytes: the server message types the viewer handles |
 
-A mis-sized body makes the Mac swallow the next message and hang silently. The
-capability bitmap gates whether the Mac sends `MiscStatus` at all.
+A mis-sized body makes the Mac swallow the next message and hang silently. A
+version other than 1 is only logged.
 
-**The pasteboard.** Change notifications need `ViewerInfo`, `SetMode(control)`
+The daemon reads two bits of the capability bitmap, and reads both as clear until
+a `ViewerInfo` arrives:
+- **Bit 20:** it checks this bit before sending every `MiscStatus` (`0x14`)
+  except command 17.
+- **Bit 21:** it checks this bit before forwarding an accessibility message from
+  the agent.
+
+A published description says it reads bit 20 alone.
+
+**`MiscStatus` (`0x14`)** is `14 00 00 04 00 01` and a `u16` command:
+
+| Command | Sent when |
+|---|---|
+| 1 | the Mac's user ends the session, just before the Mac closes it |
+| 2 | the Mac's pasteboard changed |
+| 3 | the Mac needs data for a flavor the viewer promised |
+| 4 | a 2.1 s timer finds nothing sent to the connection for 2 s |
+| 5, 6 | the Mac's displays go to sleep, and wake |
+| 9 | control is allowed, on a `FramebufferUpdateRequest` |
+| 10 | only observing is allowed, on `ViewerInfo` |
+| 11, 12 | the pointer is hidden, and shown again |
+| 13, 14 | the Mac's two busy-cursor notifications |
+| 17 | the Mac's user session changed |
+
+A published description has 12 as the heartbeat and 11 as the user session
+changing. The heartbeat is 4, 11 is the pointer hiding, and the session change is
+17 (`0x11`). Remotex acts on 2 and 3 and steps over the rest.
+
+**`SetMode` (`0x0a`)** is a type, a pad byte and a `u16` mode:
+- **0:** observe;
+- **1:** control;
+- **2:** control with the Mac's own keyboard and mouse inhibited, where the
+  connection may do that.
+
+The Mac refuses a mode above 2, and ignores 1 and 2 on a connection limited to
+observing. The mode also sets how the Mac's Screen Sharing menu shows the session:
+observed, assisted or controlled. Remotex sends 1.
+
+**The pasteboard.** `AutoPasteboard` (`0x15`) is eight bytes with a `u16` at
+byte 2: 1 starts the agent watching the Mac's pasteboard, 2 stops it, and any
+other value is ignored. Change notifications need `ViewerInfo`, `SetMode(control)`
 and `AutoPasteboard(start)`, in that order. Both modes send them in the cleartext
 prelude, and High Performance repeats `AutoPasteboard(start)` after the virtual
 display's layout. The Mac then signals with `MiscStatus`:
@@ -554,6 +605,26 @@ Contents travel as a zlib archive (level 9, one sync flush, capped at 100 MB) of
 every flavor of every item. A short text selection can therefore arrive inside
 megabytes of other flavors. Remotex streams the archive, keeps only the text, and
 sends empty text as an item with no flavors, which clears the Mac's pasteboard.
+
+- **The fetch** (`0x0b`) is eight bytes. Bit 0 of byte 1 asks for promises only,
+  and the Mac honours it only while `AutoPasteboard` is started. Bytes 4–7 are
+  the viewer's to choose; the Mac echoes them.
+- **The Mac's reply** (`0x1f`) has a 16-byte header:
+  - `1f 00`, then the fetch's promises bit in byte 2 and a pad byte;
+  - the echoed four bytes;
+  - big-endian `u32` uncompressed and compressed sizes;
+  - then the compressed archive.
+
+  A published description calls bytes 4–7 reserved.
+- **The viewer's `0x1f`** has the same header. Bit 0 of byte 2 marks the contents
+  as promises, again only while `AutoPasteboard` is started, and the Mac ignores
+  bytes 4–7. A size over 100 MiB closes the connection.
+- **The archive** is a run of items. Each item is a `u32` flavor count, then
+  that many flavors. A flavor is a counted name, a reserved `u32`, a `u32` count
+  of counted key and value tags, and counted data, every count a big-endian
+  `u32`. A flavor with no data is a promise, and an empty archive clears the
+  pasteboard. A published description reads the first count as the number of
+  items, each holding one flavor.
 
 **Polling pauses behind a fetch.** Framebuffer and pasteboard replies share one
 ordered stream. While a pasteboard fetch is pending, remotex pauses incremental
@@ -571,6 +642,34 @@ these. Remotex reads two of them only to step over them:
   Mac's current input source as UTF-8, such as `com.apple.keylayout.ABC`. The
   flag is 1 while the Mac's keyboard focus is in a secure text field, such as a
   password prompt.
+
+### Messages remotex does not use
+
+Read from the daemon, for a reader of Apple's viewer's captures:
+- **`DeviceInfo` (`0x456`)** is a metadata rectangle of zero geometry. It holds,
+  in order:
+  - a `u16` size of what follows, then `u16` 2, `u32` 1 and a `u32` 0;
+  - three `u16` string lengths, each counting its NUL;
+  - the Mac's model identifier (`hw.model`, or `unknown`) and two colour strings;
+  - a big-endian `u32` housing colour, when the Mac reports one.
+
+  A published description has the housing colour always present.
+- **`EncryptedInputEvent` (`0x10`)**, from the viewer, is 18 bytes: a type, a
+  flag byte, and one AES block the Mac decrypts in ECB under the key
+  authentication produced. Two markers in the block say what it carries, and a
+  marker other than 0 or `0xff` is a decryption error:
+  - **a key,** when byte 0 is `0xff`: byte 1 is the down flag and bytes 2–5 the
+    keysym;
+  - **a pointer event,** when byte 10 is `0xff`: byte 11 is the button mask and
+    bytes 12–15 are x and y as `u16`s.
+
+  Numbers are big-endian.
+- **`SetKeyboardInputSource` (`0x1a`)**, from the viewer, holds:
+  - a type and a pad byte;
+  - a `u16` size of what follows and a `u16` version;
+  - a `u16` length and an input source ID, which the Mac hands to its agent.
+
+  A published description leaves out the pad byte.
 
 ### Apple's own framebuffer encodings
 
