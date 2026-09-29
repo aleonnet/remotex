@@ -14,8 +14,9 @@ Measured 2026-09-07 on `workstation-ct`, a headless sway with one `HEADLESS-1`
 output, through `tests/ws_probe.py`.
 
 The server side is [wlshare](https://github.com/andrewtheguy/wlshare), a VNC
-server written for this: RFB 3.8 with ZRLE as its one standard pixel encoding
-and a VP9 encoding of its own the gateway passes to a 4:4:4 browser
+server written for this: RFB 3.8 with ZRLE as its standard lossless pixel encoding
+and a VP9 encoding of its own the gateway passes through at the render plan's
+resolved chroma
 ([wlshare's stream, passed through](architecture.md#wlshares-stream-passed-through)),
 wlr-screencopy capture, and this extension built in. It tracks each output's
 exact scale from wlr-output-management, with `wl_output.scale` as the fallback,
@@ -37,7 +38,8 @@ resize = true
 
 Nothing names the server: wlshare is a plain `vnc` target, and the extension is
 discovered the way ContinuousUpdates and Fence are. The gateway lists the
-pseudo-encoding in every generic `SetEncodings`, last so it never weighs on
+pseudo-encoding in every generic `SetEncodings`, after everything that decides
+pixels and immediately before the output-list request, so it never weighs on
 encoding preference; wlshare answers it before its first framebuffer update, and
 any other server ignores it, as RFB requires of an encoding it does not know,
 and sends pixels. Pixels before any report settle the request as unanswered:

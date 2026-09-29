@@ -85,10 +85,10 @@ pub trait MicControl: Send + Sync {
 /// [`crate::session`] and handed to both halves.
 ///
 /// Besides the two registrations — the engine's control and the socket's signal sender —
-/// it keeps whether the host is recording, and in what. A Windows host opens its recording
-/// device during the RDP handshake, seconds before any mic socket connects, so the last
-/// open is latched under the same lock as the sender and replayed to a socket that
-/// subscribes while it stands; a close clears it.
+/// it keeps whether the host is recording, and in what. A remote may open its recording
+/// device before any mic socket connects, so the last open is latched under the same lock
+/// as the sender and replayed to a socket that subscribes while it stands; a close clears
+/// it.
 ///
 /// It keeps, too, whether a mic socket is attached. The browser can enable its microphone
 /// while the engine is still connecting, before any control is registered, so the plug is

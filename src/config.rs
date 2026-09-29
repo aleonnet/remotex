@@ -547,13 +547,13 @@ pub struct TargetConfig {
     /// announces it leaves the camera unplugged. Rejected on both Apple
     /// subtypes: Screen Sharing speaks no such extension.
     ///
-    /// **Experimental**, for lack of tests. The socket's session rules and its
-    /// message encodings are unit tested, and so are both wires; the RDP
-    /// redirection itself is exercised only against a real Windows host, because
-    /// only a host that creates the `RDCamera_Device_Enumerator` channel — a
-    /// workstation, or a Windows Server carrying the Remote Desktop Session Host
-    /// role — has anywhere to redirect a camera to, and the container dummies
-    /// are neither.
+    /// **Experimental.** The socket's session rules and message encodings are
+    /// unit tested, both wires are checked, and the wlshare path has container
+    /// coverage. The RDP redirection itself is exercised only against a real
+    /// Windows host, because only a host that creates the
+    /// `RDCamera_Device_Enumerator` channel — a workstation, or a Windows Server
+    /// carrying the Remote Desktop Session Host role — has anywhere to redirect
+    /// a camera to.
     ///
     /// Capability only. The device itself appears when a client enables the
     /// camera — explicitly, per session, never remembered — by opening
@@ -905,8 +905,8 @@ pub const UNIX_LISTEN_PREFIX: &str = "unix:";
 /// machine — nginx, Caddy, a systemd unit — where a loopback port is a port every
 /// other local process can reach and a socket is a file the filesystem can guard.
 /// It is not an option for the browser, which cannot address one: the client
-/// reaches its gateway over HTTP and two WebSockets, and both need a host and a
-/// port. Whatever terminates that proxy is what a browser talks to.
+/// reaches its gateway over HTTP and up to four WebSockets, and all need a host
+/// and a port. Whatever terminates that proxy is what a browser talks to.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub enum ListenAddr {
     /// `host:port`, with any IPv6 literal bracketed — resolvable by
@@ -933,7 +933,7 @@ impl std::fmt::Display for ListenAddr {
     }
 }
 
-/// The optional `[server]` block: web-server bind and frontend location.
+/// The optional `[server]` block: web-server bind, login, and development host.
 #[derive(Clone, Debug, Default, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct ServerSection {

@@ -1,7 +1,9 @@
-//! Client wire types: tagged JSON for control and input, binary batches for VP9
-//! access units, and binary frames for Opus or PCM audio. WebSocket ordering is
-//! required because resize messages change the picture that follows — and because
-//! an access unit means nothing out of sequence. Audio travels on its own WebSocket.
+//! Client wire types: tagged JSON for control, input, and media-socket signals;
+//! binary batches for the picture; framed Opus or passed AAC-ELD for remote
+//! audio; H.264 for the browser's camera; and Opus for its microphone. WebSocket
+//! ordering is required because resize messages change the picture that follows
+//! — and because an access unit means nothing out of sequence. Each media path
+//! travels on its own WebSocket.
 
 use base64::Engine as _;
 use serde::{Deserialize, Serialize};
@@ -470,8 +472,9 @@ pub mod audio {
 /// offset 2: the access unit, to the end of the WebSocket frame
 /// ```
 ///
-/// The only binary frame the gateway *receives*: everything else inbound is
-/// JSON text. No packet table like [`audio`]'s, because the unit of transfer is
+/// One of the two binary frames the gateway *receives*, beside [`mic`]; session
+/// input and camera setup are JSON text. No packet table like [`audio`]'s, because
+/// the unit of transfer is
 /// the unit of decode — one access unit per frame per WebSocket message — and
 /// the keyframe bit exists so the gateway's drop policy can recover a stream
 /// without parsing H.264.

@@ -1,7 +1,7 @@
 //! WebSocket endpoint bridging a browser to the server-side remote-desktop
 //! session.
 //!
-//! Two endpoints, both presenting the claim token from `POST /api/session`.
+//! Four endpoints, all presenting the claim token from `POST /api/session`.
 //!
 //! `/ws?session=<token>&chroma=420|444&apple_media=true|false` is the session: it attaches
 //! to the single slot ([`crate::session::SessionManager`]). The URL also names what
@@ -49,8 +49,8 @@
 //! Any other close on the session socket detaches the browser. The owner reattaching
 //! within the grace period restores the picker or live engine; a different claim's
 //! attach reconnects the selected target instead; otherwise the engine ends for every
-//! protocol. A closed audio socket ends nothing but the sound; a closed camera socket
-//! ends nothing but the camera.
+//! protocol. A closed audio socket ends nothing but the sound; closed camera and
+//! microphone sockets end only their own redirections.
 
 use axum::{
     extract::{
@@ -85,7 +85,8 @@ const CLOSE_INVALID_TOKEN: u16 = 4000;
 /// Close code: another browser took over the session slot.
 const CLOSE_EVICTED: u16 = 4001;
 /// Close code: the running target does not carry what this socket carries — the
-/// camera socket on a target without `camera = true`, or with no engine running.
+/// camera or microphone socket on a target that does not carry it, or with no
+/// engine running.
 const CLOSE_UNSUPPORTED: u16 = 4002;
 /// Standard internal-error close. The browser treats it as reconnectable, so a
 /// fresh attachment gets a fresh sequence space rather than reusing one.
@@ -144,7 +145,7 @@ const MAX_TRACKED_PAINTS: usize = 4096;
 ///
 /// One number rather than one per plan, because a second one would bind on
 /// nothing: video never came near this. An access unit is a whole frame and
-/// [`crate::session::VIDEO_FRAME_BUFFER`] already holds that path to four, which
+/// [`crate::session::FRAME_BUFFER`] already holds that path to four, which
 /// is why VP9 under the same video ran 1 deep. What paces video is
 /// [`PAINT_LAG_LIMIT`], which counts time instead of messages.
 const PAINT_WINDOW: usize = 24;

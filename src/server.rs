@@ -195,11 +195,13 @@ fn bind_one(socket: std::net::SocketAddr) -> std::io::Result<std::net::TcpListen
 ///   liveness probe. On an embedded gateway `login` and `logout` answer 403
 ///   instead (see `no_login_handler`), while `status` stays real — the same SPA
 ///   runs there and asks it first.
-/// - the rest of `/api/*`, `/ws`, and `/ws/audio` — refuse requests that do not
+/// - the rest of `/api/*` and all four WebSockets — refuse requests that do not
 ///   carry whatever this gateway's [`GatewayAuth`] asks for; unknown `/api/*`
 ///   paths return 404 rather than the SPA, so API clients get an honest error.
 /// - `/ws` — the remote-desktop control and picture WebSocket.
 /// - `/ws/audio` — the dedicated remote-audio WebSocket.
+/// - `/ws/camera` — the browser camera's H.264 uplink.
+/// - `/ws/mic` — the browser microphone's Opus uplink.
 /// - fallback — the built SPA, compiled into the binary ([`crate::assets`]). A
 ///   real file is served as itself; any unknown path returns `index.html` with a
 ///   200 so client-side routes resolve (matching an SPA's expectations). The

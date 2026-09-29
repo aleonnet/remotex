@@ -1,10 +1,11 @@
 //! A headless RDP client, protocol and all.
 //!
-//! Screen, pointer, keyboard, mouse, resize and the clipboard, and nothing else.
-//! There is no window and no drawing: [`Session::start`] connects, keeps a complete framebuffer
-//! up to date in memory the caller can read, and posts an [`Event`] whenever a
-//! rectangle of it changes. What the caller does with those pixels is not this
-//! module's business — [`crate::rdp`] is the caller, and it encodes them.
+//! Screen, pointer, keyboard, mouse, resize, clipboard and sound, with a camera
+//! and microphone in the other direction and an optional agent-coded video stream.
+//! There is no window and no drawing: [`Session::start`] connects, keeps a complete
+//! framebuffer up to date in memory the caller can read, and posts an [`Event`]
+//! whenever a rectangle of it changes. What the caller does with those pixels is
+//! not this module's business — [`crate::rdp`] is the caller, and it encodes them.
 //!
 //! [`proto`] is the wire: the connection sequence, CredSSP, TLS, fast-path and
 //! slow-path decoding, the bitmap codec, the cursor, and Display Control, all

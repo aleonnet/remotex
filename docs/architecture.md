@@ -13,14 +13,17 @@ browser SPA over loopback or the network
    │  /ws: JSON control/input, binary picture batches
    │  /ws/audio: the audio format, then binary audio frames
    │  /ws/camera: the camera format and H.264 samples up, start/stop down
+   │  /ws/mic: Opus microphone packets up, open/close down
    ▼
 axum server ── single session slot ── protocol engine
                                          ├─ RDP through the built-in client
                                          └─ built-in RFB client (3.8 or Apple 003.889)
 ```
 
-RDP and VNC frames are decoded in the gateway and sent as one VP9 stream of the
-whole desktop, at the quality and chroma the target's render plan resolves to. A
+Ordinary RDP and VNC source frames are decoded in the gateway and sent as one VP9
+stream of the whole desktop, at the quality and chroma the target's render plan
+resolves to. wlshare and an opted-in RDP host agent can instead code that resolved
+VP9 stream themselves for the gateway to pass through unchanged. A
 VNC desktop too large for that stream, on a target that does not resize it, goes
 instead as the server's own rectangles, one PNG each — see
 [tiles past the ceiling](#tiles-past-the-ceiling). A
@@ -35,8 +38,10 @@ decodes them rather than re-encoding them — see
 Opus, save that passed AAC-ELD, and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
-extension on a generic VNC target. The redirection is experimental —
-see [Camera frames](#camera-frames).
+extension on a generic VNC target. Its microphone uses `/ws/mic`: browser-encoded
+Opus decoded to the 16-bit PCM an RDP host or wlshare records. Both redirections
+are experimental — see [Camera frames](#camera-frames) and
+[Microphone frames](#microphone-frames).
 
 ## Constraints
 
@@ -61,6 +66,7 @@ see [Camera frames](#camera-frames).
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `vnc_apple_media.rs` | High Performance's media stream: the offer, SRTP, HEVC depacketizing and decoding, and the sound's receiver |
 | `aac_eld.rs` | the AAC-ELD decoder for that stream's sound |
+| `camera.rs`, `mic.rs` | browser camera and microphone bridges into the active engine |
 | `shadow.rs` | change detection: what the client already has |
 | `encode.rs`, `stream.rs`, `video.rs` | the ordered, paced, congestion-aware stream: its mirror, its rounds, and the picture limits |
 | `vp9.rs` | the VP9 stream over the mirror, coded by the `desktop-vp9` crate wlshare shares — the one place libvpx is spoken to for either side |
@@ -68,8 +74,8 @@ see [Camera frames](#camera-frames).
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
 Each engine consumes `ClientMsg` input and emits the same `ServerMsg` stream.
-RDP and VNC pass dirty pixels through the ordered encoder before reaching that
-boundary.
+Where the gateway owns the encode, RDP and VNC pass dirty pixels through the
+ordered encoder before reaching that boundary.
 
 Ordering is a correctness requirement throughout the frame path. Every access unit
 is a change from the one before it, and a resize changes the picture that follows.
@@ -845,8 +851,8 @@ the same build, and no second client is supported.
 Control and input messages are tagged JSON. Server messages cover picker and
 connected state, desktop size, display selection, cursor shape, clipboard,
 audio format, and errors. The `connected` message includes `resize`,
-`clipboard`, and `audio` capability flags so clients expose only supported
-controls.
+`clipboard`, `audio`, `camera`, and `microphone` capability flags so clients
+expose only supported controls.
 
 It also carries two things a client cannot work out and nothing else reveals:
 `render`, the resolved render dial, and `subtype`, the target's `ard` or
@@ -1066,18 +1072,17 @@ client, so detailed negotiation status remains in the gateway log.
 
 ### Camera frames
 
-**Experimental, for lack of tests.** The camera is the one path this gateway
-ships without automated coverage of the redirection itself. Its socket rules and
-message encodings are unit tested like everything else here — the claim and
-engine binding, the eviction, the byte-for-byte control frames — and so is the
-MS-RDPECAM wire the RDP client speaks, against the specification's own examples.
+**Experimental.** The socket rules and message encodings are unit tested like
+everything else here — the claim and engine binding, the eviction, the
+byte-for-byte control frames — and so is the MS-RDPECAM wire the RDP client
+speaks, against the specification's own examples. The wlshare path is exercised
+by its container test; RDP has no container host.
 `tests/rdp_client_probe.rs` checks against a real host that the camera is
 negotiated and its device opened, and its `a_real_host_streams_the_camera` opens
 the host's Camera app and carries H.264 frames from a file to it. Like every real-host
 probe it is ignored by default, and it checks that the host started the stream
-and took samples, not the pixels the host displays. The dummy RDP server the
-container tests drive offers no camera at all. The displayed picture is verified
-by hand against a Windows host, and a change here needs a hand check.
+and took samples, not the pixels the host displays. The displayed picture is
+verified by hand against a Windows host, and a change here needs a hand check.
 
 The browser's camera goes the other way, on a third socket, to an RDP target or a
 generic VNC target that opted in with `camera = true` (refused on both Apple
@@ -1149,11 +1154,44 @@ is sent nothing and the enabled camera is never started, as on a Windows Server
 without the RDSH role. See
 [The browser's camera over VNC with wlshare](wlshare-camera.md).
 
-The browser's microphone follows the same path on a generic VNC target:
-`src/vnc_mic.rs` asks for wlshare's microphone extension, plugs the microphone
-when the mic socket attaches and unplugs it when the socket closes, relays
-wlshare's start and stop as the bridge's open and close, and sends the bridge's
-decoded PCM between them. See
+#### Microphone frames
+
+**Experimental**, under the same testing boundary as the camera. The browser's
+microphone goes the other way on the fourth socket, to an RDP target or generic
+VNC target that opted in with `microphone = true`; both Apple subtypes refuse the
+key. Opening `/ws/mic?session=<token>` is the enable. It has the camera socket's
+authentication, 4000/4001/4002 close codes, claim-and-engine binding, and
+per-session lifetime, so an engine end, takeover, or ordinary socket close stops
+the feed and the next session starts with the microphone off.
+
+The remote controls when samples are useful. It sends `micOpen` when an
+application starts recording and `micClose` when it stops; the browser captures
+and encodes only between them. Inbound binary frames contain one packet:
+
+```text
+u8 kind = 0x05 | one Opus packet
+```
+
+The browser sends mono Opus in voice mode at 16 kbit/s in 60 ms packets. The
+gateway decodes it at 48 kHz, groups it in 20 ms blocks, and resamples it to the
+16-bit mono or stereo PCM format the remote requested. Packets arriving while
+the remote is not recording are dropped, and a close discards queued and partial
+audio so a later recording starts cleanly.
+
+On RDP, `microphone = true` lets the host open the MS-RDPEAI `AUDIO_INPUT`
+dynamic channel. The host speaks first: version, recording formats, then an Open
+when an application records. The client offers exactly one of the host's 16-bit
+PCM formats, preferring mono and 16 kHz, and cuts the decoded PCM into the
+`FramesPerPacket` groups the host named. A full sixteen-buffer queue drops its
+oldest audio. `tests/rdp_client_probe.rs` drives this negotiation against a real
+host under `REMOTEX_UAT_MICROPHONE=1` and feeds a tone while the host's Recording
+panel holds the device open. See
+[The RDP client](rdp-client.md#microphone-ms-rdpeai).
+
+On a generic VNC target, `src/vnc_mic.rs` asks for wlshare's microphone
+extension, plugs the microphone when the socket attaches and unplugs it when the
+socket closes, relays wlshare's start and stop as the bridge's open and close,
+and sends the bridge's decoded PCM between them. See
 [The browser's microphone over VNC with wlshare](wlshare-microphone.md).
 
 ### Display geometry
@@ -1341,18 +1379,19 @@ The protocol is the gateway's own client, `src/rdp_client/`, down to the wire
 format: `rdp_client/proto/` encodes and decodes every PDU against [MS-RDPBCGR],
 and `rdp_client/` owns one thread per session, a complete framebuffer painted from
 those decoders, and an event per damaged rectangle. The engine (`src/rdp.rs`)
-compares those rectangles with a shadow of pixels already sent, splits the
-remainder into bands, and encodes off the event loop. Input is mapped from DOM
-codes to scancodes and queued to the client's thread as fast-path events.
+coalesces overlapping damage, compares it with a shadow of pixels already sent,
+trims it to the changed bounding rectangle, and encodes off the event loop. Input
+is mapped from DOM codes to scancodes and queued to the client's thread as
+fast-path events.
 
 The client carries the desktop, the pointer, keyboard, mouse, resize, the
-clipboard and sound, and no touch: touch is announced only by a host that opens
-MS-RDPEI, which this client never asks for. What it would take is in
+clipboard, sound, and the browser's camera and microphone, and no touch: touch is
+announced only by a host that opens MS-RDPEI, which this client never asks for. What it would take is in
 [`roadmap.md`](roadmap.md).
 
-Static virtual channels are asked for by key: `drdynvc` for `resize = true` or the
-default `egfx = true`, `cliprdr` for `clipboard = true`, and `rdpsnd` with `rdpdr`
-for `audio = true`.
+Static virtual channels are asked for by key: `drdynvc` for `resize = true`, the
+default `egfx = true`, `camera = true`, or `microphone = true`; `cliprdr` for
+`clipboard = true`; and `rdpsnd` with `rdpdr` for `audio = true`.
 Under the Graphics Pipeline (MS-RDPEGFX) the server draws through surfaces on a
 dynamic channel, marks every frame's end — which is the engine's flush signal, with
 the 16 ms coalescer demoted to a 100 ms safety net — and answers a monitor layout
@@ -1377,6 +1416,7 @@ then carries only the gaps: see
 Read [The RDP client, written here](rdp-client.md) for the whole of it: the
 connection sequence, the channels and the chunk flags a Windows host silently
 requires, the codec and damage path, resize and density, the clipboard, and sound.
+It also covers camera and microphone redirection.
 
 [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
 
@@ -1767,8 +1807,8 @@ the same machine: the socket is created `0660` so the filesystem decides who may
 connect, a leftover from a killed gateway is taken over on the next start, one
 that something is still serving refuses the start, and the file is removed when
 the gateway stops. No client addresses that form directly — the page reaches its
-gateway over one HTTP origin and two WebSockets, all of which need a host and a
-port, so whatever terminates the proxy is what a browser talks to. An embedded
+gateway over one HTTP origin and up to four WebSockets, all of which need a host
+and a port, so whatever terminates the proxy is what a browser talks to. An embedded
 gateway is that arrangement in one process tree: the worker listens on its
 private endpoint — `<instance>/gateway.sock`, or a named pipe on Windows — and
 never on TCP, and the thing terminating the proxy is the TUI master, which the
@@ -1893,7 +1933,8 @@ engine exchanges with its remote is a different link and is not counted.
 
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session
-flow and protocol engines. Containerized dummy servers cover RDP and VNC.
+flow and protocol engines. Containerized dummy servers cover generic VNC and
+wlshare; RDP end-to-end probes borrow a real Windows host.
 
 Stable headless browser tests under
 [`tests/playwright`](../tests/playwright/README.md) cover deterministic DOM,

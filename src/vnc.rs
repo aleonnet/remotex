@@ -2121,10 +2121,10 @@ fn rfb38_encoding_list(clipboard: bool, audio: bool, camera: bool, microphone: b
         // microphone, the same way. See [`crate::vnc_mic`].
         encodings.push(vnc_mic::ENCODING);
     }
-    // The density request, asked of every generic server and last so it never
-    // weighs on encoding preference. Its answer, when it comes, is the scale every
-    // framebuffer from then on is labelled with; a Mac reports its densities in
-    // its display layout and is not asked.
+    // The density request, asked of every generic server after everything that
+    // decides pixels so it never weighs on encoding preference. Its answer, when
+    // it comes, is the scale every framebuffer from then on is labelled with; a
+    // Mac reports its densities in its display layout and is not asked.
     encodings.push(ENCODING_WLSHARE_DENSITY);
     // The output list, on the same terms and for the same reason: a Mac sends its
     // screens in that layout, and this is the one way a generic server says it has

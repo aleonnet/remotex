@@ -11,7 +11,8 @@ a server that speaks it announces so, and one that does not says nothing and the
 session runs in silence.
 
 Measured 2026-09-09 on `workstation-wsl`, a headless sway with one `HEADLESS-1`
-output and PipeWire's own dummy sink, through `tmp/audio_ws_probe.py`.
+output and PipeWire's own dummy sink, through a one-off WebSocket probe. The
+maintained `tests/ws_probe.py --audio` probe exercises the current socket path.
 
 The server side is [wlshare](https://github.com/andrewtheguy/wlshare), which,
 while any client listens, has the desktop play into a PipeWire sink of its own
@@ -228,11 +229,11 @@ The format is still announced on `/ws/audio` there — the gateway advertises on
 format and writes the header before any remote channel is up — so a server
 without the extension is silence measured in packets, not in the announcement.
 
-Reproduce it:
+Exercise the current path:
 
 ```sh
-REMOTEX_PROBE_PASSWORD=… uv run tmp/audio_ws_probe.py \
-  --port <gateway port> --target <name> --user <user> --seconds 8
+REMOTEX_PROBE_PASSWORD=… uv run tests/ws_probe.py \
+  --port <gateway port> --target <name> --user <user> --seconds 8 --audio
 # meanwhile, on the host
 pw-play <some>.wav
 ```

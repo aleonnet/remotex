@@ -103,7 +103,7 @@
 # start; one that something is still serving refuses the start instead.
 #
 # A browser cannot use this form. The client addresses its gateway by URL — one
-# HTTP origin and two WebSockets — so whatever terminates the proxy is what it
+# HTTP origin and up to four WebSockets — so whatever terminates the proxy is what it
 # talks to.
 # Web login (required): username:bcrypt_hash guarding the whole surface.
 # Generate with:  remotex gen-passwd <username>
@@ -295,14 +295,13 @@ password = "change-me"
 # wlshare's camera extension, which makes it a PipeWire camera on the wlroots
 # desktop; any other VNC server says nothing and the camera is never plugged (see
 # docs/wlshare-camera.md). The rest of this note is about RDP.
-# EXPERIMENTAL, for lack of tests — the
-# socket's rules, its messages and the channel's wire are checked. Only a Windows
-# host that creates the camera enumeration channel has anywhere to redirect to: a
+# EXPERIMENTAL. The socket's rules, its messages, and both channel wires are
+# checked, and the wlshare path has container coverage. Only a Windows host that
+# creates the camera enumeration channel has anywhere to test the RDP path: a
 # workstation, or a Windows Server carrying the Remote Desktop Session Host role.
-# No dummy server here has one. `a_real_host_streams_the_camera` carries H.264
-# frames to such a host, but it is ignored by default and does not check the
-# pixels the host displays. Unlike `audio` above and the rest of the RDP features,
-# which every test run covers, the picture is verified by hand against such a host.
+# `a_real_host_streams_the_camera` carries H.264 frames to such a host, but it is
+# ignored by default and does not check the pixels the host displays. The RDP
+# picture is verified by hand against such a host.
 #
 # Capability only. The device appears when a client turns the camera on from the
 # floating menu — explicitly, per session, never remembered — and is unplugged
@@ -328,7 +327,7 @@ password = "change-me"
 #microphone = false
 
 # A VNC target needs host and, usually, one of the two passwords; domain is
-# refused, and width/height only ever answer a default-size request (see above).
+# refused, and width/height follow the opening-size rules above.
 # `vnc_password` is the server's own password and is all a server without user
 # accounts takes.
 # [[targets]]

@@ -35,23 +35,26 @@ directory and puts its `bin` on the machine `PATH`:
 
 ```text
 C:\Program Files\remotex\bin\remotex.exe
+C:\Program Files\remotex\VERSION
 C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
 C:\Program Files\remotex\share\doc\remotex\LICENSE
 C:\Program Files\remotex\share\doc\remotex\THIRD-PARTY-NOTICES.txt
 ```
 
-Every artifact, container images included, carries remotex's MIT `LICENSE` and
-`THIRD-PARTY-NOTICES.txt`, the notices of what a release build contains that
-remotex did not write: the C libraries linked from their prebuilt archives, whose
-licences are kept in `notices/`, the web client's packages, and the Rust crates
-cargo-about finds under `about.toml`. It is a build output, not a file in the
-repository: `third-party-notices.py` writes it into the tree `build-tarball.sh` and
-`build-windows-msi.ps1` package, which takes `bun install` done in `frontend/` and
-cargo-about (`cargo install cargo-about --locked --features cli`). Release CI makes
-it once, in its `notices` job, and hands it to every target in
+Every gateway artifact, container images included, carries remotex's MIT
+`LICENSE` and `THIRD-PARTY-NOTICES.txt`, the notices of what a release build
+contains that remotex did not write: the C libraries linked from their prebuilt
+archives, whose licences are kept in `notices/`, the web client's packages, and
+the Rust crates cargo-about finds under `packaging/about.toml`. It is a build
+output, not a file in the repository: `third-party-notices.py` writes it into the
+tree `build-tarball.sh` and `build-windows-msi.ps1` package, which takes
+`bun install` done in `frontend/` and cargo-about
+(`cargo install cargo-about --locked --features cli`). Release CI makes it once,
+in its `notices` job, and hands it to every target in
 `REMOTEX_PREBUILT_NOTICES`, as it hands over the frontend bundle. cargo-about
-refuses a crate under a licence `about.toml` does not accept, so such a dependency
-fails the packaging. It covers the default build, not `apple-hp-media-static`, whose
+refuses a crate under a licence `packaging/about.toml` does not accept, so such a
+dependency fails the packaging. It covers the default build, not
+`apple-hp-media-static`, whose
 distributor adds fdk-aac's licence and FFmpeg's LGPL terms.
 
 There is no package wrapper, version directory, active-version symlink, or
