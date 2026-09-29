@@ -1463,7 +1463,7 @@ async fn route_connection(
     // user. The listener is bound to `127.0.0.1` and `::1` alone, so nothing off
     // the machine can ask; the token stands in for a login the embedded gateway
     // does not have, and seeding it here is what lets one page load carry it to
-    // `/api/*` and to both WebSocket upgrades, which a header cannot reach from
+    // `/api/*` and to every WebSocket upgrade, which a header cannot reach from
     // inside a document. What follows is that **any local user may drive any
     // instance** — including one who could not open the worker's owner-only
     // endpoint directly. This is a single-user desktop tool: do not run

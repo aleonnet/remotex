@@ -1,9 +1,9 @@
 //! The wlshare microphone extension: the browser's microphone, lent to a wlroots-based
 //! desktop over the RFB connection the session already has.
 //!
-//! The camera extension's twin ([`crate::vnc_camera`]), and wlshare's fourth private
-//! one. Pseudo-encoding [`ENCODING`] (`WLSM`) and message type [`MSG_MICROPHONE`] are
-//! the whole of it, in both directions:
+//! The camera extension's twin ([`crate::vnc_camera`]), and wlshare's fourth
+//! private one. Pseudo-encoding [`ENCODING`] (`WLSM`) and message type
+//! [`MSG_MICROPHONE`] are the whole of it, in both directions:
 //!
 //! - A target with `microphone = true` lists the pseudo-encoding in `SetEncodings`.
 //!   wlshare answers with an *available* message; any other server ignores the

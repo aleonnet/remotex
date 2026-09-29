@@ -3,8 +3,8 @@
 A single-user remote desktop gateway for RDP and VNC targets, including Macs
 using the built-in Screen Sharing service. The Rust backend owns each protocol
 session and streams desktop updates over a WebSocket protocol to the browser
-SPA. Remote audio uses a dedicated second WebSocket so sound never queues behind
-the picture.
+SPA. Remote audio uses a dedicated WebSocket so sound never queues behind the
+picture; redirected camera and microphone media each use their own socket too.
 
 The main reason this exists is the client: it is a browser, so anything with one
 reaches every target — RDP, VNC and Macs alike — with nothing to install per
@@ -17,8 +17,8 @@ default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
 - RDP uses a built-in client, protocol and all: the desktop over the graphics
   pipeline (MS-RDPEGFX) or plain bitmap updates, pointer, keyboard, mouse and
   resize, spoken to a current Windows host over NLA — tested on Windows 10 and 11,
-  not on older Windows or xrdp. It carries the clipboard and
-  sound (MS-RDPEA), and does not carry touch. See
+  not on older Windows or xrdp. It carries the clipboard, sound (MS-RDPEA), and
+  the browser's camera and microphone, and does not carry touch. See
   [`docs/rdp-client.md`](docs/rdp-client.md).
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing,
   over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
@@ -273,13 +273,15 @@ Mac keeps playing where it did — its own speakers, or an AirPlay receiver that
 runs outside remotex, on Linux or Windows.
 
 Two redirections send this browser's own media the other way and are
-**experimental**, for lack of tests: `camera = true` offers the remote a virtual
+**experimental**: `camera = true` offers the remote a virtual
 webcam over MS-RDPECAM — or, on a generic `vnc` target, over wlshare's camera
 extension, which makes it a PipeWire camera on the wlroots desktop (see
 [`docs/wlshare-camera.md`](docs/wlshare-camera.md)) — and `microphone = true`
 offers an RDP host a microphone over MS-RDPEAI, or a generic `vnc` target one over
 wlshare's microphone extension, which makes it a PipeWire audio source on the
-wlroots desktop (see [`docs/wlshare-microphone.md`](docs/wlshare-microphone.md)). They serve a different purpose from the rest of the session. The
+wlroots desktop (see
+[`docs/wlshare-microphone.md`](docs/wlshare-microphone.md)). They serve a
+different purpose from the rest of the session. The
 screen and the remote's sound aim to match sitting at the desktop and spend the
 bandwidth that takes on a fast link; the camera and the microphone are for
 someone who needs one for a while — a call, a recording — and are sent as
@@ -287,8 +289,8 @@ cheaply as that allows on any link. The microphone goes as mono speech Opus at
 16 kbit/s, which the gateway decodes to the PCM the host records in. Both are off
 by default and enabled per session from the floating menu, never remembered, and
 both are refused on Apple's Screen Sharing. A Windows host starts the microphone only once something on it
-records. Their socket rules,
-control messages and channel wire formats are tested like everything else, and
+records. Their socket rules, control messages and channel wire formats are tested
+like everything else, and the wlshare paths have container coverage. On RDP,
 `a_real_host_records_the_microphone` feeds a host's recording device.
 `a_real_host_streams_the_camera` in `tests/rdp_client_probe.rs` carries H.264
 frames to a host's Camera app, but it is ignored by default and does not check
@@ -395,7 +397,7 @@ All fields and per-protocol examples are in
 
 ```sh
 cargo clippy --all-targets -- -D warnings
-cargo test
+cargo test --lib
 
 cd frontend
 bun run check
@@ -453,7 +455,7 @@ change rebuilds in seconds rather than minutes. Artifacts are always built
 
 remotex is under the MIT licence in [`LICENSE`](LICENSE). A release build also
 contains third-party software, listed with its licences in the
-`THIRD-PARTY-NOTICES.txt` every artifact carries, which packaging makes from the
-locked dependencies (see [Packaging](packaging/README.md)).
+`THIRD-PARTY-NOTICES.txt` every gateway artifact carries, which packaging makes
+from the locked dependencies (see [Packaging](packaging/README.md)).
 FFmpeg and fdk-aac, the High Performance decoders, are not in it: the gateway
 loads them from the system.

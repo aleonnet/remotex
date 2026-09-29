@@ -1,9 +1,11 @@
 // Wire protocol shared (in shape) with the Rust backend `src/protocol.rs`.
 //
-// Browser -> server: input events as JSON text frames on `/ws`.
+// Browser -> server: input events as JSON text frames on `/ws`, camera H.264 on
+// `/ws/camera`, and microphone Opus on `/ws/mic`.
 // Server -> browser: screen batches on `/ws` and audio frames on `/ws/audio`,
-// with their kind in the first byte; control messages (resize/error on the first
-// socket, the audio format on the second) are tagged JSON text frames.
+// with their kind in the first byte. Tagged JSON text carries session control on
+// `/ws`, the audio format on `/ws/audio`, and remote start/stop decisions on the
+// camera and microphone sockets.
 
 // "back" and "forward" are the side buttons of a five-button mouse. No engine
 // acts on them today — RDP and VNC drop them for want of anywhere to put them.
@@ -496,8 +498,8 @@ function decodeTile(
   };
 }
 
-// Build one camera frame: the only binary this client *sends*. Layout (matching
-// `camera` in `src/protocol.rs`):
+// Build one camera frame: one of the two binaries this client sends, beside a
+// microphone packet. Layout (matching `camera` in `src/protocol.rs`):
 //
 //   offset 0: u8 frame kind, always 0x04 (camera sample)
 //   offset 1: u8 flags — bit 0 set on a keyframe

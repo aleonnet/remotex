@@ -4,9 +4,10 @@
 
 Install a native package from the
 [latest release](https://github.com/andrewtheguy/remotex/releases/latest). The
-package manager owns the gateway executable and the config example; the web
-client is compiled into the executable. It does not own the live config, so an
-upgrade or removal never replaces or deletes credentials.
+package manager owns the gateway executable, config example, licence, and
+third-party notices; the web client is compiled into the executable. It does not
+own the live config, so an upgrade or removal never replaces or deletes
+credentials.
 
 ### Debian and Ubuntu (`.deb`)
 
@@ -23,6 +24,8 @@ Use the `arm64` filename on an arm64 host. The package installs:
 ```text
 /usr/bin/remotex
 /usr/share/doc/remotex/remotex.example.toml
+/usr/share/doc/remotex/LICENSE
+/usr/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
 ### Fedora, RHEL, and other RPM distributions (`.rpm`)
@@ -53,6 +56,8 @@ It installs:
 ```text
 /usr/local/bin/remotex
 /usr/local/share/doc/remotex/remotex.example.toml
+/usr/local/share/doc/remotex/LICENSE
+/usr/local/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
 The package is unsigned and not notarized. A browser download is quarantined,
@@ -75,7 +80,10 @@ on the machine `PATH`, so `remotex` works in a shell opened after the install:
 
 ```text
 C:\Program Files\remotex\bin\remotex.exe
+C:\Program Files\remotex\VERSION
 C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
+C:\Program Files\remotex\share\doc\remotex\LICENSE
+C:\Program Files\remotex\share\doc\remotex\THIRD-PARTY-NOTICES.txt
 ```
 
 The gateway reads its config from `%ProgramData%\remotex\remotex.toml`. Add

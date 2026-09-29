@@ -34,9 +34,10 @@ read, in [andrewtheguy/ms-rdp-specs](https://github.com/andrewtheguy/ms-rdp-spec
 
 ## What it carries
 
-The desktop, the pointer, keyboard, mouse, resize, the clipboard, sound, and a
-camera going the other way. No touch: it is announced only by a host that opens MS-RDPEI, which this client never
-asks for. What it would take is in [`roadmap.md`](roadmap.md).
+The desktop, the pointer, keyboard, mouse, resize, the clipboard, sound, and the
+browser's camera and microphone going the other way. No touch: it is announced
+only by a host that opens MS-RDPEI, which this client never asks for. What it
+would take is in [`roadmap.md`](roadmap.md).
 
 One thing it carries is not RDP's, and it is experimental: the desktop as a VP9 stream
 that an agent in the session codes itself, on a dynamic channel the agent opens, which
@@ -85,9 +86,10 @@ a session that has gone out of scope has really stopped.
 
 ## Static virtual channels
 
-Each is asked for by a key: `drdynvc` for `resize = true`, `egfx = true` or
-`camera = true`, which is the transport Display Control, the graphics pipeline and
-the camera ride on, `cliprdr` for
+Each is asked for by a key: `drdynvc` for `resize = true`, `egfx = true`,
+`camera = true`, or `microphone = true`, which is the transport Display Control,
+the graphics pipeline, the camera's two channels, and the microphone's channel
+ride on; `cliprdr` for
 `clipboard = true`, and `rdpsnd` with `rdpdr` for `audio = true` — see
 [Sound](#sound-ms-rdpea). A session that wants none asks for no channel at all.
 
@@ -492,6 +494,41 @@ feed.
 `REMOTEX_UAT_CAMERA=1`, asserts that the host agreed version 2 and opened the
 announced device's channel; `RUST_LOG=remotex=debug` shows the host's device queries
 and this end's answers.
+
+## Microphone (MS-RDPEAI)
+
+**Experimental.** `microphone = true` tells the logon that the client captures
+audio, asks for `drdynvc` when nothing else did, and accepts the one dynamic
+channel MS-RDPEAI uses, `AUDIO_INPUT`. A Windows host opens that channel only
+once an application starts recording. The browser's microphone is enabled
+separately by opening `/ws/mic`; closing that socket or ending the engine stops
+the feed, and a new session starts with it off.
+
+The host speaks first at every step. It sends its version and this end answers at
+no higher than version 2. It lists the PCM formats it can record, and this end
+offers exactly one 16-bit format it can produce: mono where possible, at 16 kHz
+where offered, otherwise the lowest rate above 16 kHz or the highest below. Only
+one- or two-channel rates from 8 to 48 kHz that form exact 20 ms groups from
+48 kHz are candidates. When the host sends Open it names that format and the
+number of frames each packet must contain; this end confirms it, replies success,
+and gathers decoded PCM into packets of exactly that size. Each packet travels
+as an Incoming Data PDU followed by a Data PDU, split across dynamic-channel
+pieces where necessary.
+
+The browser encodes mono Opus in voice mode at 16 kbit/s in 60 ms packets. The
+gateway's `MicBridge` (`src/mic.rs`) decodes them at 48 kHz, emits 20 ms groups,
+resamples and duplicates channels as the chosen host format requires, and hands
+the PCM to `rdp_client/microphone.rs`. That session-side queue holds sixteen
+groups and drops the oldest when full, because stale microphone audio is worse
+than a gap. A host channel close or socket close flushes queued and partial
+audio, so a later Open begins with a fresh stream. The protocol state machine is
+`rdp_client/proto/rdpeai.rs`; `src/rdp_mic.rs` is its bridge adapter.
+
+`tests/rdp_client_probe.rs` drives a real host's Recording panel in
+`a_real_host_records_the_microphone`. With `REMOTEX_UAT_MICROPHONE=1` it asserts
+version negotiation, then feeds a tone for the host's level meter while the
+device is open. Like the camera probe it is ignored by default and does not
+automatically inspect what the remote application heard.
 
 ## Sound (MS-RDPEA)
 

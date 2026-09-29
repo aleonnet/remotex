@@ -4,14 +4,14 @@
 //! sound is the remote's and fans out to a listener, the camera is the
 //! browser's and funnels in to the remote. What crosses this bridge inbound is
 //! **already encoded** H.264 — the browser's own `VideoEncoder` made it, the
-//! Windows host decodes it, and the gateway moves bytes without owning a codec.
+//! remote decodes it, and the gateway moves bytes without owning a codec.
 //! Outbound go the host's streaming decisions — start, stop, "next one must be
 //! a keyframe" — which are the only things a capturing browser cannot know.
 //!
 //! Nothing here names an engine. The engine side registers a [`CameraControl`]
-//! and publishes [`CameraSignal`]s; RDP's adapter is [`crate::rdp_camera`], and
-//! it is the only implementor, because MS-RDPECAM is the one camera channel any
-//! of the gateway's protocols has.
+//! and publishes [`CameraSignal`]s; RDP's adapter is [`crate::rdp_camera`] over
+//! MS-RDPECAM, and generic VNC's is [`crate::vnc_camera`] over wlshare's private
+//! extension.
 
 use std::sync::{Arc, Mutex};
 
