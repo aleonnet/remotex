@@ -9,7 +9,7 @@
 # so the package's `version` must stay the first such line.
 [package]
 name = "remotex"
-version = "0.0.290"
+version = "0.0.291"
 license = "MIT"
 edition = "2024"
 
