@@ -1,6 +1,6 @@
 //! Rectangles of pixels, which is all this client lets a server draw with.
 //!
-//! The Confirm Active of [`super::capabilities`] claims no orders and no caches, so
+//! The client's Confirm Active claims no orders and no caches, so
 //! every change to the desktop arrives as a Bitmap Update: a count, and then that
 //! many rectangles, each carrying where it goes and the pixels that go there.
 //!
@@ -8,7 +8,7 @@
 //!
 //! The session is 32 bits per pixel. That is asked for in the GCC conference, asked
 //! for again in the Confirm Active, and declared by the server in its Demand Active —
-//! where [`super::capabilities`] refuses anything else, so that a depth this decoder
+//! where the client refuses anything else, so that a depth this decoder
 //! cannot read is a sentence during the capability exchange rather than a picture that
 //! comes out wrong. At 32 bits a compressed rectangle is the planar codec of
 //! [`super::planar`], and there is no second codec to choose between: the interleaved
@@ -218,7 +218,7 @@ mod tests {
 
     impl Rectangle<'_> {
         fn encode(&self) -> Vec<u8> {
-            let mut w = super::super::wire::Writer::new();
+            let mut w = crate::proto::wire::Writer::new();
             w.u16_le(self.x);
             w.u16_le(self.y);
             // The far edges are inclusive.

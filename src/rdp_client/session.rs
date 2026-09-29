@@ -12,8 +12,8 @@ use tokio::time::Duration;
 
 use super::connect::{self, Connected, Joined};
 use super::error::Error;
-use super::framebuffer::{Framebuffer, Rect, affordable, stage};
-use super::gfx::{self, Graphics};
+use remotex_rdp_graphics::framebuffer::{Framebuffer, Rect, affordable, stage};
+use remotex_rdp_graphics::gfx::{self, Graphics};
 use super::camera::{Camera, CameraCommand, CameraFeed, CameraInput, CameraQueues, CameraSink};
 use super::input::{Clipboard, Command, Input};
 use super::pointer::Cursor;

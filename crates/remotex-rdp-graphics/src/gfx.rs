@@ -31,11 +31,11 @@ use std::collections::BTreeMap;
 use anyhow::{Context as _, Result};
 use log::{debug, info, warn};
 
-use super::framebuffer::{Framebuffer, Rect, affordable, stage};
-use super::proto::bitmap::MAX_DESKTOP_BYTES;
-use super::proto::gfx::{self, Message, Point16, Rect16};
-use super::proto::wire::Malformed;
-use super::proto::{clear, planar, progressive, zgfx};
+use crate::framebuffer::{Framebuffer, Rect, affordable, stage};
+use crate::proto::bitmap::MAX_DESKTOP_BYTES;
+use crate::proto::gfx::{self, Message, Point16, Rect16};
+use crate::proto::wire::Malformed;
+use crate::proto::{clear, planar, progressive, zgfx};
 
 /// Most rectangles a surface holds as changed before two of them are merged to
 /// make room — coarser, never longer. See [`stage`] for which two.
@@ -49,7 +49,7 @@ const CACHE_BUDGET: usize = 64 << 20;
 /// Something the pipeline did that the session has to act on, in the order it
 /// happened.
 #[derive(Clone, Debug, PartialEq, Eq)]
-pub(super) enum Update {
+pub enum Update {
     /// The host confirmed the pipeline: everything it draws from here on comes
     /// inside a frame. Reported before the first paint, which is what a consumer
     /// that paces frames itself needs to know before it receives one.
@@ -241,7 +241,7 @@ impl Tally {
 
 /// The pipeline's state for one channel: the decompressor, the surfaces, and what
 /// has been seen.
-pub(super) struct Graphics {
+pub struct Graphics {
     zgfx: zgfx::Zgfx,
     /// One PDU decompressed, reused across PDUs.
     buffer: Vec<u8>,
@@ -270,8 +270,14 @@ pub(super) struct Graphics {
     pass: bool,
 }
 
+impl Default for Graphics {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Graphics {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             zgfx: zgfx::Zgfx::new(),
             buffer: Vec::new(),
@@ -296,7 +302,7 @@ impl Graphics {
     /// framebuffer is never drawn into; what this end still reads is what the
     /// session itself answers — the confirmation, the output's size and each
     /// frame's end, which is owed an acknowledgement whoever draws it.
-    pub(super) fn passing() -> Self {
+    pub fn passing() -> Self {
         let mut passing = Self::new();
         passing.pass = true;
         passing
@@ -304,7 +310,7 @@ impl Graphics {
 
     /// The pipeline a channel opened again starts with: nothing held, composed or
     /// passed as this one is.
-    pub(super) fn fresh(&self) -> Self {
+    pub fn fresh(&self) -> Self {
         let mut fresh = Self::new();
         fresh.pass = self.pass;
         fresh
@@ -317,7 +323,7 @@ impl Graphics {
     /// A PDU that does not decode ends the session, as any other malformed PDU
     /// does. A *codec payload* that does not decode does not: it is one rectangle
     /// the server will draw again, and it is logged and counted instead.
-    pub(super) fn receive(&mut self, data: &[u8], framebuffer: &Framebuffer) -> Result<Vec<Update>> {
+    pub fn receive(&mut self, data: &[u8], framebuffer: &Framebuffer) -> Result<Vec<Update>> {
         let mut buffer = std::mem::take(&mut self.buffer);
         let outcome = self.receive_into(data, &mut buffer, framebuffer);
         self.buffer = buffer;
@@ -338,7 +344,7 @@ impl Graphics {
     }
 
     /// Act on a buffer of commands that is already unwrapped.
-    pub(super) fn compose(&mut self, commands: &[u8], framebuffer: &Framebuffer) -> Result<Vec<Update>> {
+    pub(crate) fn compose(&mut self, commands: &[u8], framebuffer: &Framebuffer) -> Result<Vec<Update>> {
         let mut updates = Vec::new();
         for message in gfx::messages(commands) {
             self.act(message?, framebuffer, &mut updates)?;
@@ -780,13 +786,13 @@ impl Drop for Graphics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rdp_client::proto::gfx::{
+    use crate::proto::gfx::{
         CMD_CACHE_TO_SURFACE, CMD_CAPS_CONFIRM, CMD_CREATE_SURFACE, CMD_END_FRAME, CMD_MAP_SURFACE_TO_OUTPUT,
         CMD_RESET_GRAPHICS, CMD_SOLID_FILL, CMD_START_FRAME, CMD_SURFACE_TO_CACHE,
         CMD_SURFACE_TO_SURFACE, CMD_WIRE_TO_SURFACE_1, CMD_WIRE_TO_SURFACE_2, CODEC_CAPROGRESSIVE, CODEC_PLANAR,
         CODEC_UNCOMPRESSED, PIXEL_XRGB_8888, pdu,
     };
-    use crate::rdp_client::proto::wire::Writer;
+    use crate::proto::wire::Writer;
 
     fn reset(width: u32, height: u32) -> Vec<u8> {
         let mut w = Writer::new();
@@ -1047,7 +1053,7 @@ mod tests {
     /// EndFrame; the tiles are kept, so a later PDU on the same surface finds them.
     #[test]
     fn a_progressive_pdu_paints_its_region_and_keeps_its_tiles() {
-        use crate::rdp_client::proto::progressive::testing::{empty_upgrade, flat_tile, grey, pdu as progressive, region};
+        use crate::proto::progressive::testing::{empty_upgrade, flat_tile, grey, pdu as progressive, region};
         let framebuffer = Framebuffer::new();
         let mut graphics = Graphics::new();
         receive(&mut graphics, &framebuffer, &[reset(100, 70), create(1, 100, 70), map(1, 0, 0)]);
@@ -1301,7 +1307,7 @@ mod tests {
     /// compositor says what it painted and when the output changed size.
     #[test]
     fn a_compositor_reports_what_a_run_did_to_the_picture() {
-        use crate::rdp_client::{Composed, Compositor};
+        use crate::{Composed, Compositor};
         let mut compositor = Compositor::new();
         let opening = [reset(4, 4), create(1, 4, 4), map(1, 0, 0)].concat();
         assert_eq!(

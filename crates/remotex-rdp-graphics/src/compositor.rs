@@ -1,10 +1,10 @@
 //! A graphics pipeline composed from commands that were passed on.
 //!
-//! [`Connect::pass_graphics`](super::Connect::pass_graphics) has a session hand its
-//! pipeline's commands to its caller instead of composing them. This is the other
-//! half: the same compositor the session would have run — every codec, the surfaces
+//! A session told to pass its graphics on (`Connect::pass_graphics`, in the
+//! gateway's `rdp_client`) hands its pipeline's commands to its caller instead of
+//! composing them. This is the other half: the same compositor the session would have run — every codec, the surfaces
 //! and the caches — fed those commands by whoever they were passed to. It is what
-//! the page's WebAssembly module is built from (`frontend/wasm`), and what a test
+//! the page's WebAssembly module runs (`frontend/wasm/egfx`), and what a test
 //! that reads a passed pipeline composes it with.
 //!
 //! A compositor starts with nothing and is only ever right for a pipeline it has
@@ -13,8 +13,8 @@
 
 use anyhow::Result;
 
-use super::framebuffer::{Framebuffer, Rect};
-use super::gfx::{Graphics, Update};
+use crate::framebuffer::{Framebuffer, Rect};
+use crate::gfx::{Graphics, Update};
 
 /// What one run of commands did to the picture.
 #[derive(Clone, Debug, Default, PartialEq, Eq)]
@@ -57,7 +57,7 @@ impl Compositor {
         Self { opaque: true, ..Self::new() }
     }
 
-    /// Compose one run of commands, as [`Event::Graphics`](super::Event::Graphics)
+    /// Compose one run of commands, as a session's `Event::Graphics`
     /// carries them: whole PDUs, out of their bulk compression.
     ///
     /// An error is a command that does not decode, after which the pipeline's state

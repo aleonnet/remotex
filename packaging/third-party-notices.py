@@ -111,7 +111,7 @@ def rust_licences() -> list[tuple[str, list[str], str]]:
             crates = {
                 f"{use['crate']['name']} {use['crate']['version']}"
                 for use in licence["used_by"]
-                # remotex itself has no source, and neither has its module.
+                # remotex's own crates have no source.
                 if use["crate"]["source"] is not None
             }
             if crates:

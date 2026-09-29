@@ -64,7 +64,8 @@ are experimental — see [Camera frames](#camera-frames) and
 | `session.rs` | target selection, takeover, detach, and reattach |
 | `ws.rs`, `protocol.rs`, `wire.rs` | WebSocket bridge and client wire format |
 | `rdp.rs` | RDP engine: damage, input, cursor, resize, clipboard, over `rdp_client` |
-| `rdp_client/` | the RDP client, protocol and all: `proto/` is the wire format, the rest is the session, framebuffer and input queue, and the graphics pipeline's compositor, which the page's WebAssembly module is built from too (`frontend/wasm/egfx`) |
+| `rdp_client/` | the RDP client, protocol and all: `proto/` is the wire format, the rest is the session and input queue |
+| `crates/remotex-rdp-graphics/` | the RDP client's graphics, a crate of its own: the codecs, the graphics pipeline's compositor and the framebuffer, which the page's WebAssembly module runs too (`frontend/wasm/egfx`) |
 | `rdp_clipboard.rs` | `CF_UNICODETEXT` and the line endings either direction needs |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `vnc_apple_media.rs` | High Performance's media stream: the offer, SRTP, HEVC depacketizing and decoding, and the sound's receiver |
@@ -476,7 +477,7 @@ nothing of it.
 - **What passes** (`VideoSink::pass_graphics`). The RDP client still owns the
   channel: it answers the capability exchange, unwraps the bulk compression —
   whose history is the connection's — and acknowledges every frame, as it does
-  when it composes (`Graphics::passing` in `src/rdp_client/gfx.rs`). It decodes
+  when it composes (`Graphics::passing` in `crates/remotex-rdp-graphics/src/gfx.rs`). It decodes
   nothing. What it unwrapped goes to the engine as `Event::Graphics`: whole
   `RDPGFX` PDUs, headers and all, in order, each run ending at a frame's end or
   where the host's own packet did. The engine queues each as a `GRAPHICS` record,
@@ -489,8 +490,9 @@ nothing of it.
   and the page makes a compositor with nothing in it. A `resize` still announces
   the desktop's size and density, ahead of the run whose ResetGraphics the page's
   compositor resizes itself by.
-- **The page composes with the gateway's compositor.** `frontend/wasm/egfx` is a
-  binding around `src/rdp_client`'s own modules, named by path and built for
+- **The page composes with the gateway's compositor.** The RDP client's graphics
+  are a crate, `crates/remotex-rdp-graphics`, that the gateway is built with and
+  that `frontend/wasm/egfx` binds for the page, built for
   `wasm32-unknown-unknown` by the frontend's build (`bun run build:wasm`), so
   there is one reading of the protocol and its codecs. It runs in the paint
   worker (`frontend/src/egfxCompositor.ts`): each record is composed in its turn,

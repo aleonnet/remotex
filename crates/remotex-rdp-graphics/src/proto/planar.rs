@@ -19,7 +19,7 @@
 //! planes as luma and chroma rather than red, green and blue, and chroma at half
 //! resolution. Both are lossy, both are gated on `DRAW_ALLOW_DYNAMIC_COLOR_FIDELITY`
 //! and `DRAW_ALLOW_COLOR_SUBSAMPLING` in the Bitmap capability, and
-//! [`super::capabilities`] claims neither — so they are refused here by name rather
+//! the client's Confirm Active claims neither — so they are refused here by name rather
 //! than decoded into a desktop whose colours are quietly wrong.
 //!
 //! [MS-RDPEGDI] 2.2.2.5.1 and 3.1.9.

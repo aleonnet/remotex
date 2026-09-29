@@ -1,0 +1,21 @@
+# The graphics half of the gateway's RDP client: the codecs a host draws with, the
+# graphics pipeline's compositor, and the framebuffer they fill. A crate of its own
+# because two things run it — the gateway, under src/rdp_client, and the page, which
+# composes a passed pipeline (`egfx_passthrough`) with the same code built to
+# WebAssembly (frontend/wasm/egfx). It therefore builds for
+# `wasm32-unknown-unknown`: no I/O, no threads, no clock, and no dependency that
+# needs one.
+#
+# A default member of the workspace, so a plain `cargo clippy` and `cargo test`
+# check it beside the gateway.
+[package]
+name = "remotex-rdp-graphics"
+version = "0.0.0"
+license = "MIT"
+edition = "2024"
+publish = false
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+thiserror = "2"

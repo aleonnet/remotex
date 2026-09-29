@@ -8,6 +8,14 @@ engine that consumes those events — damage into the video stream, `ClientMsg` 
 — is `src/rdp.rs`, and the boundary between the two is the point of this document:
 everything below it is protocol, everything above it is this gateway's.
 
+What a host draws with is a crate of its own, `crates/remotex-rdp-graphics`: the
+graphics pipeline's PDUs and bulk compression, the codecs, the compositor and the
+framebuffer. It is this client's all the same — `rdp_client` names the framebuffer
+and that part of the wire as its own — and is apart because the page runs it too,
+built to WebAssembly, for a target with `egfx_passthrough`. It holds no
+connection, thread or clock, so it builds for `wasm32-unknown-unknown`. The files
+[Graphics](#graphics) names are that crate's, under its `src/`.
+
 The only thing under that boundary not written here is the CredSSP exchange
 itself (`sspi`), because NLA is not optional on a current Windows host and NTLM is
 the one mechanism a user name and a password can drive.
@@ -147,7 +155,7 @@ subsystem when it finds a wrapper there instead.
 
 The host does not paint the desktop; it paints *surfaces* it creates and sizes,
 maps them onto the output at an origin, and brackets drawing in StartFrame and
-EndFrame. `rdp_client/gfx.rs` keeps each surface's pixels and the rectangles drawn
+EndFrame. `gfx.rs` keeps each surface's pixels and the rectangles drawn
 into since the last frame, and at the EndFrame copies those rectangles of every
 mapped surface into the framebuffer — the shape of FreeRDP's `gdi/gfx.c`. Each
 EndFrame is acknowledged (`queueDepth` unavailable), which a Windows host requires
@@ -201,7 +209,7 @@ whose `Event::Frame` follows the run that holds it. Nothing is decoded, no
 surface is kept, and the session's framebuffer holds nothing of what the
 pipeline draws.
 
-`rdp_client::Compositor` is the other half: the same compositor, fed the
+`Compositor` (`compositor.rs`) is the other half: the same compositor, fed the
 commands that were passed. The page's WebAssembly module is a binding around it
 (`frontend/wasm/egfx`), and `tests/rdp_client_probe.rs` composes a real host's
 passed pipeline with it. It is right only for a pipeline it has followed from

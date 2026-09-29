@@ -3,8 +3,8 @@
 // Not built with anything of the gateway's: the PDUs below are transcribed from
 // [MS-RDPEGFX] 2.2.2, so what is checked is the module's reading of the protocol
 // and not its agreement with its own writer. The codecs have their tests where
-// they are written (src/rdp_client/proto); what is pinned here is the boundary —
-// that the module loads, composes a pipeline from its first command, says what it
+// they are written (crates/remotex-rdp-graphics); what is pinned here is the
+// boundary — that the module loads, composes a pipeline from its first command, says what it
 // painted, and hands back a framebuffer a canvas can take.
 //
 // Run with `bun run test` from frontend/, which builds the module first.

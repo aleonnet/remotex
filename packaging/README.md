@@ -98,8 +98,8 @@ bash packaging/build-native-packages.sh
 
 Both builds make the notices, so they need cargo-about and uv beside the frontend's
 `node_modules`. The frontend's build compiles a WebAssembly module from the
-gateway's sources (`frontend/wasm/egfx`, the page's compositor for
-`egfx_passthrough`), so wherever the frontend is built — `bun run build`, or a
+gateway's graphics crate (`frontend/wasm/egfx` around
+`crates/remotex-rdp-graphics`, the page's compositor for `egfx_passthrough`), so wherever the frontend is built — `bun run build`, or a
 Cargo build without `REMOTEX_PREBUILT_FRONTEND` — Rust needs its target:
 `rustup target add wasm32-unknown-unknown`. wasm-pack comes with `bun install`. The native builder requires `dpkg-deb` and `rpmbuild` on Linux, or
 `pkgbuild` on macOS. On Windows, in PowerShell 7 with WiX on `PATH`

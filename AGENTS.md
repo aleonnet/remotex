@@ -43,8 +43,9 @@ documentation.
   version in [remotex-viewer](docs/viewer.md); the viewer then speaks it.
 - There is one frontend build, compiled from Cargo's `OUT_DIR` into the gateway
   binary (`src/assets.rs`) and served from its origin root. It holds one
-  WebAssembly module, built by the frontend's own build from the gateway's sources
-  (`frontend/wasm/egfx`), which takes Rust's `wasm32-unknown-unknown` target. A standalone frontend
+  WebAssembly module, built by the frontend's own build from the gateway's
+  graphics crate (`frontend/wasm/egfx`, around `crates/remotex-rdp-graphics`),
+  which takes Rust's `wasm32-unknown-unknown` target. A standalone frontend
   build and the platform-independent release artifact use `frontend/dist`; a
   Cargo build either produces the same bundle in its private output or stages
   that artifact there. Do not add a web root, a `static_dir`, or any run-time path
@@ -200,9 +201,10 @@ documentation.
   records on the session socket behind a `graphicsStart`, and the gateway neither
   composes nor encodes them. Every browser composes it, so the key alone selects
   it; do not add a browser question for it. The page composes with the gateway's
-  own compositor, `src/rdp_client`'s modules built to WebAssembly by path
-  (`frontend/wasm/egfx`): do not write a second decoder or compositor for the page,
-  and never alter a passed command. The host draws against what its client holds
+  own compositor, `crates/remotex-rdp-graphics`, which the gateway's RDP client is
+  built with and `frontend/wasm/egfx` binds to WebAssembly: keep that crate
+  building for `wasm32-unknown-unknown`, do not write a second decoder or
+  compositor for the page, and never alter a passed command. The host draws against what its client holds
   and answers a repaint out of its caches, so a reattach starts such a session
   over; do not resume one on a repaint. H.264 stays refused in the capability
   advertise, and a host that draws with bitmap updates is encoded here as VP9. See

@@ -2346,6 +2346,7 @@ dependencies = [
  "opus-prebuilt",
  "png",
  "rand 0.10.2",
+ "remotex-rdp-graphics",
  "rpassword",
  "rsa",
  "rubato",
@@ -2371,6 +2372,15 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "yuv",
+]
+
+[[package]]
+name = "remotex-rdp-graphics"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "thiserror",
 ]
 
 [[package]]

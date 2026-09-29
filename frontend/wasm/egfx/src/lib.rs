@@ -2,56 +2,23 @@
 //!
 //! On a target with `egfx_passthrough` the gateway passes the pipeline's commands
 //! to the browser instead of composing them and encoding the picture. This is what
-//! composes them there: the gateway's own compositor and codecs — the modules
-//! below are its sources, not copies of them — behind the few calls the paint
+//! composes them there: the gateway's own compositor and codecs, which are the
+//! `remotex-rdp-graphics` crate both are built with, behind the few calls the paint
 //! worker makes (`frontend/src/egfxCompositor.ts`).
 //!
 //! The framebuffer stays in this module's memory. The page reads it in place, as
 //! the image data of the rectangles a run painted, so a frame costs the decode and
 //! one copy onto the canvas.
 
-// The gateway's modules, whole: what the page never calls is still theirs.
-#![allow(dead_code)]
-
+use remotex_rdp_graphics::Compositor;
 use wasm_bindgen::prelude::*;
-
-#[path = "../../../../src/rdp_client"]
-mod rdp_client {
-    #[path = "compositor.rs"]
-    pub mod compositor;
-    #[path = "framebuffer.rs"]
-    pub mod framebuffer;
-    #[path = "gfx.rs"]
-    pub mod gfx;
-    #[path = "proto"]
-    pub mod proto {
-        #[path = "bitmap.rs"]
-        pub mod bitmap;
-        #[path = "clear.rs"]
-        pub mod clear;
-        #[path = "gfx.rs"]
-        pub mod gfx;
-        #[path = "nsc.rs"]
-        pub mod nsc;
-        #[path = "planar.rs"]
-        pub mod planar;
-        #[path = "progressive.rs"]
-        pub mod progressive;
-        #[path = "wire.rs"]
-        pub mod wire;
-        #[path = "zgfx.rs"]
-        pub mod zgfx;
-    }
-
-    pub use compositor::Compositor;
-}
 
 /// One pipeline's compositor. Made where a pipeline starts (`graphicsStart`) and
 /// thrown away where the next one does: it is right only for a pipeline it has
 /// followed from its first command.
 #[wasm_bindgen]
 pub struct Egfx {
-    compositor: rdp_client::Compositor,
+    compositor: Compositor,
     /// What the last run painted: `x, y, width, height` for each rectangle.
     painted: Vec<u32>,
     resized: bool,
@@ -61,7 +28,7 @@ pub struct Egfx {
 impl Egfx {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Egfx {
-        Egfx { compositor: rdp_client::Compositor::opaque(), painted: Vec::new(), resized: false }
+        Egfx { compositor: Compositor::opaque(), painted: Vec::new(), resized: false }
     }
 
     /// Compose one `GRAPHICS` record's commands, and return how many frames they

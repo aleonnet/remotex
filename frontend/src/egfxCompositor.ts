@@ -3,7 +3,7 @@
 // On a target with `egfx_passthrough` the gateway does not compose the desktop and
 // encode it: it passes the host's drawing commands on, and this page composes them.
 // What does the composing is the gateway's own compositor and codecs, compiled to
-// WebAssembly (frontend/wasm/egfx, whose sources are the gateway's by path), so
+// WebAssembly (frontend/wasm/egfx, around the crate the gateway composes with), so
 // there is one reading of the protocol and not two.
 //
 // A compositor is right only for a pipeline it has followed from its first

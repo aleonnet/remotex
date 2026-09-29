@@ -7,6 +7,20 @@
 # Note for anyone editing this file: frontend/vite.config.ts regexes the *first*
 # line matching `^version = "…"` out of this manifest to stamp the login screen,
 # so the package's `version` must stay the first such line.
+#
+# `crates/remotex-rdp-graphics` is the graphics half of the RDP client — the codecs,
+# the graphics pipeline's compositor and the framebuffer — as a crate of its own,
+# because the page runs it too: frontend/wasm/egfx is the WebAssembly binding around
+# it. It is a default member beside the gateway, so a plain `cargo clippy` and
+# `cargo test` check it on every platform. The binding is not a member: it builds for
+# `wasm32-unknown-unknown` alone, with its own profile and lockfile, from the
+# frontend's build.
+[workspace]
+resolver = "3"
+members = ["crates/remotex-rdp-graphics"]
+default-members = [".", "crates/remotex-rdp-graphics"]
+exclude = ["frontend/wasm/egfx"]
+
 [package]
 name = "remotex"
 version = "0.0.291"
@@ -176,8 +190,11 @@ socket2 = { version = "0.6", features = ["all"] }
 # Server-side RDP engine (see docs/architecture.md): the gateway's own headless
 # client in src/rdp_client/, protocol and all — every PDU is encoded and decoded in
 # src/rdp_client/proto/ against [MS-RDPBCGR], so nothing below is an RDP library.
+# What the host draws with is decoded by crates/remotex-rdp-graphics, the client's
+# graphics, which the page runs as well.
 # Pure Rust apart from `ring` and zlib, so the build needs no cmake, pkg-config,
 # OpenSSL or libclang.
+remotex-rdp-graphics = { path = "crates/remotex-rdp-graphics" }
 #
 # TLS is rustls with `ring`, and rustls needs that provider installed as the process
 # default before the first handshake: `tokio-rustls` is a direct dependency both for

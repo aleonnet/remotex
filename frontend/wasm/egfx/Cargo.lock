@@ -54,10 +54,17 @@ dependencies = [
 name = "remotex-egfx"
 version = "0.0.0"
 dependencies = [
+ "remotex-rdp-graphics",
+ "wasm-bindgen",
+]
+
+[[package]]
+name = "remotex-rdp-graphics"
+version = "0.0.0"
+dependencies = [
  "anyhow",
  "log",
  "thiserror",
- "wasm-bindgen",
 ]
 
 [[package]]
