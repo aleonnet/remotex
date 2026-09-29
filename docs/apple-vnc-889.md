@@ -964,23 +964,17 @@ other failures (see [Liveness](#the-stream)).
 - **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
   transfer, Display P3 primaries, with wavefront parallel processing
   (`entropy_coding_sync_enabled_flag`) and no tiles. libavcodec (FFmpeg 9.0.2,
-  the prebuilt one configured down to the HEVC decoder) decodes it. On one
-  core of an i5-8500T a 1600×1000 picture takes 14–23 ms, too slow for 60 a
-  second. Remotex gives the decoder four slice threads, which decode a
-  picture's rows in parallel and took 7–14 ms; frame threads would hold each
-  picture back. On macOS the decoder is given a VideoToolbox device, and the
-  archive's VideoToolbox hwaccel hands each picture to VideoToolbox. FFmpeg asks
-  it to enable its hardware decoder for HEVC, not to require it, so nothing here
-  checks that the media engine did the work. When the hwaccel fails to start,
-  FFmpeg asks for a format again and the gateway takes a software one, falling
-  back to the slice threads; a picture VideoToolbox fails once started is an
-  error, as below. The log says which decoded it. Measured on an M2 Max at
-  3200×2000 4:4:4, decode, copy out and RGB conversion together: VideoToolbox
-  9.2 ms a picture and the slice threads 4.4 ms. VideoToolbox is the slower of
-  the two and the cheaper: ffmpeg's own decode of the same stream took 1.6 ms of
-  CPU a picture through it against 11.5 ms on four threads, which suggests the
-  media engine but does not prove it. A unit that fails to decode is an error,
-  not a skipped picture, and brings a keyframe request.
+  the prebuilt one configured down to the HEVC decoder) decodes it. Remotex
+  gives the decoder four slice threads, which decode a picture's rows in
+  parallel; frame threads would hold each picture back. On macOS the decoder
+  is given a VideoToolbox device, and the archive's VideoToolbox hwaccel hands
+  each picture to VideoToolbox. FFmpeg asks it to enable its hardware decoder
+  for HEVC, not to require it, so nothing here checks that the media engine
+  did the work. When the hwaccel fails to start, FFmpeg asks for a format
+  again and the gateway takes a software one, falling back to the slice
+  threads; a picture VideoToolbox fails once started is an error, as below.
+  The log says which decoded it. A unit that fails to decode is an error, not
+  a skipped picture, and brings a keyframe request.
 - **Rate.** A picture goes out when the screen changes, at most once per refresh
   of the virtual display. Under a full-screen animation, a 60 Hz display sent
   about 57 pictures a second, with the `0x1c` 60 fps flag or without it, and the

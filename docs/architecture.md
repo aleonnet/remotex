@@ -1463,7 +1463,10 @@ display layout sets the actual framebuffer geometry. There is no client-side
 resize mode or one-shot button. The Mac supplies that virtual display the way
 it does to Apple's viewer: as HEVC over its media stream, offered once the display has
 settled and decoded in the gateway by the host's FFmpeg libavcodec (`src/vnc_apple_media.rs`),
-or passed to a browser that decodes it under `media_passthrough`. ZRLE rectangles carry the
+or passed to a browser that decodes it under `media_passthrough`. The gateway's
+decoder runs four slice threads because one is too slow for 60 pictures a second:
+on one core of an i5-8500T a 1600×1000 picture took 14–23 ms, on four 7–14 ms.
+ZRLE rectangles carry the
 picture until the stream delivers and across every display change. A stream the
 Mac refuses, that brings no picture or no sound, or that stops ends the session,
 as it ends Apple's viewer's. While it runs, polling holds to one pixel, which still brings
