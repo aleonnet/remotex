@@ -390,6 +390,7 @@ pub enum ClientMsg {
 ///
 /// 0x01 TILE      u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
 /// 0x03 VIDEO     u8 flags | u16 w | u16 h | u32 len | payload[len]
+/// 0x04 GRAPHICS  u32 len | commands[len]
 /// ```
 ///
 /// A `VIDEO` record's flags are `0x01` for a keyframe and nothing else; a receiver rejects any
@@ -401,6 +402,9 @@ pub enum ClientMsg {
 /// A `TILE` record is one rectangle the remote sent, as it sent it — see [`Tile`]. A receiver
 /// rejects a tile with no width, height or payload.
 ///
+/// A `GRAPHICS` record is a run of an RDP host's graphics pipeline commands, as the host sent
+/// them — see [`GraphicsUnit`]. A receiver rejects one with no payload.
+///
 /// Receivers reject nonzero flags. The record count makes truncation detectable.
 pub mod batch {
     pub const FRAME_KIND: u8 = 0x02;
@@ -408,12 +412,16 @@ pub mod batch {
 
     pub const OP_TILE: u8 = 0x01;
     pub const OP_VIDEO: u8 = 0x03;
+    pub const OP_GRAPHICS: u8 = 0x04;
 
     /// Bytes a `TILE` record costs besides its PNG.
     pub const TILE_HEADER_LEN: usize = 13;
 
     /// Bytes a `VIDEO` record costs besides its payload.
     pub const VIDEO_HEADER_LEN: usize = 10;
+
+    /// Bytes a `GRAPHICS` record costs besides its commands.
+    pub const GRAPHICS_HEADER_LEN: usize = 5;
 
     /// A `VIDEO` record's only flag: a decoder that has seen nothing before this can start here.
     pub const VIDEO_KEYFRAME: u8 = 0x01;
@@ -666,6 +674,42 @@ impl VideoUnit {
     }
 }
 
+/// A run of an RDP host's graphics pipeline (MS-RDPEGFX), carried as a `GRAPHICS`
+/// record inside a [`batch`] frame: whole `RDPGFX` PDUs, headers and all, as the host
+/// sent them, out of the channel's bulk compression and otherwise untouched.
+///
+/// The contract every client implements:
+///
+/// - [`ServerMsg::GraphicsStart`] arrives first, and says the pipeline starts from
+///   nothing: no surface, no cache slot, no codec state. Everything after it is drawn
+///   against what the commands before it built, so a client composes every record,
+///   in order, from that message on, and one that has missed any cannot go on.
+/// - A record ends at a frame's end or where the host's own PDU did, never inside a
+///   command. The output changes at each `EndFrame`, as on the host's own clients.
+/// - The gateway has acknowledged each frame to the host by the time its record is
+///   sent. A client answers nothing to the host; its `paintAck` is the gateway's.
+#[derive(Debug, Clone)]
+pub struct GraphicsUnit {
+    /// The commands.
+    pub data: Vec<u8>,
+    /// This payload's share of the queue budget — see [`Held`].
+    pub held: Held,
+}
+
+impl GraphicsUnit {
+    /// What this run will cost inside a batch, commands included.
+    pub fn record_len(&self) -> usize {
+        batch::GRAPHICS_HEADER_LEN + self.data.len()
+    }
+
+    /// Append this run as a `GRAPHICS` record.
+    pub fn write_record(&self, out: &mut Vec<u8>) {
+        out.push(batch::OP_GRAPHICS);
+        out.extend_from_slice(&(self.data.len() as u32).to_le_bytes());
+        out.extend_from_slice(&self.data);
+    }
+}
+
 /// One rectangle of the remote's framebuffer, carried as a `TILE` record inside a
 /// [`batch`] frame: the pixels the remote sent for it, at the place and size it sent
 /// them, as a PNG.
@@ -877,6 +921,13 @@ pub enum ServerMsg {
     /// Rectangles of the framebuffer, each as the remote sent it. Binary records
     /// like [`ServerMsg::Video`], ordered the same way, one `TILE` record each.
     Tiles(Vec<Tile>),
+    /// A run of an RDP host's graphics pipeline, passed for the browser to compose.
+    /// A binary record like [`ServerMsg::Video`], ordered the same way.
+    Graphics(GraphicsUnit),
+    /// An RDP host's graphics pipeline starts here, from nothing: the picture is what
+    /// the [`ServerMsg::Graphics`] records after this compose, and whatever a client
+    /// held of a pipeline or a video stream before it is done with.
+    GraphicsStart,
     /// The remote desktop resolution changed. `w`/`h` are framebuffer pixels;
     /// `scale` is how many of them the remote draws per point of its *own*
     /// desktop — 1.0 for a framebuffer whose pixels are its points (VNC, a 1x
@@ -1126,6 +1177,7 @@ enum ControlMsg<'a> {
     },
     Error { message: &'a str },
     Picker,
+    GraphicsStart,
     Connected {
         name: &'a str,
         protocol: &'a str,
@@ -1208,7 +1260,10 @@ impl ServerMsg {
     /// caller sending one on its own.
     pub fn text_frame(&self) -> Option<String> {
         Some(match self {
-            ServerMsg::Video(_) | ServerMsg::Tiles(_) | ServerMsg::Audio(_) => return None,
+            ServerMsg::Video(_) | ServerMsg::Tiles(_) | ServerMsg::Graphics(_) | ServerMsg::Audio(_) => {
+                return None;
+            }
+            ServerMsg::GraphicsStart => control(&ControlMsg::GraphicsStart),
             ServerMsg::Resize { w, h, scale } => control(&ControlMsg::Resize {
                 w: *w,
                 h: *h,

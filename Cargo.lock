@@ -2318,7 +2318,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.291"
+version = "0.0.292"
 dependencies = [
  "aes",
  "anyhow",
@@ -2346,6 +2346,7 @@ dependencies = [
  "opus-prebuilt",
  "png",
  "rand 0.10.2",
+ "remotex-rdp-graphics",
  "rpassword",
  "rsa",
  "rubato",
@@ -2371,6 +2372,15 @@ dependencies = [
  "uuid",
  "windows-sys 0.61.2",
  "yuv",
+]
+
+[[package]]
+name = "remotex-rdp-graphics"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "thiserror",
 ]
 
 [[package]]

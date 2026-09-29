@@ -4,7 +4,7 @@ use std::sync::{Mutex, MutexGuard};
 
 use log::warn;
 
-use super::proto::bitmap::MAX_DESKTOP_BYTES;
+use crate::proto::bitmap::MAX_DESKTOP_BYTES;
 
 /// A rectangle of the desktop, in pixels from the top left.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -55,7 +55,7 @@ impl Rect {
 /// A desktop size the server named, refused before anything is allocated for it —
 /// see [`MAX_DESKTOP_BYTES`]. Both a real desktop's size and an absurd one are legal
 /// on the wire, so the difference is made here.
-pub(super) fn affordable(width: u32, height: u32) -> anyhow::Result<()> {
+pub fn affordable(width: u32, height: u32) -> anyhow::Result<()> {
     let bytes = usize::try_from(width)
         .ok()
         .zip(usize::try_from(height).ok())
@@ -74,7 +74,7 @@ pub(super) fn affordable(width: u32, height: u32) -> anyhow::Result<()> {
 /// One complete frame, in `RGBX32`: four bytes per pixel, red first, the fourth
 /// byte unused.
 ///
-/// That byte order is the decoder's own — [`super::proto::bitmap`] writes R, G, B in
+/// That byte order is the decoder's own — [`crate::proto::bitmap`] writes R, G, B in
 /// memory order — so a paint is a row copy with no swizzle, and a consumer that
 /// encodes finds the channels in the order every encoder wants.
 pub struct Frame {
@@ -145,7 +145,7 @@ pub struct Framebuffer {
 /// the desktop, every pixel of it repacked into the stream's mirror for nothing.
 /// Merging the cheapest pair keeps the list bounded *and* the damage the shape the
 /// host drew it.
-pub(super) fn stage(pending: &mut Vec<Rect>, rect: Rect, cap: usize) {
+pub fn stage(pending: &mut Vec<Rect>, rect: Rect, cap: usize) {
     debug_assert!(cap > 0, "a cap of zero has nowhere to put a rectangle");
     if let Some(waiting) = pending.iter_mut().find(|waiting| waiting.overlaps(&rect)) {
         *waiting = waiting.union(rect);
@@ -170,8 +170,14 @@ pub(super) fn stage(pending: &mut Vec<Rect>, rect: Rect, cap: usize) {
     pending[pick] = pending[pick].union(rect);
 }
 
+impl Default for Framebuffer {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl Framebuffer {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self { frame: Mutex::new(Frame { width: 0, height: 0, stride: 0, pixels: Vec::new() }) }
     }
 
@@ -192,7 +198,7 @@ impl Framebuffer {
     }
 
     /// Resize and clear. Called on connect and on every desktop resize.
-    pub(super) fn resize(&self, width: u32, height: u32) {
+    pub fn resize(&self, width: u32, height: u32) {
         let mut frame = self.lock();
         frame.width = width;
         frame.height = height;
@@ -212,7 +218,7 @@ impl Framebuffer {
     /// or a source that is not the size it claims: the first can only mean the two
     /// disagree about the desktop's size, which is a missed resize, and clamping
     /// would paint a sheared image and hide it.
-    pub(super) fn blit(&self, src: &[u8], rect: Rect) -> bool {
+    pub fn blit(&self, src: &[u8], rect: Rect) -> bool {
         let bytes = rect.width as usize * 4;
         if src.len() != bytes * rect.height as usize {
             warn!(
@@ -234,7 +240,7 @@ impl Framebuffer {
     ///
     /// `false`, with the reason logged, for a rectangle that does not fit either
     /// side, for the reason [`Framebuffer::blit`] gives.
-    pub(super) fn blit_from(
+    pub(crate) fn blit_from(
         &self,
         src: &[u8],
         src_stride: usize,
@@ -270,11 +276,45 @@ impl Framebuffer {
         }
         true
     }
+
+    /// Make one rectangle opaque: the fourth byte of each of its pixels, which the
+    /// decoders leave at zero, set to 255. For a reader that takes the frame as
+    /// RGBA — a canvas's image data — where a zero there is a transparent pixel. A
+    /// rectangle that does not fit the frame is left alone.
+    pub(crate) fn seal(&self, rect: Rect) {
+        let mut frame = self.lock();
+        if rect.x.saturating_add(rect.width) > frame.width
+            || rect.y.saturating_add(rect.height) > frame.height
+        {
+            return;
+        }
+        let stride = frame.stride;
+        for row in 0..rect.height as usize {
+            let from = (rect.y as usize + row) * stride + rect.x as usize * 4;
+            for px in frame.pixels[from..from + rect.width as usize * 4].as_chunks_mut::<4>().0 {
+                px[3] = 0xFF;
+            }
+        }
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// Sealing touches the fourth byte of the rectangle's pixels and nothing else.
+    #[test]
+    fn a_sealed_rectangle_is_opaque_and_the_rest_is_as_it_was() {
+        let framebuffer = Framebuffer::new();
+        framebuffer.resize(3, 2);
+        assert!(framebuffer.blit(&[1, 2, 3, 0, 4, 5, 6, 0], Rect { x: 1, y: 1, width: 2, height: 1 }));
+        framebuffer.seal(Rect { x: 1, y: 1, width: 1, height: 1 });
+        framebuffer.seal(Rect { x: 2, y: 1, width: 2, height: 1 });
+        framebuffer.with(|frame| {
+            assert_eq!(frame.pixels[..12], [0; 12]);
+            assert_eq!(frame.pixels[12..], [0, 0, 0, 0, 1, 2, 3, 0xFF, 4, 5, 6, 0]);
+        });
+    }
 
     #[test]
     fn a_blit_lands_where_the_rectangle_says() {

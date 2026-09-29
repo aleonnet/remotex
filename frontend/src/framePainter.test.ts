@@ -9,6 +9,7 @@
 // Run with `bun test src/framePainter.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
+import type { ComposedRun, EgfxCompositor } from "./egfxCompositor.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
 
 const OP_VIDEO = 0x03;
@@ -65,7 +66,18 @@ let videoErrors: (string | null)[] = [];
 /** Chains that were cut. The stub never goes quiet, so these are failures. */
 let videoKeyframeAsks: string[] = [];
 
+/** `putImageData` calls: the image's size, then the dirty rectangle copied. */
+let put: { image: [number, number]; rect: number[] }[] = [];
+
 const context = {
+  putImageData(
+    image: { width: number; height: number },
+    _dx: number,
+    _dy: number,
+    ...dirty: number[]
+  ) {
+    put.push({ image: [image.width, image.height], rect: dirty });
+  },
   drawImage(_source: unknown, ...args: number[]) {
     cropped.push({
       sx: args[0],
@@ -155,6 +167,7 @@ const globals = globalThis as unknown as {
 };
 
 beforeEach(() => {
+  put = [];
   cropped = [];
   decoded = [];
   videoErrors = [];
@@ -498,6 +511,266 @@ function installBitmaps() {
     return bitmap;
   }) as unknown as typeof createImageBitmap;
 }
+
+// A GRAPHICS record: op 0x04, a length, the commands.
+function graphicsFrame(runs: number[][]): ArrayBuffer {
+  const bytes: number[] = [0x02, 0x00, runs.length & 0xff, runs.length >> 8];
+  bytes.push(1, 0, 0, 0);
+  for (const run of runs) {
+    const n = run.length;
+    bytes.push(0x04, n & 0xff, (n >> 8) & 0xff, (n >> 16) & 0xff, n >>> 24);
+    bytes.push(...run);
+  }
+  return new Uint8Array(bytes).buffer;
+}
+
+// A compositor that records what it was fed and paints what it is told to. What a
+// real one makes of the commands is egfxCompositor.test.ts; here it is the painter's
+// handling of one that is under test.
+function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
+  const made: { fed: number[][]; closed: boolean }[] = [];
+  const load = () => {
+    if (options.fail) {
+      return Promise.reject(new Error("no module"));
+    }
+    return Promise.resolve((): EgfxCompositor => {
+      const record = { fed: [] as number[][], closed: false };
+      made.push(record);
+      return {
+        compose(commands): ComposedRun {
+          if (commands[0] === options.refuse) {
+            throw new Error("a command that does not decode");
+          }
+          record.fed.push([...commands]);
+          return {
+            // Each run paints one rectangle named by its first byte.
+            painted: new Uint32Array([commands[0], 2, 3, 4]),
+            width: 64,
+            height: 48,
+            pixels: new Uint8ClampedArray(64 * 48 * 4),
+          };
+        },
+        close() {
+          record.closed = true;
+        },
+      };
+    });
+  };
+  return { made, load };
+}
+
+function graphicsPainter(load: ReturnType<typeof fakeCompositors>["load"]) {
+  return createFramePainter({
+    context: () => context,
+    onVideoError: (error) => {
+      videoErrors.push(error);
+    },
+    onVideoNeedsKeyframe: (reason) => {
+      videoKeyframeAsks.push(reason);
+    },
+    loadCompositor: load,
+  });
+}
+
+const realImageData = globalThis.ImageData;
+function installImageData() {
+  globalThis.ImageData = class {
+    width: number;
+    height: number;
+    constructor(_data: unknown, width: number, height: number) {
+      this.width = width;
+      this.height = height;
+    }
+  } as unknown as typeof ImageData;
+}
+
+test("a pipeline's runs are composed in order and their rectangles painted", async () => {
+  installImageData();
+  try {
+    const { made, load } = fakeCompositors();
+    const p = graphicsPainter(load);
+    p.startGraphics();
+    await p.draw(graphicsFrame([[7, 1], [9]]));
+    await p.draw(graphicsFrame([[11, 5, 5]]));
+    assert.equal(made.length, 1, "one compositor follows the whole pipeline");
+    assert.deepEqual(made[0].fed, [[7, 1], [9], [11, 5, 5]]);
+    assert.deepEqual(put, [
+      { image: [64, 48], rect: [7, 2, 3, 4] },
+      { image: [64, 48], rect: [9, 2, 3, 4] },
+      { image: [64, 48], rect: [11, 2, 3, 4] },
+    ]);
+    assert.equal(decoders, 0, "a pipeline built a video decoder");
+    assert.deepEqual(videoKeyframeAsks, []);
+  } finally {
+    globalThis.ImageData = realImageData;
+  }
+});
+
+test("a pipeline that starts again is composed from nothing", async () => {
+  installImageData();
+  try {
+    const { made, load } = fakeCompositors();
+    const p = graphicsPainter(load);
+    p.startGraphics();
+    await p.draw(graphicsFrame([[1]]));
+    p.startGraphics();
+    await p.draw(graphicsFrame([[2]]));
+    assert.deepEqual(
+      made.map((compositor) => [compositor.fed, compositor.closed]),
+      [
+        [[[1]], true],
+        [[[2]], false],
+      ],
+    );
+  } finally {
+    globalThis.ImageData = realImageData;
+  }
+});
+
+test("a run with no pipeline started is dropped", async () => {
+  const { made, load } = fakeCompositors();
+  const p = graphicsPainter(load);
+  await p.draw(graphicsFrame([[1]]));
+  assert.deepEqual(made, []);
+  assert.deepEqual(put, []);
+});
+
+test("a command that does not decode ends the pipeline and says so", async () => {
+  installImageData();
+  try {
+    const { made, load } = fakeCompositors({ refuse: 66 });
+    const p = graphicsPainter(load);
+    p.startGraphics();
+    await p.draw(graphicsFrame([[1], [66], [3]]));
+    await p.draw(graphicsFrame([[4]]));
+    assert.deepEqual(
+      made[0].fed,
+      [[1]],
+      "nothing is composed after the refusal",
+    );
+    assert.equal(made[0].closed, true);
+    assert.deepEqual(put.length, 1);
+    const said = videoErrors.filter((error) => error !== null);
+    assert.equal(said.length, 1);
+    assert.match(said[0] ?? "", /could not compose the host's graphics/);
+    assert.deepEqual(
+      videoKeyframeAsks,
+      [],
+      "no repaint repairs a pipeline: the host answers one out of its caches",
+    );
+  } finally {
+    globalThis.ImageData = realImageData;
+  }
+});
+
+test("a compositor that will not load says so, and the next pipeline tries again", async () => {
+  const failing = fakeCompositors({ fail: true });
+  const p = graphicsPainter(failing.load);
+  p.startGraphics();
+  await p.draw(graphicsFrame([[1]]));
+  const said = videoErrors.filter((error) => error !== null);
+  assert.match(said[0] ?? "", /could not load the graphics compositor/);
+  assert.deepEqual(put, []);
+});
+
+test("a video format takes the picture back from a pipeline", async () => {
+  installImageData();
+  try {
+    const { made, load } = fakeCompositors();
+    const p = graphicsPainter(load);
+    p.startGraphics();
+    await p.draw(graphicsFrame([[1]]));
+    p.setVideoFormat({ decode: "vp09.00.40.08" });
+    await p.draw(graphicsFrame([[2]]));
+    await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
+    assert.deepEqual(made[0].fed, [[1]]);
+    assert.equal(made[0].closed, true);
+    assert.deepEqual(chunkTypes, ["key"]);
+  } finally {
+    globalThis.ImageData = realImageData;
+  }
+});
+
+test("clear() ends a pipeline, and a run of the attachment before is not painted", async () => {
+  installImageData();
+  try {
+    const { made, load } = fakeCompositors();
+    const p = graphicsPainter(load);
+    p.startGraphics();
+    const late = p.draw(graphicsFrame([[1]]));
+    p.clear();
+    await late;
+    assert.deepEqual(put, []);
+    assert.deepEqual(
+      made,
+      [],
+      "the module loaded for a pipeline that was gone",
+    );
+  } finally {
+    globalThis.ImageData = realImageData;
+  }
+});
+
+test("a malformed batch ends a pipeline: what it held is never composed, and no repaint is asked for", async () => {
+  installImageData();
+  try {
+    const { made, load } = fakeCompositors();
+    const p = graphicsPainter(load);
+    p.startGraphics();
+    await p.draw(graphicsFrame([[1]]));
+    // A record of no length is malformed, and the batch is dropped whole.
+    await p.draw(graphicsFrame([[2], []]));
+    await p.draw(graphicsFrame([[3]]));
+    await p.draw(graphicsFrame([[]]));
+    assert.deepEqual(
+      made[0].fed,
+      [[1]],
+      "nothing is composed after the dropped batch",
+    );
+    assert.equal(made[0].closed, true);
+    assert.equal(put.length, 1);
+    const said = videoErrors.filter((error) => error !== null);
+    assert.equal(said.length, 1, "the end of a pipeline is said once");
+    assert.match(said[0] ?? "", /could not compose the host's graphics/);
+    assert.deepEqual(
+      videoKeyframeAsks,
+      [],
+      "no repaint repairs a pipeline: the host answers one out of its caches",
+    );
+  } finally {
+    globalThis.ImageData = realImageData;
+  }
+});
+
+test("a malformed batch ahead of the module's load leaves no compositor made", async () => {
+  const { made, load } = fakeCompositors();
+  const p = graphicsPainter(load);
+  p.startGraphics();
+  await p.draw(graphicsFrame([[]]));
+  await p.draw(graphicsFrame([[1]]));
+  assert.deepEqual(made, []);
+  assert.deepEqual(put, []);
+  assert.deepEqual(videoKeyframeAsks, []);
+});
+
+test("a pipeline that starts after one ended is composed", async () => {
+  installImageData();
+  try {
+    const { made, load } = fakeCompositors();
+    const p = graphicsPainter(load);
+    p.startGraphics();
+    await p.draw(graphicsFrame([[]]));
+    p.startGraphics();
+    await p.draw(graphicsFrame([[5]]));
+    assert.deepEqual(
+      made.map((compositor) => compositor.fed),
+      [[[5]]],
+    );
+    assert.equal(videoErrors.at(-1), null, "the next pipeline retracts it");
+  } finally {
+    globalThis.ImageData = realImageData;
+  }
+});
 
 test("a tile is drawn where the remote put it, and needs no stream", async () => {
   installBitmaps();

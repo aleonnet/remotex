@@ -1627,6 +1627,12 @@ export function useRemoteDesktop(
           // stream it is: only the gateway knows whether it encoded it.
           setVideoStream({ decode: msg.decode, passthrough: msg.passthrough });
           break;
+        case "graphicsStart":
+          // Queued in the worker like a format, behind the frames already posted:
+          // the pipeline's first run must find a compositor with nothing in it.
+          painter?.startGraphics();
+          setVideoStream({ decode: "", passthrough: true, composed: true });
+          break;
         case "clipboard": {
           // Both paths update the panel, but only unsolicited pushes mirror
           // into the browser's OS clipboard. Opening/revealing the panel is a

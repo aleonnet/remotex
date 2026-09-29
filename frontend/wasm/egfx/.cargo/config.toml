@@ -1,0 +1,4 @@
+# SIMD, which every browser that has the page's WebCodecs decoders also has, for
+# the codecs' colour conversion and wavelet loops.
+[target.wasm32-unknown-unknown]
+rustflags = ["-C", "target-feature=+simd128"]

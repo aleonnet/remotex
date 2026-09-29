@@ -156,6 +156,55 @@ pub enum Message<'a> {
     Other { command: u16, length: u32 },
 }
 
+/// One PDU of a decompressed channel buffer, by its header alone: where it lies in
+/// the buffer, and which command it is.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Command {
+    pub id: u16,
+    /// The PDU's bytes in the buffer, header included.
+    pub start: usize,
+    pub end: usize,
+}
+
+/// The PDUs in one decompressed channel buffer by their headers, in order, for a
+/// reader that passes them on rather than acting on them. A header that does not
+/// fit the buffer ends the iteration, as it ends [`messages`].
+pub fn commands(buffer: &[u8]) -> Commands<'_> {
+    Commands { r: Reader::new(WHAT, buffer), failed: false }
+}
+
+pub struct Commands<'a> {
+    r: Reader<'a>,
+    failed: bool,
+}
+
+impl Iterator for Commands<'_> {
+    type Item = Result<Command, Malformed>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.failed || self.r.is_empty() {
+            return None;
+        }
+        let start = self.r.at();
+        let next = header(&mut self.r).map(|(id, _, _)| Command { id, start, end: self.r.at() });
+        self.failed = next.is_err();
+        Some(next)
+    }
+}
+
+/// `RDPGFX_HEADER` and the body it measures: the command, the length it states, and
+/// the body.
+fn header<'a>(r: &mut Reader<'a>) -> Result<(u16, u32, &'a [u8]), Malformed> {
+    let command = r.u16_le()?;
+    let _flags = r.u16_le()?;
+    let length = r.u32_le()?;
+    let body = length
+        .checked_sub(HEADER)
+        .ok_or_else(|| r.refuse("a PDU length shorter than its header", length))?;
+    let body = r.bytes(usize::try_from(body).unwrap_or(usize::MAX))?;
+    Ok((command, length, body))
+}
+
 /// The PDUs in one decompressed channel buffer, in order.
 ///
 /// A PDU that does not decode ends the iteration: the buffer's remainder is at an
@@ -184,13 +233,7 @@ impl<'a> Iterator for Messages<'a> {
 
 impl<'a> Messages<'a> {
     fn pdu(&mut self) -> Result<Message<'a>, Malformed> {
-        let command = self.r.u16_le()?;
-        let _flags = self.r.u16_le()?;
-        let length = self.r.u32_le()?;
-        let body = length
-            .checked_sub(HEADER)
-            .ok_or_else(|| self.r.refuse("a PDU length shorter than its header", length))?;
-        let body = self.r.bytes(usize::try_from(body).unwrap_or(usize::MAX))?;
+        let (command, length, body) = header(&mut self.r)?;
         let mut r = Reader::new(WHAT, body);
         let message = match command {
             CMD_WIRE_TO_SURFACE_1 => {
@@ -439,6 +482,33 @@ mod tests {
             Message::Other { command: 0x0019, length: 13 },
             Message::EndFrame { frame: 7 },
         ]);
+    }
+
+    /// The same buffer by its headers alone: each PDU's place, whatever it holds.
+    #[test]
+    fn the_commands_of_a_buffer_are_found_by_their_headers() {
+        let mut buffer = server(CMD_START_FRAME, &[1, 0, 0, 0, 7, 0, 0, 0]);
+        buffer.extend(server(0x0019, &[0xAA; 5]));
+        buffer.extend(server(CMD_END_FRAME, &[7, 0, 0, 0]));
+        let found: Vec<_> = commands(&buffer).map(|c| c.unwrap()).collect();
+        assert_eq!(found, vec![
+            Command { id: CMD_START_FRAME, start: 0, end: 16 },
+            Command { id: 0x0019, start: 16, end: 29 },
+            Command { id: CMD_END_FRAME, start: 29, end: 41 },
+        ]);
+    }
+
+    /// A header naming more bytes than the buffer holds ends the walk with the
+    /// reason, and nothing after it is read.
+    #[test]
+    fn a_command_longer_than_its_buffer_ends_the_walk() {
+        let mut buffer = server(CMD_END_FRAME, &[7, 0, 0, 0]);
+        let cut = server(CMD_START_FRAME, &[1, 0, 0, 0, 7, 0, 0, 0]);
+        buffer.extend(&cut[..cut.len() - 1]);
+        let mut walk = commands(&buffer);
+        assert_eq!(walk.next(), Some(Ok(Command { id: CMD_END_FRAME, start: 0, end: 12 })));
+        assert!(matches!(walk.next(), Some(Err(Malformed::Short { .. }))));
+        assert!(walk.next().is_none());
     }
 
     #[test]

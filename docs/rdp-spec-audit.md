@@ -1,6 +1,7 @@
 # The RDP client against the specifications, audited
 
-An audit of `src/rdp_client/` against the Microsoft Open Specifications kept in
+An audit of `src/rdp_client/` and its graphics, `crates/remotex-rdp-graphics/`,
+against the Microsoft Open Specifications kept in
 [andrewtheguy/ms-rdp-specs](https://github.com/andrewtheguy/ms-rdp-specs), made on
 2026-09-13. Every PDU the client encodes or decodes was compared field by field with
 the spec text — MS-RDPBCGR of 2026-03-09, MS-RDPEGFX of 2026-05-11, and the
@@ -37,10 +38,10 @@ These could not be decided from the text alone. The probe in
 the instrument; it was not run for this audit because it takes over the remote
 clipboard.
 
-- **The ClearCodec sequence counter across a graphics reset.** `proto/clear.rs:196`
-  requires each rectangle to carry the number after the last, mod 256, and
-  `gfx.rs:318` leaves the counter alone on ResetGraphics. The spec is silent about
-  the reset. FreeRDP's `clear_context_reset`, called from `gdi_ResetGraphics`, sets
+- **The ClearCodec sequence counter across a graphics reset.** The graphics crate's
+  `proto/clear.rs:196` requires each rectangle to carry the number after the last,
+  mod 256, and its `gfx.rs:411` leaves the counter alone on ResetGraphics. The
+  spec is silent about the reset. FreeRDP's `clear_context_reset`, called from `gdi_ResetGraphics`, sets
   its counter to zero and then accepts whatever first number arrives — which
   suggests a Windows host restarts the sequence after a resize. If it does, this
   client refuses up to 255 ClearCodec rectangles after every resize or density

@@ -247,6 +247,7 @@ mod tests {
             adaptive: false,
             chroma: crate::config::Chroma::Subsampled,
             apple_media: false,
+            rdp_graphics: false,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         (VideoSink::new("test", frame_tx, plan, feedback, crate::encode::TileSupport::None), frame_rx)

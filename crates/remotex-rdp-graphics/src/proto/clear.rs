@@ -453,8 +453,10 @@ fn subcode_rlex(
             return Err(refuse("an RLEX index past its palette", u64::from(start_index)));
         }
 
+        // Against what is left, never by adding to `at`: a run is as long as four
+        // bytes say, and the sum is past a 32-bit count of pixels.
         let color = palette[usize::from(start_index)];
-        if at + run > pixels {
+        if run > pixels - at {
             return Err(refuse("an RLEX run past the rectangle", run as u64));
         }
         for _ in 0..run {
@@ -464,7 +466,7 @@ fn subcode_rlex(
         at += run;
 
         let suite = usize::from(suite_depth) + 1;
-        if at + suite > pixels {
+        if suite > pixels - at {
             return Err(refuse("an RLEX suite past the rectangle", suite as u64));
         }
         for k in 0..suite {
@@ -643,6 +645,44 @@ mod tests {
         let src = rect(0, 0, None, &[], &[], &sub);
         clear.decompress(&src, &mut Canvas::new(&mut pixels, 2, 1), 0, 0, 2, 1).unwrap();
         assert_eq!(pixels, vec![1, 2, 3, 0, 4, 5, 6, 0]);
+    }
+
+    /// One RLEX sub-rectangle of the subcodec layer, `w` × `h` at the origin.
+    fn rlex(w: u16, h: u16, data: &[u8]) -> Vec<u8> {
+        let mut sub = Vec::new();
+        for v in [0u16, 0, w, h] {
+            sub.extend_from_slice(&v.to_le_bytes());
+        }
+        sub.extend_from_slice(&(data.len() as u32).to_le_bytes());
+        sub.push(2); // RLEX
+        sub.extend_from_slice(data);
+        sub
+    }
+
+    /// An RLEX run or suite longer than what is left of its rectangle is refused,
+    /// however long it says it is: a run length is as wide as the wire's four bytes,
+    /// which is wider than the count of pixels where that count is 32 bits.
+    #[test]
+    fn an_rlex_run_or_suite_past_the_rectangle_is_refused() {
+        let refused = |w: u16, segments: &[u8]| {
+            // Palette of two, so one bit of index: colour 0 then colour 1.
+            let mut data = vec![2u8, 3, 2, 1, 6, 5, 4];
+            data.extend_from_slice(segments);
+            let mut pixels = surface(2, 1, GREY);
+            let src = rect(0, 0, None, &[], &[], &rlex(w, 1, &data));
+            match Clear::new().decompress(&src, &mut Canvas::new(&mut pixels, 2, 1), 0, 0, 2, 1) {
+                Err(Malformed::Refused { field, .. }) => field,
+                other => panic!("{other:?}"),
+            }
+        };
+        // The longest run there is, the escapes spelled out, into an empty rectangle.
+        let longest = [0x00, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF, 0xFF];
+        assert_eq!(refused(2, &longest), "an RLEX run past the rectangle");
+        // And into a full one: a run of one and a suite of one fill it first.
+        let full = [[0x00, 1].as_slice(), &longest].concat();
+        assert_eq!(refused(2, &full), "an RLEX run past the rectangle");
+        // A suite of two into a rectangle of one.
+        assert_eq!(refused(1, &[0x03, 0]), "an RLEX suite past the rectangle");
     }
 
     /// A glyph is the rectangle as the surface showed it once the layers were done —

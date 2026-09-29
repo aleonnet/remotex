@@ -779,6 +779,15 @@ impl SessionManager {
             info!("session: the browser takes a different stream; rebuilding it");
             st.take_engine();
         }
+        // A passed graphics pipeline has no resume either, whatever the browser
+        // says: the host draws against what its client already holds — surfaces,
+        // cache slots, each codec's caches — and answers even a repaint out of
+        // them, so a page that comes back holding none of it cannot be made whole
+        // by the engine that is running. It is given one that starts.
+        if st.engine.as_ref().is_some_and(|engine| engine.plan.rdp_graphics) {
+            info!("session: a passed graphics pipeline cannot be resumed; starting it over");
+            st.take_engine();
+        }
 
         // Tell the freshly attached browser which post-login state it is in. The
         // channel is empty, so try_send always lands.
@@ -1728,6 +1737,7 @@ mod tests {
             render_adaptive: None,
             audio_bitrate: None,
             media_passthrough: false,
+            egfx_passthrough: false,
             virtual_display: false,
             audio_adaptive: None,
             audio_adaptive_min: None,
@@ -2121,7 +2131,7 @@ mod tests {
 
             assert_eq!(
                 hook_rx.try_recv().expect("connect spawns the engine"),
-                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_media: false },
+                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_media: false, rdp_graphics: false },
                 "the engine must be built for what the browser said it takes"
             );
             match recv(&mut att.events).await {
@@ -2177,7 +2187,7 @@ mod tests {
         let mut taken = mgr.attach(&second, None, Chroma::Subsampled.into()).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("the takeover reconnects the selected target"),
-            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false },
+            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false },
             "the reconnect must follow the browser that took over"
         );
         expect_connected(&mut taken.events, "video-auto").await;
@@ -2231,7 +2241,7 @@ mod tests {
         let mut changed = mgr.attach(&token, None, Chroma::Subsampled.into()).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("a changed answer rebuilds the stream"),
-            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false },
+            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false },
             "the rebuilt stream must follow the browser that came back"
         );
         expect_connected(&mut changed.events, "video-auto").await;
@@ -2273,6 +2283,36 @@ mod tests {
             "a browser that takes no Mac's stream is rebuilt onto VP9"
         );
         expect_connected(&mut changed.events, "mac").await;
+    }
+
+    /// A passed graphics pipeline is never resumed: the host draws against what its
+    /// client holds, and a browser that comes back holds nothing, so the same browser
+    /// with the same answers is still given a session that starts.
+    #[tokio::test]
+    async fn a_reattach_to_a_passed_graphics_pipeline_starts_it_over() {
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner = Box::new(
+            move |_target, plan, _display, _input_rx, _frame_tx, _audio, _camera, _feedback| {
+                hook_tx.send(plan).unwrap();
+            },
+        );
+        let mgr = Arc::new(SessionManager::with_spawner(
+            vec![TargetConfig { egfx_passthrough: true, ..video_target("win") }],
+            spawner,
+        ));
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "win", None).await.unwrap();
+        assert!(matches!(hook_rx.try_recv(), Ok(RenderPlan { rdp_graphics: true, .. })));
+        expect_connected(&mut att.events, "win").await;
+
+        let mut back = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
+        assert!(
+            matches!(hook_rx.try_recv(), Ok(RenderPlan { rdp_graphics: true, .. })),
+            "the same browser coming back is still given a pipeline from its start"
+        );
+        expect_connected(&mut back.events, "win").await;
     }
 
     #[tokio::test]

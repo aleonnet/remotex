@@ -28,6 +28,16 @@
 //! set [`DUMP_ENV`] to a directory to get the framebuffer as PNG at each stage, for
 //! the check only eyes can make.
 //!
+//! ## The pipeline, passed
+//!
+//! A target with `egfx_passthrough` has the session hand the pipeline's commands on
+//! instead of composing them, and the browser composes them. [`pass_the_pipeline`]
+//! is that arrangement without the browser: a session that passes, and the same
+//! compositor fed what it passed. It asserts that the host keeps drawing — which it
+//! does only while its frames are acknowledged — that every frame the session marked
+//! was in what it passed, that the session itself drew nothing, and that the picture
+//! composed from the commands is a desktop, before and after a resize.
+//!
 //! ## The clipboard
 //!
 //! Both directions of MS-RDPECLIP are lazy — a copy announces which formats it can be
@@ -92,7 +102,9 @@ use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 
 use remotex::rdp_client::proto::{rdpeai, rdpecam, rdpsnd};
-use remotex::rdp_client::{AudioSink, Camera, CameraSink, Connect, Event, Fed, Input, MicrophoneSink, Session};
+use remotex::rdp_client::{
+    AudioSink, Camera, CameraSink, Compositor, Connect, Event, Fed, Input, MicrophoneSink, Session,
+};
 use remotex::rdp_clipboard::{self, CF_UNICODETEXT};
 use tokio::sync::mpsc::Receiver;
 
@@ -317,6 +329,7 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
         // A resize is the pipeline's graphics reset; the bitmap path has none.
         resize: egfx(),
         egfx: egfx(),
+        pass_graphics: false,
         clipboard: true,
         audio: sound().then(|| Box::new(Listen(Arc::clone(&ear))) as Box<dyn AudioSink>),
         camera: Some(Camera { name: "Remotex Probe Camera".to_owned(), sink: Box::new(Watch(Arc::clone(&eye))) }),
@@ -465,6 +478,7 @@ async fn pump(
             Event::Paint(_) => tally.paints += 1,
             Event::Frame => tally.frames += 1,
             Event::FramesMarked => {}
+            Event::Graphics(_) => panic!("a session that composes here was handed the pipeline's commands"),
             Event::Cursor(_) => tally.cursors += 1,
             Event::Resize { width, height } => tally.resizes.push((width, height)),
             Event::ResizeReady { .. } => tally.resize_ready = true,
@@ -962,6 +976,203 @@ async fn stream_camera() {
         }
     }
     assert!(matches!(ended, Some(Ok(()))), "a disconnect this end asked for is an orderly end");
+}
+
+/// The pipeline, passed: a session that hands its commands on rather than composing
+/// them, and a compositor fed those commands in its place — which is the browser's
+/// part on a target with `egfx_passthrough`. The host must keep drawing, which it
+/// does only while its frames are acknowledged, the picture composed from what was
+/// passed must be a desktop, and a resize must reach the compositor as the reset it
+/// is.
+async fn pass_the_pipeline() {
+    common::init_logging();
+    let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
+        panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml")
+    });
+    let target = common::uat_target(&name);
+    println!("rdp_client_probe: {name} ({}:{}), the pipeline passed", target.host, target.port);
+    let (session, mut events) = Session::start(Connect {
+        host: target.host.clone(),
+        port: target.port,
+        username: target.username.clone(),
+        password: target.password.clone(),
+        domain: target.domain.clone(),
+        width: OPENING.0,
+        height: OPENING.1,
+        scale_percent: 0,
+        resize: true,
+        egfx: true,
+        pass_graphics: true,
+        clipboard: false,
+        audio: None,
+        camera: None,
+        microphone: None,
+    });
+    let first = tokio::time::timeout(Duration::from_secs(60), events.recv())
+        .await
+        .expect("no first event within 60s")
+        .expect("the event channel closed");
+    let Event::Connected { width, height } = first else {
+        panic!("the session did not connect: {first:?}");
+    };
+    println!("  connected at {width}x{height}");
+
+    struct Passed {
+        compositor: Compositor,
+        started: u32,
+        runs: u64,
+        bytes: u64,
+        frames: u64,
+        composed_frames: u64,
+        painted: u64,
+        resizes: Vec<(u32, u32)>,
+        resize_ready: bool,
+    }
+    let mut passed = Passed {
+        compositor: Compositor::new(),
+        started: 0,
+        runs: 0,
+        bytes: 0,
+        frames: 0,
+        composed_frames: 0,
+        painted: 0,
+        resizes: Vec::new(),
+        resize_ready: false,
+    };
+    async fn pump(events: &mut Receiver<Event>, passed: &mut Passed, deadline: Instant, until: impl Fn(&Passed) -> bool) -> bool {
+        while !until(passed) {
+            let left = deadline.saturating_duration_since(Instant::now());
+            let Ok(event) = tokio::time::timeout(left, events.recv()).await else {
+                return false;
+            };
+            match event.expect("the event channel closed without an Ended") {
+                Event::FramesMarked => {
+                    // A pipeline begins: whoever composes it starts from nothing.
+                    passed.started += 1;
+                    passed.compositor = Compositor::new();
+                }
+                Event::Graphics(commands) => {
+                    assert!(passed.started > 0, "commands arrived before the pipeline was said to begin");
+                    passed.runs += 1;
+                    passed.bytes += commands.len() as u64;
+                    let composed = passed.compositor.compose(&commands).expect("the passed commands compose");
+                    passed.composed_frames += u64::from(composed.frames);
+                    passed.painted += composed.painted.len() as u64;
+                    if let Some(size) = composed.resized {
+                        assert_eq!(
+                            passed.resizes.last(),
+                            Some(&size),
+                            "a reset reached the compositor before the session announced its size"
+                        );
+                    }
+                }
+                Event::Frame => passed.frames += 1,
+                Event::Paint(rect) => panic!("a session that passes its pipeline painted {rect:?} itself"),
+                Event::Resize { width, height } => passed.resizes.push((width, height)),
+                Event::ResizeReady { .. } => passed.resize_ready = true,
+                Event::ResizeGone => passed.resize_ready = false,
+                Event::Ended(result) => panic!("the session ended: {result:?}"),
+                _ => {}
+            }
+        }
+        true
+    }
+    let lit = |passed: &Passed| {
+        passed.compositor.framebuffer().with(|frame| {
+            let lit = frame.pixels.as_chunks::<4>().0.iter().filter(|px| px[..3] != [0, 0, 0]).count();
+            (lit as u64, frame.width, frame.height)
+        })
+    };
+    let dump = |passed: &Passed, name: &str| {
+        let Ok(dir) = std::env::var(DUMP_ENV) else { return };
+        std::fs::create_dir_all(&dir).expect("creating the framebuffer dump directory");
+        let path = std::path::Path::new(&dir).join(format!("{name}.png"));
+        let bytes = passed.compositor.framebuffer().with(|frame| {
+            let mut rgba = frame.pixels.clone();
+            for px in rgba.as_chunks_mut::<4>().0 {
+                px[3] = 0xFF;
+            }
+            let mut out = Vec::new();
+            let mut encoder = png::Encoder::new(&mut out, frame.width, frame.height);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            let mut writer = encoder.write_header().expect("png header");
+            writer.write_image_data(&rgba).expect("png data");
+            writer.finish().expect("png finish");
+            out
+        });
+        std::fs::write(&path, bytes).expect("writing the framebuffer dump");
+        println!("  the composed picture written to {}", path.display());
+    };
+
+    pump(&mut events, &mut passed, Instant::now() + Duration::from_secs(8), |p| p.resize_ready && p.frames > 0).await;
+    pump(&mut events, &mut passed, Instant::now() + Duration::from_secs(3), |_| false).await;
+    let (on, w, h) = lit(&passed);
+    println!(
+        "  opening: {} runs / {} bytes passed, {} frames marked, {} composed, {} rectangles painted; \
+         {on} of {} pixels lit at {w}x{h}",
+        passed.runs,
+        passed.bytes,
+        passed.frames,
+        passed.composed_frames,
+        passed.painted,
+        u64::from(w) * u64::from(h),
+    );
+    dump(&passed, "passed-opening");
+    assert_eq!(passed.started, 1, "the pipeline was said to begin once");
+    assert!(passed.frames > 0, "the host drew nothing");
+    assert_eq!(passed.composed_frames, passed.frames, "every frame the session marked was in what it passed");
+    assert_eq!((w, h), (width, height), "the composed picture is the desktop's size");
+    assert!(on > 0, "the composed desktop is pure black");
+    session.framebuffer().with(|frame| {
+        assert!(frame.pixels.iter().all(|b| *b == 0), "the session drew into its own framebuffer");
+    });
+
+    for size in [RESIZED, OPENING] {
+        let started = Instant::now();
+        let deadline = started + RESIZE_BUDGET;
+        loop {
+            session.input().resize(size.0, size.1, 100);
+            let retry = (Instant::now() + RESIZE_RETRY).min(deadline);
+            if pump(&mut events, &mut passed, retry, |p| p.resizes.last() == Some(&size)).await {
+                break;
+            }
+            assert!(Instant::now() < deadline, "the host never resized to {size:?}");
+        }
+        session.input().refresh();
+        let before = passed.frames;
+        pump(&mut events, &mut passed, Instant::now() + Duration::from_secs(3), |_| false).await;
+        let (on, w, h) = lit(&passed);
+        println!(
+            "  resized to {}x{} after {:.1}s: {} frames since, {on} of {} pixels lit",
+            size.0,
+            size.1,
+            started.elapsed().as_secs_f32(),
+            passed.frames - before,
+            u64::from(w) * u64::from(h),
+        );
+        dump(&passed, &format!("passed-resized-{}x{}", size.0, size.1));
+        assert_eq!((w, h), size, "the composed picture did not follow the resize");
+        assert!(passed.frames > before, "nothing was drawn after the resize");
+        assert!(on > 0, "the resized desktop composed to pure black");
+    }
+    assert_eq!(passed.composed_frames, passed.frames);
+
+    drop(session);
+    let mut ended = None;
+    while let Ok(event) = events.try_recv() {
+        if let Event::Ended(result) = event {
+            ended = Some(result);
+        }
+    }
+    println!("  ended: {ended:?}");
+    assert!(matches!(ended, Some(Ok(()))), "a disconnect this end asked for is an orderly end");
+}
+
+#[tokio::test]
+#[ignore = "drives a real RDP host named in tmp/test_uat.toml"]
+async fn a_real_host_passes_its_pipeline() {
+    pass_the_pipeline().await;
 }
 
 #[tokio::test]

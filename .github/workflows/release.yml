@@ -82,6 +82,11 @@ jobs:
 
       - uses: oven-sh/setup-bun@v2
 
+      # The bundle holds a WebAssembly module, built by the frontend's own build
+      # from the gateway's graphics crate (frontend/wasm/egfx).
+      - name: Add the WebAssembly target
+        run: rustup target add wasm32-unknown-unknown
+
       - name: Build frontend
         run: cd frontend && bun install --frozen-lockfile && bun run build
 
@@ -94,7 +99,8 @@ jobs:
 
   # The notices of what a release build contains, made once for every target like
   # the frontend: packaging/about.toml lists the targets the Rust crates are
-  # gathered for, and the web client is the same bundle everywhere.
+  # gathered for, packaging/about-wasm.toml the web client's WebAssembly module's,
+  # and the web client is the same bundle everywhere.
   notices:
     needs: prepare
     runs-on: ubuntu-latest

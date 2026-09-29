@@ -267,6 +267,10 @@ export type ControlMsg =
   // untouched (wlshare's VP9, a High Performance Mac's HEVC), or one the gateway
   // encoded.
   | { type: "videoFormat"; decode: string; passthrough: boolean }
+  // An RDP host's graphics pipeline starts here, from nothing, and the GRAPHICS
+  // records after it are the picture: this page composes them. Whatever it held of
+  // a pipeline or a video stream before is done with.
+  | { type: "graphicsStart" }
   // Whether the remote runs macOS, discovered by the engine as it connects.
   // The browser uses it to decide whether selected local Command shortcuts stay
   // Command or become remote Control.
@@ -362,7 +366,17 @@ export interface TileMsg {
   data: Uint8Array;
 }
 
-export type BatchRecord = VideoMsg | TileMsg;
+// A run of an RDP host's graphics pipeline, as the host sent it: whole commands, out
+// of their bulk compression, for this page to compose (egfxCompositor.ts). It means
+// something only after every run before it, from the `graphicsStart` that began the
+// pipeline: the host draws against what its client already holds. See `GraphicsUnit`
+// in src/protocol.rs for the contract.
+export interface GraphicsMsg {
+  kind: "graphics";
+  data: Uint8Array;
+}
+
+export type BatchRecord = VideoMsg | TileMsg | GraphicsMsg;
 
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;
@@ -376,6 +390,8 @@ const OP_TILE = 0x01;
 const TILE_HEADER_LEN = 13;
 const OP_VIDEO = 0x03;
 const VIDEO_HEADER_LEN = 10;
+const OP_GRAPHICS = 0x04;
+const GRAPHICS_HEADER_LEN = 5;
 // A VIDEO record's only flag: a decoder that has seen nothing before it can start here.
 // Any other bit means a gateway newer than this client, and the record is dropped rather
 // than guessed at — the same strictness the batch's own flags byte gets.
@@ -392,6 +408,7 @@ const VIDEO_KEYFRAME = 0x01;
 //
 //   TILE  (op 0x01):     u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
 //   VIDEO (op 0x03):     u8 flags | u16 w | u16 h | u32 len | payload[len]
+//   GRAPHICS (op 0x04):  u32 len | commands[len]
 //
 // Returns null for anything malformed or unknown, so callers can drop a bad
 // frame whole rather than paint half of it. A truncated frame is *detectable*
@@ -406,10 +423,7 @@ export function decodeBatchFrame(buf: ArrayBuffer): BatchRecord[] | null {
   const records: BatchRecord[] = [];
   let at = BATCH_HEADER_LEN;
   while (at < buf.byteLength) {
-    const parsed =
-      view.getUint8(at) === OP_TILE
-        ? decodeTile(view, buf, at)
-        : decodeVideo(view, buf, at);
+    const parsed = decodeRecord(view, buf, at);
     if (!parsed) {
       return null;
     }
@@ -435,6 +449,41 @@ export function batchFrameSequence(buf: ArrayBuffer): number | null {
   }
   const sequence = view.getUint32(4, true);
   return sequence === 0 ? null : sequence;
+}
+
+function decodeRecord(
+  view: DataView,
+  buf: ArrayBuffer,
+  at: number,
+): { record: BatchRecord; next: number } | null {
+  switch (view.getUint8(at)) {
+    case OP_TILE:
+      return decodeTile(view, buf, at);
+    case OP_GRAPHICS:
+      return decodeGraphics(view, buf, at);
+    default:
+      return decodeVideo(view, buf, at);
+  }
+}
+
+function decodeGraphics(
+  view: DataView,
+  buf: ArrayBuffer,
+  at: number,
+): { record: GraphicsMsg; next: number } | null {
+  if (at + GRAPHICS_HEADER_LEN > buf.byteLength) {
+    return null;
+  }
+  const len = view.getUint32(at + 1, true);
+  const start = at + GRAPHICS_HEADER_LEN;
+  // A run with no commands is one the gateway never sends.
+  if (len === 0 || start + len > buf.byteLength) {
+    return null;
+  }
+  return {
+    record: { kind: "graphics", data: new Uint8Array(buf, start, len) },
+    next: start + len,
+  };
 }
 
 function decodeVideo(

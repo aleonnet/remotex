@@ -40,7 +40,9 @@ foreach ($dir in 'LIBVPX_PREBUILT_DIR', 'LIBOPUS_PREBUILT_DIR') {
 }
 
 # Build the platform-independent frontend once, then have each Cargo invocation stage that
-# bundle in its own OUT_DIR. The workspace arrives without node_modules.
+# bundle in its own OUT_DIR. The workspace arrives without node_modules. The bundle holds
+# a WebAssembly module its build compiles from the gateway's graphics crate, which takes the
+# target provision.ps1 adds.
 Invoke-Step 'frontend' {
     Push-Location frontend
     try {

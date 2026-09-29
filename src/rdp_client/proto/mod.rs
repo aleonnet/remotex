@@ -27,9 +27,9 @@
 //! - [`dvc`] — the dynamic channels a server opens over one of those while the session
 //!   is live.
 //! - [`display`] — the dynamic channel a desktop is resized over.
-//! - [`zgfx`] — the bulk compression every graphics pipeline PDU is wrapped in.
 //! - [`gfx`] — the graphics pipeline's own PDUs: surfaces, frames, and the codecs
-//!   that fill them.
+//!   that fill them. Those codecs and the pipeline's bulk compression are beside it
+//!   in [`remotex_rdp_graphics::proto`].
 //! - [`cliprdr`] — the clipboard, on a static channel of its own.
 //! - [`rdpsnd`] — the remote's sound, as PCM, on a static channel or the dynamic one
 //!   a current Windows host prefers.
@@ -46,7 +46,6 @@
 //! - [`finalization`] — the four PDUs between a confirmed share and a desktop.
 //! - [`fastpath`] — the framing the server's updates arrive in once it is live.
 //! - [`bitmap`] — the rectangles of pixels those updates carry, and where they go.
-//! - [`planar`] — the codec a 32-bit session compresses a rectangle with.
 //! - [`pointer`] — the cursor, which travels as its own shape and is never drawn
 //!   into the desktop.
 //! - [`desktop`] — what a client asks of a desktop that is already up, and the last
@@ -71,10 +70,8 @@
 //!
 //! [MS-RDPBCGR]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpbcgr/5073f4ed-1e93-45e1-b039-6e30c385867c
 
-pub mod bitmap;
 pub mod capabilities;
 pub mod channel;
-pub mod clear;
 pub mod cliprdr;
 pub mod credssp;
 pub mod der;
@@ -85,22 +82,20 @@ pub mod fastpath;
 pub mod frame;
 pub mod finalization;
 pub mod gcc;
-pub mod gfx;
 pub mod info;
 pub mod input;
 pub mod license;
 pub mod mcs;
-pub mod nsc;
 pub mod per;
-pub mod planar;
 pub mod pointer;
-pub mod progressive;
 pub mod rdpdr;
 pub mod rdpeai;
 pub mod rdpecam;
 pub mod rdpsnd;
 pub mod share;
 pub mod tls;
-pub mod wire;
 pub mod x224;
-pub mod zgfx;
+
+// What a host draws with is a crate of its own, which the page runs too. What of it
+// the rest of the client is written with is named here, as the rest of the wire is.
+pub use remotex_rdp_graphics::proto::{bitmap, gfx, wire};

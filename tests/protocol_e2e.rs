@@ -1194,6 +1194,7 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         render_chroma: None,
         render_adaptive: None,
         media_passthrough: false,
+        egfx_passthrough: false,
         virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,
@@ -2070,6 +2071,7 @@ async fn standard_on_a_virtual_display_resizes_it_and_offers_no_stream() {
     let addr = spawn_app(TargetConfig {
         subtype: Some(remotex::config::Subtype::Ard),
         media_passthrough: false,
+        egfx_passthrough: false,
         virtual_display: true,
         ..mac_target(mac_port)
     })
@@ -2148,6 +2150,7 @@ async fn standard_refuses_a_virtual_display_the_mac_does_not_offer() {
     let addr = spawn_app(TargetConfig {
         subtype: Some(remotex::config::Subtype::Ard),
         media_passthrough: false,
+        egfx_passthrough: false,
         virtual_display: true,
         ..mac_target(mac_port)
     })
@@ -2175,6 +2178,7 @@ async fn standard_speaks_apples_revision_on_the_physical_screen() {
     let addr = spawn_app(TargetConfig {
         subtype: Some(remotex::config::Subtype::Ard),
         media_passthrough: false,
+        egfx_passthrough: false,
         resize: false,
         ..mac_target(mac_port)
     })

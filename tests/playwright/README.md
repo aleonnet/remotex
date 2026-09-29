@@ -34,6 +34,14 @@ decidable without asking the browser anything. It parses VIDEO records itself â€
 `resize` announced â€” and checks that no access unit outran the `videoFormat` that
 says how to decode it.
 
+`egfx-passthrough.spec.ts` is an RDP host's graphics pipeline passed for the page
+to compose, read from the same socket: that `graphicsStart` comes ahead of the
+first `GRAPHICS` record, that every record is whole commands by their own
+headers' lengths, that the page acknowledges each batch once its paint worker has
+composed it, and that a page that reloads is given a pipeline from its first
+command rather than the one that was running. A compositor that refused a command
+says so in the DOM, which is what stands in for the picture here.
+
 `audio-socket.spec.ts` keeps sound on its dedicated `/ws/audio` connection. It
 asserts which socket receives the format and packets, and that opening and closing
 that socket is the whole subscription. The deterministic tone harness in
@@ -121,6 +129,18 @@ bun run test:video
 That gateway serves the SPA compiled into its binary, so rebuild the gateway
 after a frontend change and restart it; a stale bundle is exactly what these
 specs cannot see.
+
+The passthrough spec needs a live RDP host, in a target with
+`egfx_passthrough = true`, named by `REMOTEX_PLAYWRIGHT_EGFX_TARGET`:
+
+```sh
+cd tests/playwright
+REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52889/' \
+REMOTEX_PLAYWRIGHT_USERNAME='admin' \
+REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
+REMOTEX_PLAYWRIGHT_EGFX_TARGET='win' \
+bunx playwright test '/egfx-passthrough\.spec\.ts$'
+```
 
 The audio spec uses the test-tone gateway instead of a live target:
 

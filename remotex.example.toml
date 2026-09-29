@@ -212,6 +212,22 @@ password = "change-me"
 # host whose pipeline the decoders cannot paint. RDP only, and refused on VNC even when set to false.
 #egfx = true
 
+# Pass the RDP host's graphics pipeline to the browser, which composes it, rather
+# than composing the desktop here and encoding it as VP9. For a LAN: what the host
+# draws with is sent as it is, with no quality walk behind it, so the video keys
+# further down reach nothing of it. It takes the encoding and the decoding off the
+# gateway — a few percent of a core are left, whatever the desktop is doing — and
+# puts the decoding on the browser, where a desktop in ordinary use is light and a
+# full-screen video is about as much as one browser thread composes. A page that
+# reloads or reconnects is logged on to the host's session again rather than
+# resumed, since the host draws against what its client already holds. RDP only,
+# and refused beside `egfx = false`.
+# EXPERIMENTAL. The compositor is the gateway's own and is tested as it is there,
+# and what is passed is checked against a real host, in a headless browser and by
+# hand. That is one Windows 11 host, with `audio` and `clipboard` beside the key;
+# `camera` and `microphone` beside it have not been tried.
+#egfx_passthrough = false
+
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
 # back whenever the tab regains focus — where the browser permits it, which

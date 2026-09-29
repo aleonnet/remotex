@@ -18,7 +18,9 @@ Three parts, each from where it is kept:
 - the web client's packages, compiled into the gateway with it, from
   frontend/node_modules (`bun install` in frontend/ first);
 - the Rust crates, from cargo-about (`cargo install cargo-about --locked
-  --features cli`) under packaging/about.toml.
+  --features cli`) under packaging/about.toml: the gateway's, and those of the
+  web client's WebAssembly module (frontend/wasm/egfx), which is compiled into the
+  gateway with the rest of the web client.
 
 cargo-about refuses a crate under a licence packaging/about.toml does not accept,
 so a dependency that cannot be shipped fails the packaging that would ship it.
@@ -83,30 +85,38 @@ def web_packages() -> list[tuple[str, str, str, str]]:
     return sorted(found.values())
 
 
+# The manifests whose crates a release contains, each with the cargo-about settings
+# that name its targets: the gateway, and the web client's WebAssembly module.
+RUST_MANIFESTS = [
+    (ROOT, "packaging/about.toml"),
+    (ROOT / "frontend" / "wasm" / "egfx", "packaging/about-wasm.toml"),
+]
+
+
 def rust_licences() -> list[tuple[str, list[str], str]]:
     """(licence, crates, text) for each distinct licence text cargo-about found:
     offline, so a crate that ships no licence file gets its licence's standard text
     on every machine rather than whatever its repository says today."""
-    subprocess.run(["cargo", "fetch", "--locked"], cwd=ROOT, check=True)
-    about = subprocess.run(
-        ["cargo", "about", "generate", "--config", "packaging/about.toml", "--format", "json", "--frozen"],
-        cwd=ROOT,
-        check=True,
-        capture_output=True,
-        text=True,
-    )
-    groups = []
-    for licence in json.loads(about.stdout)["licenses"]:
-        crates = sorted(
-            {
+    by_text: dict[tuple[str, str], set[str]] = {}
+    for manifest, config in RUST_MANIFESTS:
+        subprocess.run(["cargo", "fetch", "--locked"], cwd=manifest, check=True)
+        about = subprocess.run(
+            ["cargo", "about", "generate", "--config", str(ROOT / config), "--format", "json", "--frozen"],
+            cwd=manifest,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        for licence in json.loads(about.stdout)["licenses"]:
+            crates = {
                 f"{use['crate']['name']} {use['crate']['version']}"
                 for use in licence["used_by"]
-                # remotex itself has no source.
+                # remotex's own crates have no source.
                 if use["crate"]["source"] is not None
             }
-        )
-        if crates:
-            groups.append((licence["id"], crates, licence["text"]))
+            if crates:
+                by_text.setdefault((licence["id"], licence["text"]), set()).update(crates)
+    groups = [(licence, sorted(crates), text) for (licence, text), crates in by_text.items()]
     return sorted(groups, key=lambda g: (g[0], g[1]))
 
 

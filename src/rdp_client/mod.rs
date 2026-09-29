@@ -33,8 +33,8 @@
 //! # The two graphics paths
 //!
 //! [`Connect::egfx`] chooses. With the graphics pipeline (MS-RDPEGFX), the server
-//! draws through surfaces on a dynamic channel — [`gfx`](self::gfx) composes them
-//! into the framebuffer — marks its frames ([`Event::Frame`]), and answers a monitor
+//! draws through surfaces on a dynamic channel — [`remotex_rdp_graphics::gfx`]
+//! composes them into the framebuffer — marks its frames ([`Event::Frame`]), and answers a monitor
 //! layout with a graphics reset, which surfaces here as one [`Event::Resize`].
 //! Without it, the server sends plain bitmap updates on the share and the desktop
 //! keeps its opening size: Display Control is the pipeline's alone.
@@ -87,8 +87,6 @@
 mod camera;
 mod connect;
 mod error;
-mod framebuffer;
-mod gfx;
 mod input;
 mod microphone;
 mod pointer;
@@ -98,7 +96,7 @@ mod session;
 pub use camera::{Camera, CameraFeed, CameraSink, Fed};
 pub use microphone::{MicrophoneFeed, MicrophoneSink};
 pub use error::Error;
-pub use framebuffer::{Frame, Framebuffer, Rect};
 pub use input::{Input, MouseButton, sanitise_scale, sanitise_size};
 pub use pointer::{Cursor, CursorImage};
+pub use remotex_rdp_graphics::{Composed, Compositor, Frame, Framebuffer, Rect};
 pub use session::{AudioSink, Connect, Event, Session};

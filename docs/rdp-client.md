@@ -8,6 +8,14 @@ engine that consumes those events — damage into the video stream, `ClientMsg` 
 — is `src/rdp.rs`, and the boundary between the two is the point of this document:
 everything below it is protocol, everything above it is this gateway's.
 
+What a host draws with is a crate of its own, `crates/remotex-rdp-graphics`: the
+graphics pipeline's PDUs and bulk compression, the codecs, the compositor and the
+framebuffer. It is this client's all the same — `rdp_client` names the framebuffer
+and that part of the wire as its own — and is apart because the page runs it too,
+built to WebAssembly, for a target with `egfx_passthrough`. It holds no
+connection, thread or clock, so it builds for `wasm32-unknown-unknown`. The files
+[Graphics](#graphics) names are that crate's, under its `src/`.
+
 The only thing under that boundary not written here is the CredSSP exchange
 itself (`sspi`), because NLA is not optional on a current Windows host and NTLM is
 the one mechanism a user name and a password can drive.
@@ -147,7 +155,7 @@ subsystem when it finds a wrapper there instead.
 
 The host does not paint the desktop; it paints *surfaces* it creates and sizes,
 maps them onto the output at an origin, and brackets drawing in StartFrame and
-EndFrame. `rdp_client/gfx.rs` keeps each surface's pixels and the rectangles drawn
+EndFrame. `gfx.rs` keeps each surface's pixels and the rectangles drawn
 into since the last frame, and at the EndFrame copies those rectangles of every
 mapped surface into the framebuffer — the shape of FreeRDP's `gdi/gfx.c`. Each
 EndFrame is acknowledged (`queueDepth` unavailable), which a Windows host requires
@@ -183,6 +191,32 @@ clips to the surface. A rectangle that will not decode is left unpainted with a
 warning and the session runs on, since the host draws it again; a PDU whose framing
 is wrong ends the session, as any malformed PDU does. The channel says which codecs
 and commands it carried when it ends, at `info`.
+
+### The pipeline, passed on
+
+**Experimental**, for the reason
+[RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)
+gives. `Connect::pass_graphics` — a target's `egfx_passthrough` — has the session hand the
+pipeline's commands to its caller instead of composing them. The channel is
+still this client's: the capability exchange, the bulk compression and each
+frame's acknowledgement are as above, since the history is the connection's and
+the host stops drawing without its acknowledgements. `Graphics::passing` reads
+the commands by their headers alone (`proto/gfx.rs::commands`) and decodes three:
+the confirmation, the reset, whose size the session announces, and each
+EndFrame. Everything the host sent goes out as `Event::Graphics`, whole PDUs in
+order, cut where the session has something of its own to say — before the
+confirmation and the reset, so `Event::FramesMarked` and `Event::Resize` reach
+the caller ahead of the commands that follow them, and after each EndFrame,
+whose `Event::Frame` follows the run that holds it. Nothing is decoded, no
+surface is kept, and the session's framebuffer holds nothing of what the
+pipeline draws.
+
+`Compositor` (`compositor.rs`) is the other half: the same compositor, fed the
+commands that were passed. The page's WebAssembly module is a binding around it
+(`frontend/wasm/egfx`), and `tests/rdp_client_probe.rs` composes a real host's
+passed pipeline with it. It is right only for a pipeline it has followed from
+its first command, which is why `Event::FramesMarked` is where a caller starts
+one.
 
 ### Bitmap updates
 

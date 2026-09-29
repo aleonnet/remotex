@@ -31,11 +31,11 @@ use std::collections::BTreeMap;
 use anyhow::{Context as _, Result};
 use log::{debug, info, warn};
 
-use super::framebuffer::{Framebuffer, Rect, affordable, stage};
-use super::proto::bitmap::MAX_DESKTOP_BYTES;
-use super::proto::gfx::{self, Message, Point16, Rect16};
-use super::proto::wire::Malformed;
-use super::proto::{clear, planar, progressive, zgfx};
+use crate::framebuffer::{Framebuffer, Rect, affordable, stage};
+use crate::proto::bitmap::MAX_DESKTOP_BYTES;
+use crate::proto::gfx::{self, Message, Point16, Rect16};
+use crate::proto::wire::Malformed;
+use crate::proto::{clear, planar, progressive, zgfx};
 
 /// Most rectangles a surface holds as changed before two of them are merged to
 /// make room — coarser, never longer. See [`stage`] for which two.
@@ -48,8 +48,8 @@ const CACHE_BUDGET: usize = 64 << 20;
 
 /// Something the pipeline did that the session has to act on, in the order it
 /// happened.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(super) enum Update {
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum Update {
     /// The host confirmed the pipeline: everything it draws from here on comes
     /// inside a frame. Reported before the first paint, which is what a consumer
     /// that paces frames itself needs to know before it receives one.
@@ -61,6 +61,10 @@ pub(super) enum Update {
     Paint(Rect),
     /// The server finished frame `id`, and this client has finished `decoded` in all.
     Frame { id: u32, decoded: u32 },
+    /// Commands for whoever composes the desktop in this client's place
+    /// ([`Graphics::passing`]): whole PDUs as the host sent them, decompressed, in
+    /// the order they came. Each run ends at a frame's end or at the buffer's.
+    Passed(Vec<u8>),
 }
 
 /// One surface: its pixels in `RGBX32`, where it shows on the output, and what has
@@ -237,7 +241,7 @@ impl Tally {
 
 /// The pipeline's state for one channel: the decompressor, the surfaces, and what
 /// has been seen.
-pub(super) struct Graphics {
+pub struct Graphics {
     zgfx: zgfx::Zgfx,
     /// One PDU decompressed, reused across PDUs.
     buffer: Vec<u8>,
@@ -261,10 +265,19 @@ pub(super) struct Graphics {
     clear: Option<Box<clear::Clear>>,
     /// Progressive's per-surface tiles, made on the first Progressive PDU.
     progressive: Option<Box<progressive::Progressive>>,
+    /// Whether the commands are passed on rather than composed here — see
+    /// [`Self::passing`].
+    pass: bool,
+}
+
+impl Default for Graphics {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl Graphics {
-    pub(super) fn new() -> Self {
+    pub fn new() -> Self {
         Self {
             zgfx: zgfx::Zgfx::new(),
             buffer: Vec::new(),
@@ -279,7 +292,28 @@ impl Graphics {
             pixels: Vec::new(),
             clear: None,
             progressive: None,
+            pass: false,
         }
+    }
+
+    /// A pipeline whose commands are composed somewhere else: unwrapped here,
+    /// because the bulk compression's history is the connection's, and handed on
+    /// whole ([`Update::Passed`]). Nothing is decoded, no surface is kept and the
+    /// framebuffer is never drawn into; what this end still reads is what the
+    /// session itself answers — the confirmation, the output's size and each
+    /// frame's end, which is owed an acknowledgement whoever draws it.
+    pub fn passing() -> Self {
+        let mut passing = Self::new();
+        passing.pass = true;
+        passing
+    }
+
+    /// The pipeline a channel opened again starts with: nothing held, composed or
+    /// passed as this one is.
+    pub fn fresh(&self) -> Self {
+        let mut fresh = Self::new();
+        fresh.pass = self.pass;
+        fresh
     }
 
     /// One PDU off the channel: unwrapped, decoded, and acted on. The pixels go
@@ -289,7 +323,7 @@ impl Graphics {
     /// A PDU that does not decode ends the session, as any other malformed PDU
     /// does. A *codec payload* that does not decode does not: it is one rectangle
     /// the server will draw again, and it is logged and counted instead.
-    pub(super) fn receive(&mut self, data: &[u8], framebuffer: &Framebuffer) -> Result<Vec<Update>> {
+    pub fn receive(&mut self, data: &[u8], framebuffer: &Framebuffer) -> Result<Vec<Update>> {
         let mut buffer = std::mem::take(&mut self.buffer);
         let outcome = self.receive_into(data, &mut buffer, framebuffer);
         self.buffer = buffer;
@@ -303,10 +337,67 @@ impl Graphics {
         framebuffer: &Framebuffer,
     ) -> Result<Vec<Update>> {
         self.zgfx.decompress(data, buffer).context("unwrapping a graphics pipeline PDU")?;
+        if self.pass {
+            return self.hand_on(buffer);
+        }
+        self.compose(buffer, framebuffer)
+    }
+
+    /// Act on a buffer of commands that is already unwrapped.
+    pub(crate) fn compose(&mut self, commands: &[u8], framebuffer: &Framebuffer) -> Result<Vec<Update>> {
         let mut updates = Vec::new();
-        for message in gfx::messages(buffer) {
+        for message in gfx::messages(commands) {
             self.act(message?, framebuffer, &mut updates)?;
         }
+        Ok(updates)
+    }
+
+    /// A buffer of commands for whoever composes them, cut where the session has
+    /// something of its own to do: before the confirmation and before a reset, so
+    /// what the session says about either reaches its caller ahead of the commands
+    /// that follow it, and after each frame's end, which is acknowledged once the
+    /// frame has been handed over.
+    fn hand_on(&mut self, commands: &[u8]) -> Result<Vec<Update>> {
+        let mut updates = Vec::new();
+        let mut from = 0;
+        let cut = |updates: &mut Vec<Update>, from: &mut usize, to: usize| {
+            if to > *from {
+                updates.push(Update::Passed(commands[*from..to].to_vec()));
+            }
+            *from = to;
+        };
+        for command in gfx::commands(commands) {
+            let command = command?;
+            self.tally.command(command.id);
+            if !matches!(command.id, gfx::CMD_CAPS_CONFIRM | gfx::CMD_RESET_GRAPHICS | gfx::CMD_END_FRAME) {
+                continue;
+            }
+            let read = gfx::messages(&commands[command.start..command.end]).next();
+            match read.transpose()? {
+                Some(Message::CapsConfirm { version, flags }) => {
+                    info!(
+                        "rdp: the host confirmed graphics pipeline version {version:#010x}, flags {flags:#x}; \
+                         its commands are passed on"
+                    );
+                    cut(&mut updates, &mut from, command.start);
+                    updates.push(Update::Confirmed);
+                }
+                Some(Message::ResetGraphics { width, height, monitors }) => {
+                    affordable(width, height)?;
+                    debug!("rdp: graphics reset to {width}x{height} over {monitors} monitors");
+                    self.output = Some((width, height));
+                    cut(&mut updates, &mut from, command.start);
+                    updates.push(Update::Reset { width, height });
+                }
+                Some(Message::EndFrame { frame }) => {
+                    cut(&mut updates, &mut from, command.end);
+                    self.decoded = self.decoded.wrapping_add(1);
+                    updates.push(Update::Frame { id: frame, decoded: self.decoded });
+                }
+                _ => {}
+            }
+        }
+        cut(&mut updates, &mut from, commands.len());
         Ok(updates)
     }
 
@@ -345,8 +436,10 @@ impl Graphics {
                     .map(|(_, held)| held.pixels.len())
                     .sum::<usize>()
                     + self.progressive.as_ref().map_or(0, |progressive| progressive.held_except(surface));
+                // Summed with the overflow looked for: the largest surface the wire
+                // can name is within a megabyte of what 32 bits count to.
                 anyhow::ensure!(
-                    held + bytes <= MAX_DESKTOP_BYTES,
+                    held.checked_add(bytes).is_some_and(|total| total <= MAX_DESKTOP_BYTES),
                     "the host created a {width}x{height} graphics surface, which with the {} MiB \
                      of surfaces it already has is more than the {} MiB this client will hold",
                     held >> 20,
@@ -695,13 +788,13 @@ impl Drop for Graphics {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::rdp_client::proto::gfx::{
+    use crate::proto::gfx::{
         CMD_CACHE_TO_SURFACE, CMD_CAPS_CONFIRM, CMD_CREATE_SURFACE, CMD_END_FRAME, CMD_MAP_SURFACE_TO_OUTPUT,
         CMD_RESET_GRAPHICS, CMD_SOLID_FILL, CMD_START_FRAME, CMD_SURFACE_TO_CACHE,
         CMD_SURFACE_TO_SURFACE, CMD_WIRE_TO_SURFACE_1, CMD_WIRE_TO_SURFACE_2, CODEC_CAPROGRESSIVE, CODEC_PLANAR,
         CODEC_UNCOMPRESSED, PIXEL_XRGB_8888, pdu,
     };
-    use crate::rdp_client::proto::wire::Writer;
+    use crate::proto::wire::Writer;
 
     fn reset(width: u32, height: u32) -> Vec<u8> {
         let mut w = Writer::new();
@@ -962,7 +1055,7 @@ mod tests {
     /// EndFrame; the tiles are kept, so a later PDU on the same surface finds them.
     #[test]
     fn a_progressive_pdu_paints_its_region_and_keeps_its_tiles() {
-        use crate::rdp_client::proto::progressive::testing::{empty_upgrade, flat_tile, grey, pdu as progressive, region};
+        use crate::proto::progressive::testing::{empty_upgrade, flat_tile, grey, pdu as progressive, region};
         let framebuffer = Framebuffer::new();
         let mut graphics = Graphics::new();
         receive(&mut graphics, &framebuffer, &[reset(100, 70), create(1, 100, 70), map(1, 0, 0)]);
@@ -1077,6 +1170,11 @@ mod tests {
         let mut graphics = Graphics::new();
         let err = graphics.receive(&packet(&[create(1, 32766, 32766)]), &framebuffer).unwrap_err();
         assert!(format!("{err}").contains("32766x32766"), "{err}");
+        // And beside a surface already held, where the two together are past what 32
+        // bits count to.
+        receive(&mut graphics, &framebuffer, &[create(1, 1024, 1024)]);
+        let err = graphics.receive(&packet(&[create(2, 32766, 32766)]), &framebuffer).unwrap_err();
+        assert!(format!("{err}").contains("32766x32766"), "{err}");
         let err = graphics.receive(&packet(&[reset(32766, 32766)]), &framebuffer).unwrap_err();
         assert!(format!("{err}").contains("32766x32766"), "{err}");
     }
@@ -1149,5 +1247,137 @@ mod tests {
         let confirm = pdu(CMD_CAPS_CONFIRM, &w.finish());
         let updates = receive(&mut graphics, &framebuffer, &[confirm, reset(4, 4)]);
         assert_eq!(updates, vec![Update::Confirmed, Update::Reset { width: 4, height: 4 }]);
+    }
+
+    fn confirm() -> Vec<u8> {
+        let mut w = Writer::new();
+        w.u32_le(gfx::CAPVERSION_10);
+        w.u32_le(4);
+        w.u32_le(0x22);
+        pdu(CMD_CAPS_CONFIRM, &w.finish())
+    }
+
+    /// A passing pipeline hands every command on as it came and draws none of them:
+    /// what it says for itself is the confirmation and the reset, each ahead of the
+    /// commands that follow it, and each frame's end behind the frame.
+    #[test]
+    fn a_passing_pipeline_hands_its_commands_on_whole_and_in_order() {
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::passing();
+        let opening = [confirm(), reset(4, 4), create(1, 4, 4), map(1, 0, 0)];
+        let first = [start(1), wire(1, CODEC_UNCOMPRESSED, (0, 0, 1, 1), &[1, 2, 3, 0]), end(1)];
+        let second = [start(2), solidfill(1, [9, 9, 9, 0], &[(0, 0, 2, 2)])];
+        let pdus: Vec<Vec<u8>> = opening.iter().chain(&first).chain(&second).cloned().collect();
+
+        let updates = receive(&mut graphics, &framebuffer, &pdus);
+        assert_eq!(updates, vec![
+            Update::Confirmed,
+            Update::Passed(opening[0].clone()),
+            Update::Reset { width: 4, height: 4 },
+            Update::Passed([&opening[1..], &first[..]].concat().concat()),
+            Update::Frame { id: 1, decoded: 1 },
+            Update::Passed(second.concat()),
+        ]);
+        let passed: Vec<u8> = updates
+            .iter()
+            .filter_map(|update| match update {
+                Update::Passed(commands) => Some(commands.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(passed, pdus.concat(), "every byte the host sent, once, in order");
+        framebuffer.with(|frame| assert_eq!((frame.width, frame.height), (0, 0), "nothing is drawn here"));
+        assert!(graphics.surfaces.is_empty() && graphics.clear.is_none(), "and nothing is kept");
+    }
+
+    /// A frame that ends in a later packet is passed as it arrives, and its end is
+    /// still the only place a frame is reported.
+    #[test]
+    fn a_passing_pipeline_passes_a_frame_split_across_packets() {
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::passing();
+        let head = [reset(4, 4), create(1, 4, 4), map(1, 0, 0), start(7)];
+        let tail = [solidfill(1, [1, 2, 3, 0], &[(0, 0, 4, 4)]), end(7)];
+        assert_eq!(receive(&mut graphics, &framebuffer, &head), vec![
+            Update::Reset { width: 4, height: 4 },
+            Update::Passed(head.concat()),
+        ]);
+        assert_eq!(receive(&mut graphics, &framebuffer, &tail), vec![
+            Update::Passed(tail.concat()),
+            Update::Frame { id: 7, decoded: 1 },
+        ]);
+    }
+
+    /// What is passed is what a compositor composes: the same commands, handed on
+    /// and then composed, make the picture the host's own packets make — and the
+    /// compositor says what it painted and when the output changed size.
+    #[test]
+    fn a_compositor_reports_what_a_run_did_to_the_picture() {
+        use crate::{Composed, Compositor};
+        let mut compositor = Compositor::new();
+        let opening = [reset(4, 4), create(1, 4, 4), map(1, 0, 0)].concat();
+        assert_eq!(
+            compositor.compose(&opening).unwrap(),
+            Composed { resized: Some((4, 4)), painted: Vec::new(), frames: 0 }
+        );
+        let frame = [start(1), solidfill(1, [10, 20, 30, 0], &[(1, 1, 3, 2)]), end(1)].concat();
+        assert_eq!(
+            compositor.compose(&frame).unwrap(),
+            Composed { resized: None, painted: vec![Rect { x: 1, y: 1, width: 2, height: 1 }], frames: 1 }
+        );
+        compositor.framebuffer().with(|picture| {
+            let at = (picture.width as usize + 1) * 4;
+            assert_eq!(picture.pixels[at..at + 3], [30, 20, 10]);
+        });
+        // A command that does not decode is the end of what can be trusted.
+        assert!(compositor.compose(&[0x09, 0, 0, 0, 0xFF, 0, 0, 0]).is_err());
+
+        // Read as RGBA, what was painted is opaque and what never was is not drawn.
+        let mut opaque = Compositor::opaque();
+        opaque.compose(&opening).unwrap();
+        opaque.compose(&frame).unwrap();
+        opaque.framebuffer().with(|picture| {
+            let at = (picture.width as usize + 1) * 4;
+            assert_eq!(picture.pixels[at..at + 4], [30, 20, 10, 0xFF]);
+            assert_eq!(picture.pixels[..4], [0; 4]);
+        });
+    }
+
+    #[test]
+    fn what_is_passed_composes_to_the_picture_the_packets_make() {
+        let pdus = [
+            confirm(),
+            reset(4, 4),
+            create(1, 4, 4),
+            map(1, 0, 0),
+            start(1),
+            solidfill(1, [10, 20, 30, 0], &[(0, 0, 4, 4)]),
+            s2c(1, 3, (0, 0, 2, 2)),
+            wire(1, CODEC_UNCOMPRESSED, (1, 1, 2, 2), &[1, 2, 3, 0]),
+            c2s(3, 1, &[(2, 2)]),
+            end(1),
+        ];
+        let direct = Framebuffer::new();
+        receive(&mut Graphics::new(), &direct, &pdus);
+
+        let mut passing = Graphics::passing();
+        let relayed = Framebuffer::new();
+        let mut composer = Graphics::new();
+        for update in receive(&mut passing, &Framebuffer::new(), &pdus) {
+            if let Update::Passed(commands) = update {
+                composer.compose(&commands, &relayed).expect("well-formed commands");
+            }
+        }
+        let pixels = |framebuffer: &Framebuffer| framebuffer.with(|frame| (frame.width, frame.height, frame.pixels.clone()));
+        assert_eq!(pixels(&relayed), pixels(&direct));
+        assert_eq!(pixels(&direct).0, 4, "a picture was made at all");
+    }
+
+    /// A channel the host closes and opens again starts a pipeline of the same kind.
+    #[test]
+    fn a_fresh_pipeline_keeps_whether_it_passes() {
+        assert!(Graphics::passing().fresh().pass);
+        assert!(!Graphics::new().fresh().pass);
     }
 }

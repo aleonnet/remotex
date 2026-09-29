@@ -1966,6 +1966,7 @@ mod tests {
             render_chroma: None,
             render_adaptive: None,
             media_passthrough: false,
+            egfx_passthrough: false,
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,
