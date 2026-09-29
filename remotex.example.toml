@@ -417,12 +417,13 @@ password = "change-me"
 # sound and takes no `audio` key, and an AirPlay speaker the Mac plays to hears
 # nothing.
 #
-# EXPERIMENTAL. Decoding the stream here takes a gateway built with
-# `--features apple-hp-media`, which links the two decoders — FFmpeg's HEVC decoder
-# (LGPL) and Fraunhofer's AAC-ELD decoder, whose licence is not OSI-approved — and is
-# therefore in no release artifact. Any other build takes the subtype only with
-# `media_passthrough = true`, and refuses a browser that cannot decode the stream it
-# passes. See docs/apple-vnc-889.md, "The media stream".
+# EXPERIMENTAL. Decoding the stream here takes the host's FFmpeg (libavcodec 60 to
+# 63) and Fraunhofer's fdk-aac, whose licence is not OSI-approved, which the
+# gateway loads when a session needs them: libavcodec61 and libfdk-aac2 (non-free)
+# on Debian, `brew install ffmpeg fdk-aac` on macOS, MSYS2's ffmpeg and fdk-aac on
+# Windows. Without them a session still passes the stream under
+# `media_passthrough = true`, and refuses a browser that cannot decode it. See
+# docs/apple-vnc-889.md, "The media stream".
 #
 # `media_passthrough = true` sends the Mac's stream to a browser that decodes it, as
 # the Mac sent it, for a LAN of 100 Mbit/s or more: its HEVC rather than VP9 encoded

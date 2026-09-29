@@ -1523,24 +1523,9 @@ async fn session(
     microphone: Option<Arc<crate::mic::MicBridge>>,
     sink: &VideoSink,
 ) {
-    // A build without the decoders has nothing to send a browser that cannot take
-    // the Mac's stream, and says so before dialling the Mac rather than after its
-    // offer: the config accepts such a target only with `media_passthrough`.
-    if config.media_stream() && !plan.apple_media && !cfg!(feature = "apple-hp-media") {
-        warn!("vnc: refusing a browser that does not decode the Mac's stream, in a build without its decoders");
-        let _ = sink
-            .msg(ServerMsg::Error {
-                message: "This browser does not decode the Mac's HEVC and AAC-ELD, and this \
-                          remotex was built without the apple-hp-media feature, whose decoders \
-                          would send it VP9 and Opus instead."
-                    .to_owned(),
-            })
-            .await;
-        return;
-    }
-    // A build that loads its decoders from the system has none on a host without
-    // the libraries, which is the same as a build without them.
-    #[cfg(feature = "apple-hp-media")]
+    // A gateway whose host lacks the decoders' libraries has nothing to send a
+    // browser that cannot take the Mac's stream, and says so, naming the library,
+    // before dialling the Mac rather than after its offer.
     if config.media_stream()
         && !plan.apple_media
         && let Err(e) = crate::libav::load().and_then(|()| crate::aac_eld::load())

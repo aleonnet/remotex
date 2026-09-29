@@ -14,10 +14,10 @@
 //!
 //! A target takes this path with `subtype = "ard-high-performance"`. Everything but
 //! the two decoders — offers, replies, SRTP, depacketizing, the receiver, and
-//! passing the stream on — is compiled in every build; the `apple-hp-media`
-//! feature adds the decoders. A build without it takes the subtype only with
-//! `media_passthrough`, refused at config parse otherwise, and ends the session
-//! of a browser that cannot decode the stream before it dials the Mac.
+//! passing the stream on — is the gateway's own; the decoders are FFmpeg's
+//! libavcodec and fdk-aac, loaded from the system (`crate::libav`,
+//! `crate::aac_eld`). A gateway whose host lacks either ends the session of a
+//! browser that cannot decode the stream before it dials the Mac.
 //!
 //! The offer is two AVConference negotiation blobs, rebuilt field by field from the
 //! ones Apple's client produced ([`audio_offer_blob`], [`video_offer_blob`]). The
@@ -1291,7 +1291,6 @@ pub struct Picture {
 /// since a larger display has more rows to share out. Frame threads would hold
 /// each picture back by one per thread, so there are none. These threads take no
 /// part in a picture VideoToolbox decodes.
-#[cfg(feature = "apple-hp-media")]
 const DECODE_THREADS: &std::ffi::CStr = c"4";
 
 /// FFmpeg's HEVC decoder, one context for the session: HEVC access units in,
@@ -1306,7 +1305,6 @@ const DECODE_THREADS: &std::ffi::CStr = c"4";
 /// stream VideoToolbox will not take, or a Mac with no device to open, decodes on
 /// the CPU. A picture VideoToolbox fails once started is an error, not decoded on
 /// the CPU instead. Either way the pictures are the same: HEVC decoding is exact.
-#[cfg(feature = "apple-hp-media")]
 struct Hevc {
     api: &'static crate::libav::Api,
     ctx: *mut std::ffi::c_void,
@@ -1323,7 +1321,6 @@ struct Hevc {
 }
 
 /// The pixel formats a picture comes in, looked up by name.
-#[cfg(feature = "apple-hp-media")]
 #[derive(Clone, Copy)]
 struct PixelFormats {
     yuv444p: std::ffi::c_int,
@@ -1334,7 +1331,6 @@ struct PixelFormats {
 }
 
 /// What decoded a picture.
-#[cfg(feature = "apple-hp-media")]
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum DecodedBy {
     VideoToolbox,
@@ -1344,10 +1340,8 @@ enum DecodedBy {
 // SAFETY: the context, packet and frame are created, used and freed on one thread
 // at a time — the decoder thread that owns this value. libavcodec's slice threads
 // work only inside a call to it.
-#[cfg(feature = "apple-hp-media")]
 unsafe impl Send for Hevc {}
 
-#[cfg(feature = "apple-hp-media")]
 impl Hevc {
     /// `hardware` hands the pictures to VideoToolbox where this is a Mac that has
     /// it; without it, or anywhere else, they decode on the CPU.
@@ -1482,7 +1476,7 @@ impl Hevc {
 ///
 /// `ctx` must be an allocated context of `api`'s libavcodec that has not been
 /// opened.
-#[cfg(all(feature = "apple-hp-media", target_os = "macos"))]
+#[cfg(target_os = "macos")]
 unsafe fn attach_videotoolbox(api: &crate::libav::Api, ctx: *mut std::ffi::c_void) {
     let Some(offset) = crate::libav::hw_device_ctx(api) else {
         // SAFETY: a plain version query.
@@ -1511,10 +1505,9 @@ unsafe fn attach_videotoolbox(api: &crate::libav::Api, ctx: *mut std::ffi::c_voi
 }
 
 /// No VideoToolbox off macOS: the pictures decode in software.
-#[cfg(all(feature = "apple-hp-media", not(target_os = "macos")))]
+#[cfg(not(target_os = "macos"))]
 unsafe fn attach_videotoolbox(_api: &crate::libav::Api, _ctx: *mut std::ffi::c_void) {}
 
-#[cfg(feature = "apple-hp-media")]
 impl Drop for Hevc {
     fn drop(&mut self) {
         // SAFETY: freed exactly once, here; each call takes null and nulls its
@@ -1528,7 +1521,6 @@ impl Drop for Hevc {
     }
 }
 
-#[cfg(feature = "apple-hp-media")]
 fn text(api: &crate::libav::Api, err: std::ffi::c_int) -> String {
     let mut text = [0 as std::ffi::c_char; crate::libav::ERROR_TEXT];
     // SAFETY: `av_strerror` writes a NUL-terminated description of any code, known
@@ -1549,7 +1541,6 @@ fn text(api: &crate::libav::Api, err: std::ffi::c_int) -> String {
 ///
 /// `frame` must be a picture libavcodec just returned, or a copy of one, and has not
 /// yet been unreferenced.
-#[cfg(feature = "apple-hp-media")]
 unsafe fn to_rgb(
     api: &crate::libav::Api,
     formats: &PixelFormats,
@@ -1974,14 +1965,6 @@ impl MediaStream {
 
     /// Bind the ports the Mac named and start receiving on them.
     fn receive(&self, ports: (u16, u16)) -> anyhow::Result<tokio::task::JoinHandle<()>> {
-        // The engine refuses a stream it would decode before it dials the Mac in a
-        // build without the decoders (`vnc::session`), so this is only the
-        // statement of why.
-        #[cfg(not(feature = "apple-hp-media"))]
-        anyhow::ensure!(
-            matches!(self.pictures, Outlet::Passed(_)),
-            "this remotex was built without the apple-hp-media feature, so it cannot decode the media stream"
-        );
         Ok(tokio::spawn(Receiver::bind(self, ports)?.run()))
     }
 }
@@ -2009,19 +1992,16 @@ pub const STREAM_SILENCE: std::time::Duration = std::time::Duration::from_secs(4
 
 /// Access units the HEVC decoder thread may be behind by. Reaching it drops the
 /// unit, which costs a keyframe: every later picture predicts from it.
-#[cfg(feature = "apple-hp-media")]
 const DECODE_QUEUE: usize = 8;
 
 /// AAC-ELD units the sound's decoder thread may be behind by. A unit costs tens of
 /// microseconds to decode, so this is a ceiling rather than a working depth, and
 /// reaching it drops the newest unit: 10 ms of sound, and nothing after it
 /// depends on it.
-#[cfg(feature = "apple-hp-media")]
 const SOUND_QUEUE: usize = 64;
 
 /// Access units per wave buffer handed to the bridge: two 10 ms units, one Opus
 /// packet's worth, so the encoder downstream completes a packet per buffer.
-#[cfg(feature = "apple-hp-media")]
 const UNITS_PER_WAVE: usize = 2;
 
 /// The least time between two keyframe requests. The Mac answers one in tens of
@@ -2234,7 +2214,6 @@ impl Receiver {
         let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let passed = matches!(self.pictures, Outlet::Passed(_));
         let mut onward = match &self.pictures {
-            #[cfg(feature = "apple-hp-media")]
             Outlet::Decoded(pictures) => {
                 let (units, decoder) = spawn_decoder(
                     pictures.clone(),
@@ -2242,11 +2221,6 @@ impl Receiver {
                     std::sync::Arc::clone(&self.failed),
                 );
                 Onward::Decoder(units, decoder)
-            }
-            // Refused by `MediaStream::receive` before any receiver is bound.
-            #[cfg(not(feature = "apple-hp-media"))]
-            Outlet::Decoded(_) => {
-                return fail(&self.failed, anyhow::anyhow!("no decoder for the media stream in this build"));
             }
             Outlet::Passed(units) => Onward::Browser(Passer::default(), units.clone()),
         };
@@ -2433,7 +2407,6 @@ impl Receiver {
         log::warn!("vnc: the Mac's media receiver stopped: {failure:#}");
         fail(&self.failed, failure);
         match onward {
-            #[cfg(feature = "apple-hp-media")]
             Onward::Decoder(units, decoder) => {
                 drop(units);
                 let _ = tokio::task::spawn_blocking(move || decoder.join()).await;
@@ -2451,7 +2424,6 @@ impl Receiver {
 /// Where the receiver sends each access unit it reassembles.
 enum Onward {
     /// The decoder thread, whose pictures the session encodes as VP9.
-    #[cfg(feature = "apple-hp-media")]
     Decoder(std::sync::mpsc::SyncSender<AccessUnit>, std::thread::JoinHandle<()>),
     /// The read loop, which passes each unit to the browser as it came.
     Browser(Passer, tokio::sync::mpsc::Sender<Option<PassedUnit>>),
@@ -2472,7 +2444,6 @@ enum Sent {
 impl Onward {
     fn send(&mut self, unit: AccessUnit) -> Sent {
         match self {
-            #[cfg(feature = "apple-hp-media")]
             Self::Decoder(units, _) => match units.try_send(unit) {
                 Ok(()) => Sent::Queued,
                 Err(std::sync::mpsc::TrySendError::Full(_)) => Sent::Full(DECODE_QUEUE),
@@ -2494,7 +2465,6 @@ impl Onward {
     /// What the units go to, for the log.
     fn name(&self) -> &'static str {
         match self {
-            #[cfg(feature = "apple-hp-media")]
             Self::Decoder(..) => "the HEVC decoder",
             Self::Browser(..) => "the browser's link",
         }
@@ -2515,7 +2485,6 @@ fn fail(failed: &Failure, error: anyhow::Error) {
 /// the receive task drops it.
 /// `keyframe` is how it says a unit failed to decode, which the receive task turns
 /// into a PLI. A decoder that cannot be opened leaves why in `failed`.
-#[cfg(feature = "apple-hp-media")]
 fn spawn_decoder(
     pictures: tokio::sync::watch::Sender<Option<std::sync::Arc<Picture>>>,
     keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -2567,7 +2536,6 @@ struct Sound {
 /// Where [`Sound`] sends each unit.
 enum SoundLeg {
     /// The decoder thread's queue, and the flag that stops it.
-    #[cfg(feature = "apple-hp-media")]
     Decoded {
         units: std::sync::mpsc::SyncSender<Vec<u8>>,
         stale: std::sync::Arc<std::sync::atomic::AtomicBool>,
@@ -2586,7 +2554,6 @@ impl Sound {
         Self { leg, bridge, packets: 0, forged: 0 }
     }
 
-    #[cfg(feature = "apple-hp-media")]
     fn decoder(bridge: &std::sync::Arc<crate::audio::AudioBridge>, failed: Failure) -> SoundLeg {
         use crate::aac_eld::{CHANNELS, EldDecoder, FRAME_SAMPLES};
 
@@ -2643,14 +2610,6 @@ impl Sound {
         SoundLeg::Decoded { units, stale, overrun: 0 }
     }
 
-    /// Refused by `MediaStream::receive` before any receiver is bound, so never
-    /// reached; the stream fails rather than play nothing.
-    #[cfg(not(feature = "apple-hp-media"))]
-    fn decoder(_: &std::sync::Arc<crate::audio::AudioBridge>, failed: Failure) -> SoundLeg {
-        fail(&failed, anyhow::anyhow!("no AAC-ELD decoder in this build"));
-        SoundLeg::Passed
-    }
-
     /// One authenticated, decrypted RTP packet of the sound leg: one AAC-ELD
     /// access unit, 10 ms of 48 kHz stereo. An error is a decoder that has stopped;
     /// a passed unit cannot fail.
@@ -2665,7 +2624,6 @@ impl Sound {
             );
         }
         match &mut self.leg {
-            #[cfg(feature = "apple-hp-media")]
             SoundLeg::Decoded { units, overrun, .. } => match units.try_send(unit.to_vec()) {
                 Ok(()) => {}
                 Err(std::sync::mpsc::TrySendError::Full(_)) => {
@@ -2692,7 +2650,6 @@ impl Sound {
 }
 
 /// Peak and RMS of 16-bit PCM, accumulated until taken.
-#[cfg(feature = "apple-hp-media")]
 #[derive(Default)]
 struct Level {
     peak: u16,
@@ -2700,7 +2657,6 @@ struct Level {
     samples: u64,
 }
 
-#[cfg(feature = "apple-hp-media")]
 impl Level {
     fn add(&mut self, pcm: &[u8]) {
         for sample in pcm.as_chunks::<2>().0.iter().map(|s| i16::from_le_bytes(*s)) {
@@ -2724,7 +2680,6 @@ impl Level {
 
 impl Drop for Sound {
     fn drop(&mut self) {
-        #[cfg(feature = "apple-hp-media")]
         if let SoundLeg::Decoded { stale, .. } = &self.leg {
             stale.store(true, std::sync::atomic::Ordering::Relaxed);
         }
@@ -3127,7 +3082,6 @@ mod tests {
     /// pixels of its last picture as ffmpeg converts them. The two conversions
     /// round differently, by a step at most.
     #[test]
-    #[cfg(feature = "apple-hp-media")]
     fn a_444_stream_decodes_to_the_colours_ffmpeg_converts_it_to() {
         let (pictures, decoded_by) = decode_fixture(false);
         assert_eq!(decoded_by, Some(DecodedBy::Software));
@@ -3141,7 +3095,6 @@ mod tests {
     /// decoder to reach, and elsewhere there is no VideoToolbox, so both decode in
     /// software.
     #[test]
-    #[cfg(feature = "apple-hp-media")]
     fn the_same_stream_decodes_to_the_same_colours_through_videotoolbox() {
         let (pictures, decoded_by) = decode_fixture(true);
         if cfg!(target_os = "macos") && !virtual_mac() {
@@ -3151,7 +3104,6 @@ mod tests {
     }
 
     /// The fixture's pictures, and what decoded the last.
-    #[cfg(feature = "apple-hp-media")]
     fn decode_fixture(hardware: bool) -> (Vec<Picture>, Option<DecodedBy>) {
         let units = fixture_units();
         assert_eq!(units.len(), 3);
@@ -3162,14 +3114,12 @@ mod tests {
     }
 
     /// Whether this Mac is a virtual machine, from the kernel's `kern.hv_vmm_present`.
-    #[cfg(feature = "apple-hp-media")]
     fn virtual_mac() -> bool {
         let out = std::process::Command::new("sysctl").args(["-n", "kern.hv_vmm_present"]).output().unwrap();
         assert!(out.status.success(), "sysctl -n kern.hv_vmm_present failed");
         String::from_utf8_lossy(&out.stdout).trim() == "1"
     }
 
-    #[cfg(feature = "apple-hp-media")]
     fn assert_the_fixture_colours(pictures: &[Picture]) {
         let last = pictures.last().unwrap();
         assert_eq!(last.size, (64, 48));

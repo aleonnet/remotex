@@ -1,8 +1,8 @@
 //! FFmpeg's libavcodec and libavutil, which decode High Performance's HEVC
 //! picture (`vnc_apple_media::Hevc`).
 //!
-//! The `apple-hp-media` feature loads the system's shared libraries the first
-//! time a session needs them (see [`load`]): FFmpeg 6.1 to 9, libavcodec 60 to 63
+//! The gateway loads the system's shared libraries the first time a session
+//! needs them (see [`load`]): FFmpeg 6.1 to 9, libavcodec 60 to 63
 //! with the libavutil each was released with, so no build compiles or links
 //! FFmpeg. `apple-hp-media-static` links `libavcodec-hevc-prebuilt`'s private
 //! static archives instead. Either way the calls below are the whole interface.

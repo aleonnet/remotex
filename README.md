@@ -27,7 +27,7 @@ default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
   `subtype = "ard-high-performance"` is its High Performance mode as Apple's
   viewer has it: one virtual display holding every remote window,
   with the picture as HEVC and the sound as AAC-ELD over the Mac's SRTP media
-  stream, in a gateway built with the `apple-hp-media` feature. `resize = true`
+  stream, decoded by the host's FFmpeg and fdk-aac. `resize = true`
   needs a virtual display: High Performance's, or the unofficial
   `virtual_display = true` under `ard`, which puts Standard mode's picture on one
   and was tested on macOS 26 only. Both modes are reverse engineered, having no
@@ -208,16 +208,16 @@ that fails ends the session, as it does in Apple's viewer. A playing
 video does not delay the Mac's reading of the input, as RFB pixels' deflate does. The Mac refuses the picture without the sound, and
 mutes its own speakers while it streams, so the target always carries sound, and
 nothing reaches an AirPlay speaker the Mac plays to. It is **experimental**. Decoding
-the stream needs a gateway built with `--features apple-hp-media`; no release artifact
-carries it. Its decoders, FFmpeg's libavcodec (LGPL, 6.1 to 9) and Fraunhofer's fdk-aac
-(licence not OSI-approved), are loaded from the system when a session needs them:
+the stream needs its decoders, FFmpeg's libavcodec (LGPL, 6.1 to 9) and Fraunhofer's
+fdk-aac (licence not OSI-approved), which the gateway loads from the system when a
+session needs them:
 `libavcodec61` (or 60 to 63) and `libfdk-aac2` on Debian (non-free) and Ubuntu
 (multiverse), `brew install ffmpeg fdk-aac` on macOS, and on Windows MSYS2's
 `mingw-w64-ucrt-x86_64-ffmpeg` and `mingw-w64-ucrt-x86_64-fdk-aac`, whose DLLs are found
 in `C:\msys64\ucrt64\bin`, on `PATH` or beside `remotex.exe`.
-`--features apple-hp-media-static` links both into the binary instead. Any other build
-runs the subtype only with `media_passthrough = true`, and it, like a gateway that finds
-either library missing, refuses a browser that cannot decode the stream. See
+No release artifact links either; a build with `--features apple-hp-media-static` links
+both from private archives instead. A gateway that finds either missing still passes the
+stream under `media_passthrough = true`, and refuses a browser that cannot decode it. See
 [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
 Every Apple subtype supports the native Apple pasteboard when `clipboard =

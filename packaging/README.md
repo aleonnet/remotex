@@ -60,7 +60,7 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `REMOTEX_CONTAINER_FEATURES` |
-| `publish-full-image.sh` | build a release tag's linux/amd64 image with `apple-hp-media`, from this checkout, and push it to the private `ghcr.io/andrewtheguy/remotex-full` |
+| `publish-full-image.sh` | build a release tag's linux/amd64 image with `apple-hp-media-static`, from this checkout, and push it to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 
@@ -120,15 +120,14 @@ needs no CMake, assembler, pkg-config, libclang, vcpkg, or system copies of
 those libraries. `LIBVPX_PREBUILT_DIR` and `LIBOPUS_PREBUILT_DIR` select locally
 built archives.
 
-The non-default `apple-hp-media` feature, which `ard-high-performance` targets
-need to decode the Mac's stream (without it they run only with
-`media_passthrough`, for browsers that decode the stream), adds two decoders and
-is in no release artifact because of their licences: FFmpeg's libavcodec
+`ard-high-performance` targets decode the Mac's stream with two decoders whose
+licences keep them out of every artifact: FFmpeg's libavcodec
 (LGPL-2.1-or-later) for the HEVC picture and Fraunhofer's fdk-aac, whose licence
-is not OSI-approved and grants no patents, for the AAC-ELD sound. Build it with
-`cargo build --release --features apple-hp-media`. That build compiles and links
-neither: the gateway loads the system's shared libraries when a session needs
-them (`src/libav.rs`, `src/aac_eld.rs`):
+is not OSI-approved and grants no patents, for the AAC-ELD sound. No build
+compiles or links either: the gateway loads the system's shared libraries when a
+session needs them (`src/libav.rs`, `src/aac_eld.rs`), and a host without them
+runs those targets only with `media_passthrough`, for browsers that decode the
+stream. The `.deb` recommends the Linux ones; elsewhere they are installed by hand:
 
 | | libavcodec (FFmpeg 6.1 to 9) | fdk-aac |
 |---|---|---|
@@ -140,7 +139,8 @@ Each is looked for by the platform loader's own search, then in Homebrew's and
 MacPorts' `lib` or MSYS2's `C:\msys64\ucrt64\bin`. On macOS the loaded
 libavcodec decodes through VideoToolbox.
 
-`apple-hp-media-static` links private static archives instead.
+The non-default `apple-hp-media-static` feature links private static archives
+instead, and is in no release artifact.
 `libavcodec-hevc-prebuilt` links FFmpeg's libavcodec and libavutil, configured
 down to the HEVC decoder and parser, and on macOS its VideoToolbox hwaccel, which
 links Apple's VideoToolbox, CoreMedia, CoreVideo and CoreFoundation frameworks;

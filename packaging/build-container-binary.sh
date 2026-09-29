@@ -7,7 +7,7 @@
 # since a tag holds whatever script it was cut with.
 #
 # REMOTEX_CONTAINER_FEATURES names the non-default features an operator's own
-# image adds (`apple-hp-media`); release CI leaves it unset.
+# image adds (`apple-hp-media-static`); release CI leaves it unset.
 # Whatever it names, the checks below still refuse a binary that carries the
 # managed-instance surface, or lacks a feature it was asked for.
 set -euo pipefail

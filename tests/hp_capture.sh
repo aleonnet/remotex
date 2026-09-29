@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Capture a High Performance Mac's media stream as the gateway receives it.
 #
-# Builds the gateway with `apple-hp-media`, serves CONFIG with REMOTEX_HP_DUMP set,
+# Builds the gateway, serves CONFIG with REMOTEX_HP_DUMP set,
 # drives one session through tests/ws_probe.py with its audio socket open, stops the
 # gateway and summarises the capture:
 #
@@ -55,7 +55,7 @@ if lsof -nP -iTCP:"$port" -sTCP:LISTEN >/dev/null 2>&1; then
   exit 1
 fi
 
-cargo build --profile qa --features apple-hp-media
+cargo build --profile qa
 
 mkdir -p "$out"
 rm -f "$out/video.h265" "$out/audio.eld"

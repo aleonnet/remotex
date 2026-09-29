@@ -29,7 +29,7 @@ layer.
 | `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, ZRLE until it is up | AAC-ELD over the media stream |
 
 `ard-high-performance` is High Performance as Apple's viewer has it. Decoding its
-stream needs a gateway built with the `apple-hp-media` feature; any other gateway
+stream needs FFmpeg and fdk-aac on the gateway's host; without them the gateway
 runs it only with `media_passthrough`, for browsers that decode the stream.
 
 **Unofficial:** `virtual_display = true` on an `ard` target keeps that row's
@@ -873,17 +873,13 @@ came, described by the AudioSpecificConfig below, and ZRLE's rectangles fill the
 picture's gaps as VP9 encoded here. A PLI is its repaint. See
 [Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through).
 
-The two decoders are the `apple-hp-media` Cargo feature, off by default and in
-no release artifact: FFmpeg's HEVC decoder for the picture (libavcodec,
+The two decoders are FFmpeg's HEVC decoder for the picture (libavcodec,
 LGPL-2.1-or-later) and Fraunhofer's AAC-ELD decoder for the sound (fdk-aac, a
 licence that is not OSI-approved), loaded from the system's shared libraries when
-a session needs them, or linked statically with `apple-hp-media-static`. A
-gateway that finds either missing ends the session the way a build without the
-feature does. A build without the feature refuses an
-`ard-high-performance` target without `media_passthrough` when it reads the config,
-and ends the session of a browser that cannot decode the stream before it dials the
-Mac. The rest of the module — the offers, the replies, SRTP, the depacketizer, the
-receiver and passing — is compiled and tested in every build.
+a session needs them, so no build links either; the `apple-hp-media-static`
+Cargo feature links them statically instead. A gateway that finds either missing
+ends the session of a browser that cannot decode the stream before it dials the
+Mac.
 
 ### Negotiation
 

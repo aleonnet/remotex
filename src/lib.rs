@@ -17,7 +17,6 @@ pub mod engine;
 pub mod error;
 pub mod feedback;
 pub mod keymap;
-#[cfg(feature = "apple-hp-media")]
 pub mod libav;
 pub mod mic;
 pub mod opus_stream;

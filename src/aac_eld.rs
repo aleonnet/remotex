@@ -3,9 +3,8 @@
 //! The Mac's `RemoteDesktopSystemAudio` transmitter encodes AAC-ELD (MPEG-4 audio
 //! object type 39) whatever the negotiation agreed — see `docs/apple-vnc-889.md`.
 //! The constants describing it are always compiled: a browser that decodes the
-//! stream is passed it as it came, described by them. The decoder is compiled only
-//! with the `apple-hp-media` feature, for every other browser, whose sound goes as
-//! Opus encoded from the PCM it produces.
+//! stream is passed it as it came, described by them. The decoder is for every
+//! other browser, whose sound goes as Opus encoded from the PCM it produces.
 //!
 //! The decoder is Fraunhofer's fdk-aac, whose licence is not OSI-approved and
 //! grants no patents, so no build carries it by default. The gateway loads the
@@ -44,7 +43,6 @@ pub const FRAME_SAMPLES: usize = 480;
 /// the decoder per frame.
 pub const CHANNELS: usize = 2;
 
-#[cfg(feature = "apple-hp-media")]
 mod fdk {
     //! fdk-aac's decoder calls, as `aacdecoder_lib.h` declares them. Its enums
     //! cross as `int`.
@@ -132,7 +130,7 @@ fn api() -> anyhow::Result<&'static fdk::Api> {
 /// Where the system's fdk-aac is looked for, in order. A bare name is the
 /// platform loader's own search; the paths are where Homebrew, MacPorts and MSYS2
 /// install it, which that search does not reach.
-#[cfg(all(feature = "apple-hp-media", not(feature = "apple-hp-media-static")))]
+#[cfg(not(feature = "apple-hp-media-static"))]
 const LIBRARY: &[&str] = if cfg!(target_os = "macos") {
     &[
         "libfdk-aac.2.dylib",
@@ -147,7 +145,7 @@ const LIBRARY: &[&str] = if cfg!(target_os = "macos") {
 };
 
 /// How to get the library [`LIBRARY`] names, for the error that says it is missing.
-#[cfg(all(feature = "apple-hp-media", not(feature = "apple-hp-media-static")))]
+#[cfg(not(feature = "apple-hp-media-static"))]
 const INSTALL: &str = if cfg!(target_os = "macos") {
     "install it with `brew install fdk-aac`"
 } else if cfg!(windows) {
@@ -161,7 +159,7 @@ const INSTALL: &str = if cfg!(target_os = "macos") {
 /// fdk-aac, loaded from the system on the first call that finds it. A failure is
 /// not remembered, so a library installed while the gateway runs is found by the
 /// next session.
-#[cfg(all(feature = "apple-hp-media", not(feature = "apple-hp-media-static")))]
+#[cfg(not(feature = "apple-hp-media-static"))]
 fn api() -> anyhow::Result<&'static fdk::Api> {
     use anyhow::Context as _;
 
@@ -186,7 +184,7 @@ fn api() -> anyhow::Result<&'static fdk::Api> {
     )
 }
 
-#[cfg(all(feature = "apple-hp-media", not(feature = "apple-hp-media-static")))]
+#[cfg(not(feature = "apple-hp-media-static"))]
 fn resolve(library: libloading::Library) -> anyhow::Result<fdk::Api> {
     // SAFETY: each symbol is typed as `aacdecoder_lib.h` declares it, and the
     // library is kept in the table the pointers are copied into.
@@ -205,13 +203,11 @@ fn resolve(library: libloading::Library) -> anyhow::Result<fdk::Api> {
 
 /// Load the decoder now: a session finds out before it dials the Mac that there
 /// is none, and says why.
-#[cfg(feature = "apple-hp-media")]
 pub fn load() -> anyhow::Result<()> {
     api().map(|_| ())
 }
 
 /// One decoder for one stream's access units.
-#[cfg(feature = "apple-hp-media")]
 pub struct EldDecoder {
     api: &'static fdk::Api,
     handle: fdk::Handle,
@@ -221,10 +217,8 @@ pub struct EldDecoder {
 
 // SAFETY: the handle is used by one thread at a time, whichever owns this value;
 // fdk-aac keeps no thread-local state.
-#[cfg(feature = "apple-hp-media")]
 unsafe impl Send for EldDecoder {}
 
-#[cfg(feature = "apple-hp-media")]
 impl EldDecoder {
     pub fn new() -> anyhow::Result<Self> {
         let api = api()?;
@@ -294,7 +288,6 @@ impl EldDecoder {
     }
 }
 
-#[cfg(feature = "apple-hp-media")]
 impl Drop for EldDecoder {
     fn drop(&mut self) {
         // SAFETY: the handle came from `open` and is closed once.
@@ -302,7 +295,7 @@ impl Drop for EldDecoder {
     }
 }
 
-#[cfg(all(test, feature = "apple-hp-media"))]
+#[cfg(test)]
 mod tests {
     use super::*;
 
