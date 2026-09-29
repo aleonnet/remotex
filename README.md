@@ -64,11 +64,6 @@ Windows pick the value up when their app next launches, so quit and reopen the
 browser app. `defaults delete -g NSConvolutionOverride1` restores Apple's radius
 — 26 points on macOS 26, 10 before it.
 
-A Windows host can code its own desktop for an RDP target with
-[`remotex-agent`](docs/agent.md), a service installed there from its own MSI. It is
-**experimental**, and for a setup where the host is the better place to encode, such
-as a gateway on a slow machine.
-
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/known-issues.md`](docs/known-issues.md) for faults worth recognising rather
 than re-investigating.
@@ -454,7 +449,7 @@ change rebuilds in seconds rather than minutes. Artifacts are always built
 
 remotex is under the MIT licence in [`LICENSE`](LICENSE). A release build also
 contains third-party software, listed with its licences in the
-`THIRD-PARTY-NOTICES.txt` every gateway artifact carries, which packaging makes
-from the locked dependencies (see [Packaging](packaging/README.md)).
+`THIRD-PARTY-NOTICES.txt` every artifact carries, which packaging makes from the
+locked dependencies (see [Packaging](packaging/README.md)).
 FFmpeg and fdk-aac, the High Performance decoders, are not in it: the gateway
 loads them from the system.

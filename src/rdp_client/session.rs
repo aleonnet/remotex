@@ -25,7 +25,7 @@ use super::proto::gcc::Channel;
 use super::proto::pointer::{self, Pointer};
 use super::proto::share::{self, Pdu};
 use super::microphone::{MicrophoneFeed, MicrophoneInput, MicrophoneQueue, MicrophoneSink};
-use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpeai, rdpecam, rdpsnd, tls, video};
+use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpeai, rdpecam, rdpsnd, tls};
 use super::proto::gfx as gfx_proto;
 
 // ------------------------------------------------------------------ configuration
@@ -94,12 +94,6 @@ pub struct Connect {
     /// there records — and feeds it the PCM handed to [`Session::microphone`] while it
     /// does. `None` refuses the channel by name.
     pub microphone: Option<Box<dyn MicrophoneSink>>,
-    /// Take the desktop as a VP9 stream from an agent in the session, where one opens
-    /// its channel, coded to this plan — see [`video`]. The stream then carries the
-    /// picture in place of the graphics pipeline, as [`Event::Video`], so it needs
-    /// [`Self::egfx`]. `None`, for a target that did not opt in, refuses the channel by
-    /// name, and a host with no agent never opens it.
-    pub video: Option<video::Plan>,
 }
 
 /// Where a session's redirected sound goes.
@@ -197,19 +191,6 @@ pub enum Event {
     /// handler until it is.
     ClipboardWanted { format: u32 },
     Cursor(Cursor),
-    /// One frame of an in-session agent's stream, the whole desktop, which carries the
-    /// picture from its first frame until [`Event::VideoEnded`]. The host's own graphics
-    /// go on beside the stream, acknowledged as ever, so the framebuffer stays current;
-    /// the pointer arrives as [`Event::Cursor`] from the agent meanwhile, and the host's
-    /// is held. Every frame is owed an [`Input::echo_video`] once it has gone on to
-    /// whoever is watching, which is what the agent sends the next one on.
-    Video(video::Frame),
-    /// The graphics pipeline carries the picture again, as [`Event::Paint`] and
-    /// [`Event::Frame`]: the agent cannot see the desktop, the desktop is changing
-    /// size, or its channel closed. The framebuffer is the desktop as the host last
-    /// drew it, and the host's latest pointer, held under the stream, follows as
-    /// [`Event::Cursor`].
-    VideoEnded,
     /// The session is over, and the channel is about to close. `Ok(())` is an
     /// orderly disconnection from either side.
     Ended(Result<(), Error>),
@@ -564,11 +545,6 @@ struct Active<'a> {
     capture: Option<Capture>,
     /// The microphone and where the host's decisions about it go, for a session that asked.
     recorder: Option<Recorder>,
-    /// An in-session agent's stream, for a session that takes one.
-    video: Option<video::Stream>,
-    /// The host's own pointer, held while the agent's stream is the picture and its
-    /// pointer the agent's, for when the pipeline carries the picture again.
-    host_cursor: Option<Cursor>,
     /// Device redirection's channel, named for the sound's sake alone, and its
     /// handshake — see [`rdpdr`].
     devices: Option<Joined>,
@@ -646,8 +622,6 @@ struct Dynamics {
     audio: bool,
     /// The sound channel, once the server has opened it.
     sound: Option<u32>,
-    /// The agent's video channel, once it has opened it.
-    video: Option<u32>,
 }
 
 /// The sound conversation, and where its buffers go.
@@ -814,8 +788,6 @@ impl<'a> Active<'a> {
             sound: sink.map(|sink| Sound { proto: rdpsnd::Rdpsnd::new(), sink }),
             capture: camera.map(|camera| Capture { proto: rdpecam::Rdpecam::new(&camera.name), sink: camera.sink }),
             recorder: microphone.map(|sink| Recorder { proto: rdpeai::Rdpeai::new(), sink }),
-            video: config.video.filter(|_| config.egfx).map(video::Stream::new),
-            host_cursor: None,
             devices,
             rdpdr: rdpdr::Rdpdr::new(),
             share: Share::from(&demand),
@@ -984,7 +956,7 @@ impl<'a> Active<'a> {
                 self.paint(rect);
             }
             if let Some(cursor) = cursor {
-                self.on_host_cursor(cursor).await;
+                self.send(Event::Cursor(cursor)).await;
             }
         }
         Ok(())
@@ -1024,10 +996,8 @@ impl<'a> Active<'a> {
     /// live. Everything it says is answered, because a channel whose Create Request
     /// goes unanswered is never opened.
     async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
-        let (replies, updates, watched) = {
-            let Self {
-                chunks, incoming, dynamics, graphics, sound, capture, recorder, video, framebuffer, share, ..
-            } = self;
+        let (replies, updates) = {
+            let Self { chunks, incoming, dynamics, graphics, sound, capture, recorder, framebuffer, .. } = self;
             let pdu = match chunks.push(payload)? {
                 Chunk::Whole(pdu) => pdu,
                 Chunk::Partial => return Ok(()),
@@ -1042,8 +1012,7 @@ impl<'a> Active<'a> {
             let Some(message) = incoming.push(pdu)? else {
                 return Ok(());
             };
-            let mut watched = Vec::new();
-            let (replies, updates) = match message {
+            match message {
                 // The desktop itself, which is the framebuffer's business and not a
                 // reply's.
                 dvc::Message::Data { channel, data } if dynamics.graphics == Some(channel) => {
@@ -1137,52 +1106,9 @@ impl<'a> Active<'a> {
                     replies.push(dvc::close(channel));
                     (replies, Vec::new())
                 }
-                // An in-session agent's video channel, for a session that takes one:
-                // the first agent's, while it holds it. A second is refused, since
-                // taking it would leave the stream the first began without its end.
-                dvc::Message::Create { channel, name } if name == video::CHANNEL_NAME && dynamics.video.is_some() => {
-                    warn!("rdp: refusing {name} on dynamic channel {channel}: an agent in the session holds it already");
-                    (vec![dvc::create_response(channel, dvc::NO_LISTENER)], Vec::new())
-                }
-                dvc::Message::Create { channel, name } if name == video::CHANNEL_NAME && video.is_some() => {
-                    info!("rdp: an agent in the session opened {name} on dynamic channel {channel}");
-                    let stream = video.as_mut().expect("the guard found a stream");
-                    dynamics.video = Some(channel);
-                    let turn = stream.opened();
-                    let mut replies = vec![dvc::create_response(channel, dvc::ACCEPTED)];
-                    replies.extend(video_pieces(channel, turn.replies)?);
-                    (replies, Vec::new())
-                }
-                dvc::Message::Data { channel, data } if dynamics.video == Some(channel) => {
-                    let stream = video.as_mut().expect("a channel accepted for a stream");
-                    match stream.push(data, (share.width, share.height)) {
-                        Ok(turn) => {
-                            watched = turn.outputs;
-                            (video_pieces(channel, turn.replies)?, Vec::new())
-                        }
-                        // Not the session's end: the agent is an application on the
-                        // host, and the desktop has the pipeline to travel on.
-                        Err(e) => {
-                            warn!("rdp: closing the agent's video channel: {e}");
-                            dynamics.video = None;
-                            watched = stream.closed("its message was refused").outputs;
-                            (vec![dvc::close(channel)], Vec::new())
-                        }
-                    }
-                }
-                dvc::Message::Close { channel } if dynamics.video == Some(channel) => {
-                    info!("rdp: the agent closed its video channel");
-                    dynamics.video = None;
-                    watched = video.as_mut().expect("a channel accepted for a stream").closed("the agent closed its channel").outputs;
-                    (vec![dvc::close(channel)], Vec::new())
-                }
                 message => (answer(message, dynamics)?, Vec::new()),
-            };
-            (replies, updates, watched)
+            }
         };
-        for output in watched {
-            self.on_video(output).await?;
-        }
         if let Some(dynamic) = self.dynamic {
             for reply in replies {
                 self.write_channel(dynamic, &reply).await?;
@@ -1203,11 +1129,6 @@ impl<'a> Active<'a> {
                     self.share.width = width;
                     self.share.height = height;
                     self.announce_desktop(width, height).await;
-                    // The agent's stream starts over at the new size.
-                    if let Some(stream) = &mut self.video {
-                        let turn = stream.reset();
-                        self.video_turn(turn).await?;
-                    }
                 }
                 gfx::Update::Paint(rect) => self.paint(rect),
                 gfx::Update::Frame { id, decoded } => {
@@ -1290,64 +1211,6 @@ impl<'a> Active<'a> {
         };
         let ack = gfx_proto::frame_acknowledge(frame, decoded);
         self.write_channel(dynamic, &dvc::data(channel, &ack)?).await
-    }
-
-    /// The host's own pointer update, handed up unless the agent's stream is the
-    /// picture: its pointer is the agent's then, and the host's latest waits for the
-    /// stream to end.
-    async fn on_host_cursor(&mut self, cursor: Cursor) {
-        if self.video.as_ref().is_some_and(video::Stream::flowing) {
-            self.host_cursor = Some(cursor);
-        } else {
-            self.send(Event::Cursor(cursor)).await;
-        }
-    }
-
-    /// What the agent's stream said, acted on.
-    async fn on_video(&mut self, output: video::Output) -> Result<()> {
-        match output {
-            video::Output::Frame(frame) => self.send(Event::Video(frame)).await,
-            video::Output::Pointer(video::Pointer::Hidden) => self.send(Event::Cursor(Cursor::Hidden)).await,
-            video::Output::Pointer(video::Pointer::Shape(shape)) => {
-                self.send(Event::Cursor(Cursor::Image(shape.into()))).await;
-            }
-            video::Output::Ended => {
-                self.send(Event::VideoEnded).await;
-                if let Some(cursor) = self.host_cursor.take() {
-                    self.send(Event::Cursor(cursor)).await;
-                }
-            }
-        }
-        Ok(())
-    }
-
-    /// Close the agent's channel from this end, which ends its stream.
-    async fn close_video(&mut self) -> Result<()> {
-        let (Some(channel), Some(stream)) = (self.dynamics.video.take(), &mut self.video) else {
-            return Ok(());
-        };
-        info!("rdp: closing the agent's video channel");
-        let turn = stream.closed("its stream cannot be passed on");
-        if let Some(dynamic) = self.dynamic {
-            self.write_channel(dynamic, &dvc::close(channel)).await?;
-        }
-        for output in turn.outputs {
-            self.on_video(output).await?;
-        }
-        Ok(())
-    }
-
-    /// A turn of the agent's stream taken outside its channel's own messages.
-    async fn video_turn(&mut self, turn: video::Turn) -> Result<()> {
-        if let (Some(channel), Some(dynamic)) = (self.dynamics.video, self.dynamic) {
-            for pdu in video_pieces(channel, turn.replies)? {
-                self.write_channel(dynamic, &pdu).await?;
-            }
-        }
-        for output in turn.outputs {
-            self.on_video(output).await?;
-        }
-        Ok(())
     }
 
     /// The clipboard channel. Both ends announce a copy and neither transfers
@@ -1570,19 +1433,6 @@ impl<'a> Active<'a> {
                     match other {
                         Command::Shutdown => return Ok(true),
                         Command::Refresh => self.refresh().await?,
-                        Command::EchoVideo(seq) => {
-                            if let Some(stream) = &mut self.video {
-                                let turn = video::Turn { replies: vec![stream.echoed(seq)], outputs: Vec::new() };
-                                self.video_turn(turn).await?;
-                            }
-                        }
-                        Command::VideoKeyframe => {
-                            if let Some(stream) = &mut self.video {
-                                let turn = video::Turn { replies: vec![stream.ask_keyframe()], outputs: Vec::new() };
-                                self.video_turn(turn).await?;
-                            }
-                        }
-                        Command::CloseVideo => self.close_video().await?,
                         Command::Resize { width, height, scale_percent } => {
                             self.pending_resize = Some((width, height, scale_percent));
                             self.send_layout().await?;
@@ -1839,15 +1689,6 @@ fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<
             Vec::new()
         }
     })
-}
-
-/// The agent's channel's messages, as the dynamic channel PDUs that carry them.
-fn video_pieces(channel: u32, messages: Vec<Vec<u8>>) -> Result<Vec<Vec<u8>>> {
-    let mut pdus = Vec::new();
-    for message in messages {
-        pdus.extend(dvc::pieces(channel, &message)?);
-    }
-    Ok(pdus)
 }
 
 /// A desktop dimension as the `u16` the protocol counts in, saturating rather than

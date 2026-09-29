@@ -85,14 +85,6 @@ const SETTLE_IDLE: Duration = Duration::from_millis(500);
 /// that stops changing produces no next frame — which is exactly the case a settle
 /// is for.
 const SETTLE_TICK: Duration = Duration::from_millis(250);
-/// The longest a passed stream's echo is held for the browser's delivery of what came
-/// before it ([`VideoSink::fence_hold`]). A client that is not drawing acknowledges
-/// nothing, and the wait its oldest batch shows grows without bound, so an unbounded
-/// hold would stop the remote, which sends nothing until the echo, for as long as the
-/// window stays shut. The paint window's own grace for such a window, and the one
-/// wlshare's desktop client gives its own: past it the echo goes, and a client that is
-/// only slow still holds the engine where it always did, at the budget.
-pub const FENCE_HOLD_LIMIT: Duration = Duration::from_millis(500);
 
 /// The shortest gap between two access units.
 ///
@@ -607,19 +599,7 @@ impl VideoSink {
     /// keyframe, which the full update the engine asks for at the same moment brings,
     /// and the keyframe goes out behind a fresh announcement.
     pub async fn pass(&self, w: u16, h: u16, frame: Vec<u8>) -> anyhow::Result<()> {
-        let passed = self.passable(w, h, &frame)?;
-        self.pass_checked(w, h, frame, passed).await
-    }
-
-    /// Whether a `w`×`h` frame can be passed ([`Self::pass`]), and what it is if so:
-    /// asked apart from the passing by an engine that takes the picture from elsewhere
-    /// when it cannot, where [`Self::pass`] would end the session.
-    pub fn passable(&self, w: u16, h: u16, frame: &[u8]) -> anyhow::Result<crate::stream::Passed> {
-        crate::stream::pass(w, h, frame, self.shared.chroma)
-    }
-
-    /// [`Self::pass`] for a frame [`Self::passable`] said can be.
-    pub async fn pass_checked(&self, w: u16, h: u16, frame: Vec<u8>, passed: crate::stream::Passed) -> anyhow::Result<()> {
+        let passed = crate::stream::pass(w, h, &frame, self.shared.chroma)?;
         self.forward(w, h, frame, passed).await.map(drop)
     }
 
@@ -696,9 +676,9 @@ impl VideoSink {
     /// ([`crate::feedback::LinkFeedback::hold`]). The remote keeps one frame in
     /// flight and times its fence, so an echo held for this puts the browser's
     /// queueing inside the round trip its quality walk reads, where an immediate
-    /// echo would time only the hop to this gateway. Never past [`FENCE_HOLD_LIMIT`].
+    /// echo would time only the hop to this gateway.
     pub fn fence_hold(&self) -> Duration {
-        self.shared.feedback.hold(tokio::time::Instant::now()).min(FENCE_HOLD_LIMIT)
+        self.shared.feedback.hold(tokio::time::Instant::now())
     }
 
     /// Take `bytes` of [`QUEUE_BUDGET`], waiting for the browser's socket to make
@@ -1170,7 +1150,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, agent_stream: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, chroma: Chroma::Subsampled, apple_media: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1784,7 +1764,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, agent_stream: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), TileSupport::None);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -1910,7 +1890,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, agent_stream: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false };
         let shared = Shared::new(plan, feedback(), TileSupport::None);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

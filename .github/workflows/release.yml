@@ -25,12 +25,10 @@ jobs:
         run: |
           # Real TOML parse + semver check, not grep/sed (see also packaging/build-tarball.sh).
           # Plain python3 (3.11+ for tomllib): uv is for local dev, not the CI runners.
-          # `[workspace.package]`, not `[package]`: every member inherits that one
-          # version, including the root package, so it is the only literal.
           VERSION=$(python3 -c '
           import re, sys, tomllib
           with open("Cargo.toml", "rb") as f:
-              version = tomllib.load(f)["workspace"]["package"]["version"]
+              version = tomllib.load(f)["package"]["version"]
           if not re.fullmatch(r"\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?", version):
               sys.exit(f"invalid version in Cargo.toml: {version!r}")
           print(version)
@@ -200,18 +198,6 @@ jobs:
         shell: pwsh
         run: pwsh -NoProfile -File packaging/verify-windows-msi.ps1
 
-      # remotex-agent, for the machine an RDP target is: its installer, which installs the
-      # RemotexAgent service, and the bare binary beside it in a zip.
-      - name: Build the agent's installer (${{ matrix.target-note }})
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: pwsh -NoProfile -File packaging/build-windows-agent.ps1
-
-      - name: Install the agent's service, check it and remove it (${{ matrix.target-note }})
-        if: runner.os == 'Windows'
-        shell: pwsh
-        run: pwsh -NoProfile -File packaging/verify-windows-agent-msi.ps1
-
       - name: Build feature-minimal container gateway (${{ matrix.target-note }})
         if: runner.os == 'Linux'
         run: bash packaging/build-container-binary.sh "tmp/container-bin/remotex-container-${{ matrix.target-note }}"
@@ -250,13 +236,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
         # Named globs, not `artifacts/*`: `merge-multiple` also drops the
         # frontend-dist and third-party-notices artifacts' files in here, and those
-        # are build input, not release assets. The .pkg is the native macOS gateway
-        # package; the .msi files are the Windows gateway's and remotex-agent's, and
-        # the .zip the agent's bare binary.
+        # are build input, not release assets. The .pkg is the native macOS gateway package, the .msi
+        # the Windows one.
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \
             artifacts/*.deb artifacts/*.rpm artifacts/*.pkg \
-            artifacts/*.tar.gz artifacts/*.msi artifacts/remotex-agent-*.zip --clobber
+            artifacts/*.tar.gz artifacts/*.msi --clobber
 
       - name: Publish release (remove draft, creates the tag)
         env:

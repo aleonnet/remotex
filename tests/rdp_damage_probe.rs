@@ -78,7 +78,6 @@ fn connect() -> (Session, Receiver<Event>) {
         // channel and nothing else.
         camera: None,
         microphone: None,
-        video: None,
     });
     (session, events)
 }

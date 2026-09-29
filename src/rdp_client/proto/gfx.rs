@@ -567,7 +567,7 @@ mod tests {
 
     /// The two PDUs this client writes, byte for byte.
     #[test]
-    fn the_caps_advertise_and_the_frame_acknowledgements_are_written_whole() {
+    fn the_caps_advertise_and_the_frame_acknowledge_are_written_whole() {
         let caps = caps_advertise();
         let mut r = Reader::new("a test", &caps);
         assert_eq!(r.u16_le().unwrap(), CMD_CAPS_ADVERTISE);
