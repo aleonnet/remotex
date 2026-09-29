@@ -47,38 +47,3 @@ pub mod vnc_rsa_aes;
 pub mod vp9;
 pub mod wire;
 pub mod ws;
-
-/// THIRD-PARTY-NOTICES.txt names the lockfiles it was made from, so a dependency
-/// change fails here until packaging/third-party-notices.py has run again.
-#[cfg(test)]
-mod third_party_notices {
-    use sha2::{Digest, Sha256};
-
-    /// The script's `lock_digest`: a lockfile's SHA-256, less the entry of the
-    /// package it locks, whose version moves with every release.
-    fn lock_digest(lock: &str, own: Option<&str>) -> String {
-        let lock = lock.replace('\r', "");
-        let head = own.map(|own| format!("[[package]]\nname = \"{own}\"\n"));
-        let kept: Vec<&str> = lock
-            .split("\n\n")
-            .filter(|block| head.as_deref().is_none_or(|head| !block.starts_with(head)))
-            .collect();
-        Sha256::digest(kept.join("\n\n")).iter().map(|b| format!("{b:02x}")).collect()
-    }
-
-    #[test]
-    fn the_notices_are_the_locked_dependencies() {
-        let notices = include_str!("../THIRD-PARTY-NOTICES.txt");
-        for (name, lock, own) in [
-            ("Cargo.lock", include_str!("../Cargo.lock"), Some("remotex")),
-            ("frontend/bun.lock", include_str!("../frontend/bun.lock"), None),
-        ] {
-            let line = format!("  {name:<17} {}", lock_digest(lock, own));
-            assert!(
-                notices.lines().any(|l| l == line),
-                "THIRD-PARTY-NOTICES.txt was not made from this {name}: \
-                 run `uv run --python 3.13 packaging/third-party-notices.py`"
-            );
-        }
-    }
-}

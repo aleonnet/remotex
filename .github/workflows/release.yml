@@ -92,10 +92,41 @@ jobs:
           path: frontend/dist
           if-no-files-found: error
 
+  # The notices of what a release build contains, made once for every target like
+  # the frontend: packaging/about.toml lists the targets the Rust crates are
+  # gathered for, and the web client is the same bundle everywhere.
+  notices:
+    needs: prepare
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - uses: astral-sh/setup-uv@v6
+
+      - uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-about
+
+      - name: Make the notices
+        run: |
+          (cd frontend && bun install --frozen-lockfile)
+          mkdir -p notices
+          uv run --python 3.13 packaging/third-party-notices.py notices/THIRD-PARTY-NOTICES.txt
+
+      - name: Upload the notices
+        uses: actions/upload-artifact@v4
+        with:
+          name: third-party-notices
+          path: notices/THIRD-PARTY-NOTICES.txt
+          if-no-files-found: error
+
   build:
-    needs: [prepare, frontend]
+    needs: [prepare, frontend, notices]
     env:
       REMOTEX_PREBUILT_FRONTEND: frontend/dist
+      REMOTEX_PREBUILT_NOTICES: notices/THIRD-PARTY-NOTICES.txt
     strategy:
       fail-fast: false
       matrix:
@@ -123,6 +154,12 @@ jobs:
         with:
           name: frontend-dist
           path: frontend/dist
+
+      - name: Download the notices
+        uses: actions/download-artifact@v4
+        with:
+          name: third-party-notices
+          path: notices
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
@@ -198,8 +235,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         # Named globs, not `artifacts/*`: `merge-multiple` also drops the
-        # frontend-dist artifact's files in here, and those are build input, not
-        # release assets. The .pkg is the native macOS gateway package, the .msi
+        # frontend-dist and third-party-notices artifacts' files in here, and those
+        # are build input, not release assets. The .pkg is the native macOS gateway package, the .msi
         # the Windows one.
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \

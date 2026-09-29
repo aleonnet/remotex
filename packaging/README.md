@@ -44,11 +44,14 @@ Every artifact, container images included, carries remotex's MIT `LICENSE` and
 `THIRD-PARTY-NOTICES.txt`, the notices of what a release build contains that
 remotex did not write: the C libraries linked from their prebuilt archives, whose
 licences are kept in `notices/`, the web client's packages, and the Rust crates
-cargo-about finds under `about.toml`. `third-party-notices.py` writes it (`uv run
---python 3.13 packaging/third-party-notices.py`, with `bun install` done in
-`frontend/` and `cargo install cargo-about --locked --features cli`), and it names
-the `Cargo.lock` and `frontend/bun.lock` it was made from, which a library test
-holds it to. It covers the default build, not `apple-hp-media-static`, whose
+cargo-about finds under `about.toml`. It is a build output, not a file in the
+repository: `third-party-notices.py` writes it into the tree `build-tarball.sh` and
+`build-windows-msi.ps1` package, which takes `bun install` done in `frontend/` and
+cargo-about (`cargo install cargo-about --locked --features cli`). Release CI makes
+it once, in its `notices` job, and hands it to every target in
+`REMOTEX_PREBUILT_NOTICES`, as it hands over the frontend bundle. cargo-about
+refuses a crate under a licence `about.toml` does not accept, so such a dependency
+fails the packaging. It covers the default build, not `apple-hp-media-static`, whose
 distributor adds fdk-aac's licence and FFmpeg's LGPL terms.
 
 There is no package wrapper, version directory, active-version symlink, or
@@ -89,8 +92,9 @@ bash packaging/build-tarball.sh
 bash packaging/build-native-packages.sh
 ```
 
-The native builder requires `dpkg-deb` and `rpmbuild` on Linux, or `pkgbuild` on
-macOS. On Windows, in PowerShell 7 with WiX on `PATH`
+Both builds make the notices, so they need cargo-about and uv beside the frontend's
+`node_modules`. The native builder requires `dpkg-deb` and `rpmbuild` on Linux, or
+`pkgbuild` on macOS. On Windows, in PowerShell 7 with WiX on `PATH`
 (`dotnet tool install --global wix --version 5.0.2`):
 
 ```powershell

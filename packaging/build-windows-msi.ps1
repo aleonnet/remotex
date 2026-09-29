@@ -20,7 +20,8 @@
 # prebuilt static archives from their `-prebuilt` crates. `cargo build` compiles the frontend
 # from Cargo's OUT_DIR into the exe; release CI points REMOTEX_PREBUILT_FRONTEND at its shared
 # platform-independent bundle. packaging/verify-windows-msi.ps1 then installs the result, runs
-# it and removes it.
+# it and removes it. Unless REMOTEX_PREBUILT_NOTICES names release CI's notices, it makes them,
+# which takes uv, cargo-about and frontend\node_modules as well.
 #Requires -Version 7
 $ErrorActionPreference = 'Stop'
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -70,7 +71,16 @@ try {
     if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
     New-Item -ItemType Directory -Force -Path "$stage\bin", "$stage\share\doc\remotex" | Out-Null
     Copy-Item $exe "$stage\bin\remotex.exe"
-    Copy-Item 'remotex.example.toml', 'LICENSE', 'THIRD-PARTY-NOTICES.txt' "$stage\share\doc\remotex\"
+    Copy-Item 'remotex.example.toml', 'LICENSE' "$stage\share\doc\remotex\"
+    # The notices are a build output, as in build-tarball.sh: release CI's, named in
+    # REMOTEX_PREBUILT_NOTICES, or made here with cargo-about and frontend\node_modules.
+    $notices = "$stage\share\doc\remotex\THIRD-PARTY-NOTICES.txt"
+    if ($env:REMOTEX_PREBUILT_NOTICES) {
+        Copy-Item $env:REMOTEX_PREBUILT_NOTICES $notices
+    } else {
+        & uv run --python 3.13 packaging\third-party-notices.py $notices
+        if ($LASTEXITCODE -ne 0) { throw "third-party-notices.py failed (exit $LASTEXITCODE)" }
+    }
     # Bare LF and no BOM, like the tarball's VERSION.
     [System.IO.File]::WriteAllText("$stage\VERSION", "$version`n")
 
