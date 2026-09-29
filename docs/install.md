@@ -83,6 +83,14 @@ The gateway reads its config from `%ProgramData%\remotex\remotex.toml`. Add
 `remotex tui`, is included and keeps its instances under
 `%LOCALAPPDATA%\remotex\instances`.
 
+### The agent, on a Windows RDP host
+
+The machine an `rdp` target is can run `remotex-agent`, which codes the desktop as VP9
+there and sends it on the RDP connection, for a target with `agent_passthrough = true`
+to pass to the browser. Its own `remotex-agent-windows-x86_64.msi`, installed on that
+machine, not on the gateway's, runs it as the `RemotexAgent` service: see
+[remotex-agent](agent.md).
+
 ## First configuration
 
 The config contains the web-login hash and target credentials. Create it as the

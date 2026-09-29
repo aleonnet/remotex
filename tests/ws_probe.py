@@ -239,6 +239,13 @@ async def main() -> int:
         "display list, which a generic VNC server never sends",
     )
     parser.add_argument(
+        "--viewport-gap",
+        type=duration,
+        default=0.0,
+        help="seconds between a viewport's answer and the next request, which is how "
+        "long the desktop is left at each size",
+    )
+    parser.add_argument(
         "--apple-media",
         action="store_true",
         help="state that this client decodes a High Performance Mac's HEVC and AAC-ELD, "
@@ -284,6 +291,10 @@ async def main() -> int:
         pending = list(args.select)
         viewports = list(args.viewport)
         awaiting_viewport = None
+        # The next viewport while it waits out --viewport-gap: in flight as surely
+        # as one sent and not yet answered.
+        gap_task = None
+        after_resize_sent = False
         burst_sent = False
         mouse_sent = False
         clipboard_sent = False
@@ -314,6 +325,22 @@ async def main() -> int:
                 raise
             except Exception as error:  # This is a diagnostic probe: report the socket failure.
                 audio_error = str(error)
+
+        async def send_next_viewport_after_gap() -> None:
+            nonlocal awaiting_viewport, gap_task
+            await asyncio.sleep(args.viewport_gap)
+            awaiting_viewport = viewports.pop(0)
+            print(f"  -> viewport {awaiting_viewport[0]}x{awaiting_viewport[1]}")
+            await socket.send(
+                json.dumps(
+                    {
+                        "type": "viewport",
+                        "w": awaiting_viewport[0],
+                        "h": awaiting_viewport[1],
+                    }
+                )
+            )
+            gap_task = None
 
         async def send_first_viewport_after_delay() -> None:
             nonlocal awaiting_viewport
@@ -482,9 +509,12 @@ async def main() -> int:
                         )
                         if (
                             args.viewport_after_resize
+                            and not after_resize_sent
                             and viewports
                             and awaiting_viewport is None
+                            and gap_task is None
                         ):
+                            after_resize_sent = True
                             awaiting_viewport = viewports.pop(0)
                             print(
                                 f"  -> viewport {awaiting_viewport[0]}x"
@@ -502,20 +532,7 @@ async def main() -> int:
                         elif awaiting_viewport == answered:
                             awaiting_viewport = None
                             if viewports:
-                                awaiting_viewport = viewports.pop(0)
-                                print(
-                                    f"  -> viewport {awaiting_viewport[0]}x"
-                                    f"{awaiting_viewport[1]}"
-                                )
-                                await socket.send(
-                                    json.dumps(
-                                        {
-                                            "type": "viewport",
-                                            "w": awaiting_viewport[0],
-                                            "h": awaiting_viewport[1],
-                                        }
-                                    )
-                                )
+                                gap_task = asyncio.create_task(send_next_viewport_after_gap())
                         if (
                             args.mouse is not None
                             and not pending
@@ -565,8 +582,11 @@ async def main() -> int:
                         elif (
                             viewports
                             and awaiting_viewport is None
+                            and gap_task is None
                             and viewport_task is None
                         ):
+                            # The first viewport, so a resize does not send it again.
+                            after_resize_sent = True
                             viewport_task = asyncio.create_task(
                                 send_first_viewport_after_delay()
                             )
@@ -624,6 +644,8 @@ async def main() -> int:
                     pass
             if viewport_task is not None and not viewport_task.done():
                 viewport_task.cancel()
+            if gap_task is not None and not gap_task.done():
+                gap_task.cancel()
         print(f"\n  {frames} binary frames")
         if args.records:
             print(f"  {tiles} tile records, {video_units} video records")

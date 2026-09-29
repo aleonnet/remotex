@@ -212,6 +212,17 @@ password = "change-me"
 # host whose pipeline the decoders cannot paint. RDP only, and refused on VNC even when set to false.
 #egfx = true
 
+# Take the desktop as VP9 from remotex's agent in the Windows session, on a dynamic
+# channel of the RDP connection (opt-in), and pass it to the browser as the agent
+# coded it: the encode moves from this gateway to the host. The agent is told this
+# target's video keys, resolved, and codes to them. A session with no agent running
+# never opens the channel, and wherever the stream cannot be passed as it came — a
+# frame that is not the plan's, the secure desktop, a resize — the graphics pipeline
+# carries the desktop, encoded here. Off, the channel is refused. RDP only, and
+# refused beside `egfx = false`. The host runs the agent as a service installed from its
+# own MSI: see docs/agent.md, and docs/rdp-in-session-video.md for the stream.
+#agent_passthrough = false
+
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
 # back whenever the tab regains focus — where the browser permits it, which

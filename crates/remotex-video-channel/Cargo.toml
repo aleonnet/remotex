@@ -1,0 +1,9 @@
+[package]
+name = "remotex-video-channel"
+version.workspace = true
+edition = "2024"
+publish = false
+description = "The messages of remotex's remotex.video channel, as remotex and remotex-agent both write and read them"
+
+[dependencies]
+desktop-vp9.workspace = true

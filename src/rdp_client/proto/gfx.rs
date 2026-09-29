@@ -89,8 +89,13 @@ pub const CAPS_SMALL_CACHE: u32 = 0x0000_0002;
 pub const CAPS_AVC_DISABLED: u32 = 0x0000_0020;
 
 /// `queueDepth` in a frame acknowledgement: this client does not report how many
-/// frames it holds undrawn, which the server takes as "send as you like".
+/// bytes of graphics it holds unprocessed, which the server takes as "send as you
+/// like".
 pub const QUEUE_DEPTH_UNAVAILABLE: u32 = 0x0000_0000;
+/// `queueDepth` in a frame acknowledgement: stop sending acknowledgements. The
+/// server clears its outstanding-frame list and MUST NOT block on it until a
+/// later acknowledgement opts back in ([MS-RDPEGFX] 2.2.2.13 and 3.2.5.13).
+pub const SUSPEND_FRAME_ACKNOWLEDGEMENT: u32 = 0xFFFF_FFFF;
 
 /// The largest surface or output dimension a server may name, from FreeRDP's own
 /// bound: past it a `u16` field has wrapped or a server has lost its mind.
@@ -346,8 +351,20 @@ pub fn caps_advertise() -> Vec<u8> {
 /// client has finished in all, which the server uses to notice a client that has
 /// fallen behind.
 pub fn frame_acknowledge(frame: u32, decoded: u32) -> Vec<u8> {
+    acknowledge(QUEUE_DEPTH_UNAVAILABLE, frame, decoded)
+}
+
+/// Clear the server's outstanding-frame list and opt out of acknowledgements.
+/// `frame` must identify the most recently processed logical frame ([MS-RDPEGFX]
+/// 3.3.5.13); a later ordinary [`frame_acknowledge`] in response to EndFrame opts
+/// back in.
+pub fn suspend_frame_acknowledgement(frame: u32, decoded: u32) -> Vec<u8> {
+    acknowledge(SUSPEND_FRAME_ACKNOWLEDGEMENT, frame, decoded)
+}
+
+fn acknowledge(queue_depth: u32, frame: u32, decoded: u32) -> Vec<u8> {
     let mut w = Writer::with_capacity(12);
-    w.u32_le(QUEUE_DEPTH_UNAVAILABLE);
+    w.u32_le(queue_depth);
     w.u32_le(frame);
     w.u32_le(decoded);
     pdu(CMD_FRAME_ACKNOWLEDGE, &w.finish())
@@ -566,7 +583,7 @@ mod tests {
 
     /// The two PDUs this client writes, byte for byte.
     #[test]
-    fn the_caps_advertise_and_the_frame_acknowledge_are_written_whole() {
+    fn the_caps_advertise_and_the_frame_acknowledgements_are_written_whole() {
         let caps = caps_advertise();
         let mut r = Reader::new("a test", &caps);
         assert_eq!(r.u16_le().unwrap(), CMD_CAPS_ADVERTISE);
@@ -583,6 +600,12 @@ mod tests {
             0, 0, 0, 0, // queueDepth
             7, 0, 0, 0, // frameId
             3, 0, 0, 0, // totalFramesDecoded
+        ]);
+        assert_eq!(suspend_frame_acknowledgement(9, 4), vec![
+            0x0D, 0x00, 0x00, 0x00, 20, 0, 0, 0, // header
+            0xFF, 0xFF, 0xFF, 0xFF, // queueDepth
+            9, 0, 0, 0, // frameId
+            4, 0, 0, 0, // totalFramesDecoded
         ]);
     }
 }

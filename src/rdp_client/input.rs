@@ -19,6 +19,12 @@ pub(super) enum Command {
     Input(Event),
     /// Ask the server to repaint the whole desktop.
     Refresh,
+    /// Tell the agent a frame of its stream has gone on, by the frame's number.
+    EchoVideo(u32),
+    /// Ask the agent for a keyframe.
+    VideoKeyframe,
+    /// Close the agent's channel: its stream cannot be taken.
+    CloseVideo,
     /// Ask the server for a new desktop size, over Display Control.
     Resize { width: u32, height: u32, scale_percent: u32 },
     /// Something for the clipboard channel, in the three shapes a clipboard has.
@@ -112,6 +118,30 @@ impl Input {
     /// Ask the server to repaint the whole desktop.
     pub fn refresh(&self) {
         self.push(Command::Refresh);
+    }
+
+    /// The frame of the agent's stream numbered `seq`
+    /// ([`Event::Video`](super::Event::Video)) has gone on to whoever is watching.
+    ///
+    /// **Every frame is owed one.** The agent keeps one frame in flight and sends the
+    /// next on the echo, and it walks its quality by how long each takes to come: an
+    /// echo sent at once times the hop to this end alone, so a caller with a queue
+    /// behind it holds the echo for that queue.
+    pub fn echo_video(&self, seq: u32) {
+        self.push(Command::EchoVideo(seq));
+    }
+
+    /// Ask the agent for a keyframe: whoever is watching has to start decoding over.
+    pub fn video_keyframe(&self) {
+        self.push(Command::VideoKeyframe);
+    }
+
+    /// Close the agent's channel, for a stream that cannot go on to whoever is
+    /// watching: the graphics pipeline carries the picture, as
+    /// [`Event::VideoEnded`](super::Event::VideoEnded) says once the stream has
+    /// stopped, and the frames already on their way are not owed an echo.
+    pub fn close_video(&self) {
+        self.push(Command::CloseVideo);
     }
 
     /// Ask the server to change the desktop size.

@@ -321,6 +321,7 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
         audio: sound().then(|| Box::new(Listen(Arc::clone(&ear))) as Box<dyn AudioSink>),
         camera: Some(Camera { name: "Remotex Probe Camera".to_owned(), sink: Box::new(Watch(Arc::clone(&eye))) }),
         microphone: Some(Box::new(Speak(Arc::clone(&voice)))),
+        video: None,
     });
     (session, events, ear, eye, voice)
 }
@@ -495,6 +496,8 @@ async fn pump(
                     .then(|| rdp_clipboard::encode_unicode(tally.offer.unwrap_or(COPIED)));
                 session.input().send_clipboard(data);
             }
+            // This probe takes no agent's stream: `Connect::video` is `None`.
+            Event::Video(_) | Event::VideoEnded => panic!("an agent's stream nobody asked for"),
             Event::Connected { .. } => panic!("a second Connected"),
             Event::Ended(result) => panic!("the session ended: {result:?}"),
         }

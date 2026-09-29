@@ -1728,6 +1728,7 @@ mod tests {
             render_adaptive: None,
             audio_bitrate: None,
             media_passthrough: false,
+            agent_passthrough: false,
             virtual_display: false,
             audio_adaptive: None,
             audio_adaptive_min: None,
@@ -2121,7 +2122,7 @@ mod tests {
 
             assert_eq!(
                 hook_rx.try_recv().expect("connect spawns the engine"),
-                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_media: false },
+                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_media: false, agent_stream: false },
                 "the engine must be built for what the browser said it takes"
             );
             match recv(&mut att.events).await {
@@ -2177,7 +2178,7 @@ mod tests {
         let mut taken = mgr.attach(&second, None, Chroma::Subsampled.into()).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("the takeover reconnects the selected target"),
-            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false },
+            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, agent_stream: false },
             "the reconnect must follow the browser that took over"
         );
         expect_connected(&mut taken.events, "video-auto").await;
@@ -2231,7 +2232,7 @@ mod tests {
         let mut changed = mgr.attach(&token, None, Chroma::Subsampled.into()).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("a changed answer rebuilds the stream"),
-            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false },
+            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, agent_stream: false },
             "the rebuilt stream must follow the browser that came back"
         );
         expect_connected(&mut changed.events, "video-auto").await;

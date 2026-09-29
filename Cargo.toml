@@ -4,12 +4,39 @@
 # protocol implementation. The desktop window that shows that SPA,
 # remotex-viewer, is a repository of its own (docs/viewer.md).
 #
+# One version for the whole workspace. `[workspace.package]` below is the only
+# literal `version` in the tree — the root package inherits it with
+# `version.workspace = true`.
+#
 # Note for anyone editing this file: frontend/vite.config.ts regexes the *first*
 # line matching `^version = "…"` out of this manifest to stamp the login screen,
-# so the package's `version` must stay the first such line.
+# so that line must stay the workspace version. `version.workspace = true` does
+# not match the regex (the `.` after `version` breaks it), which is what keeps
+# the root package from shadowing it.
+#
+# `crates/remotex-agent` is the agent that runs in a Windows session and sends its
+# desktop as VP9 over the session's own RDP connection, for a target with
+# `agent_passthrough`; `-p remotex-agent` picks it. It codes with the gateway's
+# desktop-vp9, from `[workspace.dependencies]` below, through this Cargo.lock.
+# `crates/remotex-video-channel` is the messages of the channel it writes to, which the
+# agent writes and reads with and the gateway builds its side from; it is a
+# default member beside the gateway, so a plain `cargo clippy` and `cargo test`
+# check it on every platform.
+[workspace]
+resolver = "3"
+members = ["crates/remotex-agent", "crates/remotex-video-channel"]
+default-members = [".", "crates/remotex-video-channel"]
+
+[workspace.dependencies]
+desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.5" }
+remotex-video-channel = { path = "crates/remotex-video-channel" }
+
+[workspace.package]
+version = "0.0.287"
+
 [package]
 name = "remotex"
-version = "0.0.286"
+version.workspace = true
 license = "MIT"
 edition = "2024"
 
@@ -77,7 +104,10 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # a thing no check of this gateway should have to have. Do not restore a source build,
 # a vcpkg dependency, or bindgen. libvpx asserts nothing — it returns error codes —
 # which is why the encoder is a plain `?` path under `panic = "abort"`.
-desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.5" }
+desktop-vp9.workspace = true
+# The messages of the `remotex.video` channel an agent in an RDP session streams on
+# (src/rdp_client/proto/video.rs), shared with remotex-agent, which writes them.
+remotex-video-channel.workspace = true
 # YUV→RGB for the HEVC pictures High Performance's media stream decodes to
 # (src/vnc_apple_media.rs). Pure Rust with AVX2 and NEON paths chosen at run time —
 # no C, no assembler, the same bargain as above.
