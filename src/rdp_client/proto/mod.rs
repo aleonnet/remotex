@@ -35,8 +35,6 @@
 //!   a current Windows host prefers.
 //! - [`rdpdr`] — device redirection with no devices in it, because a Windows host
 //!   redirects no sound to a client that did not name it.
-//! - [`video`] — an in-session agent's VP9 stream of the desktop, on a dynamic channel
-//!   of its own, which is this gateway's protocol and not RDP's.
 //! - [`share`] — the headers every PDU wears once the channels are open, and the
 //!   dispatch that says which kind has arrived.
 //! - [`info`] — the logon: who the session belongs to and what it should look like.
@@ -103,7 +101,6 @@ pub mod rdpecam;
 pub mod rdpsnd;
 pub mod share;
 pub mod tls;
-pub mod video;
 pub mod wire;
 pub mod x224;
 pub mod zgfx;

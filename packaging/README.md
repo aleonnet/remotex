@@ -41,7 +41,7 @@ C:\Program Files\remotex\share\doc\remotex\LICENSE
 C:\Program Files\remotex\share\doc\remotex\THIRD-PARTY-NOTICES.txt
 ```
 
-Every gateway artifact, container images included, carries remotex's MIT
+Every artifact, container images included, carries remotex's MIT
 `LICENSE` and `THIRD-PARTY-NOTICES.txt`, the notices of what a release build
 contains that remotex did not write: the C libraries linked from their prebuilt
 archives, whose licences are kept in `notices/`, the web client's packages, and
@@ -82,8 +82,6 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-native-packages.sh` | consume that payload and build `.deb` + `.rpm` or `.pkg` |
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
-| `build-windows-agent.ps1` | build `remotex-agent` on Windows, its `.msi` from `windows/remotex-agent.wxs` (WiX 5) and a `.zip` of the binary |
-| `verify-windows-agent-msi.ps1` | install the agent's `.msi`, check the `RemotexAgent` service it registers and starts, remove it, check the service and files went with it |
 | `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `REMOTEX_CONTAINER_FEATURES` |
 | `publish-full-image.sh` | add Debian's libavcodec and fdk-aac to a release's public linux/amd64 image and push the result to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
@@ -198,13 +196,6 @@ release sets `JEMALLOC_SYS_WITH_LG_PAGE=16`. Windows keeps the system heap.
 builds native packages and tarballs for Linux x86-64, Linux arm64, and macOS
 arm64, and the MSI for Windows x86-64. The release is published only after the packages and common artifacts
 succeed.
-
-The same Windows row builds `remotex-agent`, for the machine an RDP target is:
-`remotex-agent-windows-x86_64.msi`, which installs the agent under
-`%ProgramFiles%\remotex-agent` with the Visual C++ runtime beside it and registers and
-starts the `RemotexAgent` service, and `remotex-agent-windows-x86_64.zip`, the same three
-files for running it by hand. The runtime ships because libvpx's archive is built
-against the DLL C runtime. See [remotex-agent](../docs/agent.md).
 
 Container images take their layout from the Linux tarballs, then replace
 `bin/remotex` with the separately built container gateway. The build

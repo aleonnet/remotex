@@ -1,7 +1,7 @@
 //! A headless RDP client, protocol and all.
 //!
 //! Screen, pointer, keyboard, mouse, resize, clipboard and sound, with a camera
-//! and microphone in the other direction and an optional agent-coded video stream.
+//! and microphone in the other direction.
 //! There is no window and no drawing: [`Session::start`] connects, keeps a complete
 //! framebuffer up to date in memory the caller can read, and posts an [`Event`]
 //! whenever a rectangle of it changes. What the caller does with those pixels is
@@ -101,5 +101,4 @@ pub use error::Error;
 pub use framebuffer::{Frame, Framebuffer, Rect};
 pub use input::{Input, MouseButton, sanitise_scale, sanitise_size};
 pub use pointer::{Cursor, CursorImage};
-pub use proto::video::{Frame as VideoFrame, Plan as VideoPlan};
 pub use session::{AudioSink, Connect, Event, Session};

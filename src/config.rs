@@ -304,11 +304,6 @@ pub struct RenderPlan {
     /// set, and a browser that said it decodes both. None of the fields above reach
     /// such a picture.
     pub apple_media: bool,
-    /// An RDP host's agent stream is taken where the agent opens its channel, coded
-    /// by the agent to the fields above and passed as it came:
-    /// [`TargetConfig::agent_passthrough`] set. Unset, the channel is refused and the
-    /// graphics pipeline is the only picture there is.
-    pub agent_stream: bool,
 }
 
 /// What the attached browser said its decoders take, from its session socket
@@ -656,27 +651,6 @@ pub struct TargetConfig {
     /// [`RenderPlan::apple_media`].
     #[serde(default)]
     pub media_passthrough: bool,
-    /// Pass the VP9 stream remotex's agent codes in a Windows session to the
-    /// browser, as the agent sent it, in place of the graphics pipeline decoded and
-    /// encoded here. The agent is told the plan — [`Self::render_chroma`] resolved,
-    /// [`Self::video_quality`] and [`Self::render_adaptive`] — as the channel's first
-    /// message, so the keys mean on its stream what they mean on one encoded here,
-    /// and the encode moves from the gateway to the host. Refused on any target but
-    /// `rdp`, and beside `egfx = false`: the pipeline carries every gap in the
-    /// stream, and a session without one has nothing to carry them.
-    ///
-    /// The host selects, as the browser does for [`Self::media_passthrough`]: a
-    /// session without an agent never opens the channel, and one whose agent sends
-    /// a frame it cannot pass as it came has the channel closed, and the pipeline
-    /// carries the desktop as if this key were unset. Unset, the channel is refused
-    /// by name and no agent's stream is taken. See docs/rdp-in-session-video.md.
-    ///
-    /// Experimental, and for a setup where the host is the better place to encode,
-    /// such as a gateway on a slow machine. The host pays for the encode in CPU, and
-    /// its graphics pipeline goes on beside the stream, so it codes the desktop twice
-    /// and the link from it carries both.
-    #[serde(default)]
-    pub agent_passthrough: bool,
 }
 
 /// The stream quality a target streams at when [`TargetConfig::video_quality`] is
@@ -762,10 +736,7 @@ impl TargetConfig {
             ChromaChoice::Auto => decoders.chroma,
         };
         let apple_media = self.media_passthrough && decoders.apple_media;
-        // No browser answer to wait for: the agent codes the profile this plan
-        // names, which is the browser's own where it chose one.
-        let agent_stream = self.agent_passthrough;
-        RenderPlan { quality, adaptive, chroma, apple_media, agent_stream }
+        RenderPlan { quality, adaptive, chroma, apple_media }
     }
 
     /// The render dial for a reader with no browser in front of it — the TUI's
@@ -783,8 +754,7 @@ impl TargetConfig {
     /// argument reaches no card, and a selected `"420"` or `"444"` prints itself.
     ///
     /// A [`Self::media_passthrough`] target is the VP9 card with the passthrough
-    /// after it, since which of the two a session gets is the browser's answer, and
-    /// an [`Self::agent_passthrough`] target likewise, where it is the host's.
+    /// after it, since which of the two a session gets is the browser's answer.
     pub fn render_summary(&self) -> String {
         let slot = match self.render_chroma.unwrap_or_default() {
             ChromaChoice::Auto => Some("chroma auto"),
@@ -793,8 +763,6 @@ impl TargetConfig {
         let card = self.render_plan(Decoders { chroma: Chroma::Subsampled, apple_media: false }).card(slot);
         if self.media_passthrough {
             format!("{card} · the Mac's stream passed where the browser takes it")
-        } else if self.agent_passthrough {
-            format!("{card} · the agent's stream passed where the host runs one")
         } else {
             card
         }
@@ -1455,22 +1423,6 @@ impl ConfigFile {
                 "target {:?} sets media_passthrough, which passes a High Performance Mac's \
                  media stream to the browser, on a target without that stream: only subtype \
                  \"ard-high-performance\" has one. Remove the key.",
-                target.name
-            );
-            // The agent's stream is an RDP session's, and it needs the graphics
-            // pipeline beside it to carry the desktop wherever it cannot be passed.
-            anyhow::ensure!(
-                !target.agent_passthrough || target.protocol == Protocol::Rdp,
-                "target {:?} sets agent_passthrough, which passes the stream remotex's agent \
-                 codes in a Windows session, on a {} target: only rdp has one. Remove the key.",
-                target.name,
-                target.protocol.name()
-            );
-            anyhow::ensure!(
-                !target.agent_passthrough || target.egfx(),
-                "target {:?} sets agent_passthrough with egfx = false, and the graphics \
-                 pipeline is what carries the desktop wherever the agent's stream cannot. \
-                 Remove one of the two keys.",
                 target.name
             );
             // The bitrate keys and the adaptive switch tune the Opus encoder, so on a
@@ -2662,7 +2614,6 @@ mod tests {
                     adaptive: true,
                     chroma: decoder,
                     apple_media: false,
-                    agent_stream: false,
                 }
             );
         }
@@ -2678,7 +2629,6 @@ mod tests {
                 adaptive: true,
                 chroma: Chroma::Subsampled,
                 apple_media: false,
-                agent_stream: false,
             }
         );
     }
@@ -2706,7 +2656,6 @@ mod tests {
             adaptive: true,
             chroma,
             apple_media: false,
-            agent_stream: false,
         };
         assert_eq!(video("", Chroma::Full), stream(Chroma::Full));
         assert_eq!(video("", Chroma::Subsampled), stream(Chroma::Subsampled));
@@ -3049,37 +2998,6 @@ mod tests {
             let err = ConfigFile::parse(&vnc_toml(&format!("{subtype}media_passthrough = true"))).unwrap_err();
             assert!(format!("{err:#}").contains("only subtype \"ard-high-performance\""), "{err:#}");
         }
-    }
-
-    /// `agent_passthrough` is an RDP target's, and needs the graphics pipeline that
-    /// carries the desktop wherever the agent's stream cannot: refused on VNC and
-    /// beside `egfx = false`, both by name. The plan it adds to is the one the
-    /// target's other keys resolve to, which is what the agent is told to code.
-    #[test]
-    fn agent_passthrough_is_an_rdp_targets_beside_the_pipeline() {
-        let passed = ConfigFile::parse(&rdp_toml("agent_passthrough = true")).unwrap().targets.remove(0);
-        let plain = ConfigFile::parse(&rdp_toml("")).unwrap().targets.remove(0);
-        let browser = Decoders::from(Chroma::Full);
-        assert!(passed.render_plan(browser).agent_stream);
-        assert!(!plain.render_plan(browser).agent_stream, "only the key opts in");
-        assert_eq!(
-            passed.render_plan(browser),
-            RenderPlan { agent_stream: true, ..plain.render_plan(browser) },
-            "the agent is told the plan the target would have been encoded to"
-        );
-        assert_eq!(
-            passed.render_summary(),
-            "video q90 chroma auto · adaptive · the agent's stream passed where the host runs one"
-        );
-
-        let err = ConfigFile::parse(&vnc_toml("agent_passthrough = true")).unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("agent_passthrough"), "{rendered}");
-        assert!(rendered.contains("only rdp"), "{rendered}");
-
-        let err = ConfigFile::parse(&rdp_toml("agent_passthrough = true\negfx = false")).unwrap_err();
-        let rendered = format!("{err:#}");
-        assert!(rendered.contains("agent_passthrough with egfx = false"), "{rendered}");
     }
 
     /// The opening size resolves the same way for every engine: a pinned size
@@ -3579,7 +3497,7 @@ mod tests {
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, agent_stream: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false });
         assert_eq!(plan.describe(), "video q80 4:2:0 · adaptive");
     }
 
@@ -3591,7 +3509,7 @@ mod tests {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, agent_stream: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false });
         assert_eq!(plan.describe(), "video q80 4:2:0");
     }
 
