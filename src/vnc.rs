@@ -68,23 +68,16 @@ const SECURITY_VNC_AUTH: u8 = 2;
 /// it and what happens without it. RealVNC's RSA-AES types carry one to
 /// everything else; see [`crate::vnc_rsa_aes`].
 const SECURITY_ARD: u8 = 30;
-/// Largest DH key length accepted from the server, in bytes. macOS 26 sends
-/// exactly this: RFC 5054's 4096-bit prime, with generator 5. The cap is what
-/// keeps a bogus length from turning into a huge allocation and a very slow
-/// modular exponentiation.
-const MAX_ARD_KEY_BYTES: usize = 512;
-/// Smallest DH key length accepted, in bytes. The server picks the group, and
-/// what rides inside it is an account password, so a small prime is not a
-/// server being frugal — it is a shared secret anyone watching the wire can
-/// recover.
-///
-/// 128 bytes: a 1024-bit group, and no room below it. The 512-bit group Apple's
-/// own documentation calls the "older, less secure method" is therefore refused
-/// rather than downgraded to, which is the point. If a Mac old enough to still
-/// offer it ever turns up, this is what it will fail on, and the error says so —
-/// a refusal being the honest answer for a group that would put an account
-/// password behind precomputation anyone can afford.
-const MIN_ARD_KEY_BYTES: usize = 128;
+/// Largest DH key length accepted from the server, in bytes: 1024, an 8192-bit
+/// group, the most Apple's viewer takes. macOS 26 sends 512, RFC 5054's 4096-bit
+/// prime with generator 5. The cap keeps a bogus length from turning into a huge
+/// allocation and a very slow modular exponentiation.
+const MAX_ARD_KEY_BYTES: usize = 1024;
+/// Smallest DH key length accepted, in bytes: 64, a 512-bit group, the least
+/// Apple's viewer takes. So remotex logs in wherever Apple's viewer does, older
+/// Macs' 512-bit group included, which Apple's own documentation calls the
+/// "older, less secure method".
+const MIN_ARD_KEY_BYTES: usize = 64;
 /// Apple's credential blob: `username[64]`, then `password[64]`, each
 /// null-terminated, the remainder random.
 const ARD_CREDENTIALS_LEN: usize = 128;
@@ -6403,9 +6396,8 @@ mod tests {
     async fn a_full_dh_exchange_hands_the_server_the_credentials_back() {
         use aes::cipher::{BlockCipherDecrypt as _, KeyInit as _};
 
-        // The smallest group this client accepts, 128 bytes, to keep the
-        // arithmetic quick; macOS sends 512.
-        let key_len = MIN_ARD_KEY_BYTES;
+        // A 1024-bit group keeps the arithmetic quick; macOS sends 4096 bits.
+        let key_len = 128;
         let prime = {
             let mut bytes = vec![0xffu8; key_len];
             bytes[key_len - 1] = 0x97; // 2^1024 - 105, prime
@@ -6445,8 +6437,8 @@ mod tests {
     }
 
     /// The server chooses the group and we have to live in it, so every way that
-    /// choice can be unusable is refused before any arithmetic: a prime small
-    /// enough to break — with an account password riding inside it — a zero one,
+    /// choice can be unusable is refused before any arithmetic: a key length
+    /// outside what Apple's viewer takes, a zero prime,
     /// which `BigUint::modpow` answers with a panic rather than a number, and a
     /// public key whose shared secret anyone could predict.
     #[tokio::test]
@@ -6471,11 +6463,6 @@ mod tests {
 
         let too_small = authenticate(offer(MIN_ARD_KEY_BYTES - 1, 0xff)).await;
         assert!(too_small.contains("outside the"), "{too_small}");
-        // Named for what it is rather than left to the arithmetic above: 64
-        // bytes is the 512-bit group Apple used to use, and refusing it is the
-        // reason the floor exists.
-        let legacy = authenticate(offer(64, 0xff)).await;
-        assert!(legacy.contains("outside the"), "{legacy}");
         let too_large = authenticate(offer(MAX_ARD_KEY_BYTES + 1, 0xff)).await;
         assert!(too_large.contains("outside the"), "{too_large}");
         // Long enough, and still no group at all.

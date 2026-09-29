@@ -137,7 +137,9 @@ Both modes connect the same way until the record layer is up.
 2. **Type 30.** A Diffie-Hellman exchange. The Mac sends a `u16` generator, a
    `u16` key length, the prime and its public key; macOS 26 sends RFC 5054's
    4096-bit prime with generator 5, so both keys are 512 bytes, not the 1024-bit
-   group with generator 2 a published description gives. The viewer answers with
+   group with generator 2 a published description gives. Apple's viewer takes key
+   lengths from 64 to 1024 bytes and refuses any other; remotex takes the same.
+   The viewer answers with
    the 128-byte credential block (username at 0, password at 64), then its public
    key. `MD5(shared secret)` is the AES-128 key that encrypts the block in **ECB**
    mode, again not the published CBC. It is also the first key the record layer's
