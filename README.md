@@ -446,7 +446,8 @@ change rebuilds in seconds rather than minutes. Artifacts are always built
 ## Licence
 
 remotex is under the MIT licence in [`LICENSE`](LICENSE). A release build also
-contains the third-party software listed, with its licences, in
-[`THIRD-PARTY-NOTICES.txt`](THIRD-PARTY-NOTICES.txt), which every artifact carries.
+contains third-party software, listed with its licences in the
+`THIRD-PARTY-NOTICES.txt` every artifact carries, which packaging makes from the
+locked dependencies (see [Packaging](packaging/README.md)).
 FFmpeg and fdk-aac, the High Performance decoders, are not in it: the gateway
 loads them from the system.

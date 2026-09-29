@@ -61,7 +61,15 @@ cargo build --release
 echo ">> assembling ${pkg}"
 mkdir -p "$root/bin" "$root/share/doc/remotex"
 cp target/release/remotex "$root/bin/remotex"
-cp remotex.example.toml LICENSE THIRD-PARTY-NOTICES.txt "$root/share/doc/remotex/"
+cp remotex.example.toml LICENSE "$root/share/doc/remotex/"
+# The notices are a build output, not a file in the repository. Release CI makes
+# them once for every target and names them in REMOTEX_PREBUILT_NOTICES; anywhere
+# else they are made here, which takes cargo-about and frontend/node_modules.
+if [ -n "${REMOTEX_PREBUILT_NOTICES:-}" ]; then
+  cp "$REMOTEX_PREBUILT_NOTICES" "$root/share/doc/remotex/THIRD-PARTY-NOTICES.txt"
+else
+  uv run --python 3.13 packaging/third-party-notices.py "$root/share/doc/remotex/THIRD-PARTY-NOTICES.txt"
+fi
 chmod +x "$root/bin/remotex"
 printf '%s\n' "$version" > "$root/VERSION"
 
