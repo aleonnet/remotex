@@ -5897,8 +5897,9 @@ fn choose_security(
     if let Some(subtype) = subtype.filter(|s| s.apple_authentication()) {
         anyhow::ensure!(
             types.contains(&SECURITY_ARD),
-            "the target is subtype {:?}, whose authentication this server does not \
-             offer (types {types:?}) — it is not macOS Screen Sharing",
+            "the target is subtype {:?}, whose authentication (type 30) this server \
+             does not offer (types {types:?}) — either it is not macOS Screen Sharing, \
+             or the Mac's Remote Management settings limit it to another login type",
             subtype.name()
         );
         return Ok(SECURITY_ARD);
