@@ -77,7 +77,7 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `REMOTEX_CONTAINER_FEATURES` |
-| `publish-full-image.sh` | build a release tag's linux/amd64 image with Debian's libavcodec and fdk-aac installed and push it to the private `ghcr.io/andrewtheguy/remotex-full` |
+| `publish-full-image.sh` | add Debian's libavcodec and fdk-aac to a release's public linux/amd64 image and push the result to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 
