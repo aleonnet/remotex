@@ -5995,8 +5995,9 @@ async fn ard_authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     );
     debug!("vnc: Apple DH authentication as {username:?}, {}-bit prime", key_len * 8);
 
+    // Twice the key length, as Apple's viewer draws it.
     let mut rng = rand::rng();
-    let mut private = vec![0u8; key_len];
+    let mut private = vec![0u8; 2 * key_len];
     let mut filler = [0u8; ARD_CREDENTIALS_LEN];
     rng.fill_bytes(&mut private);
     rng.fill_bytes(&mut filler);
