@@ -211,8 +211,8 @@ nothing reaches an AirPlay speaker the Mac plays to. It is **experimental**. Dec
 the stream needs its decoders, FFmpeg's libavcodec (LGPL, 6.1 to 9) and Fraunhofer's
 fdk-aac (licence not OSI-approved), which the gateway loads from the system when a
 session needs them:
-`libavcodec61` (or 60 to 63) and `libfdk-aac2` on Debian (non-free) and Ubuntu
-(multiverse), `brew install ffmpeg fdk-aac` on macOS, and on Windows MSYS2's
+`libavcodec61` (or 60 to 63) and `libfdk-aac2t64` (`libfdk-aac2` before trixie) on
+Debian (non-free) and Ubuntu (multiverse), `brew install ffmpeg fdk-aac` on macOS, and on Windows MSYS2's
 `mingw-w64-ucrt-x86_64-ffmpeg` and `mingw-w64-ucrt-x86_64-fdk-aac`, whose DLLs are found
 in `C:\msys64\ucrt64\bin`, on `PATH` or beside `remotex.exe`.
 No release artifact links either; a build with `--features apple-hp-media-static` links

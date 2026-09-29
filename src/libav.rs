@@ -227,18 +227,27 @@ pub fn api() -> anyhow::Result<&'static Api> {
                     continue;
                 }
             };
-            let api = open(&avutil)
+            let api = match open(&avutil)
                 .map_err(anyhow::Error::new)
                 .and_then(|util| resolve(library, util))
-                .with_context(|| format!("load FFmpeg from {avcodec} and {avutil}"))?;
+                .with_context(|| format!("load FFmpeg from {avcodec} and {avutil}"))
+            {
+                Ok(api) => api,
+                Err(e) => {
+                    refused.push(format!("{e:#}"));
+                    continue;
+                }
+            };
             // SAFETY: plain version queries.
             let versions = unsafe { ((api.avcodec_version)(), (api.avutil_version)()) };
-            anyhow::ensure!(
-                versions.0 >> 16 == major && versions.1 >> 16 == major - 2,
-                "{avcodec} and {avutil} report libavcodec {} and libavutil {}",
-                dotted(versions.0),
-                dotted(versions.1)
-            );
+            if versions.0 >> 16 != major || versions.1 >> 16 != major - 2 {
+                refused.push(format!(
+                    "{avcodec} and {avutil} report libavcodec {} and libavutil {}",
+                    dotted(versions.0),
+                    dotted(versions.1)
+                ));
+                continue;
+            }
             log::info!("vnc: the HEVC decoder is libavcodec {}, from {avcodec}", dotted(versions.0));
             return Ok(API.get_or_init(|| api));
         }

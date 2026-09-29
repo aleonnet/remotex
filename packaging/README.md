@@ -133,7 +133,7 @@ elsewhere they are installed by hand:
 
 | | libavcodec (FFmpeg 6.1 to 9) | fdk-aac |
 |---|---|---|
-| Linux | `libavcodec.so.60` to `.63`, e.g. Debian's `libavcodec61` | `libfdk-aac.so.2`, `libfdk-aac2` (Debian non-free, Ubuntu multiverse) |
+| Linux | `libavcodec.so.60` to `.63`, e.g. Debian's `libavcodec61` | `libfdk-aac.so.2`, `libfdk-aac2t64`, `libfdk-aac2` before trixie (Debian non-free, Ubuntu multiverse) |
 | macOS | `libavcodec.60.dylib` to `.63`, `brew install ffmpeg` | `libfdk-aac.2.dylib`, `brew install fdk-aac` |
 | Windows | `avcodec-60.dll` to `-63`, MSYS2's `mingw-w64-ucrt-x86_64-ffmpeg` | `libfdk-aac-2.dll`, MSYS2's `mingw-w64-ucrt-x86_64-fdk-aac` |
 

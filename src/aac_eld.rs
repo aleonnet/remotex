@@ -171,10 +171,10 @@ fn api() -> anyhow::Result<&'static fdk::Api> {
     for name in LIBRARY {
         // SAFETY: fdk-aac's initialisers set up nothing but its own tables.
         match unsafe { libloading::Library::new(*name) } {
-            Ok(library) => {
-                let api = resolve(library).with_context(|| format!("load fdk-aac from {name}"))?;
-                return Ok(API.get_or_init(|| api));
-            }
+            Ok(library) => match resolve(library).with_context(|| format!("load fdk-aac from {name}")) {
+                Ok(api) => return Ok(API.get_or_init(|| api)),
+                Err(e) => refused.push(format!("{e:#}")),
+            },
             Err(e) => refused.push(format!("{name}: {e}")),
         }
     }
