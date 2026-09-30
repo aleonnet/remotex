@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
 # Build the image release CI never publishes — the public image with Debian's
 # libavcodec61 and fdk-aac (libfdk-aac2t64, from non-free) installed, the High
-# Performance decoders its gateway loads at run time — and push it to the
-# operator's private registry, ghcr.io/andrewtheguy/remotex-full, under the tag's
-# own name (v0.0.286).
+# Performance decoders its gateway loads at run time — and the EXPERIMENTAL
+# software HEVC decoder's release archive, which no release artifact holds — and
+# push it to the operator's private registry, ghcr.io/andrewtheguy/remotex-full,
+# under the tag's own name (v0.0.294).
 #
 # The tags it builds are release tags, and it builds nothing of remotex: the
 # release workflow has published the public image of the tag, and this is one
-# layer over that image's linux/amd64 half, installing the two libraries. A tag
-# whose gateway links the decoders rather than loading them is refused.
+# layer over that image's linux/amd64 half, installing the two libraries and
+# placing the archive the tag's src/hevc_wasm.rs pins, downloaded from the
+# private andrewtheguy/hevc-wasm-archives through `gh` and checked against that
+# pin, at /opt/remotex/share/hevc-wasm/. It sits outside /opt/remotex/var, whose
+# volume would hide it, so the mounted config names it by its absolute path:
+#
+#   [hevc_wasm]
+#   enabled = true
+#   archive = "/opt/remotex/share/hevc-wasm/hevc-wasm-vX.Y.Z.tar.gz"
+#
+# A tag whose gateway links the decoders rather than loading them, or that pins
+# no software decoder, is refused.
 #
 # The package must stay private: the public image leaves the decoders out, and a
 # public package is a release artifact. The first push creates it `internal` —
@@ -17,9 +28,11 @@
 # anonymous client can pull the package, and does not push unless the answer is
 # no or there is no package yet, and fails unless it is no after the push.
 #
-# Log in first, with a token that has `write:packages`:
+# Log in first, to ghcr with a token that has `write:packages`, and to GitHub
+# with access to andrewtheguy/hevc-wasm-archives:
 #
 #   podman login ghcr.io
+#   gh auth login
 #
 #   packaging/publish-full-image.sh TAG
 #
@@ -47,6 +60,16 @@ commit="$(git rev-parse --verify --quiet "refs/tags/${tag}^{commit}")" \
 git cat-file -e "${commit}:src/libav.rs" 2>/dev/null \
   || { echo "${tag} links the decoders rather than loading them: there are no libraries to add to its image" >&2; exit 1; }
 
+# The software decoder the tag pins, read from its source: the gateway refuses any
+# other archive.
+pin="$(git show "${commit}:src/hevc_wasm.rs" 2>/dev/null)" \
+  || { echo "${tag} pins no software HEVC decoder (no src/hevc_wasm.rs)" >&2; exit 1; }
+wasm_version="$(sed -n 's/^pub const VERSION: &str = "\(.*\)";$/\1/p' <<<"$pin")"
+wasm_sha256="$(sed -n 's/^const SHA256: &str = "\([0-9a-f]\{64\}\)";$/\1/p' <<<"$pin")"
+[ -n "$wasm_version" ] && [ -n "$wasm_sha256" ] \
+  || { echo "could not read the pinned version and SHA-256 from ${tag}'s src/hevc_wasm.rs" >&2; exit 1; }
+wasm_archive="hevc-wasm-v${wasm_version}.tar.gz"
+
 # Before the build rather than after it.
 podman login --get-login "$registry" >/dev/null 2>&1 \
   || { echo "not logged in to ${registry}: podman login ${registry}" >&2; exit 1; }
@@ -59,13 +82,22 @@ reported="$(podman run --rm --platform linux/amd64 "$public" --version)"
 
 layer="$(mktemp -d)"
 trap 'rm -rf "$layer"' EXIT
+
+echo ">> downloading ${wasm_archive}"
+gh release download "v${wasm_version}" --repo andrewtheguy/hevc-wasm-archives \
+  --pattern "$wasm_archive" --dir "$layer"
+echo "${wasm_sha256}  ${layer}/${wasm_archive}" | sha256sum --check --quiet \
+  || { echo "${wasm_archive} is not the release ${tag} pins (SHA-256 ${wasm_sha256})" >&2; exit 1; }
+
 cat >"$layer/Containerfile" <<'CONTAINERFILE'
 ARG BASE
 FROM ${BASE}
+ARG WASM_ARCHIVE
 RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends libavcodec61 libfdk-aac2t64 \
     && rm -rf /var/lib/apt/lists/*
+COPY ${WASM_ARCHIVE} /opt/remotex/share/hevc-wasm/${WASM_ARCHIVE}
 CONTAINERFILE
 
 echo ">> building ${image}:${tag}"
@@ -73,6 +105,7 @@ podman build \
   --platform linux/amd64 \
   -f "$layer/Containerfile" \
   --build-arg "BASE=${public}" \
+  --build-arg "WASM_ARCHIVE=${wasm_archive}" \
   --label "org.opencontainers.image.revision=${commit}" \
   -t "${image}:${tag}" \
   "$layer"
@@ -111,3 +144,4 @@ access="$(anonymous_access)"
   || { echo "${image} is not confirmed private after the push (${access}): anyone may pull ${tag}. Make the package private" >&2; exit 1; }
 
 echo ">> pushed ${image}:${tag} (${commit}); anonymous pull refused"
+echo ">> its software HEVC decoder: archive = \"/opt/remotex/share/hevc-wasm/${wasm_archive}\""

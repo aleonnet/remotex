@@ -84,7 +84,7 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `REMOTEX_CONTAINER_FEATURES` |
-| `publish-full-image.sh` | add Debian's libavcodec and fdk-aac to a release's public linux/amd64 image and push the result to the private `ghcr.io/andrewtheguy/remotex-full` |
+| `publish-full-image.sh` | add Debian's libavcodec and fdk-aac, and the pinned software HEVC decoder's archive, to a release's public linux/amd64 image and push the result to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 
@@ -175,7 +175,8 @@ instead, and is in no release artifact. No artifact holds the EXPERIMENTAL
 software HEVC decoder either, libavcodec in WebAssembly for the page: an operator
 downloads the release that `src/hevc_wasm.rs` pins by version and SHA-256 from
 the private `andrewtheguy/hevc-wasm-archives` through `gh` and names it in
-`[hevc_wasm]`, and every build serves it.
+`[hevc_wasm]`, and every build serves it. The private image
+`publish-full-image.sh` builds carries it at `/opt/remotex/share/hevc-wasm/`.
 `libavcodec-hevc-prebuilt` links FFmpeg's libavcodec and libavutil, configured
 down to the HEVC decoder and parser, and on macOS its VideoToolbox hwaccel, which
 links Apple's VideoToolbox, CoreMedia, CoreVideo and CoreFoundation frameworks;
