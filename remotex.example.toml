@@ -89,11 +89,18 @@
 #   gh release download v0.0.1 --repo andrewtheguy/hevc-wasm-archives \
 #     --pattern hevc-wasm-v0.0.1.tar.gz
 #
-# into the state directory (as for [meter] above), as it is — the gateway reads
-# the archive itself, at start-up, and refuses to start unless it is exactly that
-# release. archive names another file; a relative path is taken from
-# the state directory. With the decoder, every page is served cross-origin
-# isolated, which its threads need.
+# as it is, into share/remotex in the gateway's release tree, beside the
+# share/doc/remotex that holds this file: /usr/share/remotex for the .deb and
+# .rpm, /usr/local/share/remotex for the macOS .pkg, share\remotex under the
+# .msi's install directory (C:\Program Files\remotex\share\remotex), an
+# unpacked tarball's own, and /opt/remotex/current/share/remotex in the
+# container image. It belongs to the binary, not to the state directory: it is
+# pinned to this version, so an upgrade that pins another release wants that one
+# beside it. A gateway run from a Cargo build looks in its config's directory.
+# The gateway reads the archive itself, at start-up, and refuses to start unless
+# it is exactly that release. archive names another file; a relative path is
+# taken from that same directory. With the decoder, every page is served
+# cross-origin isolated, which its threads need.
 #
 #[hevc_wasm]
 #enabled = true

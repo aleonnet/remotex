@@ -183,7 +183,12 @@ pub async fn serve(instance: &Instance, claim: Claim) -> anyhow::Result<()> {
     let file = instance.load()?;
     let token = EmbeddedToken::generate();
     let endpoint = transport::endpoint(&instance.dir);
-    let config = file.resolve_embedded(token.clone(), transport::listen_addr(&endpoint), &instance.dir)?;
+    let config = file.resolve_embedded(
+        token.clone(),
+        transport::listen_addr(&endpoint),
+        &instance.dir,
+        &crate::config::data_dir(&instance.dir),
+    )?;
 
     // Before the handshake too, so a throughput database the gateway cannot use is a refused
     // start the launcher reports rather than a gateway that silently records nothing.
@@ -292,10 +297,11 @@ pub fn check(text: &str) -> anyhow::Result<()> {
     // Parsing alone would accept a file the gateway then refuses to start on, so
     // the check goes all the way through resolution. The endpoint is the worker's
     // to place and is not in the file, so any one is sufficient here, and so is
-    // any instance directory: nothing is opened in it.
+    // any instance or data directory: nothing is opened in either.
     file.resolve_embedded(
         EmbeddedToken::generate(),
         transport::listen_addr(&transport::endpoint(Path::new(""))),
+        Path::new(""),
         Path::new(""),
     )
         .map(|_| ())
@@ -368,6 +374,7 @@ mod tests {
             .resolve_embedded(
                 EmbeddedToken::generate(),
                 transport::listen_addr(&transport::endpoint(Path::new("/i"))),
+                Path::new("/i"),
                 Path::new("/i"),
             )
             .unwrap();

@@ -404,7 +404,11 @@ Three controls with similar names therefore remain separate:
   at `/hevc/`, and every file with COOP `same-origin` and COEP `require-corp`, which
   make the page cross-origin isolated for the threads' shared memory
   (`src/assets.rs`). No build holds the decoder: the operator downloads the
-  release archive from the private `andrewtheguy/hevc-wasm-archives`, and the
+  release archive from the private `andrewtheguy/hevc-wasm-archives` into
+  `share/remotex` in the gateway's release tree, beside `share/doc/remotex`,
+  where `[hevc_wasm]` looks unless it names another file (`config::data_dir`):
+  the archive is pinned to the binary's version, so it is kept with the binary
+  rather than in the state directory, which outlives versions. The
   gateway reads it once at start-up and refuses to start unless it is the release `src/hevc_wasm.rs` pins by SHA-256, since the page's
   worker calls that build's exports. Where the browser's
   `VideoDecoder` refuses the picture, the page, if isolated, asks the gateway for
