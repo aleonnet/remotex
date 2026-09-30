@@ -41,7 +41,7 @@
 //! `ard-high-performance` can resize its virtual display, as can `ard` on the
 //! unofficial `virtual_display` key, which asks for one with the same messages.
 //! `ard-high-performance` takes its picture and sound from the media stream alone
-//! ([`crate::vnc_apple_media`]); ZRLE is kept in step but never shown, and the
+//! ([`crate::vnc_apple_media`]); its ZRLE is stepped over undecoded, and the
 //! browser stays covered until the stream delivers. `ard` keeps its picture on
 //! ZRLE and carries no sound, on either kind of display.
 //! Every Apple subtype uses Apple's native pasteboard protocol, enabling

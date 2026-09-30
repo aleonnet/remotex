@@ -219,7 +219,7 @@ message, or add a key that selects it. See
   `apple-hp-media-static` feature
   links static archives instead. A gateway whose host lacks either ends the
   session of a browser that cannot decode the stream before it dials the Mac.
-  ZRLE is decoded only to keep its deflate stream in step and is never shown; the
+  ZRLE is stepped over by its length, never inflated or shown; the
   browser remains covered until the media stream sends the display's first picture.
   A stream that fails ends the session: do not add a subtype
   without the stream or a fallback to zlib, combinations Apple's viewer never
