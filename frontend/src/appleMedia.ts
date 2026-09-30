@@ -60,7 +60,11 @@ const ELD_CONFIG = Uint8Array.of(0xf8, 0xe6, 0x50, 0x00);
 const ELD_UNIT =
   "if////wdb7QoEQX5+fPnj64ZercOrmZxlTXLPDnPQjO35Hiu7IH2xLp/sEn0L1kRq36BpEhJqdBEZM6DJHKTXVI365CnaJYPFk4l8jSwxA6CS5OQ1EZkuzIRKTMJvjkbMshPhkiyicnFkaWdoRpJ9cmq2RhYuxDEgUSYbxHJ5m7K1pYbBcQR0eWrDBEhVMh4cjpcSRrkJDiSbbI3rBFo/21Q1yNuZYoO0smxyMtsuhr4ie+RwsuzT7UIpvEb0miQPBEc0jOZ8y4SIoxGMfkmGkRQyMYnYMgkSRyMg/dOIkRxiMY36XukiuuRqv/O/MkV1SNRujcukQOItBiuac6tItBpHNOdW49ZiOK51Zj1eI4rnVePV4jiuTVYCrEcJuklikp2K3SOxR07FbpHYo6dhtuisUdOw3feFak77wrUnfeFak77wrUnMeFak5jwrUnMeFak5jtrUm5xWTXOKyaxxWTWOKyaTNZNJmsmkzWTSZrJs8OeHPDnhkQ95AA=";
 
-/** How long one decode attempt may take to answer before it counts as a no. */
+/**
+ * How long one decode attempt, or the gateway asked for the software decoder, may
+ * take to answer before it counts as a no: the page mounts only once every answer is
+ * in.
+ */
 let attemptTimeoutMs = 2000;
 
 /**
@@ -167,7 +171,10 @@ async function decodesPictureInSoftware(): Promise<boolean> {
       codedHeight: 2,
       timestamp: 0,
     }).close();
-    const served = await fetch(hevcDecoderUrl("hevc.wasm"), { method: "HEAD" });
+    const served = await fetch(hevcDecoderUrl("hevc.wasm"), {
+      method: "HEAD",
+      signal: AbortSignal.timeout(attemptTimeoutMs),
+    });
     return served.ok;
   } catch {
     return false;

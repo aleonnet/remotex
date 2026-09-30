@@ -224,7 +224,7 @@ test("the question is asked once, and the answer is not available before it", as
 function softwareDecoderPage(
   isolated: boolean,
   search = "",
-  served = true,
+  served: boolean | "never" = true,
 ): () => void {
   const scope = globalThis as unknown as Record<string, unknown>;
   const saved = ["crossOriginIsolated", "VideoFrame", "location", "fetch"].map(
@@ -238,6 +238,12 @@ function softwareDecoderPage(
   scope.fetch = async (url: string, init?: RequestInit) => {
     assert.equal(url, "/hevc/hevc.wasm");
     assert.equal(init?.method, "HEAD");
+    if (served === "never") {
+      const signal = init?.signal;
+      return new Promise((_, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason));
+      });
+    }
     return { ok: served };
   };
   scope.VideoFrame = class {
@@ -294,6 +300,17 @@ test("an isolated page whose gateway serves no decoder has no software decoder",
   const undo = softwareDecoderPage(true, "", false);
   try {
     browser(no, () => "sound");
+    assert.equal(await chooseAppleMedia(), false);
+    assert.equal(appleHevcDecoder(), null);
+  } finally {
+    undo();
+  }
+});
+
+test("a gateway that never answers for the decoder is read as serving none", async () => {
+  const undo = softwareDecoderPage(true, "", "never");
+  try {
+    browser(no, () => "sound", 20);
     assert.equal(await chooseAppleMedia(), false);
     assert.equal(appleHevcDecoder(), null);
   } finally {
