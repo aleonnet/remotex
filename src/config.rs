@@ -1188,8 +1188,25 @@ pub struct ConfigFile {
     /// Top-level for [`Self::branding`]'s reason — an embedded config may set it too.
     #[serde(default)]
     pub meter: Option<MeterSection>,
+    /// The `[hevc_wasm]` table: EXPERIMENTAL, the page's software HEVC decoder.
+    /// Top-level for [`Self::branding`]'s reason.
+    #[serde(default)]
+    pub hevc_wasm: Option<HevcWasmSection>,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
+}
+
+/// The `[hevc_wasm]` table as written. See [`crate::hevc_wasm`].
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct HevcWasmSection {
+    /// Whether the decoder is served. Required, for [`MeterSection::enabled`]'s
+    /// reason.
+    pub enabled: bool,
+    /// The release archive, as downloaded. Absent is its release name in the
+    /// gateway's state directory, and a relative path is taken from that directory
+    /// too.
+    pub archive: Option<PathBuf>,
 }
 
 /// The `[meter]` table as written. See [`crate::throughput`].
@@ -1245,6 +1262,9 @@ pub struct AppConfig {
     pub dev_hostname: Option<String>,
     /// `[meter]`, resolved. `None` records nothing.
     pub meter: Option<MeterConfig>,
+    /// `[hevc_wasm]`, resolved: the decoder's release archive, which the gateway
+    /// reads at start-up. `None` serves no decoder.
+    pub hevc_wasm: Option<PathBuf>,
 }
 
 impl ConfigFile {
@@ -1335,6 +1355,14 @@ impl ConfigFile {
                  meter.sqlite3 in the gateway's state directory"
             );
             anyhow::ensure!(meter.max_records >= 1, "[meter].max_records must be at least 1");
+        }
+        if let Some(hevc_wasm) = &config.hevc_wasm {
+            anyhow::ensure!(
+                hevc_wasm.archive.as_ref().is_none_or(|archive| !archive.as_os_str().is_empty()),
+                "[hevc_wasm].archive is empty — name the release archive, or leave the key \
+                 out for {} in the gateway's state directory",
+                crate::hevc_wasm::archive_name()
+            );
         }
         for target in &config.targets {
             anyhow::ensure!(
@@ -1638,6 +1666,18 @@ impl ConfigFile {
             branding,
             dev_hostname: None,
             meter: Self::resolve_meter(self.meter, state_dir),
+            hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, state_dir),
+        })
+    }
+
+    /// The `[hevc_wasm]` table resolved, its archive placed in `state_dir`. `None`
+    /// unless the table says `enabled = true`. Only a path: the archive is read and
+    /// checked when the gateway starts ([`crate::hevc_wasm::HevcDecoder::load`]), as
+    /// `[meter]`'s database is opened then.
+    fn resolve_hevc_wasm(section: Option<HevcWasmSection>, state_dir: &Path) -> Option<PathBuf> {
+        section.filter(|section| section.enabled).map(|section| {
+            // `join` keeps an absolute path as written.
+            state_dir.join(section.archive.unwrap_or_else(|| crate::hevc_wasm::archive_name().into()))
         })
     }
 
@@ -1728,6 +1768,7 @@ impl ConfigFile {
                 .transpose()
                 .context("invalid [server].dev_subdomain")?,
             meter: Self::resolve_meter(self.meter, state_dir),
+            hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, state_dir),
         })
     }
 }
@@ -2382,6 +2423,41 @@ mod tests {
             .is_err(),
             "the meter's second is not the file's to set"
         );
+    }
+
+    /// No decoder until `enabled = true`; an enabled table finds the release archive
+    /// by its release name in the state directory unless it names another. Resolving
+    /// reads nothing: the gateway reads the archive when it starts.
+    #[test]
+    fn the_hevc_decoder_is_looked_for_in_the_state_directory() {
+        let state = Path::new("/var/lib/remotex");
+        let archive = |table: &str| {
+            let toml = format!("{table}\n{}", minimal());
+            ConfigFile::parse(&toml).unwrap().resolve_with(None, state).unwrap().hevc_wasm
+        };
+        assert_eq!(archive(""), None, "no [hevc_wasm] serves no decoder");
+        assert_eq!(archive("[hevc_wasm]\nenabled = false\narchive = \"kept.tar.gz\""), None);
+        assert_eq!(
+            archive("[hevc_wasm]\nenabled = true"),
+            Some(state.join(crate::hevc_wasm::archive_name()))
+        );
+        assert_eq!(
+            archive("[hevc_wasm]\nenabled = true\narchive = \"decoders/hevc.tar.gz\""),
+            Some(PathBuf::from("/var/lib/remotex/decoders/hevc.tar.gz"))
+        );
+        assert_eq!(
+            archive("[hevc_wasm]\nenabled = true\narchive = \"/opt/hevc.tar.gz\""),
+            Some(PathBuf::from("/opt/hevc.tar.gz"))
+        );
+        for (bad, says) in [
+            ("archive = \"h.tar.gz\"", "enabled"),
+            ("enabled = true\narchive = \"\"", "[hevc_wasm].archive"),
+            ("enabled = true\ndir = \"/opt/hevc\"", "dir"),
+        ] {
+            let err = ConfigFile::parse(&format!("[hevc_wasm]\n{bad}\n{}", minimal()))
+                .expect_err(bad);
+            assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
+        }
     }
 
     /// The keys are checked as written, enabled or not: a disabled table is still a

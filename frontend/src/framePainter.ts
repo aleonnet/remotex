@@ -79,6 +79,8 @@ export function createFramePainter(options: {
    * for a test, which has the module's bytes and nothing to fetch them from.
    */
   loadCompositor?: () => Promise<EgfxFactory>;
+  /** EXPERIMENTAL: decode passed HEVC in software (see `createDesktopVideo`). */
+  softwareHevc?: boolean;
 }): FramePainter {
   // Which attachment the decoder belongs to. `clear()` is the attachment boundary and
   // is not queued behind draws — an eviction closes the socket from under whatever
@@ -161,10 +163,14 @@ export function createFramePainter(options: {
     }
     // Rebuilding a failed decoder is not this client's decision: the stream begins
     // again when the gateway sends a keyframe, which a repaint or a resize does.
-    video = createDesktopVideo({
-      onError: complainAboutVideo,
-      onNeedsKeyframe: (reason) => options.onVideoNeedsKeyframe(reason),
-    });
+    video = createDesktopVideo(
+      {
+        onError: complainAboutVideo,
+        onNeedsKeyframe: (reason) => options.onVideoNeedsKeyframe(reason),
+      },
+      undefined,
+      options.softwareHevc,
+    );
     videoComplained = false;
     options.onVideoError(null);
     return video;

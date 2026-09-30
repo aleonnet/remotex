@@ -49,8 +49,12 @@ documentation.
   build and the platform-independent release artifact use `frontend/dist`; a
   Cargo build either produces the same bundle in its private output or stages
   that artifact there. Do not add a web root, a `static_dir`, or any run-time path
-  the SPA is read from. Every URL the page uses goes through
-  `frontend/src/gateway.ts`.
+  the SPA is read from. The one file read at run time is the EXPERIMENTAL
+  software HEVC decoder's release archive, which `[hevc_wasm]` names so that no
+  build or release artifact holds it: read once at start-up, refused unless it is
+  the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at
+  `/hevc/`. Do not widen it to another file, an unpinned archive, or a directory.
+  Every URL the page uses goes through `frontend/src/gateway.ts`.
 - The page requires a secure context plus `VideoDecoder` and `AudioDecoder` and
   refuses startup in `frontend/src/preflight.ts` when they are absent. Do not add
   fallback browser paths.

@@ -192,6 +192,13 @@ pub async fn serve(instance: &Instance, claim: Claim) -> anyhow::Result<()> {
         config.targets.iter().map(|target| target.name.clone()).collect(),
     )
         .context("cannot record websocket throughput ([meter].database)")?;
+    // Before the handshake for the same reason: an archive it cannot serve is a
+    // refused start.
+    let hevc_decoder = config
+        .hevc_wasm
+        .as_deref()
+        .map(crate::hevc_wasm::HevcDecoder::load)
+        .transpose()?;
 
     // Removes a Unix socket file when it is dropped, whichever way this returns.
     let listener = transport::WorkerListener::bind(&endpoint, &claim)?;
@@ -219,7 +226,7 @@ pub async fn serve(instance: &Instance, claim: Claim) -> anyhow::Result<()> {
         );
     }
 
-    let app = crate::server::router(config, throughput);
+    let app = crate::server::router(config, throughput, hevc_decoder);
     axum::serve(listener, app)
         .await
         .context("server error")?;

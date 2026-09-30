@@ -6,12 +6,12 @@ import type { VideoChroma } from "./videoChroma.ts";
 /// construction here gives fetches, WebSockets, and assets one spelling of that
 /// origin.
 ///
-/// The document's own origin, or an empty string where there is no document.
+/// The document's own origin — in one of the page's workers, the origin its script
+/// was served from, which is the same one — or an empty string outside a browser.
 ///
 /// Guarded because this module is imported by tests that run outside a browser,
 /// and one that throws on the way in cannot be tested at all.
-const DOCUMENT_ORIGIN =
-  typeof window === "undefined" ? "" : window.location.origin;
+const DOCUMENT_ORIGIN = globalThis.location?.origin ?? "";
 
 /// The gateway's origin, with no trailing slash.
 export const GATEWAY_ORIGIN = DOCUMENT_ORIGIN.replace(/\/$/, "");
@@ -65,4 +65,12 @@ export function gatewaySocketUrl(
     url.searchParams.set("apple_media", String(client.appleMedia));
   }
   return url.toString();
+}
+
+/// The software HEVC decoder's files, `hevc.js` and `hevc.wasm`: a release of
+/// andrewtheguy/hevc-wasm the gateway serves beside the bundle when configured with
+/// `[hevc_wasm]`, as they were built, because the module starts its slice
+/// threads as workers of its own script, found by its own URL.
+export function hevcDecoderUrl(file: "hevc.js" | "hevc.wasm"): string {
+  return gatewayUrl(`/hevc/${file}`);
 }

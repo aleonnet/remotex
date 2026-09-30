@@ -398,6 +398,25 @@ Three controls with similar names therefore remain separate:
   missing from the device's list), so the "no" was right.
   A browser that decodes the sound but not the picture, as that one did, loses
   nothing by being sent both re-encoded.
+- **EXPERIMENTAL: the picture in software.** A gateway configured with
+  `[hevc_wasm]` serves [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm),
+  libavcodec's HEVC decoder compiled to WebAssembly with SIMD128 and slice threads,
+  at `/hevc/`, and every file with COOP `same-origin` and COEP `require-corp`, which
+  make the page cross-origin isolated for the threads' shared memory
+  (`src/assets.rs`). No build holds the decoder: the operator downloads the
+  release archive, and the gateway reads it once at start-up and refuses to start
+  unless it is the release `src/hevc_wasm.rs` pins by SHA-256, since the page's
+  worker calls that build's exports. Where the browser's
+  `VideoDecoder` refuses the picture, the page, if isolated, asks the gateway for
+  the decoder and, served it and running shared-memory SIMD WebAssembly, decodes
+  the picture with it in a worker of its own. That browser answers yes when its
+  `AudioDecoder` decodes the sound, so Chrome on a GPU without HEVC Range
+  Extensions is passed the whole stream: its own decoder for the sound, the page's
+  for the picture. The software decoder is shaped as a `VideoDecoder`, so the paint
+  worker's stream runs it as it runs the browser's (`frontend/src/videoDecoder.ts`).
+  `?hevc_decoder=software` in the page's URL takes it even where the browser's own
+  would do. Measured against macvm at 2880×1800 on an M2 Max, a picture took 9 ms
+  across eight threads, 44 on one.
   `render_plan` sets `apple_media` for a target with the key and a browser that said
   yes; any other browser is sent VP9 and Opus exactly as without the key. The plan
   is fixed for an engine, and a takeover by a browser that answers otherwise

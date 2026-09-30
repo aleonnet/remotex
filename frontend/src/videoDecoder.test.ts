@@ -10,7 +10,11 @@
 // Run with `bun test src/videoDecoder.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import { createDesktopVideo } from "./videoDecoder.ts";
+import type {
+  VideoDecoderLike,
+  VideoDecoderLikeInit,
+} from "./hevcWasmDecoder.ts";
+import { createDesktopVideo, createVideoStream } from "./videoDecoder.ts";
 
 /** A frame the fake decoder emitted, so a test can see it was handed over and closed. */
 interface FakeFrame {
@@ -172,6 +176,36 @@ test("the stalled stream waits for its keyframe rather than erroring per frame",
   fresh.emit(0xb2);
   assert.equal(tagOf(await frame), 0xb2);
   assert.equal(s.stalls.length, 1, "one stall, asked about once");
+});
+
+test("a unit that completes no picture settles to null, and the next picture is its own unit's", async () => {
+  // The software HEVC decoder answers every unit, a none included.
+  let init: VideoDecoderLikeInit | undefined;
+  const stalls: string[] = [];
+  const stream = createVideoStream(
+    { decode: "hev1.4.10.L150.BE.8" },
+    {
+      onError: () => assert.fail("no error"),
+      onNeedsKeyframe: (r) => stalls.push(r),
+    },
+    STALL_MS,
+    (given) => {
+      init = given;
+      return new FakeDecoder(given as never) as unknown as VideoDecoderLike;
+    },
+  );
+  const first = stream.decode(unit(1), 0, true);
+  const second = stream.decode(unit(2), 1, false);
+  init?.noPicture?.();
+  assert.equal(await first, null);
+  built[0].emit(0xc3);
+  assert.equal(
+    tagOf(await second),
+    0xc3,
+    "the picture landed on the wrong unit",
+  );
+  await afterStall();
+  assert.deepEqual(stalls, [], "a none is an answer, not a stall");
 });
 
 test("closing settles what the decoder owes", async () => {

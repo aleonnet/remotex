@@ -24,6 +24,7 @@ const globals = globalThis as unknown as {
 
 const {
   appleEldConfig,
+  appleHevcDecoder,
   chooseAppleMedia,
   decodesAppleMedia,
   esDescriptor,
@@ -213,4 +214,129 @@ test("the question is asked once, and the answer is not available before it", as
   await chooseAppleMedia();
   assert.equal(asked.probes.length, 1);
   assert.equal(asked.tried.length, 1);
+});
+
+/**
+ * EXPERIMENTAL: a page that can run the software HEVC decoder — cross-origin
+ * isolated, and building an I444 `VideoFrame` — or, with `isolated` false, one that
+ * cannot. Returns the undo.
+ */
+function softwareDecoderPage(
+  isolated: boolean,
+  search = "",
+  served: boolean | "never" = true,
+): () => void {
+  const scope = globalThis as unknown as Record<string, unknown>;
+  const saved = ["crossOriginIsolated", "VideoFrame", "location", "fetch"].map(
+    (key) => [key, Object.getOwnPropertyDescriptor(scope, key)] as const,
+  );
+  Object.defineProperty(scope, "crossOriginIsolated", {
+    value: isolated,
+    configurable: true,
+  });
+  // The gateway, asked for the decoder: configured with `[hevc_wasm]` or not.
+  scope.fetch = async (url: string, init?: RequestInit) => {
+    assert.equal(url, "/hevc/hevc.wasm");
+    assert.equal(init?.method, "HEAD");
+    if (served === "never") {
+      const signal = init?.signal;
+      return new Promise((_, reject) => {
+        signal?.addEventListener("abort", () => reject(signal.reason));
+      });
+    }
+    return { ok: served };
+  };
+  scope.VideoFrame = class {
+    close() {}
+  };
+  Object.defineProperty(scope, "location", {
+    value: { search },
+    configurable: true,
+  });
+  return () => {
+    for (const [key, descriptor] of saved) {
+      if (descriptor) {
+        Object.defineProperty(scope, key, descriptor);
+      } else {
+        delete scope[key];
+      }
+    }
+  };
+}
+
+const no = async () => ({ supported: false });
+
+test("a picture the browser's decoder refuses is decoded in software on an isolated page", async () => {
+  const undo = softwareDecoderPage(true);
+  try {
+    browser(no, () => "sound");
+    assert.equal(await chooseAppleMedia(), true);
+    assert.equal(appleHevcDecoder(), "software");
+
+    browser(yes, () => "sound");
+    assert.equal(await chooseAppleMedia(), true);
+    assert.equal(appleHevcDecoder(), "native", "the browser's own comes first");
+
+    browser(no, () => "error");
+    assert.equal(await chooseAppleMedia(), false);
+    assert.equal(appleHevcDecoder(), null, "no sound, so nothing is passed");
+  } finally {
+    undo();
+  }
+});
+
+test("a page that is not cross-origin isolated has no software decoder", async () => {
+  const undo = softwareDecoderPage(false);
+  try {
+    browser(no, () => "sound");
+    assert.equal(await chooseAppleMedia(), false);
+    assert.equal(appleHevcDecoder(), null);
+  } finally {
+    undo();
+  }
+});
+
+test("an isolated page whose gateway serves no decoder has no software decoder", async () => {
+  const undo = softwareDecoderPage(true, "", false);
+  try {
+    browser(no, () => "sound");
+    assert.equal(await chooseAppleMedia(), false);
+    assert.equal(appleHevcDecoder(), null);
+  } finally {
+    undo();
+  }
+});
+
+test("a gateway that never answers for the decoder is read as serving none", async () => {
+  const undo = softwareDecoderPage(true, "", "never");
+  try {
+    browser(no, () => "sound", 20);
+    assert.equal(await chooseAppleMedia(), false);
+    assert.equal(appleHevcDecoder(), null);
+  } finally {
+    undo();
+  }
+});
+
+test("?hevc_decoder=software takes the software decoder without asking the browser's", async () => {
+  const undo = softwareDecoderPage(true, "?hevc_decoder=software");
+  try {
+    const asked = browser(yes, () => "sound");
+    assert.equal(await chooseAppleMedia(), true);
+    assert.equal(appleHevcDecoder(), "software");
+    assert.deepEqual(asked.probes, []);
+  } finally {
+    undo();
+  }
+  const refused = softwareDecoderPage(false, "?hevc_decoder=software");
+  try {
+    browser(yes, () => "sound");
+    assert.equal(
+      await chooseAppleMedia(),
+      false,
+      "asked for software where it cannot run: VP9 and Opus, not the browser's own",
+    );
+  } finally {
+    refused();
+  }
 });

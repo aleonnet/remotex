@@ -17,6 +17,7 @@
 // handlers, and only a *new* canvas element (a full remount) replaces the
 // worker — at which point the old one holds the bitmap of an element that is
 // gone, and is terminated rather than left decoding for it.
+import { appleHevcDecoder } from "./appleMedia.ts";
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { batchFrameSequence } from "./protocol.ts";
@@ -121,7 +122,14 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
   const post = (command: PainterCommand, transfer: Transferable[] = []) =>
     worker.postMessage(command, transfer);
   const offscreen = canvas.transferControlToOffscreen();
-  post({ type: "init", canvas: offscreen }, [offscreen]);
+  post(
+    {
+      type: "init",
+      canvas: offscreen,
+      softwareHevc: appleHevcDecoder() === "software",
+    },
+    [offscreen],
+  );
   const painter: DesktopPainter = {
     bind(next) {
       handlers = next;

@@ -177,12 +177,14 @@ export async function logInAndConnect(page: Page): Promise<void> {
 // what a spec about a particular target cannot have: reattaching to whatever was
 // left running would assert against the wrong dial and read as a product failure.
 // So a session found on a desktop is handed back to the picker first, and the
-// target is then chosen by name.
+// target is then chosen by name. `search` is the page's query at load, for a spec
+// about something the page decides from its URL.
 export async function logInAndConnectTo(
   page: Page,
   target: string,
+  search = "",
 ): Promise<void> {
-  await landOn(page, target, false);
+  await landOn(page, target, false, search);
 }
 
 // Both of the above, differing only in what they do about a session that is already
@@ -193,8 +195,9 @@ async function landOn(
   page: Page,
   target: string,
   keepRunningSession: boolean,
+  search = "",
 ): Promise<void> {
-  await logIn(page);
+  await logIn(page, search);
   const onPicker = await page
     .getByRole("heading", { name: "Pick a target" })
     .isVisible();
@@ -216,8 +219,8 @@ async function landOn(
 }
 
 // The login itself, which ends on whichever of the two landings this run gets.
-async function logIn(page: Page): Promise<void> {
-  await page.goto(BASE_URL);
+async function logIn(page: Page, search = ""): Promise<void> {
+  await page.goto(new URL(search, BASE_URL).toString());
   await expect(page.getByText(/^v\d+\.\d+\.\d+$/)).toBeVisible();
   await page
     .getByLabel("Username")
