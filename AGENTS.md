@@ -32,15 +32,8 @@ documentation.
 
 ## Product boundaries
 
-- There is one client: the browser SPA, whether in a browser, installed as a
-  Chrome or Edge app, or shown by `remotex-viewer`, a repository of its own
-  (`../remotex-viewer`). The viewer is a shell around the unchanged page: it
-  delivers web platform APIs the page already uses — full screen, key events,
-  `navigator.clipboard`, `window.resizeTo`, and on Windows HEVC decoding —
-  natively. It never implements a page feature, and the page carries no code for
-  it: its one trace here is the interop protocol version `frontend/index.html`
-  states. A change to what that version describes bumps it and describes the new
-  version in [remotex-viewer](docs/viewer.md); the viewer then speaks it.
+- There is one client: the browser SPA, whether in a browser or installed as a
+  Chrome or Edge app.
 - There is one frontend build, compiled from Cargo's `OUT_DIR` into the gateway
   binary (`src/assets.rs`) and served from its origin root. It holds one
   WebAssembly module, built by the frontend's own build from the gateway's
