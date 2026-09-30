@@ -1,0 +1,37 @@
+name: Frontend bundle
+
+# The web client, built once: one bundle, platform-independent, holding the
+# WebAssembly module the frontend's own build makes from the gateway's graphics
+# crate (frontend/wasm/egfx) with the nightly toolchain that directory pins.
+# The release workflow calls this for the bundle every platform build stages
+# through REMOTEX_PREBUILT_FRONTEND, and a push that touches what the bundle is
+# built from builds it here on its own, so the module's toolchain and its build
+# are tried on a fresh runner before a release is.
+on:
+  workflow_call:
+  push:
+    paths:
+      - frontend/**
+      - crates/remotex-rdp-graphics/**
+      - .github/workflows/frontend-dist.yml
+
+jobs:
+  frontend:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: oven-sh/setup-bun@v2
+
+      - name: Install the WebAssembly module's toolchain
+        run: cd frontend/wasm/egfx && rustup toolchain install
+
+      - name: Build frontend
+        run: cd frontend && bun install --frozen-lockfile && bun run build
+
+      - name: Upload frontend bundle
+        uses: actions/upload-artifact@v4
+        with:
+          name: frontend-dist
+          path: frontend/dist
+          if-no-files-found: error
