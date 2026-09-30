@@ -1,5 +1,5 @@
-//! The one stream a session runs: the whole desktop, from the first pixel to the
-//! last, and the mirror behind it.
+//! The gateway's VP9 stream: the whole desktop, from the first pixel to the last,
+//! and the mirror behind it.
 //!
 //! The mirror is double-buffered so the engine's read loop never waits an encode
 //! out: a round takes the up-to-date mirror and the encoder to a blocking worker,

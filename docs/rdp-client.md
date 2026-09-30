@@ -71,8 +71,11 @@ noticed on the same keepalive schedule as every other engine's.
 
 `ConnectionType` is declared a LAN rather than probed, because a server's own
 estimate of the hop between it and a gateway beside it throttled updates badly,
-and no multitransport is offered. The auto-detect PDUs a Windows host sends anyway
-go unanswered, which it treats as a link it cannot measure.
+and no multitransport is offered. The client requests no MCS message channel and
+does not advertise network-characteristics detection, so a conforming host has no
+channel on which to send auto-detect PDUs. Whether a current Windows host sends
+any despite that remains a live-host question in
+[`rdp-spec-audit.md`](rdp-spec-audit.md#to-settle-against-a-host).
 
 ## The two threads
 

@@ -75,7 +75,7 @@ msiexec /i remotex-windows-x86_64.msi
 
 The package is unsigned, so SmartScreen asks before it runs. It opens the usual
 install wizard — folder, confirm, and a finish page once it is done — and
-installs the same tree the Unix packages do, under `%ProgramFiles%\remotex`, and puts `bin`
+installs the same tree the Unix packages do, by default under `%ProgramFiles%\remotex`, and puts `bin`
 on the machine `PATH`, so `remotex` works in a shell opened after the install:
 
 ```text
@@ -119,9 +119,10 @@ remotex gen-passwd admin
 ${EDITOR:-vi} /usr/local/etc/remotex/remotex.toml
 ```
 
-On Windows, from PowerShell 7 (`pwsh`) opened after the install, where only the account
+On Windows, from PowerShell 7 (`pwsh`) opened after the default-path install, where only the account
 that runs the gateway may read the directory — the config and the throughput database
-with its SQLite files inherit that:
+with its SQLite files inherit that. If the wizard selected another folder, use its
+`share\doc\remotex\remotex.example.toml` as the `Copy-Item` source instead:
 
 ```powershell
 New-Item -ItemType Directory -Force "$env:ProgramData\remotex" | Out-Null
@@ -194,9 +195,11 @@ sudo pkgutil --forget com.andrewtheguy.remotex.gateway
 
 On Windows, remove remotex from **Apps & features**.
 
-None of these touch the live config. Remove `/etc/remotex` on Linux,
-`/usr/local/etc/remotex` on macOS or `%ProgramData%\remotex` on Windows
-separately only when the credentials and configuration should be deleted too.
+None of these touch the live config or state. Remove `/etc/remotex` and
+`/var/lib/remotex` on Linux, `/usr/local/etc/remotex` and
+`/usr/local/var/remotex` on macOS, or `%ProgramData%\remotex` on Windows
+separately only when the credentials, configuration, and throughput history
+should be deleted too.
 
 ## Build release packages
 

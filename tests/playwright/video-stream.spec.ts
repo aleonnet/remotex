@@ -1,4 +1,4 @@
-// What a target puts on the session socket: the whole desktop as one VP9 stream, so
+// What a VP9 target puts on the session socket: the whole desktop as one stream, so
 // everything here is decidable without asking the browser anything: the gateway
 // announces `videoFormat` before the stream's first access unit. Nothing here
 // looks at a pixel; a VIDEO record is a header this file parses for itself.

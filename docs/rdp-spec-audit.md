@@ -53,9 +53,8 @@ clipboard.
   REMOTEX_UAT_TARGET=<rdp target> cargo test --test rdp_client_probe -- --ignored --nocapture --test-threads 1
   ```
 
-- **Whether auto-detect PDUs arrive at all.** `rdp-client.md` says "The auto-detect
-  PDUs a Windows host sends anyway go unanswered". The client requests no MCS
-  message channel (`proto/gcc.rs:20`) and does not set
+- **Whether auto-detect PDUs arrive at all.** The client requests no MCS message
+  channel (`proto/gcc.rs:20`) and does not set
   `RNS_UD_CS_SUPPORT_NETCHAR_AUTODETECT`, and MS-RDPBCGR 2.2.14.3 says those PDUs
   "MUST only be sent over the MCS message channel", so a conforming host has
   nowhere to send them. One arriving on the I/O channel would be parsed by
@@ -76,7 +75,7 @@ a non-conformance.
 - **Non-conformance:** `RNS_UD_CS_SUPPORT_DYNVC_GFX_PROTOCOL` set without
   network-detection support, where 2.2.1.3.2 says setting it "requires that the
   client support network characteristics detection". Implementation status:
-  auto-detect unanswered.
+  auto-detect unsupported and no MCS message channel requested.
 - The TLS certificate chain unverified; the handshake signature verified and the
   public key bound by CredSSP. MS-CSSP 3.1.5 step 1 requires no trusted root. On
   [the roadmap](roadmap.md#verifying-the-servers-certificate-chain).

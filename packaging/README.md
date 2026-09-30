@@ -30,8 +30,9 @@ The macOS package owns the corresponding local prefix:
 /usr/local/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
-The Windows package (`.msi`) owns the same tree under the 64-bit Program Files
-directory and puts its `bin` on the machine `PATH`:
+By default the Windows package (`.msi`) owns the same tree under the 64-bit Program
+Files directory and puts its `bin` on the machine `PATH`; its install wizard can
+select another directory:
 
 ```text
 C:\Program Files\remotex\bin\remotex.exe
@@ -96,9 +97,11 @@ bash packaging/build-tarball.sh
 bash packaging/build-native-packages.sh
 ```
 
-Both builds make the notices, so they need cargo-about and uv beside the frontend's
-`node_modules`. The frontend's build compiles a WebAssembly module from the
-gateway's graphics crate (`frontend/wasm/egfx` around
+The tarball build makes the notices unless `REMOTEX_PREBUILT_NOTICES` supplies
+them, so it needs cargo-about and uv beside the frontend's `node_modules`; the
+native-package build consumes those notices from the tarball. The frontend's
+build compiles a WebAssembly module from the gateway's graphics crate
+(`frontend/wasm/egfx` around
 `crates/remotex-rdp-graphics`, the page's compositor for `egfx_passthrough`), so wherever the frontend is built — `bun run build`, or a
 Cargo build without `REMOTEX_PREBUILT_FRONTEND` — the module is built by the nightly
 toolchain `frontend/wasm/egfx/rust-toolchain.toml` pins, which its threads need and
@@ -155,9 +158,9 @@ built archives.
 `ard-high-performance` targets decode the Mac's stream with two decoders whose
 licences keep them out of every artifact: FFmpeg's libavcodec
 (LGPL-2.1-or-later) for the HEVC picture and Fraunhofer's fdk-aac, whose licence
-is not OSI-approved and grants no patents, for the AAC-ELD sound. No build
-compiles or links either: the gateway loads the system's shared libraries when a
-session needs them (`src/libav.rs`, `src/aac_eld.rs`), and a host without them
+is not OSI-approved and grants no patents, for the AAC-ELD sound. Published release
+artifacts compile and link neither: the gateway loads the system's shared libraries
+when a session needs them (`src/libav.rs`, `src/aac_eld.rs`), and a host without them
 runs those targets only with `media_passthrough`, for browsers that decode the
 stream. The `.deb` recommends the Linux ones, the public container image carries
 neither and the private one `publish-full-image.sh` builds carries Debian's;

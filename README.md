@@ -176,15 +176,15 @@ Invoke-WebRequest https://github.com/andrewtheguy/remotex/releases/latest/downlo
 msiexec /i remotex-windows-x86_64.msi
 ```
 
-The MSI is unsigned, so SmartScreen asks first. It installs the gateway under
-`%ProgramFiles%\remotex`, puts `bin` on the machine `PATH`, and reads
+The MSI is unsigned, so SmartScreen asks first. By default it installs the gateway
+under `%ProgramFiles%\remotex`, puts `bin` on the machine `PATH`, and reads
 `%ProgramData%\remotex\remotex.toml`.
 
 Packages do not own the live config because it contains credentials. On Linux,
 create it for the account that will run the gateway:
 
 ```sh
-sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /etc/remotex
+sudo install -d -m 700 -o "$(id -un)" -g "$(id -gn)" /etc/remotex /var/lib/remotex
 sudo install -m 600 -o "$(id -un)" -g "$(id -gn)" \
   /usr/share/doc/remotex/remotex.example.toml /etc/remotex/remotex.toml
 remotex gen-passwd admin
@@ -193,8 +193,9 @@ ${EDITOR:-vi} /etc/remotex/remotex.toml
 
 On macOS, use `/usr/local/etc/remotex/remotex.toml` and the example under
 `/usr/local/share/doc/remotex/` instead; on Windows,
-`%ProgramData%\remotex\remotex.toml` and the example under
-`%ProgramFiles%\remotex\share\doc\remotex\`. Paste the generated `admin:$2b$...`
+`%ProgramData%\remotex\remotex.toml` and the example under the MSI's selected
+install directory (by default
+`%ProgramFiles%\remotex\share\doc\remotex\`). Paste the generated `admin:$2b$...`
 value into `[server].site_passwd`, replace the example `[[targets]]` entry, then
 start the server in the foreground:
 
@@ -251,7 +252,8 @@ with the same authentication error as incorrect credentials. See
 Apple Screen Sharing Standard mode (`ard`) lists the Mac's physical screens, can
 show one screen or all of them, reports each screen's pixel density, keeps pixels
 at full fidelity, and supports the native Apple pasteboard. Every Apple subtype
-asks the Mac for ZRLE rectangles from the start.
+asks the Mac for ZRLE rectangles from the start, although High Performance decodes
+them only to keep the deflate stream in step and never displays them.
 
 High Performance (`ard-high-performance`) takes the same credentials and the same
 encrypted protocol revision. It requests one virtual display at the
@@ -270,8 +272,9 @@ Retina sizes. The gateway authenticates and decrypts every packet, decodes both,
 target uses — or, with `media_passthrough = true` and a browser that decodes them
 (Chrome and Safari; not Firefox), sends the HEVC and the AAC-ELD on as the Mac sent
 them, for a LAN;
-ZRLE carries the picture only until the stream does, and a stream
-that fails ends the session, as it does in Apple's viewer. A playing
+the browser stays behind its resize notice until the stream sends its first picture,
+at connect and across display changes, and a stream that fails ends the session, as
+it does in Apple's viewer. A playing
 video does not delay the Mac's reading of the input, as RFB pixels' deflate does. The Mac refuses the picture without the sound, and
 mutes its own speakers while it streams, so the target always carries sound, and
 nothing reaches an AirPlay speaker the Mac plays to. It is **experimental**. Decoding
@@ -429,7 +432,8 @@ The main directories are:
 
 remotex reads one TOML file. Native packages default to
 `/etc/remotex/remotex.toml` on Linux and
-`/usr/local/etc/remotex/remotex.toml` on macOS, and the container to
+`/usr/local/etc/remotex/remotex.toml` on macOS, and
+`%ProgramData%\remotex\remotex.toml` on Windows; the container defaults to
 `/opt/remotex/etc/remotex.toml`; a checkout should pass `--config`.
 
 ```toml

@@ -4,8 +4,9 @@
 // Two things below the login are not optional and neither can be supplied by the
 // page itself. A **secure context**, because that is what `navigator.clipboard`,
 // `navigator.keyboard` and WebCodecs are all gated on. And the **WebCodecs
-// decoders**, because the desktop arrives as an encoded video stream and its sound
-// as encoded packets, and nothing here decodes either one itself — the gateway
+// decoders**, because every target may deliver its desktop as an encoded video
+// stream (even though an RDP graphics pipeline can be composed instead) and its
+// sound as encoded packets, and nothing here decodes either one itself — the gateway
 // names a configuration and the browser's decoder does the work (videoDecoder.ts,
 // audioPlayer.ts).
 //

@@ -3656,12 +3656,13 @@ async fn read_loop<R: AsyncRead + Unpin>(
                                 tokio::time::Instant::now() + APPLE_CLIPBOARD_IDLE_GAP,
                             );
                         } else {
-                            // A passed stream is owed no repaint by a resize: wlshare
+                            // A passed wlshare stream is owed no repaint by a resize: wlshare
                             // starts it again at the new size with a keyframe of the
                             // whole desktop, and a full request would only have it
                             // send a second one, which no shadow is there to skip.
-                            // The Mac's passed HEVC is owed one: ZRLE carries the
-                            // picture after a display change, as video encoded here.
+                            // Every other resized source gets the normal full request.
+                            // A media-only Mac's ZRLE reply is decoded to keep its
+                            // deflate stream in step but is never shown.
                             let full = resized && !(passthrough.is_some() && sink.passing());
                             send(uplink, &update_request(!full, size)).await?;
                         }
