@@ -106,15 +106,25 @@ documentation.
 
 ## Media paths
 
-- The gateway encodes video as VP9 only: one encoder to maintain, and it is
-  the `desktop-vp9` crate wlshare codes its own stream with, pinned by its release
-  tag in `Cargo.toml` — a libvpx setting, the conversion in front of it, the codec
-  string or the quality walk changes there, in the desktop-vp9 repository, and
-  reaches here as a pin bump. Do
-  not add a
-  second encoder (H.264, AV1 or any other), a codec probe, or a codec key that
-  selects one. A stream a remote codes itself may be passed to the browser
-  untouched where a rule below allows it; transcoded, it is only ever to VP9. The
+- A session's picture reaches the browser one of two ways, and both are the
+  gateway's ordinary work:
+  - **Encoded here**, as VP9, by the gateway's one video encoder: the
+    `desktop-vp9` crate wlshare codes its own stream with, pinned by its release
+    tag in `Cargo.toml` — a libvpx setting, the conversion in front of it, the
+    codec string or the quality walk changes there, in the desktop-vp9
+    repository, and reaches here as a pin bump.
+  - **Passed untouched**, as the remote made it, for the browser to decode or
+    compose. Today that is wlshare's own VP9 stream on a generic VNC target, a
+    High Performance Mac's HEVC under `media_passthrough`, and an RDP host's
+    graphics pipeline under `egfx_passthrough`, each with its own rule below.
+    Another remote's stream the user asks to pass joins them with a rule of its
+    own, and is not refused on this rule's account.
+
+  What the gateway keeps to is one encoder to maintain: whatever it transcodes
+  it transcodes to VP9, and a second encoder (H.264, AV1 or any other), a codec
+  probe, or a codec key that selects one is not added as a side effect of other
+  work.
+- The
   browser is asked two questions, each once at page load and stated on the session
   socket: which VP9 profile its decoder takes, for `render_chroma = "auto"`, and
   whether it decodes a High Performance Mac's HEVC and AAC-ELD, for
@@ -127,7 +137,7 @@ documentation.
   configuration and color-space behavior described in
   [The codec](docs/architecture.md#the-codec) and
   [Choosing a chroma](docs/architecture.md#choosing-a-chroma).
-- The one picture that is not video is PNG tiles: for a desktop past the video
+- The one picture that is neither encoded as VP9 nor passed untouched is PNG tiles: for a desktop past the video
   ceiling on a source that hands over its own rectangles, VNC without `resize`.
   Each is a rectangle exactly as the server sent it. Do not add a key that selects tiles, use them
   within the ceiling on any other session, cut, merge or cache rectangles in the
@@ -204,8 +214,11 @@ documentation.
   it; do not add a browser question for it. The page composes with the gateway's
   own compositor, `crates/remotex-rdp-graphics`, which the gateway's RDP client is
   built with and `frontend/wasm/egfx` binds to WebAssembly: keep that crate
-  building for `wasm32-unknown-unknown`, do not write a second decoder or
-  compositor for the page, and never alter a passed command. The host draws against what its client holds
+  building for `wasm32-unknown-unknown`, and never alter a passed command. The
+  one decoder and compositor is the gateway's rule: do not write a second one
+  there. The page is not held to it — it already carries a software HEVC decoder
+  of its own — and may decode, compose or present the pipeline its own way, on
+  the GPU for one, where that brings a measured gain. The host draws against what its client holds
   and answers a repaint out of its caches, so a reattach starts such a session
   over; do not resume one on a repaint. H.264 stays refused in the capability
   advertise, and a host that draws with bitmap updates is encoded here as VP9.
