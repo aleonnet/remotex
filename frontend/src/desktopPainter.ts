@@ -81,8 +81,15 @@ let current: {
   painter: DesktopPainter;
 } | null = null;
 
-/** The painter for the page's one desktop canvas, built on first ask. */
-export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
+/**
+ * The painter for the page's one desktop canvas, built on first ask. `graphics`
+ * is the canvas laid over it for an RDP host's graphics pipeline: the worker
+ * draws a pipeline's picture there, and says when it is to be shown.
+ */
+export function desktopPainterFor(
+  canvas: HTMLCanvasElement,
+  graphics: HTMLCanvasElement,
+): DesktopPainter {
   if (current?.canvas === canvas) {
     return current.painter;
   }
@@ -102,9 +109,21 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
   // besides. `painted` is the exception: the socket generation it echoes is
   // what prevents an old completion from acknowledging a new attachment.
   let handlers: PainterHandlers | null = null;
+  // How many `clear`s have been posted, which is the worker's epoch once it has
+  // taken them all. The pipeline's canvas is hidden where a clear is posted, not
+  // where the worker answers it, and a `graphicsShown` the worker said before it
+  // took that clear is for the attachment the clear ended.
+  let clears = 0;
+  const showGraphics = (shown: boolean) => {
+    graphics.style.display = shown ? "block" : "";
+  };
   worker.onmessage = (ev: MessageEvent<PainterEvent>) => {
     const event = ev.data;
-    if (event.type === "videoError") {
+    if (event.type === "graphicsShown") {
+      if (event.epoch === clears) {
+        showGraphics(event.shown);
+      }
+    } else if (event.type === "videoError") {
       handlers?.onVideoError(event.reason);
     } else if (event.type === "videoNeedsKeyframe") {
       handlers?.onVideoNeedsKeyframe(event.reason);
@@ -122,13 +141,15 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
   const post = (command: PainterCommand, transfer: Transferable[] = []) =>
     worker.postMessage(command, transfer);
   const offscreen = canvas.transferControlToOffscreen();
+  const offscreenGraphics = graphics.transferControlToOffscreen();
   post(
     {
       type: "init",
       canvas: offscreen,
+      graphics: offscreenGraphics,
       softwareHevc: appleHevcDecoder() === "software",
     },
-    [offscreen],
+    [offscreen, offscreenGraphics],
   );
   const painter: DesktopPainter = {
     bind(next) {
@@ -157,6 +178,8 @@ export function desktopPainterFor(canvas: HTMLCanvasElement): DesktopPainter {
       post({ type: "graphicsStart" });
     },
     clear() {
+      clears += 1;
+      showGraphics(false);
       post({ type: "clear" });
     },
   };

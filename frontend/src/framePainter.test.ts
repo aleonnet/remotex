@@ -158,6 +158,8 @@ const globals = globalThis as unknown as {
 beforeEach(() => {
   uploaded = [];
   pictures = { made: 0, closed: 0 };
+  blanked = [];
+  shown = [];
   cropped = [];
   decoded = [];
   videoErrors = [];
@@ -554,11 +556,14 @@ function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
 let uploaded: number[][] = [];
 /** How many pictures were made, and how many closed. */
 let pictures = { made: 0, closed: 0 };
-const pictureCanvas = { width: 0, height: 0 } as OffscreenCanvas;
+/** The sizes a picture was blanked at. */
+let blanked: number[][] = [];
+/** What the page was told about showing the picture, in order. */
+let shown: boolean[] = [];
 
 function graphicsPainter(
   load: ReturnType<typeof fakeCompositors>["load"],
-  options: { noPicture?: boolean } = {},
+  options: { noPicture?: boolean; blankFails?: boolean } = {},
 ) {
   return createFramePainter({
     context: () => context,
@@ -575,19 +580,27 @@ function graphicsPainter(
       }
       pictures.made += 1;
       return {
-        canvas: pictureCanvas,
         upload(run) {
           uploaded.push([...run.painted]);
+        },
+        blank(w, h) {
+          if (options.blankFails) {
+            throw new Error("the GPU refused the picture");
+          }
+          blanked.push([w, h]);
         },
         close() {
           pictures.closed += 1;
         },
       };
     },
+    onGraphicsShown: (on) => {
+      shown.push(on);
+    },
   });
 }
 
-test("a pipeline's runs are composed in order and their rectangles painted", async () => {
+test("a pipeline's runs are composed in order and their rectangles uploaded", async () => {
   const { made, load } = fakeCompositors();
   const p = graphicsPainter(load);
   p.startGraphics();
@@ -600,24 +613,10 @@ test("a pipeline's runs are composed in order and their rectangles painted", asy
     [9, 2, 3, 4],
     [11, 2, 3, 4],
   ]);
-  // Each rectangle drawn from the picture onto the same place of the desktop.
-  assert.deepEqual(
-    cropped.map(({ sx, sy, sw, sh, dx, dy, dw, dh }) => [
-      sx,
-      sy,
-      sw,
-      sh,
-      dx,
-      dy,
-      dw,
-      dh,
-    ]),
-    [
-      [7, 2, 3, 4, 7, 2, 3, 4],
-      [9, 2, 3, 4, 9, 2, 3, 4],
-      [11, 2, 3, 4, 11, 2, 3, 4],
-    ],
-  );
+  // The picture is shown where it is drawn: nothing of it goes onto the
+  // desktop's canvas, and the page is told to show it once, at the first run.
+  assert.deepEqual(cropped, []);
+  assert.deepEqual(shown, [true]);
   assert.equal(decoders, 0, "a pipeline built a video decoder");
   assert.deepEqual(videoKeyframeAsks, []);
 });
@@ -641,6 +640,47 @@ test("a pipeline that starts again is composed from nothing", async () => {
     { made: 2, closed: 1 },
     "a picture each, the first given back",
   );
+  assert.deepEqual(
+    shown,
+    [true, false, true],
+    "the first hidden before the second has drawn anything",
+  );
+});
+
+test("a picture is not shown before its pipeline has drawn a run", async () => {
+  const { load } = fakeCompositors();
+  const p = graphicsPainter(load);
+  p.startGraphics();
+  await p.draw(graphicsFrame([]));
+  assert.deepEqual(shown, []);
+  p.clear();
+  assert.deepEqual(shown, [], "and one never shown is not hidden");
+});
+
+test("a desktop resized under a pipeline blanks its picture", async () => {
+  const { load } = fakeCompositors();
+  const p = graphicsPainter(load);
+  p.blank(800, 600);
+  p.startGraphics();
+  await p.draw(graphicsFrame([[1]]));
+  p.blank(1024, 768);
+  assert.deepEqual(blanked, [[1024, 768]], "only a pipeline's picture");
+  assert.deepEqual(
+    videoErrors.filter((error) => error !== null),
+    [],
+  );
+});
+
+test("a picture that cannot be blanked ends its pipeline", async () => {
+  const { made, load } = fakeCompositors();
+  const p = graphicsPainter(load, { blankFails: true });
+  p.startGraphics();
+  await p.draw(graphicsFrame([[1]]));
+  p.blank(1024, 768);
+  await p.draw(graphicsFrame([[2]]));
+  assert.deepEqual(made[0].fed, [[1]]);
+  const said = videoErrors.filter((error) => error !== null);
+  assert.match(said[0] ?? "", /the GPU refused the picture/);
 });
 
 test("a run with no pipeline started is dropped", async () => {
@@ -660,6 +700,13 @@ test("a command that does not decode ends the pipeline and says so", async () =>
   assert.deepEqual(made[0].fed, [[1]], "nothing is composed after the refusal");
   assert.equal(made[0].closed, true);
   assert.equal(uploaded.length, 1);
+  assert.deepEqual(
+    [pictures.closed, shown],
+    [0, [true]],
+    "the picture stays, as the desktop under the sentence",
+  );
+  p.clear();
+  assert.deepEqual([pictures.closed, shown], [1, [true, false]]);
   const said = videoErrors.filter((error) => error !== null);
   assert.equal(said.length, 1);
   assert.match(said[0] ?? "", /could not compose the host's graphics/);
@@ -703,6 +750,11 @@ test("a video format takes the picture back from a pipeline", async () => {
   assert.deepEqual(made[0].fed, [[1]]);
   assert.equal(made[0].closed, true);
   assert.deepEqual(chunkTypes, ["key"]);
+  assert.deepEqual(
+    shown,
+    [true, false],
+    "the stream is drawn on the desktop's canvas, which the picture covered",
+  );
 });
 
 test("clear() ends a pipeline, and a run of the attachment before is not painted", async () => {

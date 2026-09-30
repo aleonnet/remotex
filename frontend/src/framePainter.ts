@@ -3,7 +3,7 @@ import {
   type EgfxFactory,
   loadEgfx,
 } from "./egfxCompositor.ts";
-import { createGraphicsPicture, type GraphicsPicture } from "./egfxPicture.ts";
+import type { GraphicsPicture } from "./egfxPicture.ts";
 import {
   type BatchRecord,
   decodeBatchFrame,
@@ -53,6 +53,12 @@ export interface FramePainter {
    * compositor stood before is done with.
    */
   startGraphics(): void;
+  /**
+   * The desktop's canvas was replaced at this size and filled black. A pipeline's
+   * picture is shown over that canvas, so it is blanked with it: the reset that
+   * draws the new desktop is in a run not composed yet.
+   */
+  blank(w: number, h: number): void;
 }
 
 export function createFramePainter(options: {
@@ -81,10 +87,17 @@ export function createFramePainter(options: {
    */
   loadCompositor?: () => Promise<EgfxFactory>;
   /**
-   * Where a pipeline's picture comes from: a WebGL canvas. Injectable for a test,
-   * whose runtime has no GPU.
+   * Where a pipeline's picture comes from: the WebGL canvas the page shows it on
+   * (egfxPicture.ts). A painter given none composes no pipeline.
    */
   makePicture?: () => GraphicsPicture;
+  /**
+   * Whether a pipeline's picture is what the page should be showing: true once a
+   * pipeline has drawn its first run, false when its picture is given back. The
+   * picture's canvas lies over the desktop's, and only the page can show or hide
+   * it.
+   */
+  onGraphicsShown?: (shown: boolean) => void;
   /** EXPERIMENTAL: decode passed HEVC in software (see `createDesktopVideo`). */
   softwareHevc?: boolean;
 }): FramePainter {
@@ -104,20 +117,36 @@ export function createFramePainter(options: {
   interface Pipeline {
     compositor: EgfxCompositor | null;
     picture: GraphicsPicture | null;
+    /** Whether the page has been told to show the picture. */
+    shown: boolean;
     broken: boolean;
     ready: Promise<void>;
   }
   let pipeline: Pipeline | null = null;
   const loadCompositor = options.loadCompositor ?? (() => loadEgfx());
-  const makePicture = options.makePicture ?? createGraphicsPicture;
+  const makePicture =
+    options.makePicture ??
+    (() => {
+      throw new Error("the page gave no canvas for the pipeline's picture");
+    });
 
-  // Whatever a pipeline holds, given back; it composes nothing more.
-  const finish = (done: Pipeline) => {
+  // A pipeline's compositor, given back; it composes nothing more. Its picture
+  // stays where it is, showing what was last drawn.
+  const stop = (done: Pipeline) => {
     done.broken = true;
     done.compositor?.close();
     done.compositor = null;
+  };
+
+  // Whatever a pipeline holds, given back, and its picture no longer shown.
+  const finish = (done: Pipeline) => {
+    stop(done);
     done.picture?.close();
     done.picture = null;
+    if (done.shown) {
+      done.shown = false;
+      options.onGraphicsShown?.(false);
+    }
   };
 
   const releasePipeline = () => {
@@ -195,12 +224,13 @@ export function createFramePainter(options: {
   // the host believes its client does only while it has composed every command, so
   // one that refused a command or was never given one is not fed again; and nothing
   // is asked of the gateway, since a host answers a repaint out of the caches this
-  // compositor no longer has. Said once: what follows is the same fact.
+  // compositor no longer has. Said once: what follows is the same fact. The picture
+  // is kept, as the desktop under the sentence, until the pipeline is replaced.
   const endPipeline = (broken: Pipeline, why: string) => {
     if (broken.broken) {
       return;
     }
-    finish(broken);
+    stop(broken);
     videoComplained = false;
     options.onVideoError(
       `This browser could not compose the host's graphics (${why}). Reload the page to start the session over.`,
@@ -249,14 +279,11 @@ export function createFramePainter(options: {
       endPipeline(current, describe(error));
       return;
     }
-    const context = options.context();
-    if (!context || run.width === 0 || run.height === 0) {
-      return;
-    }
-    // Each painted rectangle from the picture, as a tile is drawn.
-    for (let i = 0; i + 3 < run.painted.length; i += 4) {
-      const [x, y, w, h] = run.painted.subarray(i, i + 4);
-      context.drawImage(picture.canvas, x, y, w, h, x, y, w, h);
+    // Shown from its first drawn run, and not before: until then the picture's
+    // canvas holds nothing of this pipeline's.
+    if (!current.shown && run.width > 0 && run.height > 0) {
+      current.shown = true;
+      options.onGraphicsShown?.(true);
     }
   };
 
@@ -352,6 +379,7 @@ export function createFramePainter(options: {
       const starting: Pipeline = {
         compositor: null,
         picture: null,
+        shown: false,
         broken: false,
         ready: Promise.resolve(),
       };
@@ -372,6 +400,17 @@ export function createFramePainter(options: {
           }
         });
       pipeline = starting;
+    },
+    blank(w, h) {
+      const current = pipeline;
+      if (!current?.picture || current.broken) {
+        return;
+      }
+      try {
+        current.picture.blank(w, h);
+      } catch (error) {
+        endPipeline(current, describe(error));
+      }
     },
     setVideoFormat(format) {
       // A stream takes the picture back from a pipeline: a host that draws with

@@ -54,6 +54,9 @@ function harness() {
     startGraphics() {
       calls.push("graphics");
     },
+    blank(w, h) {
+      calls.push(`blank:${w}x${h}`);
+    },
   };
 
   const ctx = {
@@ -81,6 +84,7 @@ function harness() {
   host.handle({
     type: "init",
     canvas: canvas as unknown as OffscreenCanvas,
+    graphics: {} as OffscreenCanvas,
     softwareHevc: false,
   });
 
@@ -160,7 +164,12 @@ test("resize and videoFormat hold their place behind a stalled draw", async () =
   h.advance(12);
   h.release();
   await settled();
-  assert.deepEqual(h.calls, ["draw", "fill", "format:vp09.00.40.08"]);
+  assert.deepEqual(h.calls, [
+    "draw",
+    "fill",
+    "blank:640x480",
+    "format:vp09.00.40.08",
+  ]);
   assert.equal(h.canvas.width, 640);
   assert.equal(h.canvas.height, 480);
   assert.equal(h.ctx.fillStyle, "#000");
@@ -258,7 +267,7 @@ test("clear ends the attachment even with a draw that never finishes", async () 
   await settled();
   // A clear that waited its turn here would wait forever: this is the freeze it
   // exists to end, not an ordinary boundary.
-  assert.deepEqual(h.calls, ["fill", "draw", "clear"]);
+  assert.deepEqual(h.calls, ["fill", "blank:640x480", "draw", "clear"]);
   assert.equal(h.canvas.width, 0);
   assert.equal(h.canvas.height, 0);
 });
@@ -334,4 +343,19 @@ test("the painter's callbacks travel back as events", () => {
     { type: "videoError", reason: null },
     { type: "videoNeedsKeyframe", reason: "went quiet" },
   ]);
+});
+
+test("a picture is shown for the attachment the worker is on, by its count of clears", () => {
+  const h = harness();
+  const options = h.painterOptions();
+  options.onGraphicsShown?.(true);
+  h.host.handle({ type: "clear" });
+  options.onGraphicsShown?.(true);
+  assert.deepEqual(
+    h.events.filter((event) => event.type === "graphicsShown"),
+    [
+      { type: "graphicsShown", shown: true, epoch: 0 },
+      { type: "graphicsShown", shown: true, epoch: 1 },
+    ],
+  );
 });
