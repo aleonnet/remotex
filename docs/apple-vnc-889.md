@@ -468,7 +468,9 @@ and it is often past what a video stream encodes: a 2x screen beside a 1x one
 measured 5376×2287. Standard never resizes (`resize = false`), so the gateway
 cannot ask for less. Such a view has no picture: the session stays up, and the
 page offers the Mac's screens instead, since one screen is a smaller desktop.
-Choosing one within the ceiling returns the session to video at the next layout. See
+Choosing one within the ceiling returns the session to video at the next layout.
+All Displays over more than two screens is held the same way whatever its size or
+densities, since composing them is too much for a browser to draw. See
 [past the ceiling](architecture.md#past-the-ceiling).
 
 ### The High Performance virtual display

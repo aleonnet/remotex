@@ -32,6 +32,7 @@ import { keepTabWithin } from "./modalFocus.ts";
 import type {
   ClipboardSnapshot,
   DisplayInfo,
+  HoldCause,
   RemoteClipboard,
 } from "./protocol.ts";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
@@ -570,7 +571,7 @@ function ScreenHelp({
   hostScale: number;
   connection: string;
   renderPlan: string;
-  oversize: boolean;
+  oversize: HoldCause | null;
   audio: AudioRow;
   videoStream: VideoStreamInfo | null;
 }) {
@@ -975,8 +976,8 @@ export default function FloatingMenu({
   connection: string;
   // The render dial this session resolved to, one line, from `connected`.
   renderPlan: string;
-  // Whether the desktop is past what video carries, from `oversize`.
-  oversize: boolean;
+  // Why the desktop has no picture, from `oversize`.
+  oversize: HoldCause | null;
   // Whether this session can carry the remote's sound, which hides the Audio
   // section rather than disabling it — the same rule the Display section follows
   // and the opposite of Clipboard's. A greyed "Audio" would be explaining a

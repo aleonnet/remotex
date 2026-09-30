@@ -875,6 +875,17 @@ pub struct DisplayInfo {
     pub virtual_display: bool,
 }
 
+/// Why a desktop has no picture: see [`ServerMsg::Oversize`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum HoldCause {
+    /// Past what a video stream encodes ([`crate::video::within_ceiling`]).
+    Size,
+    /// A Mac's All Displays over more than
+    /// [`crate::vnc_apple::MAX_COMBINED_SCREENS`] screens, whatever its size.
+    Screens,
+}
+
 /// A rectangle in whole pixels or points, origin at the top left.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct MosaicRect {
@@ -1032,13 +1043,15 @@ pub enum ServerMsg {
     /// Sent only by the Apple High Performance engine, and again on reattach
     /// while a resize is in progress.
     Resizing { active: bool },
-    /// Whether the desktop the `Resize` before this describes is past what a video
-    /// stream encodes, so that no picture follows until a `Resize` within it. Sent
-    /// after every `Resize` of a source that holds the session open for that — see
-    /// [`crate::encode::Oversize`] — and never by one that refuses it. The browser
-    /// says so over the desktop, and offers the remote's displays where it lists
-    /// them, since choosing one is how a Mac on All Displays gets back within.
-    Oversize { active: bool },
+    /// Why the desktop the `Resize` before this describes has no picture, or `None`
+    /// when it has one: past what a video stream encodes, or a Mac's All Displays
+    /// over more screens than one view shows. No picture follows until a `Resize`
+    /// without a cause. Sent after every `Resize` of a source that holds the
+    /// session open for that — see [`crate::encode::Oversize`] — and never by one
+    /// that refuses it. The browser says so over the desktop, and offers the
+    /// remote's displays where it lists them, since choosing one is how a Mac on
+    /// All Displays gets back.
+    Oversize { cause: Option<HoldCause> },
     /// The remote's clipboard text, either pushed when the engine observes a
     /// change or returned from its cache for [`ClientMsg::ClipboardRequest`].
     /// `requested` distinguishes those paths so an explicit panel read does
@@ -1180,7 +1193,7 @@ enum ControlMsg<'a> {
     RemoteOs { macos: bool },
     TouchReady,
     Resizing { active: bool },
-    Oversize { active: bool },
+    Oversize { cause: Option<HoldCause> },
     Clipboard {
         text: &'a str,
         #[serde(rename = "changedAtMs")]
@@ -1319,7 +1332,7 @@ impl ServerMsg {
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
             ServerMsg::Resizing { active } => control(&ControlMsg::Resizing { active: *active }),
-            ServerMsg::Oversize { active } => control(&ControlMsg::Oversize { active: *active }),
+            ServerMsg::Oversize { cause } => control(&ControlMsg::Oversize { cause: *cause }),
             ServerMsg::AudioFormat {
                 codec,
                 sample_rate,
@@ -1790,8 +1803,10 @@ mod tests {
                 ),
                 None => panic!("resizing must be a text frame"),
             }
-            match (ServerMsg::Oversize { active }).text_frame() {
-                Some(json) => assert_eq!(json, format!(r#"{{"type":"oversize","active":{active}}}"#)),
+        }
+        for (cause, wire) in [(None, "null"), (Some(HoldCause::Size), r#""size""#), (Some(HoldCause::Screens), r#""screens""#)] {
+            match (ServerMsg::Oversize { cause }).text_frame() {
+                Some(json) => assert_eq!(json, format!(r#"{{"type":"oversize","cause":{wire}}}"#)),
                 None => panic!("oversize must be a text frame"),
             }
         }

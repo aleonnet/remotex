@@ -207,8 +207,8 @@ for the page to lay out by the mosaic's regions as it composes one framebuffer
 today. How the Mac's rectangles split between the two, how the queue and the
 paint window order two chains, and how each stream starts over are the work.
 
-Two screens is the limit. All Displays over three or more stays refused with the
-notice, whatever the size of the view.
+Two screens is the limit, as it is today: All Displays over three or more is held
+with the notice whatever its size.
 
 ### A virtual-display remote session for sway
 

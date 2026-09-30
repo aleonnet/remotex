@@ -1573,7 +1573,7 @@ async fn an_oversize_vnc_desktop_holds_the_session_without_a_picture() {
     let mut ws = connect_ws(addr, &token, &cookie).await;
     common::connect_target(&mut ws, "test-target").await;
     expect_resize(&mut ws, w, h).await;
-    assert_eq!(expect_control(&mut ws, "oversize").await["active"], true);
+    assert_eq!(expect_control(&mut ws, "oversize").await["cause"], "size");
     expect_no_picture(&mut ws).await;
 
     // A reattach is told the same, and still sent no picture.
@@ -1588,7 +1588,7 @@ async fn an_oversize_vnc_desktop_holds_the_session_without_a_picture() {
         .to_owned();
     let mut ws = connect_ws(addr, &token, &cookie).await;
     expect_resize(&mut ws, w, h).await;
-    assert_eq!(expect_control(&mut ws, "oversize").await["active"], true);
+    assert_eq!(expect_control(&mut ws, "oversize").await["cause"], "size");
     expect_no_picture(&mut ws).await;
 }
 

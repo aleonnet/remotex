@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useRef } from "react";
 import FloatingMenu from "./FloatingMenu.tsx";
-import type { DisplayInfo } from "./protocol.ts";
+import type { DisplayInfo, HoldCause } from "./protocol.ts";
 import TargetPicker from "./TargetPicker.tsx";
 import {
   CAN_PINCH_ZOOM,
@@ -18,16 +18,18 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   failed: "Cannot open the session",
 };
 
-// The notice over a desktop past what video carries, offering every display but
-// the one being sent, which is the one too large. A click sends a `selectDisplay`
-// and nothing else: the notice comes down when the gateway says the desktop is
-// back within.
+// The notice over a desktop with no picture, offering every display but the one
+// being sent, which is the one held: past what video carries, or All Displays over
+// more than two screens. A click sends a `selectDisplay` and nothing else: the
+// notice comes down when the gateway says the desktop has a picture again.
 function OversizeNotice({
+  cause,
   size,
   displays,
   activeDisplayId,
   onSelectDisplay,
 }: {
+  cause: HoldCause;
   size: RemoteSize;
   displays: DisplayInfo[];
   activeDisplayId: number | null;
@@ -36,15 +38,27 @@ function OversizeNotice({
   const others = displays.filter((display) => display.id !== activeDisplayId);
   return (
     <div className="oversize-overlay" role="alert">
-      <span className="status">Too large to show</span>
-      <span className="status-hint">
-        The remote desktop is {size.w}×{size.h} pixels, past the largest picture
-        a video stream carries.
-      </span>
+      {cause === "screens" ? (
+        <>
+          <span className="status">Too many screens to show</span>
+          <span className="status-hint">
+            All Displays spans more than two screens, which is more than one
+            view shows.
+          </span>
+        </>
+      ) : (
+        <>
+          <span className="status">Too large to show</span>
+          <span className="status-hint">
+            The remote desktop is {size.w}×{size.h} pixels, past the largest
+            picture a video stream carries.
+          </span>
+        </>
+      )}
       {others.length > 0 ? (
         <>
           <span className="status-hint">
-            Choose one display to show it on its own:
+            Choose one display to show on its own:
           </span>
           <div className="oversize-displays">
             {others.map((display) => (
@@ -321,6 +335,7 @@ export default function RemoteDesktop({
           reachable for switching target instead. */}
       {oversize && mode === "desktop" && !showStatus && size && (
         <OversizeNotice
+          cause={oversize}
           size={size}
           displays={displays}
           activeDisplayId={activeDisplayId}

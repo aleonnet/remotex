@@ -13,6 +13,8 @@
 // and "which decoder is this browser running" were answerable only by reading the
 // console.
 
+import type { HoldCause } from "./protocol.ts";
+
 /**
  * The wire fields of `audioFormat`, minus the `OpusHead` bytes.
  *
@@ -105,15 +107,19 @@ export interface VideoStreamInfo {
 /**
  * The Video row: the exact configuration the decoder was built with and whose
  * stream it decodes, or what the row is waiting for before the stream's format has
- * arrived. While the desktop is past what a video stream encodes there is no
- * picture, whatever decoder was built before.
+ * arrived. While the desktop is held — past what a video stream encodes, or All
+ * Displays over too many screens — there is no picture, whatever decoder was
+ * built before.
  */
 export function videoLabel(
   stream: VideoStreamInfo | null,
-  oversize: boolean,
+  held: HoldCause | null,
 ): string {
-  if (oversize) {
+  if (held === "size") {
     return "Not in use: the desktop is past what video carries";
+  }
+  if (held === "screens") {
+    return "Not in use: All Displays spans more than two screens";
   }
   if (!stream) {
     return "Waiting for the video format";

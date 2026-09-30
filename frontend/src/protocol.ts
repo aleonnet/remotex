@@ -288,13 +288,14 @@ export type ControlMsg =
   // Pushed by the gateway, which alone knows when the Mac has settled; the
   // page never infers it.
   | { type: "resizing"; active: boolean }
-  // Whether the desktop the `resize` before this describes is past what a video
-  // stream encodes, so that no picture follows until a `resize` within it. Sent
-  // after every `resize` of a source that holds the session open for that, and
-  // never by one that ends the session instead. The page says so over the desktop
-  // and offers the remote's displays, since choosing one is how a Mac on All
-  // Displays gets back within.
-  | { type: "oversize"; active: boolean }
+  // Why the desktop the `resize` before this describes has no picture, or null
+  // when it has one: past what a video stream encodes, or a Mac's All Displays
+  // over more than two screens. No picture follows until a `resize` without a
+  // cause. Sent after every `resize` of a source that holds the session open for
+  // that, and never by one that ends the session instead. The page says so over
+  // the desktop and offers the remote's displays, since choosing one is how a
+  // Mac on All Displays gets back.
+  | { type: "oversize"; cause: HoldCause | null }
   // The remote's displays and which one is being shared, pushed whenever either
   // changes. The browser holds no display state of its own: the checkmark
   // follows `active`, so a selection the remote refused leaves the panel
@@ -367,6 +368,9 @@ export interface GraphicsMsg {
 }
 
 export type BatchRecord = VideoMsg | GraphicsMsg;
+
+// Why a desktop has no picture: see `oversize`.
+export type HoldCause = "size" | "screens";
 
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;

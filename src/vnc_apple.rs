@@ -94,6 +94,11 @@ pub const ENCODING_CURSOR_POS: i32 = 0x44c;
 /// also listed, the layout is what it sends.
 pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 
+/// The most screens All Displays is shown over. Past two, the view is held with a
+/// notice offering each screen on its own, whatever its size: more than two is an
+/// edge case on Standard, and composing them is too much for a browser to draw.
+pub const MAX_COMBINED_SCREENS: usize = 2;
+
 /// What this client advertises to a Mac.
 ///
 /// `screensharingd` resets its display flags on every `SetEncodings` and sets one for
@@ -518,6 +523,12 @@ impl Layout {
     /// points in its own arrangement. Both spaces are moved to start at zero:
     /// the framebuffer already does, and the arrangement's origin is wherever the
     /// main screen puts it.
+    /// Whether this is All Displays over more than [`MAX_COMBINED_SCREENS`], which
+    /// has no picture ([`crate::encode::VideoSink::hold_screens`]).
+    pub fn too_many_screens(&self) -> bool {
+        self.current.is_none() && self.displays.len() > MAX_COMBINED_SCREENS
+    }
+
     pub fn mosaic(&self) -> Option<Vec<MosaicRegion>> {
         if self.current.is_some() || !self.mixed_density() {
             return None;
@@ -1274,6 +1285,20 @@ mod tests {
         assert_eq!(parsed.displays.len(), 1);
         assert_eq!(parsed.viewer_scale(), 1.0);
         assert_eq!(parsed.scale(), 2.0);
+    }
+
+    /// All Displays is held over three screens and not over two, and a selected
+    /// screen never is, however many there are.
+    #[test]
+    fn all_displays_over_three_screens_is_too_many() {
+        let screens = [
+            (1, (1280, 800), (1280, 800), 0x01),
+            (2, (1280, 800), (1280, 800), 0x00),
+            (3, (1280, 800), (1280, 800), 0x00),
+        ];
+        assert!(!parse_layout(&layout(None, &screens[..2])).unwrap().too_many_screens());
+        assert!(parse_layout(&layout(None, &screens)).unwrap().too_many_screens());
+        assert!(!parse_layout(&layout(Some(3), &screens)).unwrap().too_many_screens());
     }
 
     #[test]

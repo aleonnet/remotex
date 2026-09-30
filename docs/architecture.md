@@ -167,8 +167,9 @@ Preserve the announced configuration and color-space behavior in
 
 #### A desktop past the ceiling
 
-A desktop past the video ceiling has no picture. On VNC without `resize` the
-session stays up and the page says so, offering the remote's displays; every
+A desktop past the video ceiling has no picture, and nor has a Mac's All
+Displays over more than two screens, whatever its size. On VNC without `resize`
+the session stays up and the page says so, offering the remote's displays; every
 other source ends on the ceiling's refusal. Do not carry such a desktop some
 other way, in the gateway or the page: rectangles as images, a scaled or a
 cropped picture. Two streams for Apple's All Displays are the planned way, in
@@ -456,17 +457,25 @@ of it, fixed when the engine starts:
 for is under the ceiling, and a remote that answers past it has refused what it
 was asked. High Performance's virtual display is held under the ceiling.
 
-A `Hold` source is decided at each `Resize`. Past the ceiling the sink drops every
-rectangle and passed frame and builds no stream, and wlshare's VP9 comes off the
-encoding list, so wlshare codes nothing that would not be sent. After every
-`Resize` of a `Hold` source the gateway sends `oversize` (`active` true or false),
-a reattach included. While it is true the page covers the desktop with a notice
-under the menu: the desktop's size, and a button for each of the remote's displays
-but the one being sent, since choosing one is how a Mac on All Displays gets back
-within; with no list, that nothing can be shown until the remote's desktop is
-smaller. A choice is a `selectDisplay` like the menu's, and the notice comes down
-only at a `Resize` within the ceiling. The remote repaints that desktop in full, as
-after any resize, and its stream starts from an announcement and a keyframe.
+A `Hold` source holds one more view whatever its size: a Mac's All Displays over
+more than two screens (`vnc_apple::MAX_COMBINED_SCREENS`). More than two is an edge
+case on Standard, and composing them is too much for a browser to draw. The engine
+tells the sink from each layout, ahead of the `Resize` it brings
+(`VideoSink::hold_screens`).
+
+A `Hold` source is decided at each `Resize`. Held, the sink drops every rectangle
+and passed frame and builds no stream, and past the ceiling wlshare's VP9 comes off
+the encoding list, so wlshare codes nothing that would not be sent. After every
+`Resize` of a `Hold` source the gateway sends `oversize` with its `cause`
+(`"size"`, `"screens"`, or `null` for a picture), a reattach included. While there
+is a cause the page covers the desktop with a notice under the menu, takes no
+input, and says which: the desktop's size, or more screens than one view shows.
+It offers a button for each of the remote's displays but the one being sent, since
+choosing one is how a Mac on All Displays gets back; with no list, it says that
+nothing can be shown until the remote's desktop is smaller. A choice is a
+`selectDisplay` like the menu's, and the notice comes down only at a `Resize`
+without a cause. The remote repaints that desktop in full, as after any resize,
+and its stream starts from an announcement and a keyframe.
 
 #### wlshare's stream, passed through
 
@@ -1788,8 +1797,9 @@ the only place the browser rescales remote pixels. See
 [Apple RFB 003.889, as measured](apple-vnc-889.md#all-displays-over-mixed-densities).
 Taken at factor 1.0, that combined framebuffer is often past the video ceiling —
 a 2x screen beside a 1x one measured 5376×2287 — and then has no picture: the page
-offers the Mac's screens instead, since one screen is a smaller desktop
-([past the ceiling](#past-the-ceiling)).
+offers the Mac's screens instead, since one screen is a smaller desktop. All
+Displays over more than two screens has none either, whatever its size or
+densities ([past the ceiling](#past-the-ceiling)).
 
 **RFB 003.889** is Apple's own protocol revision, and both Apple subtypes speak
 it, as Apple's viewer answers every Mac before choosing a mode after ServerInit.

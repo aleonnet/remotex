@@ -5207,6 +5207,9 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     if let Some(msg) = mosaic_msg {
         sink.msg(msg).await?;
     }
+    // All Displays over too many screens has no picture, whatever its size, and the
+    // resize below is where the sink reads it.
+    sink.hold_screens(!virtual_display && layout.too_many_screens());
     let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
     if virtual_display {
         let mut d = desktop.lock().unwrap();
@@ -6159,7 +6162,7 @@ async fn discard<R: AsyncRead + Unpin>(reader: &mut R, n: u64) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::WheelUnit;
+    use crate::protocol::{HoldCause, WheelUnit};
 
     // Vectors generated from a reference VNC auth implementation
     // (node:crypto des-ecb) with the challenge 00 01 .. 0f.
@@ -10889,6 +10892,36 @@ mod tests {
         let mut expected = vnc_apple::set_server_scaling(0.5);
         expected.extend_from_slice(&vnc_apple::auto_framebuffer_update((3840, 2160)));
         assert_eq!(written(&sent), expected);
+    }
+
+    /// All Displays over three screens is held however small it is, and choosing
+    /// one of them brings video back: the browser is told why at each resize.
+    #[tokio::test]
+    async fn all_displays_over_three_screens_is_held() {
+        let (uplink, _sent) = test_uplink();
+        let (frame_tx, mut rx) = mpsc::channel(64);
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Subsampled, apple_media: false, rdp_graphics: false };
+        let sink = VideoSink::new("vnc", frame_tx, plan, Arc::new(crate::feedback::LinkFeedback::new()), Oversize::Hold);
+        let shared = test_shared(uplink, shared_desktop((1280, 800), None, None), test_shadow((1280, 800)));
+        let screens: [TestScreen; 3] = [
+            (1, (1280, 800), (1280, 800), 0x01),
+            (2, (1280, 800), (1280, 800), 0x00),
+            (3, (1280, 800), (1280, 800), 0x00),
+        ];
+        for current in [None, Some(2)] {
+            read_display_layout(&mut layout_payload(current, &screens).as_slice(), &shared, false, false, &sink)
+                .await
+                .unwrap();
+        }
+
+        sink.flush().await;
+        let mut causes = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMsg::Oversize { cause } = msg {
+                causes.push(cause);
+            }
+        }
+        assert_eq!(causes, vec![Some(HoldCause::Screens), None]);
     }
 
     /// The checkmark follows the Mac and nothing else. It is placed from the
