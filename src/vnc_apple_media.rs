@@ -30,8 +30,9 @@
 //! sound within [`STREAM_START`] of its offer, one that sends neither for
 //! [`STREAM_SILENCE`], and one whose receiver fails ([`MediaStream::overdue`],
 //! [`MediaStream::failure`]).
-//! ZRLE rectangles carry the picture only until the first one and across display
-//! changes, which stop the stream until the next offer.
+//! ZRLE rectangles are decoded only to keep their deflate stream in step and never
+//! shown. Until the first media picture, and across display changes which stop the
+//! stream until the next offer, the browser stays behind its resize notice.
 //!
 //! Every packet in is authenticated before it is decrypted — AES-256 counter mode
 //! with an HMAC-SHA1-80 tag, RFC 3711 keys from the masters this side put in the
@@ -76,7 +77,7 @@ pub const ENCODING_MEDIA_STREAM: i32 = 1010;
 
 /// What the sound leg decodes to: AAC-ELD's 48 kHz stereo as 16-bit PCM. The
 /// counterpart of [`crate::audio::PCM_CD_QUALITY`] for this source, and the format
-/// the session builds its encoder for before the stream has come up.
+/// a decoded session builds its Opus encoder for.
 pub const AUDIO_FORMAT: PcmFormat = PcmFormat {
     channels: 2,
     sample_rate: 48_000,

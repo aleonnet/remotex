@@ -10,8 +10,8 @@ composes several into one picture, so the second monitor is not somewhere off th
 edge of the desktop: it is not in the session at all until the client asks for it.
 Standard RFB has no way to ask. `ExtendedDesktopSize` describes screens *inside*
 one framebuffer, which is a different thing entirely, and a plain VNC server has
-nothing else to say. So this is the second private extension, beside
-[the density one](wlshare-density.md), in the same shape and discovered the same
+nothing else to say. So this is a private extension beside
+[the density one](wlshare-density.md), with the same shape and discovered the same
 way: the client lists a pseudo-encoding, and the server that knows it answers.
 
 The server side is [wlshare](https://github.com/andrewtheguy/wlshare). Its

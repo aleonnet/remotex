@@ -4,11 +4,12 @@
 #
 #   cp remotex.example.toml remotex.toml
 #
-# The binary loads that copy on startup (see src/config.rs). The config is
-# global-only: --config <path> if given, else the installed global config
+# Pass that copy explicitly, for example `cargo run -- serve --config remotex.toml`.
+# The config is global-only: --config <path> if given, else the installed global config
 # (/etc/remotex/remotex.toml from a Linux package,
 # /usr/local/etc/remotex/remotex.toml from the macOS package, or
-# /opt/remotex/etc/remotex.toml in the container). There are no per-user or
+# %ProgramData%\remotex\remotex.toml from the Windows package; the container uses
+# /opt/remotex/etc/remotex.toml). There are no per-user or
 # working-directory files. The listen address below is the one setting that can
 # also come from outside this file (--listen, or REMOTEX_LISTEN); everything
 # else, credentials included, is configured here. Keep this file readable only
@@ -99,8 +100,8 @@
 # beside it. A gateway run from a Cargo build looks in its config's directory.
 # The gateway reads the archive itself, at start-up, and refuses to start unless
 # it is exactly that release. archive names another file; a relative path is
-# taken from that same directory. With the decoder, every page is served
-# cross-origin isolated, which its threads need.
+# taken from that same directory. Every page is cross-origin isolated for the
+# graphics compositor's threads; the decoder's threads require that isolation too.
 #
 #[hevc_wasm]
 #enabled = true
@@ -447,8 +448,9 @@ password = "change-me"
 # The picture comes as HEVC and the sound as AAC-ELD, over the media stream the
 # Mac negotiates on the RFB connection and then sends over UDP with SRTP — the
 # picture at up to 30 frames a second, without zlib's deflate holding up the
-# Mac's reading of your input. Zlib carries the picture only until the stream
-# does, and a stream that fails ends the session, as it does in Apple's viewer.
+# Mac's reading of your input. The browser stays behind its resize notice until
+# the stream sends its first picture, at connect and across display changes, and
+# a stream that fails ends the session, as it does in Apple's viewer.
 # The Mac sends to this gateway's address on UDP 5900 and 5901, so a firewall or
 # NAT between them must let that through, or the session ends 10 seconds after
 # the stream is offered.
@@ -469,13 +471,14 @@ password = "change-me"
 # `media_passthrough = true` sends the Mac's stream to a browser that decodes it, as
 # the Mac sent it, for a LAN of 100 Mbit/s or more: its HEVC rather than VP9 encoded
 # here from decoded pictures, and its AAC-ELD rather than Opus. Every picture the
-# Mac sends goes, up to 30 a second, at the Mac's own quality, and while the stream
-# is not flowing (before it starts, and across a display change) the Mac's zlib
-# rectangles are encoded here as VP9. The HEVC is walked between 20 and 60 Mbit/s
+# Mac sends goes, up to 30 a second, at the Mac's own quality. Its ZRLE rectangles
+# are decoded to keep their deflate stream in step but never shown; while the media
+# stream is not flowing, the browser remains behind its resize notice. The HEVC is
+# walked between 20 and 60 Mbit/s
 # by the Mac's own rate controller, from the delay this gateway reports as Apple's
 # viewer does, which ends at the gateway: the browser's link does not slow it. High
-# Performance has no Adaptive/Full choice, and the video keys below reach only VP9 —
-# the gaps, and the whole picture for a browser that cannot take the stream. Chrome
+# Performance has no Adaptive/Full choice, and the video keys below reach only the
+# whole VP9 picture sent to a browser that cannot take the stream. Chrome
 # and Safari, desktop and mobile, were measured decoding both halves where the GPU
 # decodes HEVC 4:4:4; Firefox decodes neither. Every other browser is sent VP9 and
 # Opus as without the key, by a build with the decoders.
@@ -490,8 +493,11 @@ password = "change-me"
 # resize = true
 # media_passthrough = true
 
-# How this target's desktop is streamed to the browser: the whole framebuffer as one
-# VP9 video stream, for every protocol. Every key below is per target, so it belongs
+# How this target's VP9 stream is configured. The gateway applies the plan when it
+# encodes a desktop, and wlshare applies the same plan to the VP9 it makes and the
+# gateway passes through. A passed Mac media stream or RDP graphics pipeline keeps
+# the remote's own quality; when that path is not selected or available, the VP9
+# plan applies. Every key below is per target, so it belongs
 # *inside* a [[targets]] table and not in a section of their own — uncommented here
 # they would attach to whichever [[targets]] block precedes them, which is the
 # "example" one at the top of this file. There is no global render setting, and

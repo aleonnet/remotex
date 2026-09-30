@@ -1293,9 +1293,6 @@ mod tests {
         assert!(frame_rx.try_recv().is_err());
     }
 
-    /// A passed High Performance stream and the Mac's rectangles around it take turns
-    /// as the picture, each starting at a keyframe behind its announcement: the gap
-    /// is VP9 encoded here, the stream is the Mac's HEVC, and nothing is encoded here
     /// The resize notice comes down behind the next unit queued, not when the engine
     /// asks: a clean mirror queues nothing, and the notice waits with it.
     #[tokio::test(start_paused = true)]
@@ -1338,10 +1335,12 @@ mod tests {
         assert!(matches!(&out[2], ServerMsg::Resizing { active: false }), "{:?}", out[2]);
     }
 
-    /// while the stream passes. A unit dropped for a keyframe says so, for the engine
-    /// to ask the Mac.
+    /// The sink can switch from passed HEVC back to encoded rectangles for a source
+    /// that uses both, each beginning at a keyframe behind its announcement. A High
+    /// Performance Mac no longer uses that capability: its rectangles never reach
+    /// [`VideoSink::damage`]. A unit dropped for a keyframe says so to the engine.
     #[tokio::test]
-    async fn the_gaps_around_a_passed_hevc_stream_are_video_encoded_here() {
+    async fn a_source_can_switch_between_passed_hevc_and_encoded_rectangles() {
         const HEVC: &str = "hev1.4.10.L150.BE.8";
         let (sink, mut frame_rx) = video_sink(64, 48).await;
         let rect = Rect::from_size(0, 0, 64, 48).unwrap();
@@ -1349,7 +1348,7 @@ mod tests {
         let is_vp9 = |msg: &ServerMsg| matches!(msg, ServerMsg::VideoFormat { decode, passthrough: false } if decode.starts_with("vp09"));
         let is_hevc = |msg: &ServerMsg| matches!(msg, ServerMsg::VideoFormat { decode, passthrough: true } if decode == HEVC);
 
-        // Before the stream flows: VP9 from the rectangles.
+        // Before the passed stream flows: VP9 from the rectangles.
         sink.damage(rect, &[7; 64 * 48 * 3]).await.unwrap();
         sink.frame().await.unwrap();
         sink.flush().await;
@@ -1357,7 +1356,7 @@ mod tests {
         assert!(is_vp9(&out[0]), "{:?}", out[0]);
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe));
 
-        // The stream takes over at its IDR, announced.
+        // The passed stream takes over at its IDR, announced.
         assert!(!sink.pass_hevc(64, 48, vec![1; 30], hevc(false)).await.unwrap(), "dropped for a keyframe");
         assert!(sink.pass_hevc(64, 48, vec![2; 900], hevc(true)).await.unwrap());
         assert!(sink.pass_hevc(64, 48, vec![3; 40], hevc(false)).await.unwrap());
@@ -1375,7 +1374,8 @@ mod tests {
         assert!(matches!(&out[4], ServerMsg::Video(unit) if unit.keyframe && unit.data.len() == 800));
         assert!(frame_rx.try_recv().is_err(), "nothing encoded here while the stream passed");
 
-        // A gap: VP9 again, from a keyframe, although its stream was built before.
+        // The source switches back to rectangles: VP9 again, from a keyframe,
+        // although its encoder was built before.
         sink.damage(rect, &[9; 64 * 48 * 3]).await.unwrap();
         assert!(!sink.passing());
         sink.frame().await.unwrap();
@@ -1384,7 +1384,7 @@ mod tests {
         assert!(is_vp9(&out[0]), "{:?}", out[0]);
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe));
 
-        // And the stream back, from an IDR, announced for the decoder VP9 displaced.
+        // And the passed stream back, from an IDR, announced for the decoder VP9 displaced.
         assert!(!sink.pass_hevc(64, 48, vec![5; 30], hevc(false)).await.unwrap());
         assert!(sink.pass_hevc(64, 48, vec![6; 700], hevc(true)).await.unwrap());
         sink.flush().await;

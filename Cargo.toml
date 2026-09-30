@@ -98,7 +98,7 @@ yuv = "0.8"
 # High Performance's decoders, loaded from the system's shared libraries:
 # libavcodec for the Mac's HEVC picture, re-encoded here as VP9, and fdk-aac for
 # its AAC-ELD sound (src/libav.rs and src/aac_eld.rs name them per platform), so
-# no build compiles or links either.
+# the default build compiles and links neither.
 libloading = "0.9"
 # `apple-hp-media-static` links them instead, from the prebuilt bargain `opus`
 # and `desktop-vp9` make: static archives the sys crates download, compiling no

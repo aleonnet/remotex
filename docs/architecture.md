@@ -77,10 +77,13 @@ area and points here; read the area's section before changing what it covers.
   graphics crate build on stable. Its threads share a memory, so every file
   `src/assets.rs` serves carries the two cross-origin isolation headers; keep
   them, and load nothing from another origin.
-- The one file read at run time is the EXPERIMENTAL software HEVC decoder's
-  release archive, named by `[hevc_wasm]`: read once at start-up, refused unless
+- The only versioned client asset read at run time is the EXPERIMENTAL software
+  HEVC decoder's release archive, named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at
-  `/hevc/`. Do not widen it to another file, an unpinned archive, or a directory.
+  `/hevc/`. An operator-configured path in `[branding].logo` is read per request
+  and is not part of the client bundle. Do not widen the decoder input to another
+  file, an unpinned archive, or a directory, and do not turn the logo path into a
+  web root.
 - The page requires a secure context plus `VideoDecoder` and `AudioDecoder` and
   refuses startup in `frontend/src/preflight.ts` without them. Do not add
   fallback browser paths.
@@ -212,11 +215,13 @@ message, or add a key that selects it. See
   as SRTCP. The Mac refuses one leg without the other, so the target always
   carries sound and takes no `audio` key. Its decoders, FFmpeg's libavcodec and
   fdk-aac, are the system's shared libraries, loaded when a session needs them,
-  so no build links either; only the non-default `apple-hp-media-static` feature
+  so published release artifacts link neither; only the non-default
+  `apple-hp-media-static` feature
   links static archives instead. A gateway whose host lacks either ends the
   session of a browser that cannot decode the stream before it dials the Mac.
-  Zlib carries the picture only until the stream is up and across display
-  changes, and a stream that fails ends the session: do not add a subtype
+  ZRLE is decoded only to keep its deflate stream in step and is never shown; the
+  browser remains covered until the media stream sends the display's first picture.
+  A stream that fails ends the session: do not add a subtype
   without the stream or a fallback to zlib, combinations Apple's viewer never
   offers. The Mac's own controller sets the rate from the offer's bitrate
   entries and the gateway's rate reports; do not cap the offer or add a key that
@@ -307,13 +312,14 @@ updates in source order even though each encode runs off the engine's own task.
 
 ### The video stream
 
-Every target reaches the browser the same way: the whole framebuffer as one
-inter-frame VP9 stream, or none: a VNC desktop past the stream's picture ceiling
-on a target without `resize` has no picture until the remote sends a smaller one —
-see [past the ceiling](#past-the-ceiling). There is one exception. An
-`ard-high-performance` target with `media_passthrough` sends a browser that decodes
-it the Mac's own HEVC, and its AAC-ELD with it — see
-[Apple's media stream, passed through](#apples-media-stream-passed-through).
+Each target has one full-desktop picture path. Ordinarily it is one inter-frame
+VP9 stream, encoded by the gateway or made by wlshare and passed through. Two
+configured paths keep another representation the remote made: an
+`ard-high-performance` target with `media_passthrough` can pass the Mac's HEVC,
+with its AAC-ELD sound, and an RDP target with `egfx_passthrough` can pass the
+host's graphics pipeline for the browser to compose. A VNC desktop past the
+stream's picture ceiling on a target without `resize` has no picture until the
+remote sends a smaller one — see [past the ceiling](#past-the-ceiling).
 
 > **There is no configurable tile transport.** Earlier releases also sent each
 > changed region as an independent PNG or WebP still (`render_type = "tiles"`, with
@@ -583,7 +589,7 @@ Three controls with similar names therefore remain separate:
 |---|---|---|
 | Standard **Adaptive** / **Full** | Apple's viewer, in Standard mode only | Which RFB framebuffer encodings the viewer asks for |
 | High Performance rate controller | Always enabled by the Mac's video profile; no UI choice | The Mac's HEVC encoder, within its fixed 20–60 Mbit/s range, by the gateway's reports |
-| `render_adaptive` | A remotex target key, on by default | VP9 encoded in the gateway: all pictures after local HEVC decoding, or only the VP9 gaps while HEVC passes |
+| `render_adaptive` | A remotex target key, on by default | VP9 encoded in the gateway, including every picture after local HEVC decoding; it does not reach passed HEVC |
 
 - **The browser selects.** The page asks once, at load (`frontend/src/appleMedia.ts`),
   and states the answer as `apple_media=true|false` on every session socket, beside
@@ -636,8 +642,8 @@ Three controls with similar names therefore remain separate:
   page lays over the desktop's, the one a passed graphics pipeline is shown on
   (`frontend/src/hevcPicture.ts`, `glPicture.ts`). The canvas is given the
   stream's primaries, Display P3, so the browser takes the picture to the display
-  as it takes a video frame; the VP9 that fills the stream's gaps is painted on
-  the desktop's own canvas, and the page hides the one over it for as long. The
+  as it takes a video frame. A session sent gateway-encoded VP9 paints the desktop's
+  own canvas instead; a media-stream session never switches between the two. The
   decoder reuses a picture's memory from its next unit on, so it starts that unit
   only once the paint worker has released the picture. A `VideoFrame` over the
   planes was a copy of the picture, and drawing it on the desktop's canvas had
@@ -1887,7 +1893,7 @@ one comes from how the page is reached — loopback (`localhost`, `127.0.0.1`, `
 any `.localhost` label), or a TLS-terminating reverse proxy. A LAN address over
 plain `http://` is the case this refuses,
 by name. `VideoDecoder` and `AudioDecoder` are asked for together rather than either
-alone, because audio is a target's choice and every target streams video: a
+alone, because audio is a target's choice and every target may fall back to video: a
 browser with one and not the other would play some targets' sound and not others, which is the
 half-working session the gate exists to prevent. What remains reportable mid-session
 is a *codec* a decoder refuses, which is a different sentence and arrives from the

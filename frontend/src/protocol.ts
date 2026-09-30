@@ -258,12 +258,13 @@ export type ControlMsg =
   // whenever it changes — a decoder configured afterwards has already thrown away the
   // frame it was meant to decode. The video counterpart of `audioFormat`.
   //
-  // One per session, plus one per resize and per repaint: the string carries a
-  // size-derived level, and a browser that just attached has seen none.
+  // One per video session, plus one per resize and per repaint: the string carries
+  // a size-derived level, and a browser that just attached has seen none.
   //
-  // `decode` is the exact WebCodecs string to configure with: `vp09.00.40.08.01.06.06.06.00`.
-  // Nothing here parses a bitstream to find it out; VP9 has no parameter sets to
-  // parse. `passthrough` says whose stream it is: the remote's own, passed through
+  // `decode` is the exact WebCodecs string to configure with, for example
+  // `vp09.00.40.08.01.06.06.06.00`. Nothing here parses a bitstream to find it out:
+  // VP9 has no parameter sets, and the gateway already parsed a passed HEVC stream's.
+  // `passthrough` says whose stream it is: the remote's own, passed through
   // untouched (wlshare's VP9, a High Performance Mac's HEVC), or one the gateway
   // encoded.
   | { type: "videoFormat"; decode: string; passthrough: boolean }
@@ -339,16 +340,14 @@ export type ControlMsg =
 // One link in a chain, where losing any link decodes wrongly until the next
 // keyframe — so none may be dropped, reordered, or decoded twice.
 //
-// `(w, h)` is the true desktop size. The decoded picture may be a pixel wider or
-// taller, because the encoder is held to even sides and an odd desktop does not have
-// them: draw the top-left w×h of it. A size that differs from the last unit's means
-// the stream started over on a differently sized picture.
+// `(w, h)` is the true desktop size. A gateway-encoded VP9 picture may be a pixel
+// wider or taller, because that encoder is held to even sides and an odd desktop does
+// not have them: draw the top-left w×h of it. A size that differs from the last unit's
+// means the stream started over on a differently sized picture.
 //
-// `keyframe` comes from the record's flags byte, and so from the encoder rather than
-// from a parse of what it produced. It is on the wire because VP9 carries no parameter
-// sets: there is nothing in a VP9 payload to read it out of. `videoFormat` says how to
-// configure the decoder, and always arrives first. See `VideoUnit` in src/protocol.rs
-// for the whole contract.
+// `keyframe` comes from the record's flags byte, decided by the source path.
+// `videoFormat` says how to configure the decoder and always arrives first. See
+// `VideoUnit` in src/protocol.rs for the whole contract.
 export interface VideoMsg {
   kind: "video";
   w: number;

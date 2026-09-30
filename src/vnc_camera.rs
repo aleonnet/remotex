@@ -2,7 +2,7 @@
 //! desktop over the RFB connection the session already has.
 //!
 //! RFB carries nothing from a client but input and a clipboard, and no registered
-//! extension carries video that way, so this is wlshare's third private one, in
+//! extension carries video that way, so this is one of wlshare's private ones, in
 //! the shape of the density and outputs extensions. Pseudo-encoding [`ENCODING`]
 //! (`WLSC`) and message type [`MSG_CAMERA`] are the whole of it, in both
 //! directions:

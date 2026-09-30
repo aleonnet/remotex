@@ -1,7 +1,8 @@
 # Build the Windows native package for x86-64: dist\remotex-windows-x86_64.msi.
 #
 # The same tree the tarball carries (packaging/build-tarball.sh), installed by Windows
-# Installer under %ProgramFiles%\remotex with bin on the machine PATH — and nothing else,
+# Installer by default under %ProgramFiles%\remotex with bin on the machine PATH — and
+# nothing else,
 # like the .deb, .rpm and .pkg: no service, no config. The gateway finds its config at
 # %ProgramData%\remotex\remotex.toml (`installed_layout_for_exe` in src/config.rs); the web
 # client is compiled into the exe:

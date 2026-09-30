@@ -30,7 +30,7 @@ MS-RDPECLIP, MS-RDPEA, MS-RDPECAM, and MS-RDPEAI live under
 EGFX is in, as [The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
 describes; what is left of it
 beyond the decoders is under
-[Source payloads](#source-payloads-the-gateway-decodes-instead-of-forwarding)
+[Source codecs](#source-codecs-not-accepted-yet)
 rather than here, because that payoff is a transcode removed, not a control
 restored.
 
@@ -60,9 +60,9 @@ pointed at sends. Anything else is refused by name in
 A Session Host with the Remote Desktop Session Host role and per-device CAL
 licensing does not send that. It opens a real exchange: `LICENSE_REQUEST`, the
 client's new or upgrade licence request, the platform challenge and its response,
-and the issued licence. This client would disconnect at the first of those. The
-exchange is written in FreeRDP 3.30.0's `libfreerdp/core/license.c`, the version
-`main` builds against, and a copy is in the local reference checkout under
+and the issued licence. This client would disconnect at the first of those.
+FreeRDP's `libfreerdp/core/license.c` is an implementation to compare while
+writing the exchange; a temporary reference checkout belongs under
 `tmp/references/`.
 
 How many real deployments this reaches is not known, and no host in use has shown
@@ -104,9 +104,10 @@ from `video`'s measurements rather than assumed.
 
 ### The first keyframe on a slow link
 
-Every stream starts at the dial, and its first keyframe is the whole desktop at
-that quality: 400 KB for a 1080p desktop at 90, two seconds on a 2 Mbit/s link
-before the first paint, and the largest lag any session on such a link ever shows.
+Every VP9 stream governed by the target's dial starts there, and its first
+keyframe is the whole desktop at that quality: 400 KB for a 1080p desktop at 90,
+two seconds on a 2 Mbit/s link before the first paint, and the largest lag any
+session on such a link ever shows.
 The walk cannot know the link before the first frame has crossed it, so the
 keyframe holds the verdicts for two seconds instead of misreading its own queue
 as the link ([the codec](architecture.md#the-codec)); a stream that started below
@@ -116,15 +117,15 @@ sharpens within half a second of the desktop going quiet. Measured before it is
 chosen: the cost on the LAN, where most sessions run, against the gain on the link
 it is for.
 
-### How a passed-through stream is doing
+### How wlshare's passed-through stream is doing
 
-A passed stream is coded and walked in wlshare, so the gateway knows each frame's
+wlshare's passed stream is coded and walked there, so the gateway knows each frame's
 size and whether it is a keyframe and nothing about the quality it went out at: the
 encode totals of such a session count its units, keyframes and bytes, and report no
-round coarsened and a lowest quality of 100 whatever wlshare did. Reporting it wants wlshare to say what it coded each
-frame at, which its desktop clients want for their own throughput readout too. It
-is one change to the wire, to be made with the desktop clients' throughput support
-rather than ahead of it.
+round coarsened and a lowest quality of 100 whatever wlshare did. Reporting it
+wants wlshare to say what it coded each frame at, which its desktop clients want
+for their own throughput readout too. It is one change to the wire, to be made
+with the desktop clients' throughput support rather than ahead of it.
 
 ### Apple's passed HEVC at 4K
 
@@ -161,18 +162,18 @@ None of it has been measured at 4K.
 
 A slow link is not a passed stream's to answer. A browser on one is served by a
 target without `media_passthrough`, whose VP9 the adaptive walk lowers; a passed
-session is not switched to VP9 for it, though the gaps' switch would make that
-possible. A brief stall stays what it is: the Mac's units predict from every one
+session is not switched to VP9 for it. A brief stall stays what it is: the Mac's
+units predict from every one
 before, so none can be dropped alone, and a full queue drops to the next IDR and
 asks the Mac for one, which brings the picture back as one fresh frame rather than
 a replay of the backlog.
 
-### Source payloads the gateway decodes instead of forwarding
+### Source codecs not accepted yet
 
-Three places where a remote could hand this gateway something closer to what the
-browser needs, and it decodes or re-encodes instead. Each is real work with a real
-payoff, and none of them is near-term — they are here so that "why not this one"
-has an answer rather than being rediscovered.
+Two places where a remote could hand this gateway a codec it currently refuses or
+does not advertise. Each could remove upstream bytes, but takes a new decoder and
+accepts a lossy source; neither is near-term. They are here so that "why not this
+one" has an answer rather than being rediscovered.
 
 - **RDP EGFX.** The RDP client carries the pipeline again — the channel, ZGFX,
   the surface compositor with its caches and copies, the frame marks, and the
@@ -181,13 +182,12 @@ has an answer rather than being rediscovered.
   describes each). H.264, which a host hands the parts of the desktop that move
   like video, is refused with `AVC_DISABLED` on purpose: a lossy video codec
   loses detail before the gateway ever encodes the picture, and the source is to
-  stay lossless. Decoding it here would be an OpenH264 dependency and a decoder
-  per surface; beyond that lies AVC420 pass-through — handing the host's H.264 to
-  the browser rather than decoding it and encoding VP9 — which is larger still: a
-  second graphics pipeline beside the one every engine shares, not an option on
-  it, and the host masks each picture by rectangles and mixes it with the other
-  codecs on one surface, which a passed stream cannot show. Neither is taken up
-  without the operator accepting a lossy source, as the VNC entry below puts it.
+  stay lossless. Supporting it would add an H.264 decoder per surface to the
+  shared compositor used in both the gateway and the page. Even on a passed
+  pipeline it is not a standalone video stream: the host masks each picture by
+  rectangles and mixes it with the other codecs and drawing commands on one
+  surface. It is not taken up without the operator accepting a lossy source, as
+  the VNC entry below puts it.
 - **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
   the lossless standard encodings on purpose: Tight and TightPNG are vendor
   encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to

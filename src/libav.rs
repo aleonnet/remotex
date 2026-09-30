@@ -3,8 +3,8 @@
 //!
 //! The gateway loads the system's shared libraries the first time a session
 //! needs them (see [`load`]): FFmpeg 6.1 to 9, libavcodec 60 to 63
-//! with the libavutil each was released with, so no build compiles or links
-//! FFmpeg. `apple-hp-media-static` links `libavcodec-hevc-prebuilt`'s private
+//! with the libavutil each was released with, so the default build compiles and
+//! links no FFmpeg. `apple-hp-media-static` links `libavcodec-hevc-prebuilt`'s private
 //! static archives instead. Either way the calls below are the whole interface.
 //!
 //! Those releases lay their structures out differently, so this reads none past

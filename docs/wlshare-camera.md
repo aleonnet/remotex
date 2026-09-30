@@ -4,7 +4,7 @@ How the browser's camera reaches a wlroots-based Wayland desktop behind wlshare,
 on the RFB connection the session already has, so a `vnc` target can take a
 camera the way an RDP one does over MS-RDPECAM. RFB carries nothing from a client
 but input and a clipboard, and no registered extension carries video that way, so
-this is wlshare's third private extension, in the shape of the density and outputs
+this is one of wlshare's private extensions, in the shape of the density and outputs
 ones ([`wlshare-density.md`](wlshare-density.md),
 [`wlshare-outputs.md`](wlshare-outputs.md)). It is discovered rather than
 configured: the client lists a pseudo-encoding, a server that speaks it answers,

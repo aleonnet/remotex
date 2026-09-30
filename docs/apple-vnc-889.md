@@ -526,8 +526,8 @@ A backing size twice the logical one makes a 2x display.
 Three behaviours of the Mac shape how remotex resizes:
 
 - **A display change stops the Mac's media stream.** The Mac restarts nothing until
-  it is offered again, so the picture is ZRLE's until the new display's stream
-  delivers — see [Display changes](#display-changes).
+  it is offered again, so remotex keeps the browser covered until the new display's
+  stream delivers — see [Display changes](#display-changes).
 - **A read racing a shrink crashes the Mac's capture agent.** Serving a pixel read
   sized for the old display after the display shrank crashes `ScreensharingAgent`.
   The session then loses its virtual display, and often its connection. The update
@@ -879,7 +879,7 @@ browser stays behind its resize notice until the stream delivers. See
 The two decoders are FFmpeg's HEVC decoder for the picture (libavcodec,
 LGPL-2.1-or-later) and Fraunhofer's AAC-ELD decoder for the sound (fdk-aac, a
 licence that is not OSI-approved), loaded from the system's shared libraries when
-a session needs them, so no build links either; the `apple-hp-media-static`
+a session needs them, so published release artifacts link neither; the `apple-hp-media-static`
 Cargo feature links them statically instead. A gateway that finds either missing
 ends the session of a browser that cannot decode the stream before it dials the
 Mac.

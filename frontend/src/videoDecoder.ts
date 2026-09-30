@@ -1,6 +1,7 @@
 // A WebCodecs `VideoDecoder` for the desktop's one stream.
 //
-// Every target sends the whole desktop as one inter-frame VP9 stream (see
+// This decodes the whole desktop as one inter-frame stream: normally VP9, or the
+// HEVC a High Performance Mac made when that stream is passed through (see
 // `VideoUnit` in src/protocol.rs). The units arrive as VIDEO records in the batches
 // and are painted onto the canvas. What is not ordinary is that the stream is a
 // *chain* — every frame means "what changed since the one before it" — so none of
@@ -8,9 +9,8 @@
 //
 // **Nothing here parses a bitstream.** The gateway says how to decode a stream in a
 // `videoFormat` control message before its first unit, and marks each unit's keyframe
-// bit on the wire. That is not a convenience: VP9 has no in-band parameter sets at
-// all, so there is nothing in a VP9 payload for a client to read a codec string out of.
-// The side that did the encoding says how to decode it.
+// bit on the wire. VP9 has no in-band parameter sets at all; for passed HEVC the
+// gateway has already parsed the stream's sequence parameters.
 //
 // The awkward part is the shape of the API rather than the codec. `decode()` is
 // fire-and-forget and frames come back on a callback, while the paint path wants

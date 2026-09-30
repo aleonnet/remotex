@@ -659,14 +659,15 @@ impl std::fmt::Debug for Painted {
 ///
 /// The contract every client implements:
 ///
-/// - The payload is **one whole access unit** — exactly one frame's worth, never a partial one
-///   and never two: the frame as libvpx emitted it.
+/// - The payload is **one whole access unit** — exactly one picture's worth, never a partial one
+///   and never two: VP9 or HEVC as its source encoder emitted it.
 /// - **[`ServerMsg::VideoFormat`] arrives first**, before the stream's first record, and names
-///   the exact WebCodecs configuration string to build the decoder with. Nothing in
-///   the payload can be parsed to find that out — VP9 has no parameter sets at all.
-/// - `keyframe` is on the wire, as bit 0 of the record's flags. It comes from the encoder itself.
-/// - `(w, h)` is the **true desktop size**, in framebuffer pixels. The decoded picture may be
-///   one pixel wider and/or taller, because the encoder is held to even sides and an odd
+///   the exact WebCodecs configuration string to build the decoder with. The client does not
+///   derive it from payloads: VP9 has no parameter sets, while the gateway has already parsed a
+///   passed HEVC stream's sequence parameters.
+/// - `keyframe` is on the wire, as bit 0 of the record's flags. The source path decides it.
+/// - `(w, h)` is the **true desktop size**, in framebuffer pixels. A gateway-encoded VP9 picture
+///   may be one pixel wider and/or taller, because that encoder is held to even sides and an odd
 ///   desktop does not have them: a client draws the top-left `w`×`h` of what it decodes and
 ///   ignores the rest. A record whose size differs from the last one means the decoder is
 ///   starting over on a differently sized picture, and a fresh `VideoFormat` precedes it.
@@ -678,10 +679,10 @@ pub struct VideoUnit {
     pub h: u16,
     /// Whether a decoder that has seen nothing before this can start here.
     ///
-    /// On the wire, as [`batch::VIDEO_KEYFRAME`] in the record's flags byte, and from the encoder
-    /// rather than from a parse of what it produced. The gateway also keeps it for the totals,
-    /// where keyframe bytes against total bytes is the whole measurement of whether the stream is
-    /// winning.
+    /// On the wire, as [`batch::VIDEO_KEYFRAME`] in the record's flags byte: reported by libvpx
+    /// for gateway-encoded VP9, and parsed from a passed stream. The gateway also keeps it for the
+    /// totals, where keyframe bytes against total bytes is the whole measurement of whether the
+    /// stream is winning.
     pub keyframe: bool,
     /// The access unit, in whatever codec [`ServerMsg::VideoFormat`] announced.
     pub data: Vec<u8>,

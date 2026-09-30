@@ -63,9 +63,10 @@ pub enum Subtype {
     /// the same wire as [`Subtype::Ard`] on a virtual display, with the picture as
     /// HEVC and the sound as AAC-ELD over the media
     /// stream Screen Sharing negotiates on the RFB connection and sends over UDP
-    /// with SRTP ([`crate::vnc_apple_media`]). ZRLE rectangles carry the picture
-    /// only until the stream does and across display changes; a stream that fails
-    /// ends the session, as it ends Apple's viewer's.
+    /// with SRTP ([`crate::vnc_apple_media`]). ZRLE rectangles are decoded only to
+    /// keep their deflate stream in step and never shown; the browser stays covered
+    /// until the media stream sends the display's first picture. A stream that
+    /// fails ends the session, as it ends Apple's viewer's.
     ///
     /// None of this is documented by Apple: the revision, its record layer and its
     /// control messages, which it shares with [`Subtype::Ard`], its virtual display
@@ -285,8 +286,8 @@ impl Default for AudioPlan {
     }
 }
 
-/// The render dial as an engine sees it: the whole framebuffer as one VP9 stream,
-/// resolved from a target's stream keys by [`TargetConfig::render_plan`].
+/// The render choices an engine sees: the target's resolved VP9 plan and either
+/// selected passthrough, from [`TargetConfig::render_plan`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct RenderPlan {
     /// The 1–100 dial the stream holds on a link that can carry it, rather than a
@@ -2019,7 +2020,7 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
         });
     }
 
-    // The Windows package installs the same tree under %ProgramFiles%\remotex:
+    // By default the Windows package installs the same tree under %ProgramFiles%\remotex:
     // <root>\bin\remotex.exe, and the tree is relocatable. Its configuration lives
     // outside that tree, under %ProgramData%, for the same reason as /etc above —
     // replacing the unpacked release must not touch a file holding credentials.

@@ -50,8 +50,8 @@ stream, that the gateway passes the HEVC, that the page asks for the decoder and
 its worker loads it, and that the first passed keyframe's batch is acknowledged
 with no video error or repaint request before it — an ordering, not a timing,
 because a failed decoder reports before the paint worker acknowledges. Against a
-gateway without the table it asserts the fallback: no isolation, no
-decoder asked for, and VP9.
+gateway without the table it asserts the fallback: the page remains isolated,
+asks for the decoder and gets a 404, then selects VP9.
 
 `audio-socket.spec.ts` keeps sound on its dedicated `/ws/audio` connection. It
 asserts which socket receives the format and packets, and that opening and closing
