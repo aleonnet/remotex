@@ -2297,7 +2297,8 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     assert_eq!(displays[0]["label"], "Virtual display", "{msg}");
     assert_eq!(displays[0]["virtual"], true, "{msg}");
     assert_eq!(msg["active"], MAC_VIRTUAL_DISPLAY, "{msg}");
-    expect_frame(&mut ws).await;
+    // No picture: the Mac's ZRLE is stepped over, and the picture is the media
+    // stream alone, which this fake Mac never delivers.
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::AutoPasteboard(true),
@@ -2398,7 +2399,6 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
         next_mac_request(&mut requests).await,
         MacRequest::AutoFramebuffer((24, 18))
     );
-    expect_frame(&mut ws).await;
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::IncrementalFramebuffer
@@ -2455,7 +2455,6 @@ async fn high_performance_opens_a_retina_client_at_its_screens_density() {
     assert_eq!(resize["w"], MAC_SCREEN_WIDTH * 2, "{resize}");
     assert_eq!(resize["h"], MAC_SCREEN_HEIGHT * 2, "{resize}");
     assert_eq!(resize["scale"], 2.0, "{resize}");
-    expect_frame(&mut ws).await;
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::AutoPasteboard(true),
@@ -2465,10 +2464,9 @@ async fn high_performance_opens_a_retina_client_at_its_screens_density() {
         next_mac_request(&mut requests).await,
         MacRequest::AutoFramebuffer((MAC_SCREEN_WIDTH * 2, MAC_SCREEN_HEIGHT * 2))
     );
-    // The re-arm rides with one more update request; consume its repaint so the
+    // The re-arm rides with one more update request; wait for the next so the
     // fake Mac is back at its read loop — and sees a clean end of stream rather
     // than a mid-write break — when the disconnect closes the session.
-    expect_frame(&mut ws).await;
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::IncrementalFramebuffer
