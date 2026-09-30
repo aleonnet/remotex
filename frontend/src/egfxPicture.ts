@@ -33,8 +33,10 @@ void main() {
   uv = vec2((gl_VertexID & 1) * 2, gl_VertexID & 2);
   gl_Position = vec4(uv * 2.0 - 1.0, 0.0, 1.0);
 }`;
+// Texel coordinates at full precision: at half precision a wide desktop's
+// neighbouring columns share a value, and NEAREST then repeats or drops one.
 const FRAGMENT = `#version 300 es
-precision mediump float;
+precision highp float;
 uniform sampler2D picture;
 in vec2 uv;
 out vec4 color;
@@ -78,14 +80,28 @@ export function createGraphicsPicture(): GraphicsPicture {
     );
   }
   gl.useProgram(program);
+  const largest = gl.getParameter(gl.MAX_TEXTURE_SIZE) as number;
   let texture: WebGLTexture | null = null;
   let width = 0;
   let height = 0;
 
   // A texture of the framebuffer's size, blank: WebGL zero-fills what it makes.
+  // WebGL reports a refused size or allocation as an error flag, not an
+  // exception, and a draw from the texture it did not make is blank: so each
+  // is checked here, and ends the pipeline rather than acknowledging a blank.
   const resize = (w: number, h: number) => {
+    if (w > largest || h > largest) {
+      throw new Error(
+        `the GPU takes no picture over ${largest} pixels a side (the host's is ${w}x${h})`,
+      );
+    }
     canvas.width = w;
     canvas.height = h;
+    if (gl.drawingBufferWidth !== w || gl.drawingBufferHeight !== h) {
+      throw new Error(
+        `the GPU gave a ${gl.drawingBufferWidth}x${gl.drawingBufferHeight} canvas for a ${w}x${h} picture`,
+      );
+    }
     gl.viewport(0, 0, w, h);
     if (texture) {
       gl.deleteTexture(texture);
@@ -95,6 +111,12 @@ export function createGraphicsPicture(): GraphicsPicture {
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, gl.NEAREST);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, gl.NEAREST);
     gl.texStorage2D(gl.TEXTURE_2D, 1, gl.RGBA8, w, h);
+    const error = gl.getError();
+    if (error !== gl.NO_ERROR) {
+      throw new Error(
+        `the GPU refused a ${w}x${h} picture (WebGL error 0x${error.toString(16)})`,
+      );
+    }
     width = w;
     height = h;
   };
