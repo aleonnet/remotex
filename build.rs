@@ -64,6 +64,7 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
         "frontend/wasm/egfx/Cargo.toml",
         "frontend/wasm/egfx/Cargo.lock",
         "frontend/wasm/egfx/.cargo/config.toml",
+        "frontend/wasm/egfx/rust-toolchain.toml",
         "frontend/wasm/egfx/src",
         "crates/remotex-rdp-graphics/Cargo.toml",
         "crates/remotex-rdp-graphics/src",

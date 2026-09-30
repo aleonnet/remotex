@@ -170,9 +170,8 @@ test.describe("a High Performance target under ?hevc_decoder=software", () => {
     const seen = watchSession(page);
     await logInAndConnectTo(page, HEVC_TARGET ?? "", SOFTWARE);
 
-    expect(await page.evaluate(() => globalThis.crossOriginIsolated)).toBe(
-      false,
-    );
+    // Isolated as every page is, so the page asks, and is told no.
+    expect(await page.evaluate(() => globalThis.crossOriginIsolated)).toBe(true);
     expect(seen.appleMedia, "asked for software where none is served").toBe(
       "false",
     );
@@ -183,11 +182,6 @@ test.describe("a High Performance target under ?hevc_decoder=software", () => {
       expect(format.passthrough).toBe(false);
       expect(format.decode).toMatch(/^vp09\./);
     }
-    // Not isolated, so the page never asks: the gateway's 404 is its own test.
-    expect(seen.decoderFiles).toEqual([]);
-    const response = await page.request.head(
-      new URL("/hevc/hevc.wasm", page.url()).toString(),
-    );
-    expect(response.status()).toBe(404);
+    expect(seen.decoderFiles).toEqual(["HEAD /hevc/hevc.wasm 404"]);
   });
 });
