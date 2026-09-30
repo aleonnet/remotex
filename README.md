@@ -13,18 +13,14 @@ window drives the remote's size, so the desktop is renegotiated at the size aske
 for rather than scaled on the client; plain `vnc`, a High Performance Mac and
 `rdp` can all be handed the window. On RDP a resize is a graphics reset of the
 default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
-With `egfx_passthrough = true` an RDP host's pipeline is passed to the browser,
-which composes it with the gateway's own compositor built to WebAssembly, rather
-than composed and encoded as VP9 here: for a LAN, where it takes nearly all of
-the picture's work off the gateway. It is **experimental**: run against one
-Windows 11 host, with sound and the clipboard beside it, and not yet with the
-camera or the microphone.
+Not every server is served alike: see [Supported servers](#supported-servers)
+for the tiers they are ranked in.
 
 - RDP uses a built-in client, protocol and all: the desktop over the graphics
   pipeline (MS-RDPEGFX) or plain bitmap updates, pointer, keyboard, mouse and
-  resize, spoken to a current Windows host over NLA — tested on Windows 10 and 11,
-  not on older Windows or xrdp. It carries the clipboard, sound (MS-RDPEA), and
-  the browser's camera and microphone, and does not carry touch. See
+  resize, spoken over NLA to modern Windows' own Remote Desktop server, tested
+  on Windows 10 and 11. It carries the clipboard, sound (MS-RDPEA), and the
+  browser's camera and microphone, and does not carry touch. See
   [`docs/rdp-client.md`](docs/rdp-client.md).
 - VNC uses a built-in RFB client and connects directly to macOS Screen Sharing,
   over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
@@ -73,6 +69,71 @@ browser app. `defaults delete -g NSConvolutionOverride1` restores Apple's radius
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/known-issues.md`](docs/known-issues.md) for faults worth recognising rather
 than re-investigating.
+
+## Supported servers
+
+What sets servers apart here is how the picture reaches the browser: passed
+through as the server made it, or decoded and encoded again as VP9 in the
+gateway, which adapts to the link.
+
+### Native servers, prioritized
+
+remotex is built around the remote desktop servers native to each platform:
+Windows' own Remote Desktop, macOS's built-in Screen Sharing, and on Linux
+wlshare, our own. They are ranked in tiers. Design, testing and optimization
+start from the first tier, and a higher tier comes first when work for two
+competes.
+
+#### Tier 1: wlshare on Linux
+
+[wlshare](https://github.com/andrewtheguy/wlshare), this project's own VNC
+server for wlroots-based Wayland desktops, is the ideal. It codes the desktop as
+VP9 itself, at the quality and chroma the target asks for, and walks that quality
+by the browser's link, so the gateway passes its stream through untouched and
+the session still adapts to a slow link. Because wlshare is ours, what generic
+VNC lacks is added to it as an extension the gateway finds on the connection:
+pixel density, switching outputs, sound, and the browser's camera and
+microphone. It is a plain `vnc` target.
+
+#### Tier 2: modern Windows' Remote Desktop, and a Mac's High Performance Screen Sharing
+
+The host's own stream, passed through to the browser for a LAN:
+
+- **Modern Windows' own Remote Desktop server** with `egfx_passthrough = true`:
+  the host's graphics pipeline (MS-RDPEGFX), composed in the browser by the
+  gateway's own compositor built to WebAssembly, which takes nearly all of the
+  picture's work off the gateway. It is **experimental**: run against one
+  Windows 11 host, with sound and the clipboard beside it, and not yet with the
+  camera or the microphone.
+- **macOS Screen Sharing's High Performance mode** (`ard-high-performance`) with
+  `media_passthrough = true`: the Mac's HEVC picture and AAC-ELD sound, to a
+  browser that decodes them (Chrome and Safari; not Firefox).
+
+A passed stream does not adapt to a slow link: the Mac's own rate control keeps
+it between 20 and 60 Mbit/s, and a Windows host's pipeline is sent as drawn. The
+fallback is the gateway's VP9, which does adapt. It serves a target without the
+key, which is the answer for a slow link; a browser that cannot decode the Mac's
+stream; and a Windows host that draws with plain bitmap updates rather than the
+pipeline. On RDP the key is the only way past VP9: without it the gateway
+composes the host's pipeline, or takes its bitmap updates, and encodes the
+picture as VP9.
+
+#### Tier 3: a Mac's Standard Screen Sharing
+
+Screen Sharing's Standard mode (`ard`, including the unofficial
+`virtual_display = true`) is decoded in the gateway and encoded as VP9, adapting
+to the link. Nothing of it is passed through.
+
+### Other servers, not prioritized
+
+Every other VNC server is reached through the RFB baseline and always encoded
+as VP9 in the gateway. It stays supported, and is worked on as needed rather
+than ahead of the tiers.
+
+Another RDP server, an older Windows or xrdp say, may happen to work if it
+speaks what the client implements ([The RDP client](docs/rdp-client.md)), but
+it is not a target: nothing is done to make it work. Its picture follows
+Windows' rule, encoded as VP9 in the gateway unless `egfx_passthrough = true`.
 
 ## Install
 
