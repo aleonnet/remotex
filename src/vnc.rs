@@ -20,7 +20,7 @@
 //! The transport difference is contained in three places and nowhere else:
 //! `Dialect` (which banner and ClientInit byte), the two preface functions after
 //! ServerInit, and the optional record wrapper. One read loop, one input path, one
-//! Apple metadata path and one tile path serve both.
+//! Apple metadata path and one rectangle path serve both.
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
@@ -39,7 +39,7 @@ use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
 use crate::config::{RenderPlan, Subtype, TargetConfig};
-use crate::encode::{TileSupport, VideoSink};
+use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
 use crate::protocol::{
@@ -1493,21 +1493,22 @@ pub async fn run(
     microphone: Option<Arc<crate::mic::MicBridge>>,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    // An RFB update is rectangles, so a desktop past the video ceiling can go as
-    // those — on a session the window does not size. With `resize` the gateway asks
-    // for every size and holds each under the ceiling, and a remote that answers
-    // past it is refused. Never High Performance's, whose picture is the media
-    // stream's, decoded or passed, with ZRLE's encoded here in its gaps.
-    let tiles = if config.resize || config.media_stream() {
-        TileSupport::None
+    // A desktop past the video ceiling holds the session open without a picture,
+    // on a session the window does not size: only the remote can bring it back
+    // within, as a Mac on All Displays does when one display is chosen. With
+    // `resize` the gateway asks for every size and holds each under the ceiling,
+    // and a remote that answers past it is refused. So is High Performance's,
+    // whose virtual display is held under the ceiling too.
+    let oversize = if config.resize || config.media_stream() {
+        Oversize::Refuse
     } else {
-        TileSupport::Rects
+        Oversize::Hold
     };
     // Every browser is sent wlshare's own VP9 as it comes when the server is wlshare,
     // asked for at the plan's chroma, dial and walk; any other server is encoded here
     // from ZRLE. A browser that decodes the Mac's stream is sent its HEVC, on a
     // target that passes it.
-    let sink = VideoSink::new("vnc", frame_tx, plan, feedback, tiles);
+    let sink = VideoSink::new("vnc", frame_tx, plan, feedback, oversize);
     session(config, display, plan, input_rx, audio, camera, microphone, &sink).await;
     sink.finish().await;
 }
@@ -2031,8 +2032,8 @@ impl Listing {
 /// Whether a session that may be sent wlshare's VP9 lists it for a desktop of this
 /// size: only within the video ceiling, since the stream is a picture of the whole
 /// desktop and one past the ceiling is not video. Past it the desktop comes as ZRLE,
-/// for tiles or for the ceiling's refusal, and the read loop lists the encoding again
-/// when a resize brings the desktop back within.
+/// held or refused, and the read loop lists the encoding again when a resize brings
+/// the desktop back within.
 fn lists_wlshare_vp9((w, h): (u16, u16)) -> bool {
     crate::video::within_ceiling((u32::from(w), u32::from(h)))
 }
@@ -3224,7 +3225,7 @@ struct Shared {
     passthrough: Option<Arc<Listing>>,
 }
 
-/// Read server messages forever, forwarding framebuffer updates as tiles.
+/// Read server messages forever, forwarding framebuffer updates to the sink.
 ///
 /// `apple` is `Some` when either Apple subtype negotiated the Mac's metadata
 /// encodings. The transport may be plain RFB 3.8 or 003.889 records.
@@ -3506,8 +3507,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // out still reaches it.
                 sink.frame().await?;
                 // wlshare's VP9 is a picture of the whole desktop, which past the
-                // ceiling is not video: off the list there, so wlshare sends the
-                // desktop again as ZRLE for tiles, and back on the list within it,
+                // ceiling is not video: off the list there, so wlshare does not code
+                // a stream nothing sends, and back on the list within it,
                 // where wlshare starts its stream again at a keyframe.
                 if let Some(lists) = passthrough {
                     let wanted = lists_wlshare_vp9(desktop.lock().unwrap().size);
@@ -4577,7 +4578,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 size.0,
                 size.1
             );
-            if sink.tiling() {
+            if sink.oversized() {
                 debug!("vnc: dropping a {w}x{h} VP9 frame past the video ceiling");
                 return Ok(RectEffect::NOTHING);
             }
@@ -4622,14 +4623,6 @@ async fn read_rect<R: AsyncRead + Unpin>(
     // deflate stream in step: the Mac still answers the one-pixel polls, and pushes
     // a whole screen on its own at a login.
     if desktop.lock().unwrap().media_live {
-        return Ok(RectEffect::pixels(rect));
-    }
-
-    // A rectangle carried as a tile goes out whole, as the server sent it. The
-    // shadow still records it, for a later CopyRect to read its source from.
-    if sink.tiling() {
-        shadow.lock().unwrap().accept(rect, &rgb);
-        sink.damage(rect, &rgb).await?;
         return Ok(RectEffect::pixels(rect));
     }
 
@@ -5214,6 +5207,9 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     if let Some(msg) = mosaic_msg {
         sink.msg(msg).await?;
     }
+    // All Displays over too many screens has no picture, whatever its size, and the
+    // resize below is where the sink reads it.
+    sink.hold_screens(!virtual_display && layout.too_many_screens());
     let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
     if virtual_display {
         let mut d = desktop.lock().unwrap();
@@ -6166,7 +6162,7 @@ async fn discard<R: AsyncRead + Unpin>(reader: &mut R, n: u64) -> anyhow::Result
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::protocol::WheelUnit;
+    use crate::protocol::{HoldCause, WheelUnit};
 
     // Vectors generated from a reference VNC auth implementation
     // (node:crypto des-ecb) with the challenge 00 01 .. 0f.
@@ -7993,7 +7989,7 @@ mod tests {
             apple_media: false,
             rdp_graphics: false,
         };
-        let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::None);
+        let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Refuse);
         // Larger than any desktop these tests paint, so a rectangle lands in the
         // mirror without the `Resize` a live engine would have sent first.
         sink.presize(256, 256);
@@ -10485,7 +10481,7 @@ mod tests {
     }
 
     /// A resize past the ceiling takes the encoding off the list, so wlshare sends the
-    /// desktop again for tiles; a frame already on its way is dropped and its fence
+    /// desktop as ZRLE while it is held; a frame already on its way is dropped and its fence
     /// goes back at once, and a resize back within the ceiling lists the encoding again.
     #[tokio::test]
     async fn a_desktop_past_the_ceiling_is_off_the_list_until_it_is_back_within() {
@@ -10494,7 +10490,7 @@ mod tests {
         let (frame_tx, mut rx) = mpsc::channel(64);
         let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Full, apple_media: false, rdp_graphics: false };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
-        let sink = VideoSink::new("vnc", frame_tx, plan, feedback, TileSupport::Rects);
+        let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
         let mut shared = test_shared(uplink, shared_desktop(small, None, None), test_shadow(small));
         let encodings = rfb38_encoding_list(false, false, false, false);
@@ -10896,6 +10892,36 @@ mod tests {
         let mut expected = vnc_apple::set_server_scaling(0.5);
         expected.extend_from_slice(&vnc_apple::auto_framebuffer_update((3840, 2160)));
         assert_eq!(written(&sent), expected);
+    }
+
+    /// All Displays over three screens is held however small it is, and choosing
+    /// one of them brings video back: the browser is told why at each resize.
+    #[tokio::test]
+    async fn all_displays_over_three_screens_is_held() {
+        let (uplink, _sent) = test_uplink();
+        let (frame_tx, mut rx) = mpsc::channel(64);
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Subsampled, apple_media: false, rdp_graphics: false };
+        let sink = VideoSink::new("vnc", frame_tx, plan, Arc::new(crate::feedback::LinkFeedback::new()), Oversize::Hold);
+        let shared = test_shared(uplink, shared_desktop((1280, 800), None, None), test_shadow((1280, 800)));
+        let screens: [TestScreen; 3] = [
+            (1, (1280, 800), (1280, 800), 0x01),
+            (2, (1280, 800), (1280, 800), 0x00),
+            (3, (1280, 800), (1280, 800), 0x00),
+        ];
+        for current in [None, Some(2)] {
+            read_display_layout(&mut layout_payload(current, &screens).as_slice(), &shared, false, false, &sink)
+                .await
+                .unwrap();
+        }
+
+        sink.flush().await;
+        let mut causes = Vec::new();
+        while let Ok(msg) = rx.try_recv() {
+            if let ServerMsg::Oversize { cause } = msg {
+                causes.push(cause);
+            }
+        }
+        assert_eq!(causes, vec![Some(HoldCause::Screens), None]);
     }
 
     /// The checkmark follows the Mac and nothing else. It is placed from the

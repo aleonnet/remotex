@@ -13,6 +13,8 @@
 // and "which decoder is this browser running" were answerable only by reading the
 // console.
 
+import type { HoldCause } from "./protocol.ts";
+
 /**
  * The wire fields of `audioFormat`, minus the `OpusHead` bytes.
  *
@@ -86,15 +88,9 @@ export function audioLabel(row: AudioRow): string {
   return row.stream ? streamLabel(row.stream) : "Waiting for the audio format";
 }
 
-/**
- * The Render row: the dial this session resolved to, or — while the desktop is past
- * what a video stream encodes — the tiles that carry it instead.
- */
-export function renderLabel(plan: string, tiling: boolean): string {
-  if (!plan) {
-    return "Waiting for the target";
-  }
-  return tiling ? "PNG tiles: the desktop is past what video carries" : plan;
+/** The Render row: the dial this session resolved to. */
+export function renderLabel(plan: string): string {
+  return plan || "Waiting for the target";
 }
 
 /** The wire fields of `videoFormat`, or a pipeline this browser composes. */
@@ -111,15 +107,19 @@ export interface VideoStreamInfo {
 /**
  * The Video row: the exact configuration the decoder was built with and whose
  * stream it decodes, or what the row is waiting for before the stream's format has
- * arrived. While the picture is tiles no decoder is in use, whatever one was built
- * before.
+ * arrived. While the desktop is held — past what a video stream encodes, or All
+ * Displays over too many screens — there is no picture, whatever decoder was
+ * built before.
  */
 export function videoLabel(
   stream: VideoStreamInfo | null,
-  tiling: boolean,
+  held: HoldCause | null,
 ): string {
-  if (tiling) {
-    return "Not in use: the picture is PNG tiles";
+  if (held === "size") {
+    return "Not in use: the desktop is past what video carries";
+  }
+  if (held === "screens") {
+    return "Not in use: All Displays spans more than two screens";
   }
   if (!stream) {
     return "Waiting for the video format";

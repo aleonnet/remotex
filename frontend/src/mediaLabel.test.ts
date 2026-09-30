@@ -78,27 +78,27 @@ test("a channel count that is neither mono nor stereo still names itself", () =>
 });
 
 test("the video row waits for the format, then names it and whose stream it is", () => {
-  assert.equal(videoLabel(null, false), "Waiting for the video format");
+  assert.equal(videoLabel(null, null), "Waiting for the video format");
   assert.equal(
-    videoLabel({ decode: "vp09.00.40.08", passthrough: false }, false),
+    videoLabel({ decode: "vp09.00.40.08", passthrough: false }, null),
     "vp09.00.40.08 · encoded by the gateway",
   );
   assert.equal(
-    videoLabel({ decode: "hev1.4.10.L150.BE.8", passthrough: true }, false),
+    videoLabel({ decode: "hev1.4.10.L150.BE.8", passthrough: true }, null),
     "hev1.4.10.L150.BE.8 · passthrough from the remote",
   );
   assert.equal(
-    videoLabel({ decode: "vp09.00.40.08", passthrough: true }, true),
-    "Not in use: the picture is PNG tiles",
+    videoLabel({ decode: "vp09.00.40.08", passthrough: true }, "size"),
+    "Not in use: the desktop is past what video carries",
+  );
+  assert.equal(
+    videoLabel({ decode: "vp09.00.40.08", passthrough: true }, "screens"),
+    "Not in use: All Displays spans more than two screens",
   );
 });
 
-test("the Render row says tiles while the desktop is past what video carries", () => {
+test("the Render row waits for the target, then names its dial", () => {
   const plan = "video q90 4:4:4 · adaptive";
-  assert.equal(renderLabel("", false), "Waiting for the target");
-  assert.equal(renderLabel(plan, false), plan);
-  assert.equal(
-    renderLabel(plan, true),
-    "PNG tiles: the desktop is past what video carries",
-  );
+  assert.equal(renderLabel(""), "Waiting for the target");
+  assert.equal(renderLabel(plan), plan);
 });

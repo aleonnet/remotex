@@ -1,8 +1,8 @@
 //! Per-attachment conversion from [`ServerMsg`] to WebSocket frames. Control
-//! messages flush the pending batch to preserve ordering against the access units
-//! and tiles around them, and batches are bounded.
+//! messages flush the pending batch to preserve ordering against the records
+//! around them, and batches are bounded.
 
-use crate::protocol::{self, GraphicsUnit, ServerMsg, Tile, VideoUnit, WireFrame, batch};
+use crate::protocol::{self, GraphicsUnit, ServerMsg, VideoUnit, WireFrame, batch};
 
 /// Record bytes per batch, below client WebSocket limits and large enough to
 /// amortize per-frame overhead.
@@ -21,7 +21,7 @@ pub enum WireError {
 pub struct Wire {
     /// Records accumulated for the batch currently being built. Every one is sent,
     /// in order: an access unit is a link in a chain, and a dropped one decodes
-    /// wrongly until the next keyframe; a tile is pixels nothing else re-sends.
+    /// wrongly until the next keyframe.
     pending: Vec<Record>,
     /// What `pending` will serialize to, so the byte cap can be checked without
     /// serializing to find out.
@@ -74,11 +74,6 @@ impl Wire {
                 // one message, not the whole attachment.
                 None => match msg {
                     ServerMsg::Video(unit) => self.push(Record::Video(unit), &mut frames)?,
-                    ServerMsg::Tiles(tiles) => {
-                        for tile in tiles {
-                            self.push(Record::Tile(tile), &mut frames)?;
-                        }
-                    }
                     // A frame's last run is its batch's last record: the browser
                     // shows a batch once it has drawn all of it, and acknowledges
                     // it then, which is this frame's acknowledgement to the host.
@@ -142,11 +137,6 @@ impl Wire {
                     unit.write_record(&mut frame);
                     unit.held
                 }
-                Record::Tile(tile) => {
-                    self.totals.tile(tile.record_len());
-                    tile.write_record(&mut frame);
-                    tile.held
-                }
                 Record::Graphics(unit) => {
                     self.totals.graphics(unit.record_len());
                     unit.write_record(&mut frame);
@@ -165,7 +155,6 @@ impl Wire {
 /// One record of a batch.
 enum Record {
     Video(VideoUnit),
-    Tile(Tile),
     Graphics(GraphicsUnit),
 }
 
@@ -173,7 +162,6 @@ impl Record {
     fn len(&self) -> usize {
         match self {
             Record::Video(unit) => unit.record_len(),
-            Record::Tile(tile) => tile.record_len(),
             Record::Graphics(unit) => unit.record_len(),
         }
     }
@@ -190,9 +178,6 @@ pub struct Totals {
     /// Access units and their record bytes.
     pub video: u64,
     pub video_bytes: u64,
-    /// Tiles and their record bytes.
-    pub tiles: u64,
-    pub tile_bytes: u64,
     /// Runs of a passed graphics pipeline and their record bytes.
     pub graphics: u64,
     pub graphics_bytes: u64,
@@ -226,11 +211,6 @@ impl Totals {
         self.video_bytes += len as u64;
     }
 
-    fn tile(&mut self, len: usize) {
-        self.tiles += 1;
-        self.tile_bytes += len as u64;
-    }
-
     fn graphics(&mut self, len: usize) {
         self.graphics += 1;
         self.graphics_bytes += len as u64;
@@ -246,16 +226,14 @@ impl std::fmt::Display for Totals {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(
             f,
-            "{} binary frames / {} bytes carrying {} video records / {} bytes, \
-             {} tile records / {} bytes and {} graphics records / {} bytes, \
+            "{} binary frames / {} bytes carrying {} video records / {} bytes \
+             and {} graphics records / {} bytes, \
              {} text frames / {} bytes, largest binary {} bytes, \
              {} audio frames / {} bytes carrying {} opus packets",
             self.binary_frames,
             self.binary_bytes,
             self.video,
             self.video_bytes,
-            self.tiles,
-            self.tile_bytes,
             self.graphics,
             self.graphics_bytes,
             self.text_frames,
@@ -287,11 +265,8 @@ mod tests {
         ServerMsg::Resize { w: 1600, h: 1000, scale: UNSCALED }
     }
 
-    /// A parsed record: `(flags, w, h, payload)` for `VIDEO`, `(TILE, 0, 0, png)` for a tile.
+    /// A parsed `VIDEO` record: `(flags, w, h, payload)`.
     type Parsed = (u8, u16, u16, Vec<u8>);
-
-    /// The flags a parsed tile is marked with, which no `VIDEO` record can carry.
-    const TILE: u8 = 0xFF;
 
     /// The records of a batch, parsed independently of the writer above — a reader
     /// that shared the writer's arithmetic would agree with it whatever it did.
@@ -302,14 +277,6 @@ mod tests {
         let mut at = batch::HEADER_LEN;
         let mut out = Vec::new();
         while at < frame.len() {
-            if frame[at] == batch::OP_TILE {
-                let len = u32::from_le_bytes([frame[at + 9], frame[at + 10], frame[at + 11], frame[at + 12]])
-                    as usize;
-                let start = at + batch::TILE_HEADER_LEN;
-                out.push((TILE, 0, 0, frame[start..start + len].to_vec()));
-                at = start + len;
-                continue;
-            }
             assert_eq!(frame[at], batch::OP_VIDEO, "unknown record op");
             let le = |o: usize| u16::from_le_bytes([frame[at + o], frame[at + o + 1]]);
             let len = u32::from_le_bytes([frame[at + 6], frame[at + 7], frame[at + 8], frame[at + 9]])
@@ -501,23 +468,6 @@ mod tests {
         // A run with nothing in it produces nothing, rather than an empty frame.
         assert!(wire.encode(Vec::new()).unwrap().is_empty());
         assert_eq!(wire.encode(vec![resize()]).unwrap().len(), 1);
-    }
-
-    /// Tiles share batches with the units around them, one record per tile, in order,
-    /// and a control message flushes them like any record.
-    #[test]
-    fn tiles_are_records_in_their_place() {
-        let tile = |seed: u8| crate::protocol::Tile { x: 1, y: 2, w: 3, h: 4, data: vec![seed; 5], held: Held::default() };
-        let mut wire = Wire::default();
-        let frames = wire
-            .encode(vec![ServerMsg::Tiles(vec![tile(1), tile(2)]), resize(), ServerMsg::Tiles(vec![tile(3)])])
-            .unwrap();
-        assert_eq!(frames.len(), 3);
-        let seen: Vec<(u8, u8)> =
-            binary(&frames).iter().flat_map(|f| records(f)).map(|r| (r.0, r.3[0])).collect();
-        assert_eq!(seen, vec![(TILE, 1), (TILE, 2), (TILE, 3)]);
-        assert_eq!(wire.totals.tiles, 3);
-        assert_eq!(wire.totals.video, 0);
     }
 
     /// A run of a passed graphics pipeline is a record in its place: whole, in order

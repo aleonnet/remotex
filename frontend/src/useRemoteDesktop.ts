@@ -45,6 +45,7 @@ import {
   clickCount,
   type DisplayInfo,
   decodeAudioFrame,
+  type HoldCause,
   MAX_CLIPBOARD_BYTES,
   type MosaicRegion,
   type MouseButton,
@@ -518,9 +519,12 @@ export function useRemoteDesktop(
   const [videoStream, setVideoStream] = useState<VideoStreamInfo | null>(null);
   // The render dial this session resolved to, from `connected`. Empty in the picker.
   const [renderPlan, setRenderPlan] = useState("");
-  // Whether the picture arrives as PNG tiles rather than video, from `tiling`.
-  // False in the picker and at every `connected`, until the gateway says otherwise.
-  const [tiling, setTiling] = useState(false);
+  // Why the desktop has no picture, from `oversize`: past what a video stream
+  // encodes, or All Displays over too many screens. Null in the picker and at
+  // every `connected`, until the gateway says otherwise.
+  const [oversize, setOversize] = useState<HoldCause | null>(null);
+  // Whether it is held at all, which is what input and focus follow.
+  const held = oversize !== null;
   // What this session is speaking, from `connected`: the protocol and the target's
   // subtype where it has one. Empty in the picker, and read only by the card — no
   // behaviour hangs off it, because every capability that varies by subtype already
@@ -1531,7 +1535,7 @@ export function useRemoteDesktop(
       // browser can decode what a streaming target sends is answered by `configure`
       // refusing it, once, with the configuration in hand.
       setRenderPlan(msg.render);
-      setTiling(false);
+      setOversize(null);
       // The operator's QA overlay, stated per session like everything else on
       // `connected`: this browser holds no preference for it and offers no
       // toggle, the same way it offers none for `resize`.
@@ -1687,8 +1691,8 @@ export function useRemoteDesktop(
         case "resizing":
           setRemoteResizing(msg.active);
           break;
-        case "tiling":
-          setTiling(msg.active);
+        case "oversize":
+          setOversize(msg.cause);
           break;
         case "picker":
           // No target selected (idle attach, switch-target, or an engine that
@@ -1719,7 +1723,7 @@ export function useRemoteDesktop(
           // video at all.
           setVideoError(null);
           setRenderPlan("");
-          setTiling(false);
+          setOversize(null);
           setConnection("");
           // Back to the default rather than left as the last target's answer: the
           // next one may not report at all, and inheriting "the remote is a Mac"
@@ -2232,8 +2236,10 @@ export function useRemoteDesktop(
     const el = overlayRef.current;
     // View-only is the absence of every listener below rather than a flag each
     // of them tests, so there is no path left that could forward a key or a
-    // click while the menu has the screen.
-    if (!el || viewOnly) {
+    // click while the menu has the screen. A held desktop is the same: the
+    // remote is not on screen to see what a key does to it, and the notice over
+    // it wants Tab for its own buttons.
+    if (!el || viewOnly || held) {
       return;
     }
 
@@ -2591,7 +2597,15 @@ export function useRemoteDesktop(
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, canvasRef, graphicsRef, syncCursor, touchActive, viewOnly]);
+  }, [
+    overlayRef,
+    canvasRef,
+    graphicsRef,
+    syncCursor,
+    touchActive,
+    viewOnly,
+    held,
+  ]);
 
   // The desktop takes the keyboard as soon as it is on screen, so the first
   // thing typed reaches the remote — the surface is the only thing on it worth
@@ -2607,11 +2621,11 @@ export function useRemoteDesktop(
   // opens only once its fetch has answered, which is a later commit than the one
   // that closed the drawer, so its own focus lands after this.
   useEffect(() => {
-    if (mode !== "desktop" || viewOnly) {
+    if (mode !== "desktop" || viewOnly || held) {
       return;
     }
     overlayRef.current?.focus({ preventScroll: true });
-  }, [mode, viewOnly, overlayRef]);
+  }, [mode, viewOnly, held, overlayRef]);
 
   return {
     status,
@@ -2621,7 +2635,7 @@ export function useRemoteDesktop(
     size,
     hostScale,
     renderPlan,
-    tiling,
+    oversize,
     connection,
     canClipboard,
     canAudio,

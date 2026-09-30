@@ -288,11 +288,14 @@ export type ControlMsg =
   // Pushed by the gateway, which alone knows when the Mac has settled; the
   // page never infers it.
   | { type: "resizing"; active: boolean }
-  // Whether the desktop the `resize` before this describes arrives as the remote's
-  // own rectangles (TILE records) rather than as video, because it is past what a
-  // video stream encodes. Sent after every `resize` of a source that can do that,
-  // and never by one that cannot — whose pictures are always video.
-  | { type: "tiling"; active: boolean }
+  // Why the desktop the `resize` before this describes has no picture, or null
+  // when it has one: past what a video stream encodes, or a Mac's All Displays
+  // over more than two screens. No picture follows until a `resize` without a
+  // cause. Sent after every `resize` of a source that holds the session open for
+  // that, and never by one that ends the session instead. The page says so over
+  // the desktop and offers the remote's displays, since choosing one is how a
+  // Mac on All Displays gets back.
+  | { type: "oversize"; cause: HoldCause | null }
   // The remote's displays and which one is being shared, pushed whenever either
   // changes. The browser holds no display state of its own: the checkmark
   // follows `active`, so a selection the remote refused leaves the panel
@@ -354,18 +357,6 @@ export interface VideoMsg {
   data: Uint8Array;
 }
 
-// One rectangle of the remote's framebuffer, as the remote sent it: a PNG to draw
-// at (x, y) over what the canvas holds. It depends on nothing before it. See `Tile`
-// in src/protocol.rs for the contract.
-export interface TileMsg {
-  kind: "tile";
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  data: Uint8Array;
-}
-
 // A run of an RDP host's graphics pipeline, as the host sent it: whole commands, out
 // of their bulk compression, for this page to compose (egfxCompositor.ts). It means
 // something only after every run before it, from the `graphicsStart` that began the
@@ -376,7 +367,10 @@ export interface GraphicsMsg {
   data: Uint8Array;
 }
 
-export type BatchRecord = VideoMsg | TileMsg | GraphicsMsg;
+export type BatchRecord = VideoMsg | GraphicsMsg;
+
+// Why a desktop has no picture: see `oversize`.
+export type HoldCause = "size" | "screens";
 
 const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;
@@ -386,8 +380,6 @@ const AUDIO_PACKET_HEADER_LEN = 2;
 const CAMERA_FRAME_KIND = 0x04;
 const CAMERA_KEYFRAME = 0x01;
 const MIC_FRAME_KIND = 0x05;
-const OP_TILE = 0x01;
-const TILE_HEADER_LEN = 13;
 const OP_VIDEO = 0x03;
 const VIDEO_HEADER_LEN = 10;
 const OP_GRAPHICS = 0x04;
@@ -406,7 +398,6 @@ const VIDEO_KEYFRAME = 0x01;
 //   offset 4: u32 sequence, increasing per attachment
 //   offset 8: records, back to back
 //
-//   TILE  (op 0x01):     u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
 //   VIDEO (op 0x03):     u8 flags | u16 w | u16 h | u32 len | payload[len]
 //   GRAPHICS (op 0x04):  u32 len | commands[len]
 //
@@ -457,8 +448,6 @@ function decodeRecord(
   at: number,
 ): { record: BatchRecord; next: number } | null {
   switch (view.getUint8(at)) {
-    case OP_TILE:
-      return decodeTile(view, buf, at);
     case OP_GRAPHICS:
       return decodeGraphics(view, buf, at);
     default:
@@ -512,35 +501,6 @@ function decodeVideo(
       w: view.getUint16(at + 2, true),
       h: view.getUint16(at + 4, true),
       keyframe: (flags & VIDEO_KEYFRAME) !== 0,
-      data: new Uint8Array(buf, start, len),
-    },
-    next: start + len,
-  };
-}
-
-// A tile of no area or no payload is malformed: nothing could be drawn for it.
-function decodeTile(
-  view: DataView,
-  buf: ArrayBuffer,
-  at: number,
-): { record: TileMsg; next: number } | null {
-  if (at + TILE_HEADER_LEN > buf.byteLength) {
-    return null;
-  }
-  const w = view.getUint16(at + 5, true);
-  const h = view.getUint16(at + 7, true);
-  const len = view.getUint32(at + 9, true);
-  const start = at + TILE_HEADER_LEN;
-  if (w === 0 || h === 0 || len === 0 || start + len > buf.byteLength) {
-    return null;
-  }
-  return {
-    record: {
-      kind: "tile",
-      x: view.getUint16(at + 1, true),
-      y: view.getUint16(at + 3, true),
-      w,
-      h,
       data: new Uint8Array(buf, start, len),
     },
     next: start + len,

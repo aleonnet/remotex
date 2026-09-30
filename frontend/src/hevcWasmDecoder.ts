@@ -70,9 +70,7 @@ export interface HevcPlanes extends DecodedPlanes {
 /** What a stream's decoder outputs: the browser's frame, or this decoder's planes. */
 export type DecodedPicture = VideoFrame | HevcPlanes;
 
-export function isHevcPlanes(
-  picture: DecodedPicture | ImageBitmap,
-): picture is HevcPlanes {
+export function isHevcPlanes(picture: DecodedPicture): picture is HevcPlanes {
   return "planes" in picture;
 }
 

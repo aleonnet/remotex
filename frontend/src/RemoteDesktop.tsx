@@ -1,9 +1,11 @@
 import { useCallback, useEffect, useRef } from "react";
 import FloatingMenu from "./FloatingMenu.tsx";
+import type { DisplayInfo, HoldCause } from "./protocol.ts";
 import TargetPicker from "./TargetPicker.tsx";
 import {
   CAN_PINCH_ZOOM,
   type ConnectionStatus,
+  type RemoteSize,
   useRemoteDesktop,
 } from "./useRemoteDesktop.ts";
 
@@ -15,6 +17,70 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   takenOver: "Session taken over",
   failed: "Cannot open the session",
 };
+
+// The notice over a desktop with no picture, offering every display but the one
+// being sent, which is the one held: past what video carries, or All Displays over
+// more than two screens. A click sends a `selectDisplay` and nothing else: the
+// notice comes down when the gateway says the desktop has a picture again.
+function OversizeNotice({
+  cause,
+  size,
+  displays,
+  activeDisplayId,
+  onSelectDisplay,
+}: {
+  cause: HoldCause;
+  size: RemoteSize;
+  displays: DisplayInfo[];
+  activeDisplayId: number | null;
+  onSelectDisplay: (id: number) => void;
+}) {
+  const others = displays.filter((display) => display.id !== activeDisplayId);
+  return (
+    <div className="oversize-overlay" role="alert">
+      {cause === "screens" ? (
+        <>
+          <span className="status">Too many screens to show</span>
+          <span className="status-hint">
+            All Displays spans more than two screens, which is more than one
+            view shows.
+          </span>
+        </>
+      ) : (
+        <>
+          <span className="status">Too large to show</span>
+          <span className="status-hint">
+            The remote desktop is {size.w}×{size.h} pixels, past the largest
+            picture a video stream carries.
+          </span>
+        </>
+      )}
+      {others.length > 0 ? (
+        <>
+          <span className="status-hint">
+            Choose one display to show on its own:
+          </span>
+          <div className="oversize-displays">
+            {others.map((display) => (
+              <button
+                type="button"
+                key={display.id}
+                className="status-action"
+                onClick={() => onSelectDisplay(display.id)}
+              >
+                {display.label}
+              </button>
+            ))}
+          </div>
+        </>
+      ) : (
+        <span className="status-hint">
+          Nothing can be shown until the remote's desktop is smaller.
+        </span>
+      )}
+    </div>
+  );
+}
 
 export default function RemoteDesktop({
   branding,
@@ -45,7 +111,7 @@ export default function RemoteDesktop({
     size,
     hostScale,
     renderPlan,
-    tiling,
+    oversize,
     connection,
     canClipboard,
     canAudio,
@@ -193,7 +259,7 @@ export default function RemoteDesktop({
           hostScale={hostScale}
           connection={connection}
           renderPlan={renderPlan}
-          tiling={tiling}
+          oversize={oversize}
           canAudio={canAudio}
           audioEnabled={audioEnabled}
           audioError={audioError}
@@ -259,6 +325,22 @@ export default function RemoteDesktop({
         <output className="resize-overlay">
           <span className="status">Resizing…</span>
         </output>
+      )}
+
+      {/* A desktop past what video carries: no picture comes, and the session stays
+          up for the one way out, a smaller desktop from the remote. Choosing one of
+          its displays is that way for a Mac on All Displays, so they are offered
+          here and not only in the menu. It takes the pointer, since the remote
+          under it is not on screen, and sits below the menu, which stays
+          reachable for switching target instead. */}
+      {oversize && mode === "desktop" && !showStatus && size && (
+        <OversizeNotice
+          cause={oversize}
+          size={size}
+          displays={displays}
+          activeDisplayId={activeDisplayId}
+          onSelectDisplay={selectDisplay}
+        />
       )}
 
       {showStatus && (

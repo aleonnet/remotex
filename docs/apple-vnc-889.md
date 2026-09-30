@@ -466,13 +466,12 @@ This is the one place the browser rescales remote pixels (see
 At factor 1.0 the combined framebuffer is the screens' native pixels side by side,
 and it is often past what a video stream encodes: a 2x screen beside a 1x one
 measured 5376×2287. Standard never resizes (`resize = false`), so the gateway
-cannot ask for less. Instead it passes the Mac's own rectangles through: each ZRLE
-rectangle of a `FramebufferUpdate`, decoded, goes to the browser whole as one PNG
-tile at the Mac's place and size, and the mosaic composes the framebuffer they are
-drawn into. Nothing about the RFB side changes — the Mac sends ZRLE rectangles
-either way. Going back to one screen returns the session to video at the next
-layout. See
-[tiles past the ceiling](architecture.md#tiles-past-the-ceiling).
+cannot ask for less. Such a view has no picture: the session stays up, and the
+page offers the Mac's screens instead, since one screen is a smaller desktop.
+Choosing one within the ceiling returns the session to video at the next layout.
+All Displays over more than two screens is held the same way whatever its size or
+densities, since composing them is too much for a browser to draw. See
+[past the ceiling](architecture.md#past-the-ceiling).
 
 ### The High Performance virtual display
 

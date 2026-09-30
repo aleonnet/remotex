@@ -250,7 +250,7 @@ mod tests {
             rdp_graphics: false,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
-        (VideoSink::new("test", frame_tx, plan, feedback, crate::encode::TileSupport::None), frame_rx)
+        (VideoSink::new("test", frame_tx, plan, feedback, crate::encode::Oversize::Refuse), frame_rx)
     }
 
     // The detection itself is not testable here, and the reason is the same one

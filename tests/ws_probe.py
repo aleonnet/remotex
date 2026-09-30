@@ -75,28 +75,19 @@ def coordinates(value: str) -> tuple[int, int]:
     return x, y
 
 
-def batch_records(frame: bytes) -> tuple[int, int]:
-    """Print one screen batch's records and return its (tiles, video units).
+def batch_records(frame: bytes) -> int:
+    """Print one screen batch's records and return its video units.
 
-    Parsed here rather than trusted from anywhere: a TILE record is
-    ``0x01 | u16 x | u16 y | u16 w | u16 h | u32 len | png``, a VIDEO record
+    Parsed here rather than trusted from anywhere: a VIDEO record is
     ``0x03 | u8 flags | u16 w | u16 h | u32 len | payload``."""
     count = int.from_bytes(frame[2:4], "little")
     sequence = int.from_bytes(frame[4:8], "little")
     at = 8
-    tiles = video = 0
+    video = 0
     parts = []
     while at < len(frame):
         op = frame[at]
-        if op == 0x01:
-            x, y, w, h = (int.from_bytes(frame[at + 1 + 2 * i : at + 3 + 2 * i], "little") for i in range(4))
-            length = int.from_bytes(frame[at + 9 : at + 13], "little")
-            png = frame[at + 13 : at + 13 + length]
-            assert png[:8] == b"\x89PNG\r\n\x1a\n", "a tile that is not a PNG"
-            parts.append(f"tile {w}x{h}+{x}+{y} {length}B")
-            tiles += 1
-            at += 13 + length
-        elif op == 0x03:
+        if op == 0x03:
             w = int.from_bytes(frame[at + 2 : at + 4], "little")
             h = int.from_bytes(frame[at + 4 : at + 6], "little")
             length = int.from_bytes(frame[at + 6 : at + 10], "little")
@@ -107,10 +98,10 @@ def batch_records(frame: bytes) -> tuple[int, int]:
         else:
             raise AssertionError(f"unknown record op {op:#x}")
     assert at == len(frame), "records must exactly fill the frame"
-    assert tiles + video == count, "the header's count must match the records"
+    assert video == count, "the header's count must match the records"
     shown = ", ".join(parts[:6]) + (f", ... ({len(parts)} records)" if len(parts) > 6 else "")
     print(f"  batch #{sequence}: {shown}")
-    return tiles, video
+    return video
 
 
 async def main() -> int:
@@ -254,7 +245,7 @@ async def main() -> int:
     parser.add_argument(
         "--records",
         action="store_true",
-        help="print each screen batch's records: TILE rectangles and VIDEO units",
+        help="print each screen batch's VIDEO records",
     )
     args = parser.parse_args()
 
@@ -278,8 +269,8 @@ async def main() -> int:
     # Mac's stream only with --apple-media.
     apple_media = "true" if args.apple_media else "false"
     url = f"ws://127.0.0.1:{args.port}/ws?session={token}&chroma=444&apple_media={apple_media}"
-    # No cap on a message, as a browser has none: a tile of a whole desktop is one
-    # batch, which a 2x screen puts past the library's 1 MiB default.
+    # No cap on a message, as a browser has none: a keyframe of a whole desktop is
+    # one batch, which a 2x screen can put past the library's 1 MiB default.
     async with websockets.connect(
         url, additional_headers={"Cookie": f"remotex_session={cookie}"}, max_size=None
     ) as socket:
@@ -299,7 +290,6 @@ async def main() -> int:
         mouse_sent = False
         clipboard_sent = False
         frames = 0
-        tiles = 0
         video_units = 0
         audio_format = None
         audio_frames = 0
@@ -463,9 +453,7 @@ async def main() -> int:
                     if isinstance(message, bytes):
                         frames += 1
                         if args.records and len(message) >= 8 and message[0] == 0x02:
-                            counts = batch_records(message)
-                            tiles += counts[0]
-                            video_units += counts[1]
+                            video_units += batch_records(message)
                         # Acknowledge the batch at once, as a client that painted it
                         # instantly would: the gateway's paint window holds the next
                         # batch when too many are owed, and a probe that never acked
@@ -648,7 +636,7 @@ async def main() -> int:
                 gap_task.cancel()
         print(f"\n  {frames} binary frames")
         if args.records:
-            print(f"  {tiles} tile records, {video_units} video records")
+            print(f"  {video_units} video records")
         if args.audio:
             print(f"  {audio_frames} audio frames; format={audio_format}")
             if audio_error is not None:

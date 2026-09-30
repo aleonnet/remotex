@@ -10,6 +10,7 @@ import {
   type BatchRecord,
   decodeBatchFrame,
   type GraphicsMsg,
+  type VideoMsg,
 } from "./protocol.ts";
 import {
   createDesktopVideo,
@@ -17,8 +18,8 @@ import {
   type VideoFormat,
 } from "./videoDecoder.ts";
 
-// The browser SPA's batch draw loop: each batch's records — access units, tiles and
-// runs of an RDP host's graphics pipeline — decoded or composed in wire order and
+// The browser SPA's batch draw loop: each batch's records — access units and runs
+// of an RDP host's graphics pipeline — decoded or composed in wire order and
 // drawn onto the canvas. The decoder lives here rather than beside each caller:
 // it belongs to exactly one attachment, and `clear` is the one place that ends it.
 
@@ -32,8 +33,7 @@ export type PaintContext =
 export interface FramePainter {
   /**
    * Decode one binary batch frame and paint it, in wire order. Malformed framing
-   * drops the batch, which cuts the stream's chain or loses a tile's pixels, so it
-   * also asks for a keyframe — a repaint, for a target that sends tiles.
+   * drops the batch, which cuts the stream's chain, so it also asks for a keyframe.
    */
   draw(frame: ArrayBuffer): Promise<void>;
   /**
@@ -270,9 +270,8 @@ export function createFramePainter(options: {
 
   // Every unit is part of one chain, so a dropped batch cuts it: the deltas after it
   // name a picture this decoder never made. Restarted rather than fed them, and a
-  // keyframe asked for, exactly as a failed decoder is. A dropped tile is pixels
-  // nothing will send again, so it asks the same way: the gateway answers with a
-  // full update from the remote. A pipeline's dropped batch is commands its
+  // keyframe asked for, exactly as a failed decoder is. A pipeline's dropped batch
+  // is commands its
   // compositor never composed, which no repaint brings back, so it ends there.
   const dropMalformed = () => {
     if (pipeline) {
@@ -318,30 +317,18 @@ export function createFramePainter(options: {
     }
   };
 
-  // One record's picture: a decoded frame for a unit, a decoded PNG for a tile.
-  // Null when there is nothing to draw — a decoder that dropped the unit has said so
-  // itself, and a tile that would not decode asks for a repaint here. A run of the
-  // pipeline has no picture of its own: it is composed in its turn.
-  const decode = (
-    record: BatchRecord,
-  ): Promise<DecodedPicture | ImageBitmap | null> => {
+  // One unit's picture. Null when there is nothing to draw — a decoder that dropped
+  // the unit has said so itself. A run of the pipeline has no picture of its own: it
+  // is composed in its turn.
+  const decode = (record: BatchRecord): Promise<DecodedPicture | null> => {
     if (record.kind === "graphics") {
       return Promise.resolve(null);
     }
-    if (record.kind === "video") {
-      return desktopVideo().decode(
-        { w: record.w, h: record.h },
-        record.data,
-        record.keyframe,
-      );
-    }
-    const png = new Blob([record.data as Uint8Array<ArrayBuffer>], {
-      type: "image/png",
-    });
-    return createImageBitmap(png).catch(() => {
-      options.onVideoNeedsKeyframe("a tile could not be decoded");
-      return null;
-    });
+    return desktopVideo().decode(
+      { w: record.w, h: record.h },
+      record.data,
+      record.keyframe,
+    );
   };
 
   // One of the software decoder's pictures, onto the canvas over the desktop's.
@@ -375,21 +362,12 @@ export function createFramePainter(options: {
     return true;
   };
 
-  const paint = (
-    record: Exclude<BatchRecord, GraphicsMsg>,
-    image: DecodedPicture | ImageBitmap,
-  ) => {
+  const paint = (record: VideoMsg, image: DecodedPicture) => {
     const context = options.context();
     if (isHevcPlanes(image)) {
-      if (
-        record.kind !== "video" ||
-        !presentPlanes(image, record.w, record.h)
-      ) {
+      if (!presentPlanes(image, record.w, record.h)) {
         return;
       }
-    } else if (record.kind === "tile") {
-      context?.drawImage(image, record.x, record.y);
-      return;
     } else {
       const { w, h } = record;
       // Cropped by the desktop's size rather than drawn whole: the encoder is held
@@ -420,7 +398,7 @@ export function createFramePainter(options: {
       // All decodes start at once — `decode` queues units on the decoder in wire
       // order — and each is drawn in wire order as it lands, so a picture is released
       // the moment it is drawn instead of the whole batch's worth staying alive until
-      // the slowest. Drawing in order is what lets a later tile cover an earlier one.
+      // the slowest.
       const decodes = records.map(decode);
       for (let i = 0; i < records.length; i += 1) {
         const record = records[i];

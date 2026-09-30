@@ -24,9 +24,9 @@ Ordinary RDP and VNC source frames are decoded in the gateway and sent as one VP
 stream of the whole desktop, at the quality and chroma the target's render plan
 resolves to. wlshare can instead code that resolved VP9
 stream itself for the gateway to pass through unchanged. A
-VNC desktop too large for that stream, on a target that does not resize it, goes
-instead as the server's own rectangles, one PNG each — see
-[tiles past the ceiling](#tiles-past-the-ceiling). A
+VNC desktop too large for that stream, on a target that does not resize it, has no
+picture: the session stays up and the page offers the remote's displays — see
+[past the ceiling](#past-the-ceiling). A
 Mac is reached
 over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
 Apple's viewer reaches it: in Screen Sharing's Standard mode with `subtype = "ard"`,
@@ -165,15 +165,16 @@ Preserve the announced configuration and color-space behavior in
 [The codec](#the-codec) and
 [Choosing a chroma](#choosing-a-chroma).
 
-#### PNG tiles
+#### A desktop past the ceiling
 
-The one picture that is neither is PNG tiles: for a desktop past the video
-ceiling on a source that hands over its own rectangles, VNC without `resize`,
-each rectangle exactly as the server sent it. Do not add a key that selects
-tiles, use them within the ceiling, cut, merge or cache rectangles in the
-gateway, or give them to a source with `resize` or without rectangles, which
-still ends on the ceiling's refusal. See
-[Tiles past the ceiling](#tiles-past-the-ceiling).
+A desktop past the video ceiling has no picture, and nor has a Mac's All
+Displays over more than two screens, whatever its size. On VNC without `resize`
+the session stays up and the page says so, offering the remote's displays; every
+other source ends on the ceiling's refusal. Do not carry such a desktop some
+other way, in the gateway or the page: rectangles as images, a scaled or a
+cropped picture. Two streams for Apple's All Displays are the planned way, in
+[the roadmap](roadmap.md#two-streams-for-apples-all-displays). See
+[Past the ceiling](#past-the-ceiling).
 
 #### wlshare's VP9 on generic VNC
 
@@ -305,9 +306,9 @@ updates in source order even though each encode runs off the engine's own task.
 ### The video stream
 
 Every target reaches the browser the same way: the whole framebuffer as one
-inter-frame VP9 stream. There are two exceptions. A VNC desktop past the stream's
-picture ceiling on a target without `resize` goes as the server's own rectangles
-instead — see [tiles past the ceiling](#tiles-past-the-ceiling). And an
+inter-frame VP9 stream, or none: a VNC desktop past the stream's picture ceiling
+on a target without `resize` has no picture until the remote sends a smaller one —
+see [past the ceiling](#past-the-ceiling). There is one exception. An
 `ard-high-performance` target with `media_passthrough` sends a browser that decodes
 it the Mac's own HEVC, and its AAC-ELD with it — see
 [Apple's media stream, passed through](#apples-media-stream-passed-through).
@@ -318,9 +319,7 @@ it the Mac's own HEVC, and its AAC-ELD with it — see
 > `render_motion` switch that streamed only the moving regions, a slot cache,
 > `COPY` records and the `render_grid_debug` overlay). All of it was removed after
 > **v0.0.253**; `git checkout v0.0.253` recovers it, including the classifier's
-> research notes in `docs/still-image-classification-research.md`. Tiles past the
-> ceiling are not that: no key selects them, and a tile is a rectangle exactly as
-> the server sent it — never cut, merged, classified or cached by the gateway.
+> research notes in `docs/still-image-classification-research.md`.
 
 A target's stream keys are per target, and every one has a default:
 
@@ -350,7 +349,7 @@ The engines never see the config keys. They collapse to one `RenderPlan`
 ```text
 video_quality / render_chroma / render_adaptive / media_passthrough
   → TargetConfig::render_plan(browser decoders) → RenderPlan → vnc::run / rdp::run
-  → VideoSink::new(engine, frame_tx, plan, feedback, tiles)
+  → VideoSink::new(engine, frame_tx, plan, feedback, oversize)
   → DesktopStream (src/stream.rs) → vp9::Stream
 ```
 
@@ -358,7 +357,7 @@ Every size an engine asks a remote for is held under the stream's picture ceilin
 (`video::fit_ceiling`: a long side of 3840 and a short side of 2400), and a pinned
 `width`/`height` past it is refused at config load. A remote the gateway cannot
 size can still answer past it; what happens then is
-[tiles past the ceiling](#tiles-past-the-ceiling).
+[past the ceiling](#past-the-ceiling).
 
 Five rules hold the stream up, and each is a rule somewhere:
 
@@ -438,7 +437,7 @@ iPadOS, refuses the configuration by name the way it would refuse any other.
 `a_444_stream_keeps_the_colour_420_averages_away` in `desktop-vp9` is the round
 trip that pins the difference, through the archive's own decoder.
 
-#### Tiles past the ceiling
+#### Past the ceiling
 
 A desktop past the picture ceiling is one a video stream will not encode
 (`video::check_picture`). The gateway sizes every desktop it asks for under it, so
@@ -446,43 +445,37 @@ only a remote it cannot size gets there: a Mac in Standard mode on All Displays 
 5376×2287 over a 2x screen beside a 1x one, measured — or a generic VNC server
 whose desktop is simply that large.
 
-Such a desktop goes to the browser as the server's own rectangles when the source
-has them. RFB does: a `FramebufferUpdate` is a list of rectangles, each with its
-place and size, whatever encoding carries its pixels (ZRLE from a Mac, any of the
-standard ones from other servers). Each rectangle is decoded as always, then sent whole as
-one PNG `TILE` record at the same `x`, `y`, `w` and `h` — not trimmed by the shadow,
-not merged, not cut. The browser draws each where the server put it, in record
-order, into the same framebuffer a `mosaic` composes from.
+Such a desktop has no picture. `Oversize` in `src/encode.rs` is the source's side
+of it, fixed when the engine starts:
 
-`TileSupport` in `src/encode.rs` is the source's side of it, fixed when the engine
-starts, and the sink decides the carriage at each `Resize` against the ceiling:
-
-| Source | `TileSupport` | Past the ceiling |
+| Source | `Oversize` | Past the ceiling |
 |---|---|---|
-| VNC (generic, Apple Standard) without `resize` | `Rects` | tiles |
-| VNC with `resize`, Apple High Performance, RDP | `None` | refused, as before: "a video stream will not encode a W×H picture" |
+| VNC (generic, Apple Standard) without `resize` | `Hold` | the session stays up without a picture |
+| VNC with `resize`, Apple High Performance, RDP | `Refuse` | the session ends: "a video stream will not encode a W×H picture" |
 
-`resize` rules tiles out because it is the gateway sizing the remote: every size it
-asks for is under the ceiling, and a remote that answers past it has refused what
-it was asked. High Performance's picture is the media stream's whole decoded
-pictures, not rectangles, and its virtual display is held under the ceiling.
+`resize` refuses because it is the gateway sizing the remote: every size it asks
+for is under the ceiling, and a remote that answers past it has refused what it
+was asked. High Performance's virtual display is held under the ceiling.
 
-Within the ceiling the same session is video. A resize that crosses it changes the
-carriage there: rectangles taken before the `Resize` go out before it, the remote
-repaints the resized desktop in full as it does after any resize, and a desktop
-back under the ceiling starts its stream again from an announcement and a keyframe.
-After every `Resize` of a `Rects` source the gateway sends `tiling` (`active`
-true or false), which is how the session card knows to say "PNG tiles" in place
-of the render dial.
+A `Hold` source holds one more view whatever its size: a Mac's All Displays over
+more than two screens (`vnc_apple::MAX_COMBINED_SCREENS`). More than two is an edge
+case on Standard, and composing them is too much for a browser to draw. The engine
+tells the sink from each layout, ahead of the `Resize` it brings
+(`VideoSink::hold_screens`).
 
-A tile depends on nothing before it, so there is no interval, keyframe or quality
-walk: every rectangle goes out, PNG-encoded on a blocking worker with the fastest
-compression, and a reattach is repainted by the full update it already asks the
-remote for. Tiles take their share of `QUEUE_BUDGET` like an access unit, so a slow
-browser still holds the engine back rather than letting the backlog grow. The cost
-is size: a PNG of a changing region is far larger than a delta frame of it — a
-591×433 animation measured 157 KB a tile — and one rectangle larger than a batch's
-256 KB goes out as a batch of its own.
+A `Hold` source is decided at each `Resize`. Held, the sink drops every rectangle
+and passed frame and builds no stream, and past the ceiling wlshare's VP9 comes off
+the encoding list, so wlshare codes nothing that would not be sent. After every
+`Resize` of a `Hold` source the gateway sends `oversize` with its `cause`
+(`"size"`, `"screens"`, or `null` for a picture), a reattach included. While there
+is a cause the page covers the desktop with a notice under the menu, takes no
+input, and says which: the desktop's size, or more screens than one view shows.
+It offers a button for each of the remote's displays but the one being sent, since
+choosing one is how a Mac on All Displays gets back; with no list, it says that
+nothing can be shown until the remote's desktop is smaller. A choice is a
+`selectDisplay` like the menu's, and the notice comes down only at a `Resize`
+without a cause. The remote repaints that desktop in full, as after any resize,
+and its stream starts from an announcement and a keyframe.
 
 #### wlshare's stream, passed through
 
@@ -556,13 +549,13 @@ sends what it always did, which is encoded here.
   that is not drawing gets: such a window acknowledges nothing, the wait its oldest
   batch shows only grows, and wlshare, which sends nothing until the echo, would
   otherwise stop with it.
-- **Past the ceiling it is tiles.** A frame is the whole desktop, which past the
-  ceiling is not video: a desktop past it is not listed the encoding, and one that a
-  resize takes there has it taken off the list, which wlshare answers with the whole
-  desktop in ZRLE — for [tiles](#tiles-past-the-ceiling) on a target without
-  `resize`, where a frame already on its way is dropped, and for the ceiling's
-  refusal on one with it. Back within the ceiling, the encoding is listed again and
-  wlshare starts over at a keyframe.
+- **Past the ceiling it is off the list.** A frame is the whole desktop, which past
+  the ceiling is not video: a desktop past it is not listed the encoding, and one
+  that a resize takes there has it taken off the list, which wlshare answers with
+  the whole desktop in ZRLE — [held](#past-the-ceiling) on a target without
+  `resize`, where a frame already on its way is dropped, and refused by the ceiling
+  on one with it. Back within the ceiling, the encoding is listed again and wlshare
+  starts over at a keyframe.
 
 #### Apple's media stream, passed through
 
@@ -688,8 +681,7 @@ Three controls with similar names therefore remain separate:
   keyframe — and ZRLE is decoded only to keep its deflate stream in step. A display
   change asks the Mac for the whole desktop, as it does in a decoded session, since
   the mirror has seen nothing of what the stream showed. The gap costs a VP9
-  keyframe and its deltas, where whole-screen PNG tiles of a playing video came to
-  about 5 MB each on macvm.
+  keyframe and its deltas.
 - **The dial does not reach it.** `video_quality`, `render_chroma` and the adaptive
   walk govern only VP9: the gaps, and the whole picture of a browser that says no.
   `render_adaptive` neither enables nor disables the Mac's separate, always-on
@@ -1167,7 +1159,6 @@ Screen updates use little-endian binary frames:
 ```text
 u8 kind = 0x02 | u8 flags = 0 | u16 record count | u32 sequence | records
 
-TILE     op 0x01: u16 x | u16 y | u16 w | u16 h | u32 len | png[len]
 VIDEO    op 0x03: u8 flags | u16 w | u16 h | u32 len | payload[len]
 GRAPHICS op 0x04: u32 len | commands[len]
 ```
@@ -1177,10 +1168,7 @@ WebSocket event per record — save that a `GRAPHICS` record ending a frame ends
 its batch, since a batch is shown once. Receivers reject unknown operations and truncated
 records, and reject a nonzero frame flags byte. A `VIDEO` record's own flags byte
 is `0x01` for a keyframe and nothing else — any other bit is rejected the same
-way. A `TILE` record is one rectangle the remote sent, as a PNG, drawn at `(x, y)`
-over what the canvas holds; one of no width, height or payload is rejected. A
-session's records are `VIDEO` unless its desktop is
-[past the ceiling](#tiles-past-the-ceiling), or its target passes an RDP host's
+way. A session's records are `VIDEO` unless its target passes an RDP host's
 [graphics pipeline](#rdps-graphics-pipeline-passed-through): a `GRAPHICS` record
 is a run of that pipeline's commands, whole, which means something only after
 every run before it from the `graphicsStart` that began the pipeline. One of no
@@ -1566,8 +1554,8 @@ browser scales it: a 5K window receives at most a 3840×2400 desktop at 100%, wi
 the remainder bare. A pinned size already
 over the ceiling at 1x is rejected during config parsing; a physical or
 non-resizable remote may still answer past it because the gateway cannot ask it
-for a smaller desktop: a VNC one goes as [tiles](#tiles-past-the-ceiling), and any
-other reaches the encoder's refusal.
+for a smaller desktop: a VNC one [holds the session](#past-the-ceiling) without a
+picture, and any other reaches the encoder's refusal.
 
 High Performance paces what the window asks for. A second
 `SetDisplayConfiguration` overlapping the first, or a region of the old size
@@ -1808,9 +1796,10 @@ pointer positions back through the same regions (`frontend/src/mosaic.ts`). It i
 the only place the browser rescales remote pixels. See
 [Apple RFB 003.889, as measured](apple-vnc-889.md#all-displays-over-mixed-densities).
 Taken at factor 1.0, that combined framebuffer is often past the video ceiling —
-a 2x screen beside a 1x one measured 5376×2287 — and then arrives as the Mac's
-own rectangles, drawn into the same off-screen framebuffer the mosaic composes
-from ([tiles past the ceiling](#tiles-past-the-ceiling)).
+a 2x screen beside a 1x one measured 5376×2287 — and then has no picture: the page
+offers the Mac's screens instead, since one screen is a smaller desktop. All
+Displays over more than two screens has none either, whatever its size or
+densities ([past the ceiling](#past-the-ceiling)).
 
 **RFB 003.889** is Apple's own protocol revision, and both Apple subtypes speak
 it, as Apple's viewer answers every Mac before choosing a mode after ServerInit.

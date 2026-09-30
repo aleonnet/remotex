@@ -196,6 +196,20 @@ has an answer rather than being rediscovered.
   where the operator has already accepted lossy, the transcode is pure loss. The
   cost is a decoder this repo would then own.
 
+### Two streams for Apple's All Displays
+
+Standard's All Displays over two screens is one framebuffer of both, which is
+often past the video ceiling at factor 1.0 (5376×2287 over a 2x screen beside a
+1x one), and then has no picture: the page offers one screen instead
+([past the ceiling](architecture.md#past-the-ceiling)). The plan is to carry that
+view as two streams, one per screen, each its own VP9 stream within the ceiling,
+for the page to lay out by the mosaic's regions as it composes one framebuffer
+today. How the Mac's rectangles split between the two, how the queue and the
+paint window order two chains, and how each stream starts over are the work.
+
+Two screens is the limit, as it is today: All Displays over three or more is held
+with the notice whatever its size.
+
 ### A virtual-display remote session for sway
 
 Console-style remote control of a physical sway machine, the way Apple's High

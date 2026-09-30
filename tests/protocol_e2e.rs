@@ -1301,16 +1301,16 @@ async fn expect_picker(ws: &mut Ws) {
 }
 
 /// Read from the socket until a binary frame of the desktop's stream arrives.
-async fn expect_frame(ws: &mut Ws) -> Vec<common::BatchRecord> {
+async fn expect_frame(ws: &mut Ws) -> Vec<common::BatchUnit> {
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(msg) = ws.next().await {
             match msg.expect("websocket receive") {
                 Message::Binary(frame) => {
                     // Parsed rather than sniffed: the envelope's own invariants
                     // are checked on the way past.
-                    let records = common::batch_records(&frame);
-                    assert!(!records.is_empty());
-                    return records;
+                    let units = common::batch_units(&frame);
+                    assert!(!units.is_empty());
+                    return units;
                 }
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
@@ -1559,10 +1559,11 @@ async fn takeover_evicts_the_attached_browser_and_reconnects_the_target_for_the_
 }
 
 /// On a session the window does not size, a desktop past what a video stream
-/// encodes goes to the browser as the server's own rectangles — one tile each, at its place and size — and a reattach repaints it
-/// the same way. Within the ceiling the same server is video (the tests above).
+/// encodes holds the session open without a picture: the browser is told, is sent
+/// nothing of the desktop, and is told again when it reattaches. Within the ceiling
+/// the same server is video (the tests above).
 #[tokio::test]
-async fn an_oversize_vnc_desktop_goes_as_the_servers_rectangles() {
+async fn an_oversize_vnc_desktop_holds_the_session_without_a_picture() {
     // A long side just past 3840, and as little else as that allows.
     let (w, h) = (3842, 2);
     let vnc_port = spawn_fake_vnc_sized(w, h).await;
@@ -1572,14 +1573,10 @@ async fn an_oversize_vnc_desktop_goes_as_the_servers_rectangles() {
     let mut ws = connect_ws(addr, &token, &cookie).await;
     common::connect_target(&mut ws, "test-target").await;
     expect_resize(&mut ws, w, h).await;
+    assert_eq!(expect_control(&mut ws, "oversize").await["cause"], "size");
+    expect_no_picture(&mut ws).await;
 
-    let the_whole_rect = |records: Vec<common::BatchRecord>| match records.as_slice() {
-        [common::BatchRecord::Tile(tile)] => assert_eq!((tile.x, tile.y, tile.w, tile.h), (0, 0, w, h)),
-        _ => panic!("expected the server's one rectangle as one tile"),
-    };
-    the_whole_rect(expect_frame(&mut ws).await);
-
-    // A reattach asks the server for the whole desktop, and it comes back as tiles.
+    // A reattach is told the same, and still sent no picture.
     ws.close(None).await.unwrap();
     drop(ws);
     let (status, body) =
@@ -1591,11 +1588,32 @@ async fn an_oversize_vnc_desktop_goes_as_the_servers_rectangles() {
         .to_owned();
     let mut ws = connect_ws(addr, &token, &cookie).await;
     expect_resize(&mut ws, w, h).await;
-    the_whole_rect(expect_frame(&mut ws).await);
+    assert_eq!(expect_control(&mut ws, "oversize").await["cause"], "size");
+    expect_no_picture(&mut ws).await;
 }
 
-/// With `resize` the window sizes the desktop and tiles are never used: a server
-/// that answers past the ceiling ends the session with the stream's refusal.
+/// Read for half a second, failing on a binary frame of the desktop, an `error` or
+/// a close: long enough for the full update the fake server answers with at once.
+async fn expect_no_picture(ws: &mut Ws) {
+    let quiet = tokio::time::timeout(Duration::from_millis(500), async {
+        while let Some(msg) = ws.next().await {
+            match msg.expect("websocket receive") {
+                Message::Binary(frame) => panic!("a held desktop sent a {}-byte frame", frame.len()),
+                Message::Text(text) => {
+                    assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
+                }
+                Message::Close(frame) => panic!("closed while held: {frame:?}"),
+                _ => {}
+            }
+        }
+        panic!("websocket ended while held");
+    })
+    .await;
+    assert!(quiet.is_err());
+}
+
+/// With `resize` the window sizes the desktop and nothing is held: a server that
+/// answers past the ceiling ends the session with the stream's refusal.
 #[tokio::test]
 async fn an_oversize_vnc_desktop_under_resize_is_refused() {
     let (w, h) = (3842, 2);
@@ -2204,12 +2222,7 @@ async fn standard_speaks_apples_revision_on_the_physical_screen() {
         MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
     );
     expect_resize(&mut ws, MAC_DESKTOP, MAC_DESKTOP).await;
-    // A desktop within the ceiling is video, whatever the source can do.
-    let records = expect_frame(&mut ws).await;
-    assert!(
-        records.iter().all(|record| matches!(record, common::BatchRecord::Unit(_))),
-        "a desktop within the ceiling went as tiles"
-    );
+    expect_frame(&mut ws).await;
 
     for (button, bit) in [("right", 0x02), ("middle", 0x04)] {
         for pressed in [true, false] {

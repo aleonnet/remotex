@@ -32,6 +32,7 @@ import { keepTabWithin } from "./modalFocus.ts";
 import type {
   ClipboardSnapshot,
   DisplayInfo,
+  HoldCause,
   RemoteClipboard,
 } from "./protocol.ts";
 import { SoftKeyboardPanel } from "./SoftKeyboardPanel.tsx";
@@ -562,7 +563,7 @@ function ScreenHelp({
   hostScale,
   connection,
   renderPlan,
-  tiling,
+  oversize,
   audio,
   videoStream,
 }: {
@@ -570,11 +571,11 @@ function ScreenHelp({
   hostScale: number;
   connection: string;
   renderPlan: string;
-  tiling: boolean;
+  oversize: HoldCause | null;
   audio: AudioRow;
   videoStream: VideoStreamInfo | null;
 }) {
-  const video = videoLabel(videoStream, tiling);
+  const video = videoLabel(videoStream, oversize);
   return (
     <>
       <h3>This session</h3>
@@ -612,7 +613,7 @@ function ScreenHelp({
               decides how the picture looks and costs and that nothing else reveals: it
               lives in the operator's config file, which whoever is looking at the screen
               usually does not have. Empty only before `connected`. */}
-          <dd>{renderLabel(renderPlan, tiling)}</dd>
+          <dd>{renderLabel(renderPlan)}</dd>
         </div>
         <div className="help-item">
           <dt>Audio</dt>
@@ -908,7 +909,7 @@ export default function FloatingMenu({
   hostScale,
   connection,
   renderPlan,
-  tiling,
+  oversize,
   canAudio,
   audioEnabled,
   audioError,
@@ -975,8 +976,8 @@ export default function FloatingMenu({
   connection: string;
   // The render dial this session resolved to, one line, from `connected`.
   renderPlan: string;
-  // Whether the picture is arriving as PNG tiles instead, from `tiling`.
-  tiling: boolean;
+  // Why the desktop has no picture, from `oversize`.
+  oversize: HoldCause | null;
   // Whether this session can carry the remote's sound, which hides the Audio
   // section rather than disabling it — the same rule the Display section follows
   // and the opposite of Clipboard's. A greyed "Audio" would be explaining a
@@ -1520,7 +1521,7 @@ export default function FloatingMenu({
             hostScale={hostScale}
             connection={connection}
             renderPlan={renderPlan}
-            tiling={tiling}
+            oversize={oversize}
             audio={{
               available: canAudio,
               enabled: audioEnabled,
