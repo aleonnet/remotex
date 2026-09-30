@@ -47,12 +47,6 @@ impl Compositor {
         Self { graphics: Graphics::new(), framebuffer: Framebuffer::new() }
     }
 
-    /// A compositor whose framebuffer is read as RGBA — see
-    /// [`Framebuffer::opaque`].
-    pub fn opaque() -> Self {
-        Self { graphics: Graphics::new(), framebuffer: Framebuffer::opaque() }
-    }
-
     /// Compose one run of commands, as a session's `Event::Graphics`
     /// carries them: whole PDUs, out of their bulk compression.
     ///

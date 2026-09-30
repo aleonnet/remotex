@@ -129,8 +129,6 @@ impl Frame {
 /// the lock for longer than that copy.
 pub struct Framebuffer {
     frame: Mutex<Frame>,
-    /// Whether what is painted is made opaque — see [`Self::opaque`].
-    opaque: bool,
 }
 
 /// Fold `rect` into the damage already staged, keeping the list to `cap`
@@ -180,15 +178,7 @@ impl Default for Framebuffer {
 
 impl Framebuffer {
     pub fn new() -> Self {
-        Self { frame: Mutex::new(Frame { width: 0, height: 0, stride: 0, pixels: Vec::new() }), opaque: false }
-    }
-
-    /// A framebuffer read as RGBA: every pixel painted into it has its fourth byte
-    /// set to 255, where the decoders leave zero. For a reader — a canvas's image
-    /// data — where a zero there is a transparent pixel. What has never been
-    /// painted stays zero throughout, which such a reader does not draw.
-    pub fn opaque() -> Self {
-        Self { opaque: true, ..Self::new() }
+        Self { frame: Mutex::new(Frame { width: 0, height: 0, stride: 0, pixels: Vec::new() }) }
     }
 
     /// Read the frame. The lock is held for the duration of `f`.
@@ -282,15 +272,7 @@ impl Framebuffer {
                 return false;
             };
             let to = (rect.y as usize + row) * stride + left;
-            let dst = &mut frame.pixels[to..to + bytes];
-            if self.opaque {
-                // A word a pixel, its top byte set: a copy the lanes make whole.
-                for (out, px) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
-                    *out = (u32::from_le_bytes(*px) | 0xFF00_0000).to_le_bytes();
-                }
-            } else {
-                dst.copy_from_slice(src);
-            }
+            frame.pixels[to..to + bytes].copy_from_slice(src);
         }
         true
     }
@@ -299,21 +281,6 @@ impl Framebuffer {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// An opaque framebuffer sets the fourth byte of the pixels painted into it
-    /// and nothing else; a plain one copies them as they are.
-    #[test]
-    fn a_painted_rectangle_is_opaque_and_the_rest_is_as_it_was() {
-        for (opaque, alpha) in [(false, 0), (true, 0xFF)] {
-            let framebuffer = if opaque { Framebuffer::opaque() } else { Framebuffer::new() };
-            framebuffer.resize(3, 2);
-            assert!(framebuffer.blit(&[1, 2, 3, 0, 4, 5, 6, 0], Rect { x: 1, y: 1, width: 2, height: 1 }));
-            framebuffer.with(|frame| {
-                assert_eq!(frame.pixels[..12], [0; 12]);
-                assert_eq!(frame.pixels[12..], [0, 0, 0, 0, 1, 2, 3, alpha, 4, 5, 6, alpha]);
-            });
-        }
-    }
 
     #[test]
     fn a_blit_lands_where_the_rectangle_says() {
