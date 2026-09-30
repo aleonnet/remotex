@@ -6,7 +6,8 @@
 // render the gateway resolved, the order of `graphicsStart` and the records behind
 // it, the records' own framing, the acknowledgment the page sends once its paint
 // worker has composed a batch, and the DOM's account of a compositor that refused
-// what it was fed. Nothing here looks at a pixel. A GRAPHICS record is a header this
+// what it was fed and of the canvas the picture is shown on. Nothing here looks at
+// a pixel. A GRAPHICS record is a header this
 // file parses for itself, and what is inside one is the host's.
 //
 // It needs a gateway whose local config names a live RDP host with the key. Keep
@@ -255,6 +256,11 @@ test.describe("a target that passes its graphics pipeline", () => {
     // A compositor that refused a command says so where the desktop is.
     await expect(page.getByRole("alert")).toHaveCount(0);
 
+    // The pipeline's picture is drawn on a canvas of its own, which the page
+    // shows once the paint worker says a run has been drawn on it. A canvas has
+    // no role to be found by: it is the one laid over the desktop's.
+    await expect(page.locator("canvas.graphics")).toBeVisible();
+
     // And the session card says which of the two this browser is doing.
     await page.getByRole("button", { name: "Open menu" }).click();
     await page.getByRole("button", { name: "Info", exact: true }).click();
@@ -296,6 +302,7 @@ test.describe("a target that passes its graphics pipeline", () => {
     ).toBe(0);
     expect(seen.batches[0]?.sequence).toBe(1);
     await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(page.locator("canvas.graphics")).toBeVisible();
 
     await returnToPicker(page);
   });

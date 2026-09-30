@@ -27,6 +27,7 @@ export default function RemoteDesktop({
   onUnauthorized: () => void;
 }) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
+  const graphicsRef = useRef<HTMLCanvasElement>(null);
   const overlayRef = useRef<HTMLDivElement>(null);
   const pointerRef = useRef<HTMLImageElement>(null);
   // The keyboard belongs to the overlay, whose key listeners are scoped to it
@@ -91,7 +92,13 @@ export default function RemoteDesktop({
     requestClipboard,
     sendClipboard,
     setBottomInset,
-  } = useRemoteDesktop(canvasRef, overlayRef, pointerRef, onUnauthorized);
+  } = useRemoteDesktop(
+    canvasRef,
+    graphicsRef,
+    overlayRef,
+    pointerRef,
+    onUnauthorized,
+  );
 
   // A speaker on the tab title while sound is playing, and a camera and a
   // microphone while each is offered — the one place the desktop has room to
@@ -124,6 +131,16 @@ export default function RemoteDesktop({
             remote-point CSS size. Kept
             mounted in both modes so the hook's canvas ref stays stable. */}
         <canvas ref={canvasRef} className="framebuffer" width={0} height={0} />
+        {/* An RDP host's graphics pipeline, passed through, is drawn here and
+            not on the canvas above: a WebGL picture the paint worker shows
+            while a pipeline has one (egfxPicture.ts). It takes the canvas
+            above's box, and lies under the input overlay like it. */}
+        <canvas
+          ref={graphicsRef}
+          className="framebuffer graphics"
+          width={0}
+          height={0}
+        />
         {/* Transparent overlay captures mouse + keyboard input. tabIndex
             makes the div focusable — without it, focus() in the mousedown
             handler is a no-op and the keydown/keyup listeners (scoped to

@@ -530,8 +530,8 @@ the pipeline.
   there is one reading of the protocol and its codecs. It runs in the paint
   worker (`frontend/src/egfxCompositor.ts`): each record is composed in its turn,
   the output changes at each EndFrame as it does on the host's own clients, and
-  the rectangles a frame painted are copied out of the module's memory and onto
-  the canvas. A command that does not decode ends the pipeline there — the
+  the rectangles a frame painted are uploaded out of the module's memory into the
+  pipeline's picture. A command that does not decode ends the pipeline there — the
   compositor no longer holds what the host believes its client does — and the
   page says so and asks for nothing: the way back is a session that starts.
 - **The tiles are decoded on threads.** A desktop in motion is Progressive
@@ -549,11 +549,15 @@ the pipeline.
   that drops them the threads do not start, and the page says the compositor
   could not be loaded. A canvas takes no image data out of a shared memory, and
   a WebGL texture takes an upload from one, so the painted rectangles are
-  uploaded out of the framebuffer where it is, into a texture on a canvas of the
-  pipeline's own (`frontend/src/egfxPicture.ts`), and drawn from there onto the
-  desktop's canvas as a tile is. Copying them out first cost as much again as
-  drawing them. A browser without WebGL 2 is told the compositor could not be
-  loaded, and sees such a host through the gateway's encoding. The module's
+  uploaded out of the framebuffer where it is, into a texture on a WebGL canvas
+  (`frontend/src/egfxPicture.ts`). That canvas is the pipeline's own and the one
+  the page shows: a second canvas laid over the desktop's in the same box, which
+  the paint worker draws on and the page shows from a pipeline's first drawn run
+  until its picture is given back. Drawing the rectangles from it onto the
+  desktop's canvas instead made the GPU copy the whole picture for every run, at
+  twice the GPU's time on an integrated one. A browser without WebGL 2 is told
+  the compositor could not be loaded, and sees such a host through the gateway's
+  encoding. The module's
   standard library has to be built for threads, which takes a nightly Cargo:
   `frontend/wasm/egfx/rust-toolchain.toml` pins one by its date, for that
   directory alone.

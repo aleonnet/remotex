@@ -32,6 +32,7 @@
 // also the cure and not only the escape — closing the decoders settles every access
 // unit the stuck draw is holding, so the chain it abandoned unwedges behind it.
 
+import { createGraphicsPicture } from "./egfxPicture.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { binaryFrameKind } from "./protocol.ts";
@@ -48,6 +49,11 @@ export type PainterCommand =
   | {
       type: "init";
       canvas: OffscreenCanvas;
+      /**
+       * The canvas the page lays over the desktop's for an RDP host's graphics
+       * pipeline, whose picture is drawn there and nowhere else (egfxPicture.ts).
+       */
+      graphics: OffscreenCanvas;
       /** EXPERIMENTAL: decode passed HEVC in software (appleMedia.ts). */
       softwareHevc: boolean;
     }
@@ -100,7 +106,13 @@ export type PainterEvent =
       queuedMs: number;
       drawMs: number;
     }
-  | { type: "resized"; seq: number };
+  | { type: "resized"; seq: number }
+  /**
+   * Whether a pipeline's picture is to be shown over the desktop's canvas.
+   * `epoch` is how many `clear`s this worker had taken when it said so: one said
+   * for an attachment that has since been cleared is not the page's to act on.
+   */
+  | { type: "graphicsShown"; shown: boolean; epoch: number };
 
 export interface PainterHost {
   handle(command: PainterCommand): void;
@@ -222,6 +234,9 @@ export function createPainterWorker(
             onVideoError: (reason) => post({ type: "videoError", reason }),
             onVideoNeedsKeyframe: (reason) =>
               post({ type: "videoNeedsKeyframe", reason }),
+            makePicture: () => createGraphicsPicture(command.graphics),
+            onGraphicsShown: (shown) =>
+              post({ type: "graphicsShown", shown, epoch }),
             softwareHevc: command.softwareHevc,
           });
           break;
@@ -283,6 +298,7 @@ export function createPainterWorker(
                 view = null;
                 blank(canvas, ctx, command.w, command.h);
               }
+              painter?.blank(command.w, command.h);
             }
             // Echoed even with no canvas: the page's layout state must not
             // wait forever on a bitmap that cannot exist.

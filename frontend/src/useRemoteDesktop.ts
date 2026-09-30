@@ -231,6 +231,7 @@ const pointerRectCache = createRectCache((clear) =>
 // the high-density pixels, so the 2D context needs no scale transform.
 function applyCanvasCss(
   canvas: HTMLCanvasElement | null,
+  graphics: HTMLCanvasElement | null,
   size: RemoteSize | null,
   view: TouchViewState,
   bottomInset = 0,
@@ -243,6 +244,11 @@ function applyCanvasCss(
     canvas.style.height = `${h}px`;
     if (transform !== undefined) {
       canvas.style.transform = transform;
+      // The pipeline's canvas fills the surface, which is this canvas's box
+      // before its transform: so it is moved the same way.
+      if (graphics) {
+        graphics.style.transform = transform;
+      }
     }
   };
   // Every write below moves or resizes the canvas box, and a pointer event in
@@ -431,6 +437,7 @@ function viewportMsg(size: {
 // because it participates in the connection effects.
 export function useRemoteDesktop(
   canvasRef: React.RefObject<HTMLCanvasElement | null>,
+  graphicsRef: React.RefObject<HTMLCanvasElement | null>,
   overlayRef: React.RefObject<HTMLElement | null>,
   pointerRef: React.RefObject<HTMLImageElement | null>,
   onUnauthorized: () => void,
@@ -860,9 +867,10 @@ export function useRemoteDesktop(
     // React work (desktopPainterWorker.ts says what that is and is not worth). This
     // effect only posts to it; the worker itself outlives the effect (see
     // desktopPainter.ts), and `bind` points its callbacks at this run.
-    const painter = canvasRef.current
-      ? desktopPainterFor(canvasRef.current)
-      : null;
+    const painter =
+      canvasRef.current && graphicsRef.current
+        ? desktopPainterFor(canvasRef.current, graphicsRef.current)
+        : null;
     // Resizes in flight to the worker, by sequence number. The state half of a
     // resize — the CSS box, `size`, the cursor — waits for the worker's echo
     // (see `onResized` in desktopPainter.ts for why), and `clearDesktop`
@@ -1375,6 +1383,7 @@ export function useRemoteDesktop(
       mosaicViewRef.current = view;
       applyCanvasCss(
         canvasRef.current,
+        graphicsRef.current,
         s,
         viewRef.current,
         bottomInsetRef.current,
@@ -1766,6 +1775,7 @@ export function useRemoteDesktop(
       resizeTimer = setTimeout(() => {
         applyCanvasCss(
           canvasRef.current,
+          graphicsRef.current,
           sizeRef.current,
           viewRef.current,
           bottomInsetRef.current,
@@ -1831,6 +1841,7 @@ export function useRemoteDesktop(
     };
   }, [
     canvasRef,
+    graphicsRef,
     onUnauthorized,
     syncCursor,
     settleClipboardWaiters,
@@ -2199,13 +2210,14 @@ export function useRemoteDesktop(
       bottomInsetRef.current = Math.max(0, px);
       applyCanvasCss(
         canvasRef.current,
+        graphicsRef.current,
         sizeRef.current,
         viewRef.current,
         bottomInsetRef.current,
       );
       syncCursor();
     },
-    [canvasRef, syncCursor],
+    [canvasRef, graphicsRef, syncCursor],
   );
 
   // The toolbar took a chord that had Command in it. Stable, so the handler that
@@ -2277,6 +2289,7 @@ export function useRemoteDesktop(
       viewRef.current.pan = { x: 0, y: 0 };
       applyCanvasCss(
         canvasRef.current,
+        graphicsRef.current,
         sizeRef.current,
         viewRef.current,
         bottomInsetRef.current,
@@ -2305,6 +2318,7 @@ export function useRemoteDesktop(
               viewRef.current.pan = pan;
               applyCanvasCss(
                 canvasRef.current,
+                graphicsRef.current,
                 sizeRef.current,
                 viewRef.current,
                 bottomInsetRef.current,
@@ -2577,7 +2591,7 @@ export function useRemoteDesktop(
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, canvasRef, syncCursor, touchActive, viewOnly]);
+  }, [overlayRef, canvasRef, graphicsRef, syncCursor, touchActive, viewOnly]);
 
   // The desktop takes the keyboard as soon as it is on screen, so the first
   // thing typed reaches the remote — the surface is the only thing on it worth
