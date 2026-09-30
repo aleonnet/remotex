@@ -18,7 +18,10 @@
 //! specification there is: the extrapolated transform's edge cases, the SRL reader's
 //! parameter walk, and the fixed-point colour conversion.
 
+use std::cell::RefCell;
 use std::collections::BTreeMap;
+
+use rayon::prelude::*;
 
 use super::gfx::Rect16;
 use super::wire::{Malformed, Reader};
@@ -217,13 +220,19 @@ struct TileHeader {
     y: u16,
 }
 
-/// The decoder: every surface's tiles, and the scratch space one tile needs.
+thread_local! {
+    /// The scratch space one tile needs, one to a thread that decodes: three
+    /// components' coefficients being transformed, and the inverse wavelet's
+    /// intermediate.
+    static SCRATCH: RefCell<(Vec<i16>, Vec<i16>)> = RefCell::new((vec![0; COEFFS * 3], vec![0; COEFFS]));
+}
+
+/// A region of fewer tiles than this is decoded on the thread that read it.
+const PARALLEL_FROM: usize = 4;
+
+/// The decoder: every surface's tiles.
 pub struct Progressive {
     surfaces: BTreeMap<u16, Grid>,
-    /// Three components' coefficients, being transformed.
-    work: Vec<i16>,
-    /// The inverse wavelet's intermediate.
-    temp: Vec<i16>,
 }
 
 impl Default for Progressive {
@@ -234,11 +243,7 @@ impl Default for Progressive {
 
 impl Progressive {
     pub fn new() -> Self {
-        Self {
-            surfaces: BTreeMap::new(),
-            work: vec![0; COEFFS * 3],
-            temp: vec![0; COEFFS],
-        }
+        Self { surfaces: BTreeMap::new() }
     }
 
     /// A graphics frame begins: no tile has been decoded in it yet.
@@ -314,7 +319,7 @@ impl Progressive {
                 WBT_REGION => {
                     let grid = self.surfaces.get_mut(&surface).expect("inserted above");
                     let mut updated = std::mem::take(&mut grid.updated);
-                    let outcome = read_region(&mut b, grid, &mut self.work, &mut self.temp, &mut updated);
+                    let outcome = read_region(&mut b, grid, &mut updated);
                     if let Ok(region) = &outcome {
                         present(grid, region, &updated, &mut paint);
                     }
@@ -338,8 +343,6 @@ impl Progressive {
 fn read_region(
     r: &mut Reader<'_>,
     grid: &mut Grid,
-    work: &mut [i16],
-    temp: &mut [i16],
     touched: &mut Vec<usize>,
 ) -> Result<Region, Malformed> {
     let tile = r.u8()?;
@@ -384,7 +387,40 @@ fn read_region(
     let region = Region { rects, quants, prog };
 
     let tiles = r.bytes(usize::try_from(tile_bytes).unwrap_or(usize::MAX))?;
-    let mut t = Reader::new(WHAT, tiles);
+    let mut passes = Vec::with_capacity(usize::from(num_tiles));
+    let read = read_tiles(&mut Reader::new(WHAT, tiles), grid, &region, num_tiles, touched, &mut passes);
+    // Whatever was read before a fault is decoded, fault or none.
+    decode(grid, passes);
+    read?;
+    Ok(region)
+}
+
+/// One tile block as read: checked against the tile it names, which holds the
+/// precision the pass leaves it at already, and not yet decoded.
+struct Pass<'a> {
+    index: usize,
+    /// Each component's dequantization.
+    shift: [Quant; 3],
+    kind: PassKind<'a>,
+}
+
+enum PassKind<'a> {
+    First { diff: bool, data: [&'a [u8]; 3] },
+    /// `bits` is how many bits the pass adds to each band; `data` is each
+    /// component's SRL stream, then its raw one.
+    Upgrade { bits: [Quant; 3], data: [&'a [u8]; 6] },
+}
+
+/// Read a region's tile blocks into `passes`, in their order, adding each tile
+/// named to the frame's `touched`.
+fn read_tiles<'a>(
+    t: &mut Reader<'a>,
+    grid: &mut Grid,
+    region: &Region,
+    num_tiles: u16,
+    touched: &mut Vec<usize>,
+    passes: &mut Vec<Pass<'a>>,
+) -> Result<(), Malformed> {
     let mut count = 0u16;
     while !t.is_empty() {
         let kind = t.u16_le()?;
@@ -393,13 +429,18 @@ fn read_region(
             return Err(refuse("a tile block length", len));
         };
         let mut b = Reader::new(WHAT, t.bytes(body)?);
-        match kind {
-            WBT_TILE_SIMPLE | WBT_TILE_FIRST => {
-                decode_first(&mut b, kind == WBT_TILE_SIMPLE, grid, &region, work, temp, touched)?;
-            }
-            WBT_TILE_UPGRADE => decode_upgrade(&mut b, grid, &region, work, temp, touched)?,
+        let pass = match kind {
+            WBT_TILE_SIMPLE | WBT_TILE_FIRST => read_first(&mut b, kind == WBT_TILE_SIMPLE, grid, region)?,
+            WBT_TILE_UPGRADE => read_upgrade(&mut b, grid, region)?,
             other => return Err(refuse("a tile block type", other)),
+        };
+        if let Some(tile) = grid.tiles[pass.index].as_deref_mut()
+            && !tile.dirty
+        {
+            tile.dirty = true;
+            touched.push(pass.index);
         }
+        passes.push(pass);
         if !b.is_empty() {
             return Err(refuse("a tile block with bytes past its fields", kind));
         }
@@ -408,7 +449,51 @@ fn read_region(
     if count != num_tiles {
         return Err(refuse("a region's tile count", num_tiles));
     }
-    Ok(region)
+    Ok(())
+}
+
+/// Decode what a region's tile blocks carried. A tile's passes run in the order
+/// they were read in; tiles hold nothing of one another's, and are decoded side by
+/// side.
+fn decode(grid: &mut Grid, mut passes: Vec<Pass<'_>>) {
+    passes.sort_by_key(|pass| pass.index);
+    let mut tiles = grid.tiles.iter_mut().enumerate();
+    let mut work = Vec::new();
+    for passes in passes.chunk_by(|a, b| a.index == b.index) {
+        let index = passes[0].index;
+        let tile = tiles.by_ref().find(|(at, _)| *at == index).and_then(|(_, tile)| tile.as_deref_mut());
+        work.push((tile.expect("a tile is made where its block is read"), passes));
+    }
+    if work.len() < PARALLEL_FROM {
+        for (tile, passes) in work {
+            decode_tile(tile, passes);
+        }
+    } else {
+        work.into_par_iter().for_each(|(tile, passes)| decode_tile(tile, passes));
+    }
+}
+
+fn decode_tile(tile: &mut Tile, passes: &[Pass<'_>]) {
+    SCRATCH.with_borrow_mut(|(work, temp)| {
+        for pass in passes {
+            for c in 0..3 {
+                let out = &mut work[c * COEFFS..(c + 1) * COEFFS];
+                let current = &mut tile.current[c * COEFFS..(c + 1) * COEFFS];
+                let sign = &mut tile.sign[c * COEFFS..(c + 1) * COEFFS];
+                match pass.kind {
+                    PassKind::First { diff, data } => {
+                        decode_component(data[c], pass.shift[c], out, current, sign, diff, temp);
+                    }
+                    PassKind::Upgrade { bits, data } => {
+                        upgrade_component(data[c * 2], data[c * 2 + 1], pass.shift[c], bits[c], current, sign);
+                        out.copy_from_slice(current);
+                        idwt(out, temp);
+                    }
+                }
+            }
+            to_bgrx(work, &mut tile.pixels);
+        }
+    });
 }
 
 /// The fields every tile kind opens with, then the tile they name — made if this is
@@ -446,15 +531,7 @@ fn tile_quants(region: &Region, header: &TileHeader, quality: u8) -> Result<([Qu
 }
 
 /// A `TILE_SIMPLE` or `TILE_FIRST`: the tile decoded from scratch.
-fn decode_first(
-    r: &mut Reader<'_>,
-    simple: bool,
-    grid: &mut Grid,
-    region: &Region,
-    work: &mut [i16],
-    temp: &mut [i16],
-    touched: &mut Vec<usize>,
-) -> Result<(), Malformed> {
+fn read_first<'a>(r: &mut Reader<'a>, simple: bool, grid: &mut Grid, region: &Region) -> Result<Pass<'a>, Malformed> {
     let (header, index, tile) = tile_header(r, grid)?;
     let flags = r.u8()?;
     let quality = if simple { 0xFF } else { r.u8()? };
@@ -469,23 +546,18 @@ fn decode_first(
 
     let (quants, prog) = tile_quants(region, &header, quality)?;
     let progs = [prog.y, prog.cb, prog.cr];
-    let diff = flags & TILE_DIFFERENCE != 0;
+    let mut bitpos = [Quant::default(); 3];
+    let mut shift = [Quant::default(); 3];
     for c in 0..3 {
-        let bitpos = quants[c].add(progs[c]);
-        let shift = bitpos.sub(Quant([1; 10])).ok_or_else(|| refuse("a zero quantization", 0u8))?;
-        tile.bitpos[c] = bitpos;
-        let out = &mut work[c * COEFFS..(c + 1) * COEFFS];
-        let current = &mut tile.current[c * COEFFS..(c + 1) * COEFFS];
-        let sign = &mut tile.sign[c * COEFFS..(c + 1) * COEFFS];
-        decode_component(data[c], shift, out, current, sign, diff, temp)?;
+        bitpos[c] = quants[c].add(progs[c]);
+        shift[c] = bitpos[c].sub(Quant([1; 10])).ok_or_else(|| refuse("a zero quantization", 0u8))?;
+        if data[c].is_empty() {
+            return Err(refuse("an empty RLGR stream", 0u8));
+        }
     }
+    tile.bitpos = bitpos;
     tile.started = true;
-    to_bgrx(work, &mut tile.pixels);
-    if !tile.dirty {
-        tile.dirty = true;
-        touched.push(index);
-    }
-    Ok(())
+    Ok(Pass { index, shift, kind: PassKind::First { diff: flags & TILE_DIFFERENCE != 0, data } })
 }
 
 /// One component of a first pass: entropy decode, dequantize, difference against
@@ -498,8 +570,8 @@ fn decode_component(
     sign: &mut [i16],
     diff: bool,
     temp: &mut [i16],
-) -> Result<(), Malformed> {
-    rlgr1(data, out)?;
+) {
+    rlgr1(data, out);
     sign.copy_from_slice(out);
     for (band, &(at, len)) in BANDS.iter().enumerate() {
         if band == LL3 {
@@ -517,18 +589,10 @@ fn decode_component(
         current.copy_from_slice(out);
     }
     idwt(out, temp);
-    Ok(())
 }
 
 /// A `TILE_UPGRADE`: more bits for the coefficients a first pass left.
-fn decode_upgrade(
-    r: &mut Reader<'_>,
-    grid: &mut Grid,
-    region: &Region,
-    work: &mut [i16],
-    temp: &mut [i16],
-    touched: &mut Vec<usize>,
-) -> Result<(), Malformed> {
+fn read_upgrade<'a>(r: &mut Reader<'a>, grid: &mut Grid, region: &Region) -> Result<Pass<'a>, Malformed> {
     let (header, index, tile) = tile_header(r, grid)?;
     let quality = r.u8()?;
     let mut lens = [0u16; 6];
@@ -544,24 +608,16 @@ fn decode_upgrade(
     }
     let (quants, prog) = tile_quants(region, &header, quality)?;
     let progs = [prog.y, prog.cb, prog.cr];
+    let mut bitpos = [Quant::default(); 3];
+    let mut bits = [Quant::default(); 3];
+    let mut shift = [Quant::default(); 3];
     for c in 0..3 {
-        let bitpos = quants[c].add(progs[c]);
-        let bits = tile.bitpos[c].sub(bitpos).ok_or_else(|| refuse("an upgrade below the pass before it", quality))?;
-        let shift = bitpos.sub(Quant([1; 10])).ok_or_else(|| refuse("a zero quantization", 0u8))?;
-        tile.bitpos[c] = bitpos;
-        let out = &mut work[c * COEFFS..(c + 1) * COEFFS];
-        let current = &mut tile.current[c * COEFFS..(c + 1) * COEFFS];
-        let sign = &mut tile.sign[c * COEFFS..(c + 1) * COEFFS];
-        upgrade_component(data[c * 2], data[c * 2 + 1], shift, bits, current, sign);
-        out.copy_from_slice(current);
-        idwt(out, temp);
+        bitpos[c] = quants[c].add(progs[c]);
+        bits[c] = tile.bitpos[c].sub(bitpos[c]).ok_or_else(|| refuse("an upgrade below the pass before it", quality))?;
+        shift[c] = bitpos[c].sub(Quant([1; 10])).ok_or_else(|| refuse("a zero quantization", 0u8))?;
     }
-    to_bgrx(work, &mut tile.pixels);
-    if !tile.dirty {
-        tile.dirty = true;
-        touched.push(index);
-    }
-    Ok(())
+    tile.bitpos = bitpos;
+    Ok(Pass { index, shift, kind: PassKind::Upgrade { bits, data } })
 }
 
 /// One component of an upgrade: each sub-band's coefficients gain `bits` more bits,
@@ -711,10 +767,7 @@ const KPMAX: u32 = 80;
 
 /// RLGR1 entropy decoding of one component's 4096 coefficients, [MS-RDPRFX]
 /// 3.1.8.1.7.3. Coefficients past the end of the stream are zero.
-fn rlgr1(src: &[u8], out: &mut [i16]) -> Result<(), Malformed> {
-    if src.is_empty() {
-        return Err(refuse("an empty RLGR stream", 0u8));
-    }
+fn rlgr1(src: &[u8], out: &mut [i16]) {
     let mut bits = Bits::new(src);
     let (mut k, mut kp, mut kr, mut krp) = (1u32, 8u32, 1u32, 8u32);
     let mut n = 0;
@@ -799,7 +852,6 @@ fn rlgr1(src: &[u8], out: &mut [i16]) -> Result<(), Malformed> {
         }
     }
     out[n..].fill(0);
-    Ok(())
 }
 
 /// Undo differential coding: each value is a delta on the one before.
@@ -1442,7 +1494,7 @@ mod tests {
         coeffs[4095] = -3;
         let encoded = rlgr1_encode(&coeffs);
         let mut decoded = vec![1i16; COEFFS];
-        rlgr1(&encoded, &mut decoded).unwrap();
+        rlgr1(&encoded, &mut decoded);
         assert_eq!(decoded, coeffs);
     }
 
@@ -1450,9 +1502,8 @@ mod tests {
     #[test]
     fn rlgr1_zero_fills_past_the_stream() {
         let mut decoded = vec![1i16; 16];
-        rlgr1(&[0], &mut decoded).unwrap();
+        rlgr1(&[0], &mut decoded);
         assert_eq!(decoded, vec![0; 16]);
-        assert!(rlgr1(&[], &mut decoded).is_err());
     }
 
     /// A tile whose only coefficient is LL3's first comes out one flat grey: the
@@ -1557,5 +1608,59 @@ mod tests {
         let second = pdu(&[region(&[(0, 0, 64, 64)], 1, &[diff])]);
         let paints = collect(&mut p, 1, 64, 64, &second).unwrap();
         assert_eq!(paints[0].1, grey(8).repeat(COEFFS));
+    }
+
+    /// A region of enough tiles to be decoded side by side: each is what it would
+    /// be alone, whichever thread decoded it.
+    #[test]
+    fn tiles_decoded_side_by_side_are_each_their_own() {
+        let mut p = Progressive::new();
+        let tiles: Vec<Vec<u8>> = (0..8u8).map(|i| flat_tile(WBT_TILE_FIRST, u16::from(i % 4), u16::from(i / 4), i16::from(i) + 1)).collect();
+        assert!(tiles.len() >= PARALLEL_FROM);
+        let src = pdu(&[region(&[(0, 0, 256, 128)], 1, &tiles)]);
+        let paints = collect(&mut p, 1, 256, 128, &src).unwrap();
+        assert_eq!(paints.len(), 8);
+        for (rect, pixels) in paints {
+            let tile = (rect.top / 64) * 4 + rect.left / 64;
+            assert_eq!(pixels, grey(tile as u8 + 1).repeat(COEFFS), "the tile at {rect:?}");
+        }
+    }
+
+    /// A tile a region carries twice is decoded in the order it was sent in, among
+    /// the tiles decoded beside it.
+    #[test]
+    fn a_tile_sent_twice_in_a_region_is_the_later_of_the_two() {
+        let mut p = Progressive::new();
+        let mut tiles: Vec<Vec<u8>> = (0..4).map(|x| flat_tile(WBT_TILE_FIRST, x, 0, 3)).collect();
+        tiles.push(flat_tile(WBT_TILE_FIRST, 2, 0, 40));
+        let src = pdu(&[region(&[(0, 0, 256, 64)], 1, &tiles)]);
+        let paints = collect(&mut p, 1, 256, 64, &src).unwrap();
+        assert_eq!(paints.len(), 4, "a tile is painted once however often it was sent");
+        for (rect, pixels) in paints {
+            let dc = if rect.left == 128 { 40 } else { 3 };
+            assert_eq!(pixels, grey(dc).repeat(COEFFS), "the tile at {rect:?}");
+        }
+    }
+
+    /// A component with no stream is refused where its tile is read, and the tiles
+    /// read before it are decoded for the region that paints them.
+    #[test]
+    fn a_component_with_no_stream_is_refused_and_the_tiles_before_it_are_kept() {
+        let mut p = Progressive::new();
+        // Flat at the middle, the three components' streams are the same bytes: the
+        // first is given no length, and the tile's tail is given its bytes.
+        let mut empty = flat_tile(WBT_TILE_FIRST, 1, 0, 0);
+        let lens = 6 + 9; // after the block header, the tile's header, flags and quality
+        let len = [empty[lens], empty[lens + 1]];
+        empty[lens..lens + 2].copy_from_slice(&[0, 0]);
+        empty[lens + 6..lens + 8].copy_from_slice(&len);
+        let src = pdu(&[region(&[(0, 0, 128, 64)], 1, &[flat_tile(WBT_TILE_FIRST, 0, 0, 9), empty])]);
+        let err = collect(&mut p, 1, 128, 64, &src).unwrap_err();
+        assert!(matches!(err, Malformed::Refused { field: "an empty RLGR stream", .. }), "{err}");
+
+        let next = pdu(&[region(&[(0, 0, 128, 64)], 1, &[])]);
+        let paints = in_frame(&mut p, 1, 128, 64, &next).unwrap();
+        assert_eq!(paints.len(), 1);
+        assert_eq!(paints[0].1, grey(9).repeat(COEFFS));
     }
 }

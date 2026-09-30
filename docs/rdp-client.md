@@ -13,7 +13,9 @@ graphics pipeline's PDUs and bulk compression, the codecs, the compositor and th
 framebuffer. It is this client's all the same — `rdp_client` names the framebuffer
 and that part of the wire as its own — and is apart because the page runs it too,
 built to WebAssembly, for a target with `egfx_passthrough`. It holds no
-connection, thread or clock, so it builds for `wasm32-unknown-unknown`. The files
+connection or clock, so it builds for `wasm32-unknown-unknown`, and the one thing
+it does on threads is decode a Progressive region's tiles, side by side on rayon's
+pool: the gateway's is the process's, and the page's is workers it starts. The files
 [Graphics](#graphics) names are that crate's, under its `src/`.
 
 The only thing under that boundary not written here is the CredSSP exchange
