@@ -57,8 +57,8 @@ area's section before changing what it covers:
   layers, the display picker as the remote's, presentation at 100%, density as
   the wire's word, and the Apple mosaic as the one rescale.
 - [Media paths](docs/architecture.md#media-paths): one VP9 encoder or passed
-  untouched, with a rule for each passthrough, PNG tiles, audio, camera and
-  microphone.
+  untouched, with a rule for each passthrough, a desktop past the ceiling, audio,
+  camera and microphone.
 
 ## Packaging and platforms
 

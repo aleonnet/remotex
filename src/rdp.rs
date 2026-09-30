@@ -31,7 +31,7 @@ use tokio::time::{Duration, Instant};
 
 use crate::audio::{AudioBridge, PcmFormat};
 use crate::config::{RenderPlan, TargetConfig};
-use crate::encode::{TileSupport, VideoSink};
+use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16};
 use crate::keymap;
 use crate::protocol::{
@@ -165,7 +165,7 @@ pub async fn run(
     uplinks: Uplinks,
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
-    let sink = VideoSink::new("rdp", frame_tx, plan, feedback, TileSupport::None);
+    let sink = VideoSink::new("rdp", frame_tx, plan, feedback, Oversize::Refuse);
     session(config, plan.rdp_graphics, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }
@@ -1998,7 +1998,7 @@ mod tests {
             rdp_graphics: false,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
-        let sink = VideoSink::new("test", frame_tx, plan, feedback, crate::encode::TileSupport::None);
+        let sink = VideoSink::new("test", frame_tx, plan, feedback, crate::encode::Oversize::Refuse);
 
         // The remote copied and this end asked for the bytes.
         let mut clipboard = ClipboardState {

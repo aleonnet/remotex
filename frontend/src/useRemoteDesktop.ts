@@ -518,9 +518,10 @@ export function useRemoteDesktop(
   const [videoStream, setVideoStream] = useState<VideoStreamInfo | null>(null);
   // The render dial this session resolved to, from `connected`. Empty in the picker.
   const [renderPlan, setRenderPlan] = useState("");
-  // Whether the picture arrives as PNG tiles rather than video, from `tiling`.
-  // False in the picker and at every `connected`, until the gateway says otherwise.
-  const [tiling, setTiling] = useState(false);
+  // Whether the desktop is past what a video stream encodes, so no picture comes,
+  // from `oversize`. False in the picker and at every `connected`, until the
+  // gateway says otherwise.
+  const [oversize, setOversize] = useState(false);
   // What this session is speaking, from `connected`: the protocol and the target's
   // subtype where it has one. Empty in the picker, and read only by the card — no
   // behaviour hangs off it, because every capability that varies by subtype already
@@ -1531,7 +1532,7 @@ export function useRemoteDesktop(
       // browser can decode what a streaming target sends is answered by `configure`
       // refusing it, once, with the configuration in hand.
       setRenderPlan(msg.render);
-      setTiling(false);
+      setOversize(false);
       // The operator's QA overlay, stated per session like everything else on
       // `connected`: this browser holds no preference for it and offers no
       // toggle, the same way it offers none for `resize`.
@@ -1687,8 +1688,8 @@ export function useRemoteDesktop(
         case "resizing":
           setRemoteResizing(msg.active);
           break;
-        case "tiling":
-          setTiling(msg.active);
+        case "oversize":
+          setOversize(msg.active);
           break;
         case "picker":
           // No target selected (idle attach, switch-target, or an engine that
@@ -1719,7 +1720,7 @@ export function useRemoteDesktop(
           // video at all.
           setVideoError(null);
           setRenderPlan("");
-          setTiling(false);
+          setOversize(false);
           setConnection("");
           // Back to the default rather than left as the last target's answer: the
           // next one may not report at all, and inheriting "the remote is a Mac"
@@ -2621,7 +2622,7 @@ export function useRemoteDesktop(
     size,
     hostScale,
     renderPlan,
-    tiling,
+    oversize,
     connection,
     canClipboard,
     canAudio,

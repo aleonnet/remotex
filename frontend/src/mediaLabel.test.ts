@@ -89,16 +89,12 @@ test("the video row waits for the format, then names it and whose stream it is",
   );
   assert.equal(
     videoLabel({ decode: "vp09.00.40.08", passthrough: true }, true),
-    "Not in use: the picture is PNG tiles",
+    "Not in use: the desktop is past what video carries",
   );
 });
 
-test("the Render row says tiles while the desktop is past what video carries", () => {
+test("the Render row waits for the target, then names its dial", () => {
   const plan = "video q90 4:4:4 · adaptive";
-  assert.equal(renderLabel("", false), "Waiting for the target");
-  assert.equal(renderLabel(plan, false), plan);
-  assert.equal(
-    renderLabel(plan, true),
-    "PNG tiles: the desktop is past what video carries",
-  );
+  assert.equal(renderLabel(""), "Waiting for the target");
+  assert.equal(renderLabel(plan), plan);
 });
