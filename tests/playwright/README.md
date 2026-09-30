@@ -42,6 +42,17 @@ composed it, and that a page that reloads is given a pipeline from its first
 command rather than the one that was running. A compositor that refused a command
 says so in the DOM, which is what stands in for the picture here.
 
+`software-hevc.spec.ts` is the EXPERIMENTAL software HEVC decoder, on a High
+Performance target with `media_passthrough` and the page loaded with
+`?hevc_decoder=software`. Against a gateway built with `--features hevc-wasm` it
+asserts that the page is cross-origin isolated and says it decodes the Mac's
+stream, that the gateway passes the HEVC, that the page asks for the decoder and
+its worker loads it, and that the first passed keyframe's batch is acknowledged
+with no video error or repaint request before it — an ordering, not a timing,
+because a failed decoder reports before the paint worker acknowledges. Against a
+gateway built without the feature it asserts the fallback: no isolation, no
+decoder asked for, and VP9.
+
 `audio-socket.spec.ts` keeps sound on its dedicated `/ws/audio` connection. It
 asserts which socket receives the format and packets, and that opening and closing
 that socket is the whole subscription. The deterministic tone harness in
@@ -142,6 +153,26 @@ REMOTEX_PLAYWRIGHT_EGFX_TARGET='win' \
 bunx playwright test '/egfx-passthrough\.spec\.ts$'
 ```
 
+The software HEVC spec needs a gateway whose config has an
+`ard-high-performance` target with `media_passthrough = true`, built with the
+decoder, and names that target with `REMOTEX_PLAYWRIGHT_HEVC_TARGET`:
+
+```sh
+cargo run --profile qa --features hevc-wasm -- serve --config tmp/qa_hevc.toml
+```
+
+```sh
+cd tests/playwright
+REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:52889/' \
+REMOTEX_PLAYWRIGHT_USERNAME='admin' \
+REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
+REMOTEX_PLAYWRIGHT_HEVC_TARGET='macvmhevc' \
+bun run test:hevc
+```
+
+Against a gateway built without `--features hevc-wasm`, add
+`REMOTEX_PLAYWRIGHT_HEVC_WASM=0`, which runs the fallback test instead.
+
 The audio spec uses the test-tone gateway instead of a live target:
 
 ```sh
@@ -160,9 +191,9 @@ bunx playwright test '/audio-socket\.spec\.ts$'
 ```
 
 `bun run test` runs all specs. `bun run test:clipboard`,
-`bun run test:oversized` and `bun run test:video` run one each; their filters are
-anchored (`'/clipboard\.spec\.ts$'`) because a positional argument is a regex matched
-against the whole path, and the bare name `clipboard.spec.ts` also matches
+`bun run test:oversized`, `bun run test:video` and `bun run test:hevc` run one
+each; their filters are anchored (`'/clipboard\.spec\.ts$'`) because a
+positional argument is a regex matched against the whole path, and the bare name `clipboard.spec.ts` also matches
 `oversized-clipboard.spec.ts`.
 
 The specs are TypeScript, which Playwright transpiles itself — and transpiling is
