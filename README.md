@@ -170,8 +170,8 @@ Each immediate subdirectory is one instance. The default root is
 `%LOCALAPPDATA%\remotex\instances` on Windows; pass `--instances-dir` to choose
 another. The root is made private to your account — mode `0700`, or on Windows
 an ACL naming only you and `SYSTEM` — because the configs hold credentials. Its
-config uses the same `[branding]` and `[[targets]]` format as the former native
-viewer and deliberately has no `[server]` block. `e` opens it in `$VISUAL` or
+config uses the same `[branding]` and `[[targets]]` format as a gateway's and
+deliberately has no `[server]` block. `e` opens it in `$VISUAL` or
 `$EDITOR` — `vi` when neither is set, and Notepad on Windows. The supervisor owns
 the shared TCP port and proxies each subdomain to that child's private endpoint:
 `<instance>/gateway.sock`, or on Windows a named pipe only your account can open.

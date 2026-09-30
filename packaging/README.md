@@ -221,6 +221,3 @@ script, release smoke test, and Dockerfile all reject a binary that exposes
 `tui`, `serve-embedded`, or `check-config --embedded`. The tarballs therefore remain
 build plumbing and fallback payloads even though native packages are what users
 are directed to install.
-
-`remotex-viewer` is released from [its own repository](https://github.com/andrewtheguy/remotex-viewer), not from
-this one.

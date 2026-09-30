@@ -1662,9 +1662,6 @@ button and `keyboardLock.ts` deliberately does not watch `(display-mode: fullscr
 — arming on that took a lock Chromium never made active, which is the failure it
 looked like a fix for. The way out of the mode is that button again, or holding
 Escape, which is Chromium's own exit from a locked full screen.
-[remotex-viewer](viewer.md) needs neither: it takes every key from the OS whenever the
-remote surface has focus, windowed or full screen, fills the monitor on the page's
-`requestFullscreen`, and its window is an app window that reserves no chords.
 
 The Command translation table itself is always complete and never changes with
 fullscreen. App windows therefore send every chord in windowed and fullscreen use
@@ -1757,8 +1754,8 @@ reclaim actions.
 ### Local multi-instance control plane
 
 `remotex tui --port <port>` is the native local control plane. It discovers one
-instance per immediate subdirectory, creates and edits the same serverless
-`remotex.toml` format the former Electron viewer used, and starts, stops or
+instance per immediate subdirectory, creates and edits its serverless
+`remotex.toml`, and starts, stops or
 restarts each gateway from its own list. `remotex.localhost:<port>` is a landing
 page; `<instance>.remotex.localhost:<port>` is that instance's browser origin.
 
@@ -1815,8 +1812,8 @@ retain it. Container artifacts are built separately with
 `--no-default-features`; the build script and Dockerfile reject a
 binary that exposes any embedded CLI surface.
 
-There is still no separate native client: every instance is the same SPA loaded
-by Chrome, Edge or [remotex-viewer](viewer.md) from its subdomain. The TUI is process and configuration
+There is no separate native client: every instance is the same SPA loaded
+by Chrome or Edge from its subdomain. The TUI is process and configuration
 control, not another remote-desktop implementation.
 
 ## Configuration and testing
