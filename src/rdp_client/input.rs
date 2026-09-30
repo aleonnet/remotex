@@ -23,6 +23,8 @@ pub(super) enum Command {
     Resize { width: u32, height: u32, scale_percent: u32 },
     /// Something for the clipboard channel, in the three shapes a clipboard has.
     Clipboard(Clipboard),
+    /// A frame of a passed graphics pipeline has been composed.
+    FrameComposed(u32),
     Shutdown,
 }
 
@@ -186,6 +188,20 @@ impl Input {
     /// anybody sees.
     pub fn send_clipboard(&self, data: Option<Vec<u8>>) {
         self.push(Command::Clipboard(Clipboard::Respond(data)));
+    }
+
+    /// Say that the run of a passed graphics pipeline that ended `frame` has been
+    /// composed — [`Event::Graphics`](super::Event::Graphics) — which is what the
+    /// host's acknowledgement of that frame waits for.
+    ///
+    /// The host paces itself by its acknowledgements: it draws only so far ahead
+    /// of the last one, so a compositor that is slower than the host is what sets
+    /// the rate the desktop is drawn at, and the session keeps the host a few
+    /// frames ahead of it rather than as far as the host would go. Every frame is
+    /// to be said, once its run is composed; one never said is one the host waits
+    /// for, and it stops drawing a dozen frames later.
+    pub fn frame_composed(&self, frame: u32) {
+        self.push(Command::FrameComposed(frame));
     }
 
     pub(super) fn shutdown(&self) {

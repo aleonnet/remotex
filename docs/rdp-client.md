@@ -200,18 +200,34 @@ and commands it carried when it ends, at `info`.
 [RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)
 gives. `Connect::pass_graphics` — a target's `egfx_passthrough` — has the session hand the
 pipeline's commands to its caller instead of composing them. The channel is
-still this client's: the capability exchange, the bulk compression and each
-frame's acknowledgement are as above, since the history is the connection's and
-the host stops drawing without its acknowledgements. `Graphics::passing` reads
+still this client's: the capability exchange and the bulk compression are as
+above, since the history is the connection's, and so is writing each frame's
+acknowledgement, which the host stops drawing without. `Graphics::passing` reads
 the commands by their headers alone (`proto/gfx.rs::commands`) and decodes three:
 the confirmation, the reset, whose size the session announces, and each
 EndFrame. Everything the host sent goes out as `Event::Graphics`, whole PDUs in
 order, cut where the session has something of its own to say — before the
 confirmation and the reset, so `Event::FramesMarked` and `Event::Resize` reach
-the caller ahead of the commands that follow them, and after each EndFrame,
-whose `Event::Frame` follows the run that holds it. Nothing is decoded, no
-surface is kept, and the session's framebuffer holds nothing of what the
-pipeline draws.
+the caller ahead of the commands that follow them, and after each EndFrame, so
+that a run names the frame it ends and an `Event::Frame` follows it. Nothing is
+decoded, no surface is kept, and the session's framebuffer holds nothing of what
+the pipeline draws.
+
+What the session no longer knows is when a frame is finished, so the caller
+says: `Input::frame_composed` once it has composed the run, and the host is
+acknowledged then. The host paces itself by that. Measured against a Windows 11
+host, it draws until eleven of its frames are unacknowledged and then one for
+each acknowledgement, evenly, at whatever rate they come — a reported
+`queueDepth` changes nothing — so a caller that composes more slowly than the
+host draws sets the rate itself, and every frame it composes is one the host
+drew for it. Acknowledged as each is composed, though, such a caller is left
+eleven frames behind the desktop for as long as it is slower. So the session
+keeps the host a few frames ahead of the caller instead (`PASSED_AHEAD`): while
+more wait to be composed than that, the frames already composed go
+unacknowledged, and the host's count fills with those; at that many, one is
+acknowledged for each composed; below it, two; and once nothing waits,
+everything is. A caller that keeps up is acknowledged at once, and no
+acknowledgement outlasts the frames in front of it.
 
 `Compositor` (`compositor.rs`) is the other half: the same compositor, fed the
 commands that were passed. The page's WebAssembly module is a binding around it

@@ -621,6 +621,48 @@ impl Clone for Held {
     }
 }
 
+/// What a payload's source is owed once the browser has painted it, said when this
+/// drops.
+///
+/// Carried inside the payload and then with its batch, as [`Held`] is and for the
+/// same reason: every way out says it. The batch was painted and acknowledged, or
+/// it went with a socket that closed, a queue nobody was attached to, or an engine
+/// that ended — and a source waiting to hear is never left waiting on a payload
+/// that no longer exists. There is nothing to call and so nothing to forget.
+///
+/// A clone says nothing: what is owed is owed once, by the payload that is queued.
+#[derive(Default)]
+pub struct Painted {
+    then: Option<Box<dyn FnOnce() + Send + Sync>>,
+}
+
+impl Painted {
+    /// `then` runs once, wherever this is dropped, so it must not wait on anything.
+    pub fn new(then: impl FnOnce() + Send + Sync + 'static) -> Self {
+        Self { then: Some(Box::new(then)) }
+    }
+}
+
+impl Drop for Painted {
+    fn drop(&mut self) {
+        if let Some(then) = self.then.take() {
+            then();
+        }
+    }
+}
+
+impl Clone for Painted {
+    fn clone(&self) -> Self {
+        Self::default()
+    }
+}
+
+impl std::fmt::Debug for Painted {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("Painted").field("owed", &self.then.is_some()).finish()
+    }
+}
+
 /// One video access unit, carried as a `VIDEO` record inside a [`batch`] frame.
 ///
 /// The contract every client implements:
@@ -685,13 +727,20 @@ impl VideoUnit {
 ///   against what the commands before it built, so a client composes every record,
 ///   in order, from that message on, and one that has missed any cannot go on.
 /// - A record ends at a frame's end or where the host's own PDU did, never inside a
-///   command. The output changes at each `EndFrame`, as on the host's own clients.
-/// - The gateway has acknowledged each frame to the host by the time its record is
-///   sent. A client answers nothing to the host; its `paintAck` is the gateway's.
+///   command. The output changes at each `EndFrame`, as on the host's own clients,
+///   and the record that ends a frame is the last of its batch: a batch is drawn
+///   and then shown, so one that held two frames would show one of them.
+/// - A client answers nothing to the host. Its `paintAck` for a batch is what the
+///   gateway acknowledges that batch's frame to the host on, and the host paces
+///   its drawing by how soon that comes, so a client acknowledges a batch when it
+///   has composed it and not before.
 #[derive(Debug, Clone)]
 pub struct GraphicsUnit {
     /// The commands.
     pub data: Vec<u8>,
+    /// For a run that ends a frame, the acknowledgement the host is owed for that
+    /// frame — see [`Painted`].
+    pub frame: Option<Painted>,
     /// This payload's share of the queue budget — see [`Held`].
     pub held: Held,
 }
@@ -1150,7 +1199,10 @@ pub enum WireFrame {
     /// `held` is the queue budget of every payload the batch carries: a batch
     /// encoded and still waiting on the paint window is as much backlog as one not
     /// yet encoded, and the socket decides when it has stopped being any.
-    Batch { sequence: u32, bytes: Vec<u8>, held: Vec<Held> },
+    ///
+    /// `painted` is what the batch's payloads are owed once the browser has
+    /// acknowledged it ([`Painted`]), which the socket keeps until then.
+    Batch { sequence: u32, bytes: Vec<u8>, held: Vec<Held>, painted: Vec<Painted> },
     /// One audio frame. Audio has its own socket and no paint acknowledgment.
     Audio(Vec<u8>),
 }
@@ -2025,6 +2077,26 @@ mod tests {
         assert_eq!((info.width, info.height, info.color_type), (3, 2, png::ColorType::Rgb));
         assert_eq!(&buf[..info.buffer_size()], &rgb[..]);
         assert!(Tile::from_rgb(0, 0, 3, 2, &rgb[1..]).is_err(), "a short payload is refused");
+    }
+
+    /// What a payload is owed is said once, wherever the payload ends, and a copy of
+    /// the payload says nothing.
+    #[test]
+    fn what_a_payload_is_owed_is_said_once_when_it_drops() {
+        let said = std::sync::Arc::new(std::sync::atomic::AtomicU32::new(0));
+        let painted = {
+            let said = std::sync::Arc::clone(&said);
+            Painted::new(move || {
+                said.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+            })
+        };
+        let said = || said.load(std::sync::atomic::Ordering::Relaxed);
+        drop(painted.clone());
+        assert_eq!(said(), 0, "a clone owes nothing");
+        let unit = GraphicsUnit { data: vec![0], frame: Some(painted), held: Held::default() };
+        assert_eq!(said(), 0, "still queued");
+        drop(unit);
+        assert_eq!(said(), 1);
     }
 
     /// A share split off another takes its bytes with it, and both go back.

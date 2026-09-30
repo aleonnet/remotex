@@ -478,7 +478,7 @@ async fn pump(
             Event::Paint(_) => tally.paints += 1,
             Event::Frame => tally.frames += 1,
             Event::FramesMarked => {}
-            Event::Graphics(_) => panic!("a session that composes here was handed the pipeline's commands"),
+            Event::Graphics { .. } => panic!("a session that composes here was handed the pipeline's commands"),
             Event::Cursor(_) => tally.cursors += 1,
             Event::Resize { width, height } => tally.resizes.push((width, height)),
             Event::ResizeReady { .. } => tally.resize_ready = true,
@@ -1018,6 +1018,8 @@ async fn pass_the_pipeline() {
     println!("  connected at {width}x{height}");
 
     struct Passed {
+        /// Where the frames composed here are said to be, which the host waits on.
+        input: Input,
         compositor: Compositor,
         started: u32,
         runs: u64,
@@ -1029,6 +1031,7 @@ async fn pass_the_pipeline() {
         resize_ready: bool,
     }
     let mut passed = Passed {
+        input: session.input().clone(),
         compositor: Compositor::new(),
         started: 0,
         runs: 0,
@@ -1051,11 +1054,15 @@ async fn pass_the_pipeline() {
                     passed.started += 1;
                     passed.compositor = Compositor::new();
                 }
-                Event::Graphics(commands) => {
+                Event::Graphics { commands, frame } => {
                     assert!(passed.started > 0, "commands arrived before the pipeline was said to begin");
                     passed.runs += 1;
                     passed.bytes += commands.len() as u64;
                     let composed = passed.compositor.compose(&commands).expect("the passed commands compose");
+                    assert_eq!(composed.frames, u32::from(frame.is_some()), "a run names the frame it ends");
+                    if let Some(frame) = frame {
+                        passed.input.frame_composed(frame);
+                    }
                     passed.composed_frames += u64::from(composed.frames);
                     passed.painted += composed.painted.len() as u64;
                     if let Some(size) = composed.resized {
