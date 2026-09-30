@@ -11,15 +11,15 @@
 # layer over that image's linux/amd64 half, installing the two libraries and
 # placing the archive the tag's src/hevc_wasm.rs pins, downloaded from the
 # private andrewtheguy/hevc-wasm-archives through `gh` and checked against that
-# pin, at /opt/remotex/share/hevc-wasm/. It sits outside /opt/remotex/var, whose
-# volume would hide it, so the mounted config names it by its absolute path:
+# pin, in /opt/remotex/versions/<version>/share/remotex, the release tree's data
+# directory, where the gateway looks for it (src/config.rs, data_dir). The
+# mounted config turns it on with no path:
 #
 #   [hevc_wasm]
 #   enabled = true
-#   archive = "/opt/remotex/share/hevc-wasm/hevc-wasm-vX.Y.Z.tar.gz"
 #
-# A tag whose gateway links the decoders rather than loading them, or that pins
-# no software decoder, is refused.
+# A tag whose gateway links the decoders rather than loading them, pins no
+# software decoder, or looks for it elsewhere, is refused.
 #
 # The package must stay private: the public image leaves the decoders out, and a
 # public package is a release artifact. The first push creates it `internal` —
@@ -69,6 +69,8 @@ wasm_sha256="$(sed -n 's/^const SHA256: &str = "\([0-9a-f]\{64\}\)";$/\1/p' <<<"
 [ -n "$wasm_version" ] && [ -n "$wasm_sha256" ] \
   || { echo "could not read the pinned version and SHA-256 from ${tag}'s src/hevc_wasm.rs" >&2; exit 1; }
 wasm_archive="hevc-wasm-v${wasm_version}.tar.gz"
+git grep -q 'fn data_dir_for_exe' "$commit" -- src/config.rs \
+  || { echo "${tag}'s gateway does not look for the decoder in its release tree's share/remotex" >&2; exit 1; }
 
 # Before the build rather than after it.
 podman login --get-login "$registry" >/dev/null 2>&1 \
@@ -92,12 +94,13 @@ echo "${wasm_sha256}  ${layer}/${wasm_archive}" | sha256sum --check --quiet \
 cat >"$layer/Containerfile" <<'CONTAINERFILE'
 ARG BASE
 FROM ${BASE}
+ARG VERSION
 ARG WASM_ARCHIVE
 RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources \
     && apt-get update \
     && apt-get install -y --no-install-recommends libavcodec61 libfdk-aac2t64 \
     && rm -rf /var/lib/apt/lists/*
-COPY ${WASM_ARCHIVE} /opt/remotex/share/hevc-wasm/${WASM_ARCHIVE}
+COPY ${WASM_ARCHIVE} /opt/remotex/versions/${VERSION}/share/remotex/${WASM_ARCHIVE}
 CONTAINERFILE
 
 echo ">> building ${image}:${tag}"
@@ -105,6 +108,7 @@ podman build \
   --platform linux/amd64 \
   -f "$layer/Containerfile" \
   --build-arg "BASE=${public}" \
+  --build-arg "VERSION=${tag#v}" \
   --build-arg "WASM_ARCHIVE=${wasm_archive}" \
   --label "org.opencontainers.image.revision=${commit}" \
   -t "${image}:${tag}" \
@@ -144,4 +148,4 @@ access="$(anonymous_access)"
   || { echo "${image} is not confirmed private after the push (${access}): anyone may pull ${tag}. Make the package private" >&2; exit 1; }
 
 echo ">> pushed ${image}:${tag} (${commit}); anonymous pull refused"
-echo ">> its software HEVC decoder: archive = \"/opt/remotex/share/hevc-wasm/${wasm_archive}\""
+echo ">> its software HEVC decoder: /opt/remotex/versions/${tag#v}/share/remotex/${wasm_archive}"

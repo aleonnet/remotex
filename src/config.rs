@@ -1204,8 +1204,8 @@ pub struct HevcWasmSection {
     /// reason.
     pub enabled: bool,
     /// The release archive, as downloaded. Absent is its release name in the
-    /// gateway's state directory, and a relative path is taken from that directory
-    /// too.
+    /// gateway's data directory ([`data_dir`]), and a relative path is taken from
+    /// that directory too.
     pub archive: Option<PathBuf>,
 }
 
@@ -1648,13 +1648,15 @@ impl ConfigFile {
     /// gateway itself: it names the instance, and multiple local instances are
     /// easier to tell apart if they can be called different things.
     ///
-    /// `state_dir` is the instance directory, where `[meter]` keeps its database.
+    /// `state_dir` is the instance directory, where `[meter]` keeps its database, and
+    /// `data_dir` is where `[hevc_wasm]` finds its archive; see [`data_dir`].
     #[cfg(feature = "embedded-gateway")]
     pub fn resolve_embedded(
         self,
         token: EmbeddedToken,
         endpoint: ListenAddr,
         state_dir: &Path,
+        data_dir: &Path,
     ) -> anyhow::Result<AppConfig> {
         let branding = Self::resolve_branding(self.branding.as_ref())?;
         Ok(AppConfig {
@@ -1666,18 +1668,18 @@ impl ConfigFile {
             branding,
             dev_hostname: None,
             meter: Self::resolve_meter(self.meter, state_dir),
-            hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, state_dir),
+            hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
         })
     }
 
-    /// The `[hevc_wasm]` table resolved, its archive placed in `state_dir`. `None`
+    /// The `[hevc_wasm]` table resolved, its archive placed in `data_dir`. `None`
     /// unless the table says `enabled = true`. Only a path: the archive is read and
     /// checked when the gateway starts ([`crate::hevc_wasm::HevcDecoder::load`]), as
     /// `[meter]`'s database is opened then.
-    fn resolve_hevc_wasm(section: Option<HevcWasmSection>, state_dir: &Path) -> Option<PathBuf> {
+    fn resolve_hevc_wasm(section: Option<HevcWasmSection>, data_dir: &Path) -> Option<PathBuf> {
         section.filter(|section| section.enabled).map(|section| {
             // `join` keeps an absolute path as written.
-            state_dir.join(section.archive.unwrap_or_else(|| crate::hevc_wasm::archive_name().into()))
+            data_dir.join(section.archive.unwrap_or_else(|| crate::hevc_wasm::archive_name().into()))
         })
     }
 
@@ -1720,10 +1722,10 @@ impl ConfigFile {
     /// Resolve the runtime configuration with the file's own listen address.
     /// See [`Self::resolve_with`] for the overriding form.
     ///
-    /// For checking a config that may not be in any file: the state directory is the
-    /// working directory, and nothing is opened in it.
+    /// For checking a config that may not be in any file: the state and data
+    /// directories are the working directory, and nothing is opened in either.
     pub fn resolve(self) -> anyhow::Result<AppConfig> {
-        self.resolve_with(None, Path::new(""))
+        self.resolve_with(None, Path::new(""), Path::new(""))
     }
 
     /// Resolve the runtime configuration: validate the web-login credential and
@@ -1734,7 +1736,13 @@ impl ConfigFile {
     /// command line if it is there and from the file otherwise.
     ///
     /// `state_dir` is where `[meter]` keeps its database; see [`state_dir`].
-    pub fn resolve_with(self, listen: Option<&str>, state_dir: &Path) -> anyhow::Result<AppConfig> {
+    /// `data_dir` is where `[hevc_wasm]` finds its archive; see [`data_dir`].
+    pub fn resolve_with(
+        self,
+        listen: Option<&str>,
+        state_dir: &Path,
+        data_dir: &Path,
+    ) -> anyhow::Result<AppConfig> {
         let server = self.server.unwrap_or_default();
         let listen = match (listen, server.listen.as_deref()) {
             (Some(value), _) => parse_listen(value).context("invalid --listen address")?,
@@ -1768,7 +1776,7 @@ impl ConfigFile {
                 .transpose()
                 .context("invalid [server].dev_subdomain")?,
             meter: Self::resolve_meter(self.meter, state_dir),
-            hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, state_dir),
+            hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
         })
     }
 }
@@ -1950,12 +1958,43 @@ pub fn state_dir(config: &Path) -> PathBuf {
     config.parent().map_or_else(PathBuf::new, Path::to_path_buf)
 }
 
+/// Where the gateway finds the files that come with its version but no build
+/// holds — the software HEVC decoder's archive: `share/remotex` in its release
+/// tree, beside the `share/doc/remotex` every release target installs. That is
+/// `/usr/share/remotex` for the `.deb` and `.rpm`, `/usr/local/share/remotex` for
+/// the macOS `.pkg`, `share\remotex` under the `.msi`'s install directory,
+/// `/opt/remotex/versions/<version>/share/remotex` in the container image, and
+/// the unpacked tarball's own. They follow the binary, not the config, and are
+/// replaced with it: they are pinned to its version, unlike the state directory.
+///
+/// A binary outside a release tree — a Cargo build — has `outside`: the config's
+/// directory, or the embedded instance's.
+pub fn data_dir(outside: &Path) -> PathBuf {
+    running_exe()
+        .and_then(|exe| data_dir_for_exe(&exe))
+        .unwrap_or_else(|| outside.to_path_buf())
+}
+
+/// Every release target puts the binary in a release tree's `bin`.
+fn data_dir_for_exe(exe: &Path) -> Option<PathBuf> {
+    let bin_dir = exe.parent()?;
+    if !bin_dir.file_name()?.eq_ignore_ascii_case("bin") {
+        return None;
+    }
+    Some(bin_dir.parent()?.join("share").join("remotex"))
+}
+
+/// The executable that is actually running, through any link to it: the
+/// container's `/opt/remotex/current` is one.
+fn running_exe() -> Option<PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    Some(exe.canonicalize().unwrap_or(exe))
+}
+
 /// Resolve the package-manager layout or the container image's versioned layout
 /// from the executable that is actually running.
 fn installed_layout() -> Option<InstalledLayout> {
-    let exe = std::env::current_exe().ok()?;
-    let exe = exe.canonicalize().unwrap_or(exe);
-    installed_layout_for_exe(&exe)
+    installed_layout_for_exe(&running_exe()?)
 }
 
 fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
@@ -2048,6 +2087,30 @@ mod tests {
         }
 
         assert!(installed_layout_for_exe(Path::new("/checkout/target/debug/remotex")).is_none());
+    }
+
+    #[test]
+    fn the_data_directory_is_share_remotex_in_each_release_tree() {
+        let data = |exe: &str| data_dir_for_exe(Path::new(exe));
+        assert_eq!(data("/usr/bin/remotex"), Some("/usr/share/remotex".into()), ".deb and .rpm");
+        assert_eq!(data("/usr/local/bin/remotex"), Some("/usr/local/share/remotex".into()), ".pkg");
+        assert_eq!(
+            data("/opt/remotex/versions/0.0.294/bin/remotex"),
+            Some("/opt/remotex/versions/0.0.294/share/remotex".into()),
+            "the container image"
+        );
+        assert_eq!(
+            data("/home/me/remotex-0.0.294-linux-x86_64/bin/remotex"),
+            Some("/home/me/remotex-0.0.294-linux-x86_64/share/remotex".into()),
+            "an unpacked tarball"
+        );
+        #[cfg(windows)]
+        assert_eq!(
+            data(r"C:\Program Files\remotex\bin\remotex.exe"),
+            Some(PathBuf::from(r"C:\Program Files\remotex\share\remotex")),
+            ".msi"
+        );
+        assert_eq!(data("/checkout/target/debug/remotex"), None, "a Cargo build");
     }
 
     #[test]
@@ -2244,26 +2307,26 @@ mod tests {
     fn the_command_line_listen_address_wins_and_is_checked() {
         let file = ConfigFile::parse(&with_server(r#"listen = "127.0.0.1:1""#)).unwrap();
         assert_eq!(
-            file.clone().resolve_with(Some("0.0.0.0:8080"), Path::new("")).unwrap().listen.to_string(),
+            file.clone().resolve_with(Some("0.0.0.0:8080"), Path::new(""), Path::new("")).unwrap().listen.to_string(),
             "0.0.0.0:8080"
         );
         // Absent, the file still decides.
         assert_eq!(
-            file.clone().resolve_with(None, Path::new("")).unwrap().listen.to_string(),
+            file.clone().resolve_with(None, Path::new(""), Path::new("")).unwrap().listen.to_string(),
             "127.0.0.1:1"
         );
         // And a config with no address at all falls back to the default.
         assert_eq!(
             ConfigFile::parse(&minimal())
                 .unwrap()
-                .resolve_with(None, Path::new(""))
+                .resolve_with(None, Path::new(""), Path::new(""))
                 .unwrap()
                 .listen
                 .to_string(),
             DEFAULT_LISTEN
         );
 
-        let err = file.resolve_with(Some("0.0.0.0"), Path::new("")).unwrap_err();
+        let err = file.resolve_with(Some("0.0.0.0"), Path::new(""), Path::new("")).unwrap_err();
         assert!(
             format!("{err:#}").contains("--listen"),
             "a bad override must name where it came from: {err:#}"
@@ -2387,7 +2450,7 @@ mod tests {
         let state = Path::new("/var/lib/remotex");
         let meter = |table: &str| {
             let toml = format!("{table}\n{}", minimal());
-            ConfigFile::parse(&toml).unwrap().resolve_with(None, state).unwrap().meter
+            ConfigFile::parse(&toml).unwrap().resolve_with(None, state, Path::new("")).unwrap().meter
         };
         assert_eq!(meter(""), None, "no [meter] records nothing");
         assert_eq!(
@@ -2426,24 +2489,29 @@ mod tests {
     }
 
     /// No decoder until `enabled = true`; an enabled table finds the release archive
-    /// by its release name in the state directory unless it names another. Resolving
-    /// reads nothing: the gateway reads the archive when it starts.
+    /// by its release name in the data directory, not the state directory, unless it
+    /// names another. Resolving reads nothing: the gateway reads the archive when it
+    /// starts.
     #[test]
-    fn the_hevc_decoder_is_looked_for_in_the_state_directory() {
-        let state = Path::new("/var/lib/remotex");
+    fn the_hevc_decoder_is_looked_for_in_the_data_directory() {
+        let data = Path::new("/usr/share/remotex");
         let archive = |table: &str| {
             let toml = format!("{table}\n{}", minimal());
-            ConfigFile::parse(&toml).unwrap().resolve_with(None, state).unwrap().hevc_wasm
+            ConfigFile::parse(&toml)
+                .unwrap()
+                .resolve_with(None, Path::new("/var/lib/remotex"), data)
+                .unwrap()
+                .hevc_wasm
         };
         assert_eq!(archive(""), None, "no [hevc_wasm] serves no decoder");
         assert_eq!(archive("[hevc_wasm]\nenabled = false\narchive = \"kept.tar.gz\""), None);
         assert_eq!(
             archive("[hevc_wasm]\nenabled = true"),
-            Some(state.join(crate::hevc_wasm::archive_name()))
+            Some(data.join(crate::hevc_wasm::archive_name()))
         );
         assert_eq!(
             archive("[hevc_wasm]\nenabled = true\narchive = \"decoders/hevc.tar.gz\""),
-            Some(PathBuf::from("/var/lib/remotex/decoders/hevc.tar.gz"))
+            Some(PathBuf::from("/usr/share/remotex/decoders/hevc.tar.gz"))
         );
         assert_eq!(
             archive("[hevc_wasm]\nenabled = true\narchive = \"/opt/hevc.tar.gz\""),

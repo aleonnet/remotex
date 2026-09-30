@@ -32,7 +32,11 @@ async fn main() -> anyhow::Result<()> {
             info!("remotex {}, features: {}", env!("CARGO_PKG_VERSION"), remotex::cli::features_line());
             let (file, path) = remotex::config::load(config.as_deref())?;
             info!("config: {}", path.display());
-            let config = file.resolve_with(listen.as_deref(), &remotex::config::state_dir(&path))?;
+            let config = file.resolve_with(
+                listen.as_deref(),
+                &remotex::config::state_dir(&path),
+                &remotex::config::data_dir(path.parent().unwrap_or(std::path::Path::new(""))),
+            )?;
             serve(config).await?;
         }
         #[cfg(feature = "embedded-gateway")]

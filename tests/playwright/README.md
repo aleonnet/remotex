@@ -155,8 +155,8 @@ bunx playwright test '/egfx-passthrough\.spec\.ts$'
 
 The software HEVC spec needs a gateway whose config has an
 `ard-high-performance` target with `media_passthrough = true` and an enabled
-`[hevc_wasm]` table, with the pinned release archive beside the config (the
-state directory of a `--config` run), and names that target with
+`[hevc_wasm]` table, with the pinned release archive beside the config (where
+a gateway run from a Cargo build looks for it), and names that target with
 `REMOTEX_PLAYWRIGHT_HEVC_TARGET`:
 
 ```sh

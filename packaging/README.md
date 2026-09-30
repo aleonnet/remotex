@@ -174,9 +174,14 @@ The non-default `apple-hp-media-static` feature links private static archives
 instead, and is in no release artifact. No artifact holds the EXPERIMENTAL
 software HEVC decoder either, libavcodec in WebAssembly for the page: an operator
 downloads the release that `src/hevc_wasm.rs` pins by version and SHA-256 from
-the private `andrewtheguy/hevc-wasm-archives` through `gh` and names it in
-`[hevc_wasm]`, and every build serves it. The private image
-`publish-full-image.sh` builds carries it at `/opt/remotex/share/hevc-wasm/`.
+the private `andrewtheguy/hevc-wasm-archives` through `gh`, and every build
+serves it under `[hevc_wasm]`. Every release target looks for it by its release
+name in `share/remotex`, beside the `share/doc/remotex` it installs:
+`/usr/share/remotex` for the `.deb` and `.rpm`, `/usr/local/share/remotex` for
+the `.pkg`, `share\remotex` under the `.msi`'s install directory, the unpacked
+tarball's own, and `/opt/remotex/versions/<version>/share/remotex` in the
+container image. No package owns or makes that directory: the operator does. The
+private image `publish-full-image.sh` builds carries it there.
 `libavcodec-hevc-prebuilt` links FFmpeg's libavcodec and libavutil, configured
 down to the HEVC decoder and parser, and on macOS its VideoToolbox hwaccel, which
 links Apple's VideoToolbox, CoreMedia, CoreVideo and CoreFoundation frameworks;
