@@ -4,6 +4,8 @@ import {
   loadEgfx,
 } from "./egfxCompositor.ts";
 import type { GraphicsPicture } from "./egfxPicture.ts";
+import type { HevcPicture } from "./hevcPicture.ts";
+import { type DecodedPicture, isHevcPlanes } from "./hevcWasmDecoder.ts";
 import {
   type BatchRecord,
   decodeBatchFrame,
@@ -56,7 +58,8 @@ export interface FramePainter {
   /**
    * The desktop's canvas was replaced at this size and filled black. A pipeline's
    * picture is shown over that canvas, so it is blanked with it: the reset that
-   * draws the new desktop is in a run not composed yet.
+   * draws the new desktop is in a run not composed yet. The software HEVC
+   * decoder's is no longer shown, until the stream's next picture.
    */
   blank(w: number, h: number): void;
 }
@@ -92,10 +95,15 @@ export function createFramePainter(options: {
    */
   makePicture?: () => GraphicsPicture;
   /**
-   * Whether a pipeline's picture is what the page should be showing: true once a
-   * pipeline has drawn its first run, false when its picture is given back. The
-   * picture's canvas lies over the desktop's, and only the page can show or hide
-   * it.
+   * EXPERIMENTAL: where the software HEVC decoder's pictures are drawn, the same
+   * canvas (hevcPicture.ts). A painter given none presents none.
+   */
+  makeHevcPicture?: () => HevcPicture;
+  /**
+   * Whether that canvas holds what the page should be showing: true once a
+   * pipeline has drawn its first run or the software decoder a picture, false
+   * when the desktop's own canvas is the picture again. It lies over the
+   * desktop's, and only the page can show or hide it.
    */
   onGraphicsShown?: (shown: boolean) => void;
   /** EXPERIMENTAL: decode passed HEVC in software (see `createDesktopVideo`). */
@@ -159,6 +167,28 @@ export function createFramePainter(options: {
   const describe = (error: unknown) =>
     error instanceof Error ? error.message : String(error);
 
+  // The software HEVC decoder's picture, made by the first one it decodes. The
+  // Mac's stream gives way to VP9 encoded here across a display change, which is
+  // painted on the desktop's own canvas, so `shown` goes both ways in a session.
+  // `broken` once the GPU would not take a picture: said once, and the pictures
+  // after it are dropped, since nothing sent again would be taken either.
+  const hevc: { picture: HevcPicture | null; shown: boolean; broken: boolean } =
+    { picture: null, shown: false, broken: false };
+
+  const hideHevc = () => {
+    if (hevc.shown) {
+      hevc.shown = false;
+      options.onGraphicsShown?.(false);
+    }
+  };
+
+  const releaseHevc = () => {
+    hideHevc();
+    hevc.picture?.close();
+    hevc.picture = null;
+    hevc.broken = false;
+  };
+
   // What is on screen about video, and whether a painted frame may take it down.
   //
   // A decoder giving up is answered by a painted frame: what the banner says is that
@@ -190,6 +220,7 @@ export function createFramePainter(options: {
 
   const releaseVideo = () => {
     releasePipeline();
+    releaseHevc();
     video?.close();
     video = null;
     videoComplained = false;
@@ -293,7 +324,7 @@ export function createFramePainter(options: {
   // pipeline has no picture of its own: it is composed in its turn.
   const decode = (
     record: BatchRecord,
-  ): Promise<VideoFrame | ImageBitmap | null> => {
+  ): Promise<DecodedPicture | ImageBitmap | null> => {
     if (record.kind === "graphics") {
       return Promise.resolve(null);
     }
@@ -313,20 +344,61 @@ export function createFramePainter(options: {
     });
   };
 
+  // One of the software decoder's pictures, onto the canvas over the desktop's.
+  // False when the GPU would not take it, which is said and ends the presenting.
+  const presentPlanes = (
+    planes: Parameters<HevcPicture["draw"]>[0],
+    w: number,
+    h: number,
+  ): boolean => {
+    if (hevc.broken || !options.makeHevcPicture) {
+      return false;
+    }
+    try {
+      hevc.picture ??= options.makeHevcPicture();
+      hevc.picture.draw(planes, w, h);
+    } catch (error) {
+      hideHevc();
+      hevc.picture?.close();
+      hevc.picture = null;
+      hevc.broken = true;
+      videoComplained = false;
+      options.onVideoError(
+        `This browser could not present the decoded picture (${describe(error)}). Reload the page to start the session over.`,
+      );
+      return false;
+    }
+    if (!hevc.shown) {
+      hevc.shown = true;
+      options.onGraphicsShown?.(true);
+    }
+    return true;
+  };
+
   const paint = (
     record: Exclude<BatchRecord, GraphicsMsg>,
-    image: VideoFrame | ImageBitmap,
+    image: DecodedPicture | ImageBitmap,
   ) => {
     const context = options.context();
-    if (record.kind === "tile") {
+    if (isHevcPlanes(image)) {
+      if (
+        record.kind !== "video" ||
+        !presentPlanes(image, record.w, record.h)
+      ) {
+        return;
+      }
+    } else if (record.kind === "tile") {
       context?.drawImage(image, record.x, record.y);
       return;
+    } else {
+      const { w, h } = record;
+      // Cropped by the desktop's size rather than drawn whole: the encoder is held
+      // to even sides and an odd desktop does not have them, so the decoded picture
+      // can be a pixel wider or taller than the desktop.
+      context?.drawImage(image, 0, 0, w, h, 0, 0, w, h);
+      // The desktop's own canvas is the picture again.
+      hideHevc();
     }
-    const { w, h } = record;
-    // Cropped by the desktop's size rather than drawn whole: the encoder is held
-    // to even sides and an odd desktop does not have them, so the decoded picture
-    // can be a pixel wider or taller than the desktop.
-    context?.drawImage(image, 0, 0, w, h, 0, 0, w, h);
     if (videoComplained) {
       // Video is painting again, so whatever was said about it has stopped being
       // true. Said here rather than on a timer or behind a dismiss button: the
@@ -366,8 +438,12 @@ export function createFramePainter(options: {
           image.close();
           continue;
         }
-        paint(record, image);
-        image.close();
+        try {
+          paint(record, image);
+        } finally {
+          // Whatever became of it: the software decoder waits on this.
+          image.close();
+        }
       }
     },
     clear() {
@@ -402,6 +478,7 @@ export function createFramePainter(options: {
       pipeline = starting;
     },
     blank(w, h) {
+      hideHevc();
       const current = pipeline;
       if (!current?.picture || current.broken) {
         return;

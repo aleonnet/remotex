@@ -13,6 +13,17 @@
 // hopes for: the decode worker answers every unit with one picture or with none,
 // and a none is `noPicture`, which settles that unit's entry to null rather than
 // leaving it for the next picture to resolve.
+//
+// What it outputs is not a `VideoFrame` but the picture's planes where the decoder
+// left them (`HevcPlanes`): the module's memory is one its threads share, so the
+// paint worker reads it too, and uploads the planes to the GPU from there
+// (hevcPicture.ts). A `VideoFrame` over them was a copy of the picture, and
+// drawing it on the desktop's canvas had the GPU convert and copy it again: on an
+// Intel UHD 630 that was well over twice the GPU's time and three times the
+// workers'. Copying the planes out here instead is no way around it: a copy out
+// of a shared memory took longer than the rest of presenting together. The price
+// is that the decoder waits: it reuses a picture's memory from its next unit on,
+// so it starts that unit only once the picture is closed.
 
 /** What the paint worker sends the decode worker. */
 export type HevcCommand =
@@ -22,13 +33,52 @@ export type HevcCommand =
       id: number;
       data: ArrayBuffer;
       keyframe: boolean;
-      timestamp: number;
     }
+  /** The paint worker is done reading the picture last answered with. */
+  | { type: "release"; id: number }
   | { type: "destroy"; id: number };
+
+/** One plane of a picture: where its first row is in the memory, and its size. */
+export interface HevcPlane {
+  offset: number;
+  stride: number;
+  width: number;
+  rows: number;
+}
+
+/** A decoded picture as the decode worker describes it: 8-bit Y'CbCr planes. */
+export interface DecodedPlanes {
+  /** The module's memory, which the planes are in until the picture is released. */
+  memory: SharedArrayBuffer;
+  width: number;
+  height: number;
+  /** Luma, then the two chroma planes, which may be half its size either way. */
+  planes: HevcPlane[];
+  fullRange: boolean;
+  /** Which coefficients made the luma: BT.709's, or BT.601's. */
+  matrix: "bt709" | "smpte170m";
+  /** The primaries, as the canvas color space that has them. */
+  colorSpace: PredefinedColorSpace;
+}
+
+/** A decoded picture the paint worker holds: read until closed, and closed once. */
+export interface HevcPlanes extends DecodedPlanes {
+  /** Done with the planes; the decoder may go on to its next unit. */
+  close(): void;
+}
+
+/** What a stream's decoder outputs: the browser's frame, or this decoder's planes. */
+export type DecodedPicture = VideoFrame | HevcPlanes;
+
+export function isHevcPlanes(
+  picture: DecodedPicture | ImageBitmap,
+): picture is HevcPlanes {
+  return "planes" in picture;
+}
 
 /** What the decode worker answers: one `decoded` or `failed` per `decode`. */
 export type HevcEvent =
-  | { type: "decoded"; id: number; frame: VideoFrame | null }
+  | { type: "decoded"; id: number; picture: DecodedPlanes | null }
   /**
    * The decoder is over. `name` follows WebCodecs: `NotSupportedError` for a
    * module or a picture this browser cannot run at all, `EncodingError` for a unit
@@ -37,7 +87,9 @@ export type HevcEvent =
   | { type: "failed"; id: number; name: string; message: string };
 
 /** What `createVideoStream` builds a decoder with. */
-export interface VideoDecoderLikeInit extends VideoDecoderInit {
+export interface VideoDecoderLikeInit {
+  output: (picture: DecodedPicture) => void;
+  error: (error: DOMException) => void;
   /**
    * A unit decoded to no picture. Only a decoder that answers every unit calls it;
    * `VideoDecoder` never does.
@@ -77,10 +129,9 @@ function decodeWorker(): Worker {
     const client = clients.get(event.id);
     if (client) {
       client.onEvent(event);
-    } else if (event.type === "decoded") {
-      // A stream closed while this was on its way.
-      event.frame?.close();
     }
+    // A stream closed while this was on its way has nothing to release: its
+    // `destroy` did.
   };
   started.onerror = (ev) => {
     // A worker that failed to start takes every decoder in it down.
@@ -160,10 +211,21 @@ export function createWasmHevcDecoder(
         onEvent: (event) => {
           if (event.type === "failed") {
             fail(event.name, event.message);
-          } else if (state !== "configured") {
-            event.frame?.close();
-          } else if (event.frame) {
-            init.output(event.frame);
+          } else if (event.picture) {
+            let open = true;
+            init.output({
+              ...event.picture,
+              close() {
+                // Once, and only to a decoder still there: `destroy` releases too.
+                if (open && state === "configured") {
+                  worker?.postMessage({
+                    type: "release",
+                    id,
+                  } satisfies HevcCommand);
+                }
+                open = false;
+              },
+            });
           } else {
             init.noPicture?.();
           }
@@ -186,7 +248,6 @@ export function createWasmHevcDecoder(
           id,
           data,
           keyframe: chunk.type === "key",
-          timestamp: chunk.timestamp,
         } satisfies HevcCommand,
         [data],
       );

@@ -131,10 +131,11 @@ export default function RemoteDesktop({
             remote-point CSS size. Kept
             mounted in both modes so the hook's canvas ref stays stable. */}
         <canvas ref={canvasRef} className="framebuffer" width={0} height={0} />
-        {/* An RDP host's graphics pipeline, passed through, is drawn here and
-            not on the canvas above: a WebGL picture the paint worker shows
-            while a pipeline has one (egfxPicture.ts). It takes the canvas
-            above's box, and lies under the input overlay like it. */}
+        {/* What is drawn on the GPU is drawn here and not on the canvas above:
+            an RDP host's graphics pipeline, passed through, and the software
+            HEVC decoder's pictures (glPicture.ts). The paint worker shows it
+            while it holds one of them. It takes the canvas above's box, and
+            lies under the input overlay like it. */}
         <canvas
           ref={graphicsRef}
           className="framebuffer graphics"

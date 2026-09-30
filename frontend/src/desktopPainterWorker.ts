@@ -34,6 +34,7 @@
 
 import { createGraphicsPicture } from "./egfxPicture.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
+import { createHevcPicture } from "./hevcPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
 import { binaryFrameKind } from "./protocol.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
@@ -50,8 +51,9 @@ export type PainterCommand =
       type: "init";
       canvas: OffscreenCanvas;
       /**
-       * The canvas the page lays over the desktop's for an RDP host's graphics
-       * pipeline, whose picture is drawn there and nowhere else (egfxPicture.ts).
+       * The canvas the page lays over the desktop's for the two pictures drawn on
+       * the GPU and nowhere else: an RDP host's graphics pipeline (egfxPicture.ts)
+       * and the software HEVC decoder's (hevcPicture.ts).
        */
       graphics: OffscreenCanvas;
       /** EXPERIMENTAL: decode passed HEVC in software (appleMedia.ts). */
@@ -108,7 +110,8 @@ export type PainterEvent =
     }
   | { type: "resized"; seq: number }
   /**
-   * Whether a pipeline's picture is to be shown over the desktop's canvas.
+   * Whether the canvas over the desktop's is to be shown: it holds a pipeline's
+   * picture, or the software HEVC decoder's.
    * `epoch` is how many `clear`s this worker had taken when it said so: one said
    * for an attachment that has since been cleared is not the page's to act on.
    */
@@ -235,6 +238,7 @@ export function createPainterWorker(
             onVideoNeedsKeyframe: (reason) =>
               post({ type: "videoNeedsKeyframe", reason }),
             makePicture: () => createGraphicsPicture(command.graphics),
+            makeHevcPicture: () => createHevcPicture(command.graphics),
             onGraphicsShown: (shown) =>
               post({ type: "graphicsShown", shown, epoch }),
             softwareHevc: command.softwareHevc,

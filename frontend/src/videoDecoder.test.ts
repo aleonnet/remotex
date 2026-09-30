@@ -92,9 +92,8 @@ afterEach(() => {
   globals.EncodedVideoChunk = undefined;
 });
 
-/** Which picture came back, through the `VideoFrame` shape the caller is typed to. */
-const tagOf = (frame: VideoFrame | null) =>
-  (frame as unknown as FakeFrame | null)?.tag;
+/** Which picture came back, through whatever shape the caller is typed to. */
+const tagOf = (frame: unknown) => (frame as FakeFrame | null)?.tag;
 
 const unit = (byte: number) => new Uint8Array([byte]);
 const size = { w: 320, h: 240 };

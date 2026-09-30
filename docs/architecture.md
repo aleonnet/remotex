@@ -418,6 +418,21 @@ Three controls with similar names therefore remain separate:
   Extensions is passed the whole stream: its own decoder for the sound, the page's
   for the picture. The software decoder is shaped as a `VideoDecoder`, so the paint
   worker's stream runs it as it runs the browser's (`frontend/src/videoDecoder.ts`).
+  What it outputs is not a `VideoFrame` but the picture's three planes where the
+  decoder left them, in the module's shared memory: the paint worker uploads each
+  as a texture from there and one draw converts them, on the WebGL canvas the
+  page lays over the desktop's, the one a passed graphics pipeline is shown on
+  (`frontend/src/hevcPicture.ts`, `glPicture.ts`). The canvas is given the
+  stream's primaries, Display P3, so the browser takes the picture to the display
+  as it takes a video frame; the VP9 that fills the stream's gaps is painted on
+  the desktop's own canvas, and the page hides the one over it for as long. The
+  decoder reuses a picture's memory from its next unit on, so it starts that unit
+  only once the paint worker has released the picture. A `VideoFrame` over the
+  planes was a copy of the picture, and drawing it on the desktop's canvas had
+  the GPU convert and copy it again: on an Intel UHD 630, with a synthetic 4:4:4
+  stream at 2880×1800 and twenty pictures a second, that was 29% of the GPU
+  against 12%, and 6.2 ms of the two workers' time a picture against 1.8, beside
+  the 23 ms across six threads that decoding one took.
   `?hevc_decoder=software` in the page's URL takes it even where the browser's own
   would do. Measured against macvm at 2880×1800 on an M2 Max, a picture took 9 ms
   across eight threads, 44 on one.
