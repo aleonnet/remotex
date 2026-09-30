@@ -336,10 +336,12 @@ impl VideoSink {
     /// it in, and the resize that ends the hold is repainted in full.
     ///
     /// A rectangle while a passed stream is the picture ([`Self::passing`]) is the gap
-    /// after it: the source's own rectangles carry the picture again, as the stream
-    /// encoded here, which starts at a keyframe behind its announcement for a browser
-    /// whose decoder was the passed stream's. The passed stream starts over the same
-    /// way when it comes back.
+    /// after it, on a source whose rectangles come back — wlshare's VP9 on a generic
+    /// VNC target: they carry the picture again, as the stream encoded here, which
+    /// starts at a keyframe behind its announcement for a browser whose decoder was
+    /// the passed stream's. The passed stream starts over the same way when it comes
+    /// back. A Mac's media stream has no such gap: its rectangles never reach here
+    /// ([`crate::vnc::DesktopState::media_only`]).
     pub async fn damage(&self, rect: Rect, rgb: &[u8]) -> anyhow::Result<()> {
         if self.oversized() {
             return Ok(());

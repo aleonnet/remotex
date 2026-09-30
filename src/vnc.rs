@@ -3114,8 +3114,11 @@ async fn show_picture(
 /// unit sent, since the first one received may be dropped waiting for a keyframe,
 /// and after it, so the notice never lifts on an empty canvas.
 async fn uncover(shared: &Shared, sink: &VideoSink) -> anyhow::Result<()> {
-    if std::mem::take(&mut shared.desktop.lock().unwrap().covered) {
+    if shared.desktop.lock().unwrap().covered {
         sink.msg(ServerMsg::Resizing { active: false }).await?;
+        // Cleared only once the browser has been told: a send that failed leaves it
+        // covered for whoever attaches next.
+        shared.desktop.lock().unwrap().covered = false;
     }
     Ok(())
 }
