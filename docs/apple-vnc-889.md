@@ -26,7 +26,8 @@ layer.
 | Subtype | Mode | Picture | Sound |
 |---|---|---|---|
 | `ard` | Standard, the physical displays | ZRLE | none; the Mac's own output is left alone |
-| `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, ZRLE until it is up | AAC-ELD over the media stream |
+| `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, covered until it is up | AAC-ELD over the media stream |
+| `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | ZRLE | none; the Mac's own output is left alone |
 
 `ard-high-performance` is High Performance as Apple's viewer has it. Decoding its
 stream needs FFmpeg and fdk-aac on the gateway's host; without them the gateway
@@ -869,8 +870,9 @@ Remotex decodes the picture and encodes it as VP9, and the sound as Opus, unless
 the target sets `media_passthrough` and the browser decodes the Mac's HEVC and
 AAC-ELD: then each access unit goes to the browser as it came, described by the
 stream's own sequence parameter set, each sound unit goes on `/ws/audio` as it
-came, described by the AudioSpecificConfig below, and ZRLE's rectangles fill the
-picture's gaps as VP9 encoded here. A PLI is its repaint. See
+came, described by the AudioSpecificConfig below. A PLI is its repaint. Either
+way ZRLE's rectangles are decoded to keep its stream in step and never shown: the
+browser stays behind its resize notice until the stream delivers. See
 [Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through).
 
 The two decoders are FFmpeg's HEVC decoder for the picture (libavcodec,

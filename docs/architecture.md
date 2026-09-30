@@ -231,9 +231,11 @@ message, or add a key that selects it. See
 - `media_passthrough` on `ard-high-performance` passes the Mac's media stream
   unaltered, for a LAN, to a browser that said it decodes both halves: HEVC
   access units on the session socket, AAC-ELD units on `/ws/audio`. Both pass or
-  neither does; every other browser is sent VP9 and Opus. The Mac's ZRLE
-  rectangles fill the stream's gaps as VP9 encoded here, each switch starting at
-  a keyframe, and a PLI is a passed stream's repaint. The page answers for the
+  neither does; every other browser is sent VP9 and Opus. Decoded or passed, the
+  stream is the whole picture: the Mac's ZRLE rectangles are never shown, and
+  the browser stays behind its resize notice until the stream's first picture,
+  at connect and across every display change. A PLI is a passed stream's
+  repaint. The page answers for the
   sound by decoding one of the Mac's units in each form `isConfigSupported`
   accepts, since it accepts forms that do not decode, and plays in the form that
   decoded (`frontend/src/appleMedia.ts`). Keep the key to that stream. See
@@ -1844,8 +1846,11 @@ settled and decoded in the gateway by the host's FFmpeg libavcodec (`src/vnc_app
 or passed to a browser that decodes it under `media_passthrough`. The gateway's
 decoder runs four slice threads because one is too slow for 60 pictures a second:
 on one core of an i5-8500T a 1600×1000 picture took 14–23 ms, on four 7–14 ms.
-ZRLE rectangles carry the
-picture until the stream delivers and across every display change. A stream the
+ZRLE rectangles never carry the
+picture: the browser stays behind its resize notice until the stream delivers, at
+connect and across every display change, as Apple's viewer keeps its curtain up
+until its stream is hooked up, and a session that passes the stream builds no video
+encoder at all. A stream the
 Mac refuses, that brings no picture or no sound, or that stops ends the session,
 as it ends Apple's viewer's. While it runs, polling holds to one pixel, which still brings
 cursor shapes and layouts. Apple's virtual-display-count and

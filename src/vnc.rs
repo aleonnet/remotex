@@ -12,8 +12,8 @@
 //! ZRLE rectangles. `subtype = "ard-high-performance"` is High Performance mode:
 //! one virtual display at the target's pinned `width` and `height`, or at the
 //! connecting client's screen resolution when no size is pinned, with the picture
-//! and sound from the Mac's media stream ([`crate::vnc_apple_media`]) and ZRLE
-//! rectangles carrying the picture until it is up. The unofficial
+//! and sound from the Mac's media stream ([`crate::vnc_apple_media`]) alone, the
+//! browser covered by its resize notice until the stream is up. The unofficial
 //! `virtual_display = true` gives `ard` High Performance's display and resizing
 //! under its own ZRLE picture, with no stream offered. See docs/apple-vnc-889.md.
 //!
@@ -630,6 +630,18 @@ struct DesktopState {
     /// Pixel polling then holds to [`HP_HOLD_REQUEST`], which still brings the
     /// cursor shapes and layouts, and ZRLE pixels are decoded but not shown.
     media_live: bool,
+    /// The picture is the media stream alone, decoded here or passed: a High
+    /// Performance session, whose ZRLE pixels are decoded but never shown, in the
+    /// stream's gaps either — the seconds before it delivers, and across a display
+    /// change — so a session that passes the stream encodes no video at all.
+    media_only: bool,
+    /// The browser is behind its resize notice waiting for the stream's first
+    /// picture of the display. Raised at connect and by every display change of a
+    /// `media_only` session, and dropped by that picture ([`uncover`]) rather than
+    /// when the display settles, as Apple's viewer keeps its curtain up until its
+    /// stream is hooked up. Read with [`HpResize::shown`] wherever that decides
+    /// whether a browser is covered.
+    covered: bool,
 }
 
 /// How long a High Performance viewport has to hold still before the Mac is
@@ -2377,6 +2389,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let mut write_task = tokio::spawn(writer);
     let uplink: SharedUplink = Arc::new(Mutex::new(uplink));
     let hp = if virtual_display && resize { HpResize::opening() } else { HpResize::default() };
+    let media_only = media.is_some();
     let desktop: SharedDesktop = Arc::new(std::sync::Mutex::new(DesktopState {
         size,
         scale: UNSCALED,
@@ -2396,6 +2409,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         hp,
         laid_out: false,
         media_live: false,
+        media_only,
+        covered: media_only,
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
@@ -2436,8 +2451,13 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         passthrough,
     };
 
-    // A resizing High Performance session opens covered — see [`HpResize::opening`].
-    if desktop.lock().unwrap().hp.shown {
+    // A High Performance session opens covered — see [`HpResize::opening`] and
+    // [`DesktopState::covered`].
+    let covered = {
+        let d = desktop.lock().unwrap();
+        d.hp.shown || d.covered
+    };
+    if covered {
         sink.msg(ServerMsg::Resizing { active: true }).await?;
     }
 
@@ -2699,8 +2719,12 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     {
                         break Err(e);
                     }
-                    // A resize in progress stays covered for the new browser too.
-                    let resizing = desktop.lock().unwrap().hp.shown;
+                    // A resize in progress, or a stream still to deliver, stays
+                    // covered for the new browser too.
+                    let resizing = {
+                        let d = desktop.lock().unwrap();
+                        d.hp.shown || d.covered
+                    };
                     if resizing
                         && let Err(e) = sink.msg(ServerMsg::Resizing { active: true }).await
                     {
@@ -2994,7 +3018,16 @@ async fn hp_resize_step(
             // The display has settled, which is what the media stream waits for:
             // offered mid-change, it is torn down by the change anyway.
             Some(HpStep::Hide) => {
-                sink.msg(ServerMsg::Resizing { active: false }).await?;
+                // A display with a media stream stays covered past its settling,
+                // until the stream's first picture — see [`DesktopState::covered`].
+                let covered = {
+                    let mut d = desktop.lock().unwrap();
+                    d.covered |= d.media_only;
+                    d.covered
+                };
+                if !covered {
+                    sink.msg(ServerMsg::Resizing { active: false }).await?;
+                }
                 offer_media(uplink, desktop, media).await?;
             }
             // A full request answers at once even on a still desktop, so the
@@ -3052,8 +3085,8 @@ async fn offer_media(
 /// Show a picture the media stream decoded: the whole display, through the shadow
 /// like any rectangle, so only what changed reaches the browser. A picture of
 /// another size is the old display's last or the new one's before its layout, and
-/// is dropped. The first one of a display takes the picture over from ZRLE —
-/// see [`DesktopState::media_live`].
+/// is dropped. The first one of a display is the browser's first picture of it,
+/// and uncovers it — see [`DesktopState::media_live`] and [`uncover`].
 async fn show_picture(
     shared: &Shared,
     picture: &vnc_apple_media::Picture,
@@ -3072,7 +3105,19 @@ async fn show_picture(
         // change on screen — and it reads nothing from this side while it writes.
         send(&shared.uplink, &vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST)).await?;
     }
-    blit_picture(&shared.shadow, picture, sink).await
+    blit_picture(&shared.shadow, picture, sink).await?;
+    uncover(shared, sink).await
+}
+
+/// Bring the browser's resize notice down on the stream's first picture of a
+/// display — see [`DesktopState::covered`]. Called after every picture shown or
+/// unit sent, since the first one received may be dropped waiting for a keyframe,
+/// and after it, so the notice never lifts on an empty canvas.
+async fn uncover(shared: &Shared, sink: &VideoSink) -> anyhow::Result<()> {
+    if std::mem::take(&mut shared.desktop.lock().unwrap().covered) {
+        sink.msg(ServerMsg::Resizing { active: false }).await?;
+    }
+    Ok(())
 }
 
 /// A whole-display picture into the stream, as much of it as the browser lacks.
@@ -3099,10 +3144,10 @@ async fn blit_picture(
 
 /// Pass a unit of the Mac's HEVC to the browser, as [`show_picture`] shows a
 /// decoded picture: one of another size, or one that comes while a resize holds
-/// the display, is dropped, and the first one of a display takes the picture over
-/// from ZRLE, whose rectangles went out as video encoded here. A dropped unit is one
-/// the next ones predict from, so the browser starts over at a keyframe, which the
-/// Mac is asked for as soon as a unit is held back waiting for one.
+/// the display, is dropped, and the first one of a display is the browser's first
+/// picture of it, and uncovers it. A dropped unit is one the next ones predict
+/// from, so the browser starts over at a keyframe, which the Mac is asked for as
+/// soon as a unit is held back waiting for one.
 async fn pass_unit(shared: &Shared, unit: PassedUnit, sink: &VideoSink, media: &SharedMedia) -> anyhow::Result<()> {
     let first = {
         let mut d = shared.desktop.lock().unwrap();
@@ -3114,17 +3159,14 @@ async fn pass_unit(shared: &Shared, unit: PassedUnit, sink: &VideoSink, media: &
     };
     if first {
         info!("vnc: the picture is now the Mac's HEVC media stream, passed to the browser");
-        // A passed unit never reaches the shadow, so it goes on holding the screen
-        // from before the stream. Forgotten, the ZRLE after the stream is all new
-        // and switches the browser back to video encoded here, even where the
-        // screen has returned to exactly those pixels.
-        shared.shadow.lock().unwrap().forget();
         // As in `show_picture`: the Mac would otherwise go on pushing ZRLE.
         send(&shared.uplink, &vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST)).await?;
     }
     let (w, h) = unit.size;
     let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe };
-    if !sink.pass_hevc(w, h, unit.data, passed).await? {
+    if sink.pass_hevc(w, h, unit.data, passed).await? {
+        uncover(shared, sink).await?;
+    } else {
         media.lock().unwrap().want_keyframe();
     }
     Ok(())
@@ -4549,16 +4591,17 @@ async fn read_rect<R: AsyncRead + Unpin>(
         // The Mac's replies to a media-stream offer ([`vnc_apple_media`]): a `u16`
         // saying how much follows, then the reply. A refusal ends the session, as it
         // ends Apple's viewer's. A stream the Mac took down with a display change of
-        // its own hands the picture to ZRLE until the next offer, and ZRLE has sent
-        // nothing while the stream ran, so the whole desktop is asked for.
+        // its own leaves the browser covered until the next offer delivers; the
+        // change's layout is what covers it ([`DesktopState::covered`]).
         vnc_apple_media::ENCODING_MEDIA_STREAM if shared.media.is_some() => {
             let len = reader.read_u16().await?;
             let mut body = vec![0u8; usize::from(len)];
             reader.read_exact(&mut body).await?;
             let media = shared.media.as_ref().expect("guarded");
-            let down = media.lock().unwrap().on_reply(&body)?;
-            let was_live = down && std::mem::take(&mut desktop.lock().unwrap().media_live);
-            return Ok(if was_live { RectEffect::FULL_REPAINT } else { RectEffect::NOTHING });
+            if media.lock().unwrap().on_reply(&body)? {
+                desktop.lock().unwrap().media_live = false;
+            }
+            return Ok(RectEffect::NOTHING);
         }
         // A frame of wlshare's VP9, which is the whole desktop: passed to the browser
         // untouched, or dropped while the desktop is past the ceiling, until the list
@@ -4612,19 +4655,24 @@ async fn read_rect<R: AsyncRead + Unpin>(
     let Some(rect) = Rect::from_size(x, y, w, h) else {
         return Ok(RectEffect::NOTHING);
     };
+    // On a session with a media stream, ZRLE is decoded only to keep its deflate
+    // stream in step: the Mac still answers the one-pixel polls, pushes a whole
+    // screen on its own at a login, and sends the display between streams. None
+    // of it is shown ([`DesktopState::media_only`]), so a CopyRect with no known
+    // source is nothing to repaint for either.
+    let unshown = {
+        let d = desktop.lock().unwrap();
+        d.media_live || d.media_only
+    };
     let rgb = match decoded {
+        Decoded::Pixels(_) if unshown => return Ok(RectEffect::pixels(rect)),
         Decoded::Pixels(rgb) => rgb,
+        Decoded::Unavailable if unshown => return Ok(RectEffect::pixels(rect)),
         // A CopyRect whose source this side never learned. Guessing would leave
         // wrong pixels on screen until something else happened to change that area;
         // one full request makes the source known instead.
         Decoded::Unavailable => return Ok(RectEffect::FULL_REPAINT),
     };
-    // While the media stream carries the picture, ZRLE is decoded only to keep its
-    // deflate stream in step: the Mac still answers the one-pixel polls, and pushes
-    // a whole screen on its own at a login.
-    if desktop.lock().unwrap().media_live {
-        return Ok(RectEffect::pixels(rect));
-    }
 
     // What of this rect the browser does not already have. A server that
     // re-sends unchanged pixels — and they do, on a cursor crossing a window
@@ -5212,19 +5260,26 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     sink.hold_screens(!virtual_display && layout.too_many_screens());
     let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
     if virtual_display {
-        let mut d = desktop.lock().unwrap();
-        d.hp.layout(resized, tokio::time::Instant::now());
-        d.laid_out = true;
-        // A new display stopped the media stream, whoever asked for it: the
-        // picture is ZRLE's until the stream is offered for it and delivers.
-        if resized {
-            d.media_live = false;
-            if let Some(media) = &shared.media {
-                media.lock().unwrap().stopped();
+        let cover = {
+            let mut d = desktop.lock().unwrap();
+            d.hp.layout(resized, tokio::time::Instant::now());
+            d.laid_out = true;
+            // A new display stopped the media stream, whoever asked for it: the
+            // browser stays covered until the stream is offered for it and
+            // delivers. A change the window asked for covered it at
+            // [`HpStep::Show`]; one the Mac made on its own is covered here.
+            resized && {
+                d.media_live = false;
+                if let Some(media) = &shared.media {
+                    media.lock().unwrap().stopped();
+                }
+                d.media_only && !d.hp.shown && !std::mem::replace(&mut d.covered, true)
             }
-        }
-        drop(d);
+        };
         hp_wake.notify_one();
+        if cover {
+            sink.msg(ServerMsg::Resizing { active: true }).await?;
+        }
     }
 
     // The Mac says which screen it is sending, so nothing here has to be inferred
@@ -7923,6 +7978,8 @@ mod tests {
             hp: HpResize::default(),
             laid_out: false,
             media_live: false,
+            media_only: false,
+            covered: false,
         }))
     }
 
@@ -9550,29 +9607,29 @@ mod tests {
         assert_eq!(held, Some(first), "five encodings of one picture, one picture");
     }
 
-    /// A passed HEVC stream never reaches the shadow, so the screen from before it
-    /// must not suppress the ZRLE after it: a Mac back on exactly those pixels still
-    /// has to take the picture back from the stream, or the browser keeps showing
-    /// the stream's last unit.
+    /// The picture of a session with a media stream is the stream alone: the
+    /// screen the Mac sends as ZRLE between streams is decoded and dropped, so a
+    /// passed stream is never displaced by video encoded here, and a session that
+    /// passes builds no encoder.
     #[tokio::test]
-    async fn the_screen_after_a_passed_stream_takes_the_picture_back_unchanged() {
+    async fn the_screen_between_streams_is_not_encoded() {
         let bgrx = [0x30, 0x20, 0x10, 0].repeat(4);
-        let rgb = [0x10, 0x20, 0x30].repeat(4);
         let (uplink, _sent) = test_uplink();
-        let (sink, _rx) = sized_sink((2, 2)).await;
+        let (sink, mut rx) = sized_sink((2, 2)).await;
         let shadow = test_shadow((2, 2));
         let desktop = shared_desktop((2, 2), None, None);
+        desktop.lock().unwrap().media_only = true;
         let shared = test_shared(uplink, Arc::clone(&desktop), Arc::clone(&shadow));
-        // What the browser was sent before the stream.
-        shadow.lock().unwrap().accept(Rect::from_size(0, 0, 2, 2).unwrap(), &rgb);
 
         let addr = "127.0.0.1:5900".parse().unwrap();
         let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true).0));
         let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, data: vec![0; 16] };
         pass_unit(&shared, unit, &sink, &media).await.unwrap();
         assert!(sink.passing());
+        sink.flush().await;
+        assert_eq!(units(&mut rx).len(), 1, "the passed unit");
 
-        // The stream stops, and the Mac repaints the screen it had before it.
+        // The stream stops, and the Mac sends the screen as ZRLE.
         desktop.lock().unwrap().media_live = false;
         let mut raw = geometry(0, 0, 2, 2, ENCODING_RAW);
         raw.extend_from_slice(&bgrx);
@@ -9586,7 +9643,44 @@ mod tests {
         .await
         .unwrap_err();
         assert!(format!("{err:#}").contains("closed the connection"), "{err:#}");
-        assert!(!sink.passing(), "the Mac's rectangles carry the picture again");
+        assert!(sink.passing(), "the Mac's rectangles do not take the picture");
+        sink.flush().await;
+        assert!(units(&mut rx).is_empty(), "nothing is encoded of them");
+        assert!(shadow.lock().unwrap().copy_out(Rect::from_size(0, 0, 2, 2).unwrap()).is_none(), "nor recorded as sent");
+    }
+
+    /// The browser's resize notice comes down on the stream's first picture of a
+    /// display, after that picture, not when the display settles.
+    #[tokio::test]
+    async fn the_first_passed_unit_of_a_display_uncovers_the_browser() {
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = sized_sink((2, 2)).await;
+        let desktop = shared_desktop((2, 2), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.media_only = true;
+            d.covered = true;
+        }
+        let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
+        let addr = "127.0.0.1:5900".parse().unwrap();
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true).0));
+
+        // Not a keyframe: dropped for one, and the notice stays up.
+        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: false, data: vec![0; 16] };
+        pass_unit(&shared, unit, &sink, &media).await.unwrap();
+        sink.flush().await;
+        let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(!out.iter().any(|m| matches!(m, ServerMsg::Resizing { .. })), "{out:?}");
+        assert!(desktop.lock().unwrap().covered);
+
+        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, data: vec![0; 16] };
+        pass_unit(&shared, unit, &sink, &media).await.unwrap();
+        sink.flush().await;
+        let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        let video = out.iter().position(|m| matches!(m, ServerMsg::Video(_))).expect("the unit");
+        let uncovered = out.iter().position(|m| matches!(m, ServerMsg::Resizing { active: false })).expect("uncovered");
+        assert!(uncovered > video, "the notice lifts behind the picture: {out:?}");
+        assert!(!desktop.lock().unwrap().covered);
     }
 
     /// CopyRect saves the VNC link its pixels: the source is read back out of the

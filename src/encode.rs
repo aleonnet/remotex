@@ -606,9 +606,10 @@ impl VideoSink {
     /// nothing until an IDR, and `false` says this unit was dropped for one: only the
     /// Mac can send it, and a screen that stays still would never bring one unasked.
     ///
-    /// Its gaps — before it flows and across a display change — are the Mac's
-    /// rectangles, encoded here as VP9 ([`Self::damage`]); the stream coming back
-    /// after one starts over at an IDR, announced for the decoder VP9 displaced.
+    /// Its gaps — before it flows and across a display change — show nothing new:
+    /// the Mac's rectangles are never encoded on a session with a media stream, so
+    /// one that passes the stream builds no encoder at all. The stream coming back
+    /// after a gap starts over at an IDR, announced again.
     pub async fn pass_hevc(
         &self,
         w: u16,
