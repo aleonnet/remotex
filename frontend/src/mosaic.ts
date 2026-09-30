@@ -6,7 +6,8 @@
 // two, so the gateway sends a `mosaic` naming each screen's pixels and its
 // points, and the page draws every region at its points at this browser
 // display's own density — what Apple's viewer does with the same view. It is
-// the one place remote pixels are rescaled in the browser (AGENTS.md).
+// the one place remote pixels are rescaled in the browser (docs/architecture.md,
+// Input and display).
 //
 // The composed canvas is then presented like any framebuffer: `w`/`h` in
 // pixels at `scale` of them per point. Everything downstream — the CSS box,

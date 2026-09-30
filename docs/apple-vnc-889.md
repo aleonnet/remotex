@@ -460,7 +460,8 @@ framebuffer, not over the one on screen). The browser then:
   before each press and wheel and dropping them in gaps (a button release still
   goes, so a drag cannot leave a button held).
 
-This is the one place the browser rescales remote pixels (see AGENTS.md).
+This is the one place the browser rescales remote pixels (see
+[Input and display](architecture.md#input-and-display)).
 
 At factor 1.0 the combined framebuffer is the screens' native pixels side by side,
 and it is often past what a video stream encodes: a 2x screen beside a 1x one
