@@ -61,6 +61,9 @@ export type EgfxFactory = () => EgfxCompositor;
 
 let loaded: Promise<EgfxFactory> | null = null;
 
+/** The pool's workers, held for as long as the pool is: the page's lifetime. */
+const workers: Worker[] = [];
+
 /**
  * Start the pool: `threads` workers, each told what this instance is and heard
  * from once its own is made, and then the pool made of them. The pool is made last
@@ -71,7 +74,6 @@ async function startThreads(
   memory: WebAssembly.Memory,
   threads: number,
 ): Promise<void> {
-  const workers: Worker[] = [];
   const seat: PoolSeat = { module: compiled(), memory };
   try {
     await Promise.all(
@@ -101,7 +103,7 @@ async function startThreads(
       ),
     );
   } catch (error) {
-    for (const worker of workers) {
+    for (const worker of workers.splice(0)) {
       worker.terminate();
     }
     throw error;
