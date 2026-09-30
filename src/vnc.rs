@@ -636,11 +636,11 @@ struct DesktopState {
     /// change — so a session that passes the stream encodes no video at all.
     media_only: bool,
     /// The browser is behind its resize notice waiting for the stream's first
-    /// picture of the display. Raised at connect and by every display change of a
-    /// `media_only` session, and dropped by that picture ([`uncover`]) rather than
-    /// when the display settles, as Apple's viewer keeps its curtain up until its
-    /// stream is hooked up. Read with [`HpResize::shown`] wherever that decides
-    /// whether a browser is covered.
+    /// picture of the display. Raised at connect, by every display change and by a
+    /// stream restart of a `media_only` session, and dropped when that picture is on
+    /// its way ([`uncover`]) rather than when the display settles, as Apple's viewer
+    /// keeps its curtain up until its stream is hooked up. Read with
+    /// [`HpResize::shown`] wherever that decides whether a browser is covered.
     covered: bool,
 }
 
@@ -3105,22 +3105,22 @@ async fn show_picture(
         // change on screen — and it reads nothing from this side while it writes.
         send(&shared.uplink, &vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST)).await?;
     }
-    blit_picture(&shared.shadow, picture, sink).await?;
-    uncover(shared, sink).await
+    uncover(shared, sink);
+    blit_picture(&shared.shadow, picture, sink).await
 }
 
 /// Bring the browser's resize notice down on the stream's first picture of a
-/// display — see [`DesktopState::covered`]. Called after every picture shown or
-/// unit sent, since the first one received may be dropped waiting for a keyframe,
-/// and after it, so the notice never lifts on an empty canvas.
-async fn uncover(shared: &Shared, sink: &VideoSink) -> anyhow::Result<()> {
-    if shared.desktop.lock().unwrap().covered {
-        sink.msg(ServerMsg::Resizing { active: false }).await?;
-        // Cleared only once the browser has been told: a send that failed leaves it
-        // covered for whoever attaches next.
-        shared.desktop.lock().unwrap().covered = false;
+/// display — see [`DesktopState::covered`]. The sink sends it behind the unit that
+/// picture becomes ([`VideoSink::uncover`]), which is why this is called ahead of
+/// every picture shown or unit passed: the first may be deferred or dropped, and
+/// the notice then follows the first that goes. Not while a resize is in progress,
+/// whose own cover the display's next picture ends.
+fn uncover(shared: &Shared, sink: &VideoSink) {
+    let mut d = shared.desktop.lock().unwrap();
+    if d.covered && !d.hp.shown {
+        d.covered = false;
+        sink.uncover();
     }
-    Ok(())
 }
 
 /// A whole-display picture into the stream, as much of it as the browser lacks.
@@ -3167,9 +3167,8 @@ async fn pass_unit(shared: &Shared, unit: PassedUnit, sink: &VideoSink, media: &
     }
     let (w, h) = unit.size;
     let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe };
-    if sink.pass_hevc(w, h, unit.data, passed).await? {
-        uncover(shared, sink).await?;
-    } else {
+    uncover(shared, sink);
+    if !sink.pass_hevc(w, h, unit.data, passed).await? {
         media.lock().unwrap().want_keyframe();
     }
     Ok(())
@@ -4593,16 +4592,25 @@ async fn read_rect<R: AsyncRead + Unpin>(
         }
         // The Mac's replies to a media-stream offer ([`vnc_apple_media`]): a `u16`
         // saying how much follows, then the reply. A refusal ends the session, as it
-        // ends Apple's viewer's. A stream the Mac took down with a display change of
-        // its own leaves the browser covered until the next offer delivers; the
-        // change's layout is what covers it ([`DesktopState::covered`]).
+        // ends Apple's viewer's. A stream the Mac took down on its own leaves the
+        // browser covered until the next offer delivers ([`DesktopState::covered`]):
+        // covered here, unless a resize already covers it, since the display change
+        // behind it may keep the size and bring no layout that resizes.
         vnc_apple_media::ENCODING_MEDIA_STREAM if shared.media.is_some() => {
             let len = reader.read_u16().await?;
             let mut body = vec![0u8; usize::from(len)];
             reader.read_exact(&mut body).await?;
             let media = shared.media.as_ref().expect("guarded");
-            if media.lock().unwrap().on_reply(&body)? {
-                desktop.lock().unwrap().media_live = false;
+            let cover = media.lock().unwrap().on_reply(&body)? && {
+                let mut d = desktop.lock().unwrap();
+                d.media_live = false;
+                d.media_only && !d.hp.shown && !std::mem::replace(&mut d.covered, true)
+            };
+            if cover {
+                // The screen may come back as it was, and a picture the shadow
+                // already holds queues nothing for the notice to follow.
+                shadow.lock().unwrap().forget();
+                sink.msg(ServerMsg::Resizing { active: true }).await?;
             }
             return Ok(RectEffect::NOTHING);
         }
@@ -9674,7 +9682,6 @@ mod tests {
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(!out.iter().any(|m| matches!(m, ServerMsg::Resizing { .. })), "{out:?}");
-        assert!(desktop.lock().unwrap().covered);
 
         let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, data: vec![0; 16] };
         pass_unit(&shared, unit, &sink, &media).await.unwrap();
@@ -9684,6 +9691,31 @@ mod tests {
         let uncovered = out.iter().position(|m| matches!(m, ServerMsg::Resizing { active: false })).expect("uncovered");
         assert!(uncovered > video, "the notice lifts behind the picture: {out:?}");
         assert!(!desktop.lock().unwrap().covered);
+    }
+
+    /// A resize begun while the stream's first picture is still owed keeps its own
+    /// cover: the old display's picture does not lift it.
+    #[tokio::test]
+    async fn a_picture_of_the_old_display_does_not_lift_a_resize_cover() {
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = sized_sink((2, 2)).await;
+        let desktop = shared_desktop((2, 2), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.media_only = true;
+            d.covered = true;
+            d.hp.shown = true;
+        }
+        let shared = test_shared(uplink, Arc::clone(&desktop), test_shadow((2, 2)));
+        let addr = "127.0.0.1:5900".parse().unwrap();
+        let media = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, true).0));
+        let unit = PassedUnit { size: (2, 2), decode: "hev1.4.10.L150.BE.8".into(), keyframe: true, data: vec![0; 16] };
+        pass_unit(&shared, unit, &sink, &media).await.unwrap();
+        sink.flush().await;
+        let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(out.iter().any(|m| matches!(m, ServerMsg::Video(_))), "{out:?}");
+        assert!(!out.iter().any(|m| matches!(m, ServerMsg::Resizing { .. })), "{out:?}");
+        assert!(desktop.lock().unwrap().covered, "still owed to the display the resize brings");
     }
 
     /// CopyRect saves the VNC link its pixels: the source is read back out of the

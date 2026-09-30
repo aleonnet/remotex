@@ -672,20 +672,18 @@ Three controls with similar names therefore remain separate:
   A link that cannot carry the stream fills the receiver's queue of 15 units, half
   a second of the display's refresh; a full queue drops to the next keyframe, as
   the decoder's queue does.
-- **The gaps are VP9 encoded here.** ZRLE carries the picture until the stream is
-  up and across every display change, and in a passed session its rectangles are
-  encoded as they are in a decoded one: through the shadow into the mirror, and
-  out as VP9 at the target's dial. The two take turns as the picture, and the
-  browser's decoder is replaced at each turn, by the `VideoFormat` that opens it:
-  a rectangle while the stream passes starts VP9 over at a keyframe
-  (`VideoSink::damage`), and the stream coming back starts at an IDR. While the
-  stream passes, nothing is encoded here — a repaint is the Mac's IDR, not a VP9
-  keyframe — and ZRLE is decoded only to keep its deflate stream in step. A display
-  change asks the Mac for the whole desktop, as it does in a decoded session, since
-  the mirror has seen nothing of what the stream showed. The gap costs a VP9
-  keyframe and its deltas.
+- **The gaps show nothing.** ZRLE never carries the picture of a session with a
+  media stream, passed or decoded: its rectangles are decoded only to keep the
+  deflate stream in step and reach neither the shadow nor the encoder, so a passed
+  session builds no encoder at all, and nothing is encoded here — a repaint is the
+  Mac's IDR, not a VP9 keyframe. Before the stream is up, across every display
+  change and across a stream the Mac restarts on its own, the browser stays behind
+  its resize notice, which the gateway sends down behind the stream's first unit of
+  the display (`VideoSink::uncover`), never ahead of it, and not while a resize in
+  progress has covered the browser for the display it brings. The stream coming
+  back starts at an IDR, announced again by its `VideoFormat`.
 - **The dial does not reach it.** `video_quality`, `render_chroma` and the adaptive
-  walk govern only VP9: the gaps, and the whole picture of a browser that says no.
+  walk govern only VP9: the whole picture of a browser that says no.
   `render_adaptive` neither enables nor disables the Mac's separate, always-on
   High Performance controller, and the Opus keys reach no passed sound.
 - **The sound passes on `/ws/audio`.** The receiver hands each authenticated,

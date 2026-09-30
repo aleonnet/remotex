@@ -211,6 +211,9 @@ struct Shared {
     pass_restart: AtomicBool,
     /// The configuration string last announced for the passed stream.
     pass_announced: Mutex<Option<String>>,
+    /// The browser's resize notice is to come down behind the next unit queued —
+    /// see [`VideoSink::uncover`].
+    uncover_owed: AtomicBool,
     /// Set by [`VideoSink::reset_render`], consumed by [`VideoSink::frame`]. An atomic
     /// rather than a field on [`Video`] so that resetting stays synchronous: its call
     /// sites are already awaiting other things, and none of them should have to wait
@@ -274,6 +277,7 @@ impl Shared {
             passing: AtomicBool::new(false),
             pass_restart: AtomicBool::new(true),
             pass_announced: Mutex::default(),
+            uncover_owed: AtomicBool::new(false),
             keyframe_owed: AtomicBool::new(false),
             feedback,
             units: AtomicU64::new(0),
@@ -463,6 +467,7 @@ impl VideoSink {
         let round_bytes = usize::try_from(self.shared.round_bytes.load(Ordering::Relaxed)).unwrap_or(usize::MAX);
         let held = self.hold(round_bytes).await;
         let pushed = self.push(Pending::Round(handle, held)).await;
+        let pushed = if pushed.is_ok() { self.uncover_behind().await } else { pushed };
         // How long that took is the congestion signal, and it is read whether or not
         // the push succeeded: a push that failed waited just as long, and the verdict
         // is about the link rather than about this round. Waiting on the budget and
@@ -658,7 +663,27 @@ impl VideoSink {
         }
         let unit = VideoUnit { w, h, keyframe: passed.keyframe, data: frame, held };
         self.push(Pending::Msg(ServerMsg::Video(unit))).await?;
+        self.uncover_behind().await?;
         Ok(true)
+    }
+
+    /// Bring the browser's resize notice down behind the next unit queued, encoded
+    /// here or passed: a `Resizing { active: false }` follows that unit on the
+    /// channel, so the notice never lifts on an empty canvas. For an engine whose
+    /// picture is a stream that has just delivered its first picture of a display
+    /// ([`crate::vnc::DesktopState::covered`]): the engine cannot tell when that
+    /// picture is queued, since [`Self::frame`] defers it while a round is out or
+    /// the interval has not passed, and a passed unit may be dropped for a keyframe.
+    pub fn uncover(&self) {
+        self.shared.uncover_owed.store(true, Ordering::Relaxed);
+    }
+
+    /// The notice [`Self::uncover`] owes, once a unit has been queued.
+    async fn uncover_behind(&self) -> anyhow::Result<()> {
+        if self.shared.uncover_owed.swap(false, Ordering::Relaxed) {
+            self.push(Pending::Msg(ServerMsg::Resizing { active: false })).await?;
+        }
+        Ok(())
     }
 
     /// An RDP host's graphics pipeline starts here, from nothing, and is the picture
@@ -1271,6 +1296,48 @@ mod tests {
     /// A passed High Performance stream and the Mac's rectangles around it take turns
     /// as the picture, each starting at a keyframe behind its announcement: the gap
     /// is VP9 encoded here, the stream is the Mac's HEVC, and nothing is encoded here
+    /// The resize notice comes down behind the next unit queued, not when the engine
+    /// asks: a clean mirror queues nothing, and the notice waits with it.
+    #[tokio::test(start_paused = true)]
+    async fn the_notice_comes_down_behind_the_next_unit() {
+        let (sink, mut frame_rx) = video_sink(64, 48).await;
+        let rect = Rect::from_size(0, 0, 64, 48).unwrap();
+
+        sink.uncover();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        assert!(frame_rx.try_recv().is_err(), "nothing to queue, nothing to follow");
+
+        sink.damage(rect, &[7; 64 * 48 * 3]).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 3).await;
+        assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe), "{:?}", out[1]);
+        assert!(matches!(&out[2], ServerMsg::Resizing { active: false }), "{:?}", out[2]);
+
+        // Owed once: the next unit brings no second notice.
+        tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
+        sink.damage(rect, &[8; 64 * 48 * 3]).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 1).await;
+        assert!(matches!(&out[0], ServerMsg::Video(_)), "{:?}", out[0]);
+        assert!(frame_rx.try_recv().is_err());
+
+        // A passed unit dropped for a keyframe brings it no sooner than the one sent.
+        sink.uncover();
+        let hevc = |keyframe| crate::stream::Passed { decode: "hev1.4.10.L150.BE.8".to_owned(), keyframe };
+        sink.reset_render();
+        assert!(!sink.pass_hevc(64, 48, vec![1; 30], hevc(false)).await.unwrap());
+        sink.flush().await;
+        assert!(frame_rx.try_recv().is_err(), "dropped, so nothing follows");
+        assert!(sink.pass_hevc(64, 48, vec![2; 900], hevc(true)).await.unwrap());
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 3).await;
+        assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe), "{:?}", out[1]);
+        assert!(matches!(&out[2], ServerMsg::Resizing { active: false }), "{:?}", out[2]);
+    }
+
     /// while the stream passes. A unit dropped for a keyframe says so, for the engine
     /// to ask the Mac.
     #[tokio::test]
