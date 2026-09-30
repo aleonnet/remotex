@@ -1,8 +1,7 @@
 # The gateway. `serve` is the deployable browser gateway; `tui` is the
 # feature-gated local multi-instance control plane; `serve-embedded` is its
 # hidden per-instance worker. Every shape serves the same SPA and uses the same
-# protocol implementation. The desktop window that shows that SPA,
-# remotex-viewer, is a repository of its own (docs/viewer.md).
+# protocol implementation.
 #
 # Note for anyone editing this file: frontend/vite.config.ts regexes the *first*
 # line matching `^version = "…"` out of this manifest to stamp the login screen,
