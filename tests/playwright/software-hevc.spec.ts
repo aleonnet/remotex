@@ -158,6 +158,9 @@ test.describe("a High Performance target under ?hevc_decoder=software", () => {
       .toBe(true);
     await expect(page.getByRole("alert")).toHaveCount(0);
     expect(seen.refreshes, "repaints the page asked for").toEqual([]);
+    // Its pictures are drawn on the canvas over the desktop's, which the page
+    // shows from the first one (hevcPicture.ts).
+    await expect(page.locator("canvas.graphics")).toBeVisible();
 
     // Asked for with a HEAD before choosing it, then loaded by the decode worker.
     expect(seen.decoderFiles).toContain("HEAD /hevc/hevc.wasm 200");

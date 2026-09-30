@@ -32,6 +32,7 @@
 
 import {
   createWasmHevcDecoder,
+  type DecodedPicture,
   isHevc,
   type VideoDecoderLike,
   type VideoDecoderLikeInit,
@@ -72,7 +73,7 @@ export interface DesktopVideo {
     size: { w: number; h: number },
     data: Uint8Array,
     keyframe: boolean,
-  ) => Promise<VideoFrame | null>;
+  ) => Promise<DecodedPicture | null>;
   /**
    * Cut the chain: drop the decoder but keep the format, so the next unit builds a
    * fresh one that waits for a keyframe.
@@ -287,14 +288,14 @@ export interface VideoStream {
     data: Uint8Array,
     timestamp: number,
     keyframe: boolean,
-  ) => Promise<VideoFrame | null>;
+  ) => Promise<DecodedPicture | null>;
   /** Drop the decoder. Everything still pending resolves to null. */
   close: () => void;
 }
 
 /** One access unit in flight, and the promise the paint path is holding. */
 interface Pending {
-  resolve: (frame: VideoFrame | null) => void;
+  resolve: (frame: DecodedPicture | null) => void;
 }
 
 /**
@@ -344,12 +345,12 @@ export function createVideoStream(
     }
   };
 
-  const settle = (frame: VideoFrame | null) => {
+  const settle = (frame: DecodedPicture | null) => {
     const next = pending.shift();
     if (next) {
       next.resolve(frame);
     } else {
-      // A frame nobody is waiting for is one that would leak: VideoFrame holds
+      // A frame nobody is waiting for is one that would leak: a picture holds
       // decoder memory until it is closed.
       frame?.close();
     }
@@ -472,7 +473,7 @@ export function createVideoStream(
         return Promise.resolve(null);
       }
       keyNeeded = false;
-      const frame = new Promise<VideoFrame | null>((resolve) => {
+      const frame = new Promise<DecodedPicture | null>((resolve) => {
         pending.push({ resolve });
       });
       rearm();

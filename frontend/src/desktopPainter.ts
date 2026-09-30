@@ -83,8 +83,9 @@ let current: {
 
 /**
  * The painter for the page's one desktop canvas, built on first ask. `graphics`
- * is the canvas laid over it for an RDP host's graphics pipeline: the worker
- * draws a pipeline's picture there, and says when it is to be shown.
+ * is the canvas laid over it for what is drawn on the GPU, an RDP host's graphics
+ * pipeline and the software HEVC decoder's pictures: the worker draws them there,
+ * and says when it is to be shown.
  */
 export function desktopPainterFor(
   canvas: HTMLCanvasElement,
@@ -110,7 +111,7 @@ export function desktopPainterFor(
   // what prevents an old completion from acknowledging a new attachment.
   let handlers: PainterHandlers | null = null;
   // How many `clear`s have been posted, which is the worker's epoch once it has
-  // taken them all. The pipeline's canvas is hidden where a clear is posted, not
+  // taken them all. The GPU's canvas is hidden where a clear is posted, not
   // where the worker answers it, and a `graphicsShown` the worker said before it
   // took that clear is for the attachment the clear ended.
   let clears = 0;

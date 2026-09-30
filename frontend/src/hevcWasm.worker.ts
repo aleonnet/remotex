@@ -3,12 +3,17 @@
 // runs one decoder per stream the paint worker opens, and answers every unit with
 // one picture or none.
 //
-// A picture leaves as a `VideoFrame` built straight over the decoder's planes in
-// linear memory — the constructor's copy is the only one — and is transferred to
-// the paint worker, which draws it as it draws the browser's own.
+// A picture leaves as where its planes are in the module's memory, which is
+// shared, and the paint worker uploads them to the GPU from there
+// (hevcPicture.ts). The decoder holds a picture until its next unit is put in, so
+// that unit waits here until the paint worker has released the picture.
 
 import { hevcDecoderUrl } from "./gateway.ts";
-import type { HevcCommand, HevcEvent } from "./hevcWasmDecoder.ts";
+import type {
+  DecodedPlanes,
+  HevcCommand,
+  HevcEvent,
+} from "./hevcWasmDecoder.ts";
 
 /** The module hevc-wasm's src/decoder.c builds, as its glue exposes it. */
 interface HevcModule {
@@ -17,7 +22,8 @@ interface HevcModule {
   _hevc_decode(decoder: number, keyframe: number): number;
   _hevc_picture(decoder: number): number;
   _hevc_destroy(decoder: number): void;
-  wasmMemory: WebAssembly.Memory;
+  /** Shared, as a module with threads has it. */
+  wasmMemory: { readonly buffer: SharedArrayBuffer };
 }
 
 type CreateModule = (options: {
@@ -26,7 +32,7 @@ type CreateModule = (options: {
 }) => Promise<HevcModule>;
 
 const scope = self as unknown as {
-  postMessage(message: HevcEvent, transfer?: Transferable[]): void;
+  postMessage(message: HevcEvent): void;
   onmessage: ((ev: MessageEvent<HevcCommand>) => void) | null;
 };
 
@@ -51,96 +57,71 @@ function load(): Promise<HevcModule> {
   return loading;
 }
 
-// FFmpeg's enums (libavutil/pixfmt.h) as WebCodecs names them; anything else is
-// left unstated, as a decoder states nothing the stream does not. Strings, since
-// TypeScript's DOM library lists fewer than browsers take — the Mac's Display P3
-// primaries, `smpte432`, among them.
-const MATRIX: Record<number, string> = {
-  0: "rgb",
+// FFmpeg's enums (libavutil/pixfmt.h) for what the page's shader presents
+// (hevcPicture.ts): Y'CbCr made with BT.709's coefficients or BT.601's, in sRGB's
+// primaries or Display P3's, the Mac's, and a transfer a display takes as it is.
+// A stream that states nothing is taken as WebCodecs takes one: BT.709.
+const UNSPECIFIED = 2;
+const MATRIX: Record<number, DecodedPlanes["matrix"]> = {
   1: "bt709",
-  5: "bt470bg",
+  [UNSPECIFIED]: "bt709",
+  5: "smpte170m",
   6: "smpte170m",
-  9: "bt2020-ncl",
 };
-const PRIMARIES: Record<number, string> = {
-  1: "bt709",
-  5: "bt470bg",
-  6: "smpte170m",
-  9: "bt2020",
-  12: "smpte432",
+const PRIMARIES: Record<number, PredefinedColorSpace> = {
+  1: "srgb",
+  [UNSPECIFIED]: "srgb",
+  12: "display-p3",
 };
-const TRANSFER: Record<number, string> = {
-  1: "bt709",
-  6: "smpte170m",
-  8: "linear",
-  13: "iec61966-2-1",
-  16: "pq",
-  18: "hlg",
-};
-const FORMATS: VideoPixelFormat[] = ["I420", "I422", "I444"];
+// BT.709's, BT.601's and sRGB's.
+const TRANSFERS = [1, UNSPECIFIED, 6, 13];
+const FULL_RANGE = 2;
 
-// Whether a `VideoFrame` may be built over shared memory. The specification takes
-// any buffer; a browser that refuses a shared one is given a copy, found once.
-let sharedViews = true;
-
-/** The picture `_hevc_decode` just returned, as a `VideoFrame`. */
-function picture(
-  module: HevcModule,
-  decoder: number,
-  timestamp: number,
-): VideoFrame | string {
+/** The picture `_hevc_decode` just returned, as its planes. */
+function picture(module: HevcModule, decoder: number): DecodedPlanes | string {
   const memory = module.wasmMemory.buffer;
   const p = new Int32Array(memory, module._hevc_picture(decoder), 16);
   const [w, h, layout, range, matrix, primaries, transfer] = p;
-  const format = FORMATS[layout];
-  if (!format) {
-    return "the stream's pictures are not 8-bit Y'CbCr, which a VideoFrame holds";
+  if (layout < 0 || layout > 2) {
+    return "the stream's pictures are not 8-bit Y'CbCr, which the page presents";
   }
+  const made = MATRIX[matrix];
+  const colorSpace = PRIMARIES[primaries];
+  if (!made || !colorSpace || !TRANSFERS.includes(transfer)) {
+    return `the stream's colors are not ones the page presents (matrix ${matrix}, primaries ${primaries}, transfer ${transfer})`;
+  }
+  // 0 is 4:2:0, 1 is 4:2:2, 2 is 4:4:4.
   const chromaW = layout === 2 ? w : (w + 1) >> 1;
   const chromaH = layout === 0 ? (h + 1) >> 1 : h;
-  const planes = [0, 1, 2].map((i) => ({
-    at: p[7 + i],
-    stride: p[10 + i],
-    width: i === 0 ? w : chromaW,
-    rows: i === 0 ? h : chromaH,
-  }));
-  const start = Math.min(...planes.map((plane) => plane.at));
-  const end = Math.max(
-    ...planes.map(
-      (plane) => plane.at + plane.stride * (plane.rows - 1) + plane.width,
-    ),
-  );
-  const init: VideoFrameBufferInit = {
-    format,
-    codedWidth: w,
-    codedHeight: h,
-    timestamp,
-    layout: planes.map((plane) => ({
-      offset: plane.at - start,
-      stride: plane.stride,
+  return {
+    memory,
+    width: w,
+    height: h,
+    planes: [0, 1, 2].map((i) => ({
+      offset: p[7 + i],
+      stride: p[10 + i],
+      width: i === 0 ? w : chromaW,
+      rows: i === 0 ? h : chromaH,
     })),
-    colorSpace: {
-      fullRange: range === 2 ? true : range === 1 ? false : undefined,
-      matrix: MATRIX[matrix],
-      primaries: PRIMARIES[primaries],
-      transfer: TRANSFER[transfer],
-    } as VideoColorSpaceInit,
+    fullRange: range === FULL_RANGE,
+    matrix: made,
+    colorSpace,
   };
-  const bytes = new Uint8Array(memory, start, end - start);
-  if (sharedViews) {
-    try {
-      return new VideoFrame(bytes, init);
-    } catch (e) {
-      if (!(e instanceof TypeError)) {
-        throw e;
-      }
-      sharedViews = false;
-    }
-  }
-  return new VideoFrame(bytes.slice(), init);
 }
 
 const decoders = new Map<number, number>();
+
+// The pictures the paint worker is reading, by stream: what ends each wait.
+const held = new Map<number, () => void>();
+
+function release(id: number) {
+  held.get(id)?.();
+  held.delete(id);
+}
+
+// Streams whose end has been asked for and not yet reached: a unit still queued
+// for one is not decoded, since nothing would release its picture.
+const ending = new Set<number>();
 
 const reason = (e: unknown) => (e instanceof Error ? e.message : String(e));
 
@@ -171,6 +152,7 @@ async function create(id: number): Promise<void> {
 async function destroy(id: number): Promise<void> {
   const decoder = decoders.get(id);
   decoders.delete(id);
+  ending.delete(id);
   if (decoder) {
     (await load())._hevc_destroy(decoder);
   }
@@ -188,6 +170,9 @@ async function decode(
     return;
   }
   const module = await load();
+  if (ending.has(id)) {
+    return;
+  }
   const fail = (name: string, message: string) => {
     decoders.delete(id);
     module._hevc_destroy(decoder);
@@ -208,15 +193,19 @@ async function decode(
     return;
   }
   if (ret === 0) {
-    scope.postMessage({ type: "decoded", id, frame: null });
+    scope.postMessage({ type: "decoded", id, picture: null });
     return;
   }
-  const frame = picture(module, decoder, command.timestamp);
-  if (typeof frame === "string") {
-    fail("NotSupportedError", frame);
+  const planes = picture(module, decoder);
+  if (typeof planes === "string") {
+    fail("NotSupportedError", planes);
     return;
   }
-  scope.postMessage({ type: "decoded", id, frame }, [frame]);
+  // The decoder frees the picture with its next unit, and with its end: neither
+  // is started until the paint worker has read it.
+  const released = new Promise<void>((resolve) => held.set(id, resolve));
+  scope.postMessage({ type: "decoded", id, picture: planes });
+  await released;
 }
 
 function handle(command: HevcCommand): Promise<void> {
@@ -227,6 +216,8 @@ function handle(command: HevcCommand): Promise<void> {
       return destroy(command.id);
     case "decode":
       return decode(command);
+    case "release":
+      return Promise.resolve();
   }
 }
 
@@ -235,6 +226,16 @@ function handle(command: HevcCommand): Promise<void> {
 let queue: Promise<void> = Promise.resolve();
 scope.onmessage = (ev) => {
   const command = ev.data;
+  // Not queued: a release is what the queue is waiting for, and a stream that
+  // ends has closed its picture with it.
+  if (command.type === "release") {
+    release(command.id);
+    return;
+  }
+  if (command.type === "destroy") {
+    ending.add(command.id);
+    release(command.id);
+  }
   queue = queue.then(() =>
     handle(command).catch((e) => {
       // Every decode is answered, a thrown one included.

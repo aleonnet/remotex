@@ -46,10 +46,10 @@ body {
   image-rendering: auto;
 }
 
-/* The canvas a passed graphics pipeline's picture is drawn on, over the
+/* The canvas a picture drawn on the GPU is on (glPicture.ts), over the
    framebuffer's and in its box: the surface shrink-wraps that one, and
    applyCanvasCss gives both the same transform. Shown by the paint worker's word
-   (desktopPainter.ts) while a pipeline has a picture, and not otherwise. */
+   (desktopPainter.ts) while it holds such a picture, and not otherwise. */
 .graphics {
   display: none;
   position: absolute;

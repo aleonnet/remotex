@@ -28,7 +28,8 @@
 // in software — libavcodec's HEVC decoder compiled to WebAssembly, with SIMD128 and
 // slice threads (hevcWasmDecoder.ts) — where the gateway is configured with
 // `[hevc_wasm]`, which serves the decoder, and the browser runs shared-memory SIMD
-// WebAssembly on the cross-origin isolated page every gateway serves. The page asks the
+// WebAssembly on the cross-origin isolated page every gateway serves, and presents
+// its pictures on a WebGL 2 canvas (hevcPicture.ts). The page asks the
 // gateway for the decoder rather than assuming it. Chrome on a GPU without HEVC
 // Range Extensions then says yes, decoding the sound itself and the picture here. `?hevc_decoder=software` in the page's URL takes the
 // software decoder even where the browser's own would do, to try it.
@@ -145,8 +146,24 @@ const SIMD_PROBE = Uint8Array.of(
 );
 
 /**
+ * Whether this browser presents the software decoder's pictures (hevcPicture.ts): on
+ * a WebGL 2 canvas off the page, as the paint worker's is, that can be given the
+ * Mac's primaries. Asked here because a yes that cannot be presented is a session
+ * with no picture, where a no is one sent VP9.
+ */
+function presentsSoftwarePictures(): boolean {
+  const gl = new OffscreenCanvas(1, 1).getContext("webgl2");
+  if (!gl || gl.isContextLost()) {
+    return false;
+  }
+  const takesPrimaries = "drawingBufferColorSpace" in gl;
+  gl.getExtension("WEBGL_lose_context")?.loseContext();
+  return takesPrimaries;
+}
+
+/**
  * Whether the gateway serves the software decoder, this page can run it, and it can
- * build its pictures.
+ * present its pictures.
  */
 async function decodesPictureInSoftware(): Promise<boolean> {
   try {
@@ -166,12 +183,9 @@ async function decodesPictureInSoftware(): Promise<boolean> {
     if (!(memory.buffer instanceof SharedArrayBuffer)) {
       return false;
     }
-    new VideoFrame(new Uint8Array(12), {
-      format: "I444",
-      codedWidth: 2,
-      codedHeight: 2,
-      timestamp: 0,
-    }).close();
+    if (!presentsSoftwarePictures()) {
+      return false;
+    }
     const served = await fetch(hevcDecoderUrl("hevc.wasm"), {
       method: "HEAD",
       signal: AbortSignal.timeout(attemptTimeoutMs),

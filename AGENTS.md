@@ -30,7 +30,9 @@ documentation.
 ## Product boundaries
 
 - There is one client: the browser SPA, whether in a browser or installed as a
-  Chrome or Edge app.
+  Chrome or Edge app. The user may at times start an experimental native client
+  to try out a use case, as the WebView apps were; one stays maintained only
+  while its benefits justify a separate client.
 - There is one frontend build, compiled from Cargo's `OUT_DIR` into the gateway
   binary (`src/assets.rs`) and served from its origin root. A standalone build
   and the release artifact use `frontend/dist`; a Cargo build produces the same
