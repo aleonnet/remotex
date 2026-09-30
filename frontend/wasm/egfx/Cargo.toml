@@ -5,7 +5,9 @@
 #
 # Built by `bun run build:wasm` in frontend/, into pkg/. Not a member of the
 # gateway's workspace, which names it in `exclude`: it builds for
-# `wasm32-unknown-unknown` alone, with the profile and the lockfile here.
+# `wasm32-unknown-unknown` alone, with the profile, the lockfile and the toolchain
+# here. The toolchain is a nightly (rust-toolchain.toml), for the threads the
+# module decodes on (.cargo/config.toml).
 [package]
 name = "remotex-egfx"
 version = "0.0.0"
@@ -18,6 +20,7 @@ crate-type = ["cdylib"]
 
 [dependencies]
 remotex-rdp-graphics = { path = "../../../crates/remotex-rdp-graphics" }
+rayon = "1"
 wasm-bindgen = "0.2"
 
 # For speed, not size: this decodes a desktop's every frame.
@@ -28,4 +31,4 @@ codegen-units = 1
 panic = "abort"
 
 [package.metadata.wasm-pack.profile.release]
-wasm-opt = ["-O3", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-simd"]
+wasm-opt = ["-O3", "--enable-bulk-memory", "--enable-nontrapping-float-to-int", "--enable-simd", "--enable-threads"]

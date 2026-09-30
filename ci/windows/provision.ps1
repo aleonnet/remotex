@@ -189,8 +189,8 @@ try {
     $env:RUSTUP_HOME = 'C:\rust\rustup'
     $env:CARGO_HOME = 'C:\rust\cargo'
     & 'C:\rust\cargo\bin\rustup.exe' component add clippy rustfmt 2>&1 | ForEach-Object { Log "  $_" }
-    # The frontend's WebAssembly module (frontend\wasm\egfx).
-    & 'C:\rust\cargo\bin\rustup.exe' target add wasm32-unknown-unknown 2>&1 | ForEach-Object { Log "  $_" }
+    # The frontend's WebAssembly module (frontend\wasm\egfx) is built by the nightly
+    # toolchain its directory pins, which rustup installs on the module's first build.
     Log "rust: $(& 'C:\rust\cargo\bin\rustc.exe' --version)"
 
     # --- pagefile: 2 GB of RAM is not enough for a thin-LTO release link -------

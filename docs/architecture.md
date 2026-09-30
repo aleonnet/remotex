@@ -401,9 +401,9 @@ Three controls with similar names therefore remain separate:
 - **EXPERIMENTAL: the picture in software.** A gateway configured with
   `[hevc_wasm]` serves [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm),
   libavcodec's HEVC decoder compiled to WebAssembly with SIMD128 and slice threads,
-  at `/hevc/`, and every file with COOP `same-origin` and COEP `require-corp`, which
-  make the page cross-origin isolated for the threads' shared memory
-  (`src/assets.rs`). No build holds the decoder: the operator downloads the
+  at `/hevc/`; its threads share their memory through the cross-origin isolation
+  every gateway serves the page with (`src/assets.rs`). No build holds the
+  decoder: the operator downloads the
   release archive from the private `andrewtheguy/hevc-wasm-archives` into
   `share/remotex` in the gateway's release tree, beside `share/doc/remotex`,
   where `[hevc_wasm]` looks unless it names another file (`config::data_dir`):
@@ -530,10 +530,28 @@ the pipeline.
   there is one reading of the protocol and its codecs. It runs in the paint
   worker (`frontend/src/egfxCompositor.ts`): each record is composed in its turn,
   the output changes at each EndFrame as it does on the host's own clients, and
-  the rectangles a frame painted are copied onto the canvas out of the module's
-  memory. A command that does not decode ends the pipeline there — the
+  the rectangles a frame painted are copied out of the module's memory and onto
+  the canvas. A command that does not decode ends the pipeline there — the
   compositor no longer holds what the host believes its client does — and the
   page says so and asks for nothing: the way back is a session that starts.
+- **The tiles are decoded on threads.** A desktop in motion is Progressive
+  tiles, each of which holds its own coefficients and is nothing to the tile
+  beside it, so a region's tile blocks are read in their order and then decoded
+  side by side, on rayon's pool (`proto/progressive.rs` in the crate), in the
+  gateway as in the page. A page's threads are workers: the paint worker starts
+  up to four (`frontend/src/egfxPool.worker.ts`), each an instance of the module
+  on the one memory, and makes the pool of them once every one has answered.
+  Everything else a pipeline carries — ClearCodec, the caches, the copies between
+  surfaces — is order itself and stays on the paint worker. A shared memory is
+  given only to a page that is cross-origin isolated, so the gateway sends
+  `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy:
+  require-corp` with every file of the page (`src/assets.rs`); behind a proxy
+  that drops them the threads do not start, and the page says the compositor
+  could not be loaded. A canvas takes no image data out of a shared memory,
+  which is why the painted rectangles are copied out of it first. The module's
+  standard library has to be built for threads, which takes a nightly Cargo:
+  `frontend/wasm/egfx/rust-toolchain.toml` pins one by its date, for that
+  directory alone.
 - **Nothing is resumed.** The host draws against what its client already holds:
   surfaces, cache slots, ClearCodec's glyph and bar caches, Progressive's tiles.
   It answers even a repaint out of them — measured against Windows 11, a

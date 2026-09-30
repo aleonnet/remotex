@@ -11,15 +11,18 @@
 //! holds an asset revalidates it for a 304 instead of downloading it again, and a
 //! redeployed gateway with a changed index answers with a fresh document.
 //!
+//! Every file goes out with the two headers that make the page cross-origin
+//! isolated (COOP `same-origin`, COEP `require-corp`), the document for itself and
+//! each worker's script for its worker: isolation is what gives the page
+//! `SharedArrayBuffer`, which the graphics compositor's threads share their memory
+//! through (`frontend/src/egfxCompositor.ts`), as the software HEVC decoder's do.
+//! It costs the page nothing, since all it loads is this origin's.
+//!
 //! EXPERIMENTAL: a gateway configured with `[hevc_wasm]` also serves the software
 //! HEVC decoder ([`crate::hevc_wasm`]), which it read at start-up, at `/hevc/` under
 //! the names it was built with: the module starts its slice threads as workers of
-//! its own script, found by its own URL. Such a gateway serves every file here
-//! cross-origin isolated (COOP `same-origin`, COEP `require-corp`) — the page loads
-//! nothing from another origin, and isolation is what gives it `SharedArrayBuffer`,
-//! which those threads share their memory through. Without it `/hevc/` is a 404
-//! and the page, which asks for the decoder before choosing it, decodes as it did
-//! before.
+//! its own script, found by its own URL. Without it `/hevc/` is a 404 and the
+//! page, which asks for the decoder before choosing it, decodes as it did before.
 
 use std::fmt::Write as _;
 
@@ -50,7 +53,7 @@ fn index() -> EmbeddedFile {
 /// so only paths no route claimed arrive here — `/api/*` has its own 404.
 ///
 /// `decoder` is the software HEVC decoder a `[hevc_wasm]` gateway loaded, whose
-/// files are served under `/hevc/` and whose presence isolates every response.
+/// files are served under `/hevc/`.
 pub fn serve(decoder: Option<&HevcDecoder>, request: &Request) -> Response {
     if !matches!(*request.method(), Method::GET | Method::HEAD) {
         return StatusCode::METHOD_NOT_ALLOWED.into_response();
@@ -76,22 +79,18 @@ pub fn serve(decoder: Option<&HevcDecoder>, request: &Request) -> Response {
         (Body::from(file.data), content_type, etag)
     };
 
-    let mut response = if request
+    if request
         .headers()
         .get(header::IF_NONE_MATCH)
         .is_some_and(|held| *held == etag)
     {
-        ([(header::ETAG, etag)], StatusCode::NOT_MODIFIED).into_response()
+        (ISOLATED, [(header::ETAG, etag)], StatusCode::NOT_MODIFIED).into_response()
     } else {
-        ([(header::CONTENT_TYPE, content_type), (header::ETAG, etag)], body).into_response()
-    };
-    if decoder.is_some() {
-        response.headers_mut().extend(ISOLATED);
+        (ISOLATED, [(header::CONTENT_TYPE, content_type), (header::ETAG, etag)], body).into_response()
     }
-    response
 }
 
-/// The headers that make the page cross-origin isolated, for the decoder's threads.
+/// The headers that make the page cross-origin isolated, for its threads.
 const ISOLATED: [(header::HeaderName, HeaderValue); 2] = [
     (
         header::HeaderName::from_static("cross-origin-opener-policy"),
@@ -184,14 +183,26 @@ mod tests {
         assert_eq!(response.headers()[header::CONTENT_TYPE], "text/css; charset=utf-8");
     }
 
-    /// With the decoder, the document and its assets are cross-origin isolated,
-    /// revalidated or not, and the decoder's own files are served beside them.
+    /// The document, a script a worker may start from, and a revalidation of
+    /// either all say the page is isolated, with the decoder or without it.
     #[tokio::test]
-    async fn the_decoder_is_served_cross_origin_isolated() {
+    async fn every_answer_isolates_the_page() {
+        let script = Frontend::iter()
+            .find(|name| name.starts_with("assets/") && name.ends_with(".js"))
+            .expect("the bundle has a script");
+        let etag = get("/", None).headers()[header::ETAG].clone();
+        for response in [get("/", None), get(&format!("/{script}"), None), get("/", Some(&etag))] {
+            assert_eq!(response.headers()["cross-origin-opener-policy"], "same-origin");
+            assert_eq!(response.headers()["cross-origin-embedder-policy"], "require-corp");
+        }
+    }
+
+    /// With the decoder, its own files are served beside the page's, isolated as
+    /// they are, revalidated or not.
+    #[tokio::test]
+    async fn the_decoder_is_served_beside_the_page() {
         let decoder = crate::hevc_wasm::tests::decoder();
         let decoder = Some(&decoder);
-        let response = get_with(decoder, "/", None);
-        let etag = response.headers()[header::ETAG].clone();
         let wasm = get_with(decoder, "/hevc/hevc.wasm", None);
         assert_eq!(wasm.status(), StatusCode::OK);
         assert_eq!(wasm.headers()[header::CONTENT_TYPE], "application/wasm");
@@ -204,7 +215,7 @@ mod tests {
         );
         let held = get_with(decoder, "/hevc/hevc.wasm", Some(&wasm_etag));
         assert_eq!(held.status(), StatusCode::NOT_MODIFIED);
-        for response in [response, get_with(decoder, "/", Some(&etag)), wasm, script, held] {
+        for response in [wasm, script, held] {
             assert_eq!(response.headers()["cross-origin-opener-policy"], "same-origin");
             assert_eq!(response.headers()["cross-origin-embedder-policy"], "require-corp");
         }
@@ -213,15 +224,12 @@ mod tests {
     }
 
     /// Without it, `/hevc/` is not found, rather than the document, so the page's
-    /// question reads no; and nothing is isolated.
+    /// question reads no.
     #[test]
-    fn without_the_decoder_nothing_is_isolated() {
+    fn without_the_decoder_there_is_no_decoder() {
         for path in ["/hevc/hevc.js", "/hevc/hevc.wasm"] {
             assert_eq!(get(path, None).status(), StatusCode::NOT_FOUND, "{path}");
         }
-        let response = get("/", None);
-        assert!(!response.headers().contains_key("cross-origin-opener-policy"));
-        assert!(!response.headers().contains_key("cross-origin-embedder-policy"));
     }
 
     /// A path that is not a file is the page, with a 200: the SPA's own routes have

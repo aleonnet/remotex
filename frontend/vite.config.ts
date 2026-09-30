@@ -51,8 +51,9 @@ export default defineConfig({
   },
   plugins: [react()],
   server: {
-    // As a gateway configured with `[hevc_wasm]` serves the page (src/assets.rs):
-    // cross-origin isolated, with the decoder, if the backend has it, at /hevc/.
+    // As the gateway serves the page (src/assets.rs): cross-origin isolated, for
+    // the graphics compositor's threads and the software HEVC decoder's, with the
+    // decoder, if the backend has it, at /hevc/.
     headers: {
       "Cross-Origin-Opener-Policy": "same-origin",
       "Cross-Origin-Embedder-Policy": "require-corp",

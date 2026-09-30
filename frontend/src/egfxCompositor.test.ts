@@ -4,8 +4,9 @@
 // [MS-RDPEGFX] 2.2.2, so what is checked is the module's reading of the protocol
 // and not its agreement with its own writer. The codecs have their tests where
 // they are written (crates/remotex-rdp-graphics); what is pinned here is the
-// boundary — that the module loads, composes a pipeline from its first command, says what it
-// painted, and hands back a framebuffer a canvas can take.
+// boundary — that the module loads and starts its threads, composes a pipeline from
+// its first command, says what it painted, and hands back a picture a canvas can
+// take.
 //
 // Run with `bun run test` from frontend/, which builds the module first.
 import assert from "node:assert/strict";
@@ -98,6 +99,10 @@ test("a pipeline is composed from its first command, frame by frame", async () =
   assert.deepEqual(pixel(ended, 5, 2), [0x10, 0x20, 0x30, 0xff]);
   assert.deepEqual(pixel(ended, 6, 2), [0, 0, 0, 0], "outside the fill");
   assert.equal(ended.pixels.length, 8 * 4 * 4);
+  assert.ok(
+    ended.pixels.buffer instanceof ArrayBuffer,
+    "the picture is in a memory a canvas takes image data from, not the shared one",
+  );
   compositor.close();
 });
 
