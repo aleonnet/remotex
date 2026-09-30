@@ -547,8 +547,13 @@ the pipeline.
   `Cross-Origin-Opener-Policy: same-origin` and `Cross-Origin-Embedder-Policy:
   require-corp` with every file of the page (`src/assets.rs`); behind a proxy
   that drops them the threads do not start, and the page says the compositor
-  could not be loaded. A canvas takes no image data out of a shared memory,
-  which is why the painted rectangles are copied out of it first. The module's
+  could not be loaded. A canvas takes no image data out of a shared memory, and
+  a WebGL texture takes an upload from one, so the painted rectangles are
+  uploaded out of the framebuffer where it is, into a texture on a canvas of the
+  pipeline's own (`frontend/src/egfxPicture.ts`), and drawn from there onto the
+  desktop's canvas as a tile is. Copying them out first cost as much again as
+  drawing them. A browser without WebGL 2 is told the compositor could not be
+  loaded, and sees such a host through the gateway's encoding. The module's
   standard library has to be built for threads, which takes a nightly Cargo:
   `frontend/wasm/egfx/rust-toolchain.toml` pins one by its date, for that
   directory alone.

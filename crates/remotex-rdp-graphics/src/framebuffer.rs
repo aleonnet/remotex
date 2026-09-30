@@ -276,45 +276,11 @@ impl Framebuffer {
         }
         true
     }
-
-    /// Make one rectangle opaque: the fourth byte of each of its pixels, which the
-    /// decoders leave at zero, set to 255. For a reader that takes the frame as
-    /// RGBA — a canvas's image data — where a zero there is a transparent pixel. A
-    /// rectangle that does not fit the frame is left alone.
-    pub(crate) fn seal(&self, rect: Rect) {
-        let mut frame = self.lock();
-        if rect.x.saturating_add(rect.width) > frame.width
-            || rect.y.saturating_add(rect.height) > frame.height
-        {
-            return;
-        }
-        let stride = frame.stride;
-        for row in 0..rect.height as usize {
-            let from = (rect.y as usize + row) * stride + rect.x as usize * 4;
-            for px in frame.pixels[from..from + rect.width as usize * 4].as_chunks_mut::<4>().0 {
-                px[3] = 0xFF;
-            }
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    /// Sealing touches the fourth byte of the rectangle's pixels and nothing else.
-    #[test]
-    fn a_sealed_rectangle_is_opaque_and_the_rest_is_as_it_was() {
-        let framebuffer = Framebuffer::new();
-        framebuffer.resize(3, 2);
-        assert!(framebuffer.blit(&[1, 2, 3, 0, 4, 5, 6, 0], Rect { x: 1, y: 1, width: 2, height: 1 }));
-        framebuffer.seal(Rect { x: 1, y: 1, width: 1, height: 1 });
-        framebuffer.seal(Rect { x: 2, y: 1, width: 2, height: 1 });
-        framebuffer.with(|frame| {
-            assert_eq!(frame.pixels[..12], [0; 12]);
-            assert_eq!(frame.pixels[12..], [0, 0, 0, 0, 1, 2, 3, 0xFF, 4, 5, 6, 0]);
-        });
-    }
 
     #[test]
     fn a_blit_lands_where_the_rectangle_says() {

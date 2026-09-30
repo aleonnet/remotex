@@ -3,6 +3,7 @@ import {
   type EgfxFactory,
   loadEgfx,
 } from "./egfxCompositor.ts";
+import { createGraphicsPicture, type GraphicsPicture } from "./egfxPicture.ts";
 import {
   type BatchRecord,
   decodeBatchFrame,
@@ -79,6 +80,11 @@ export function createFramePainter(options: {
    * for a test, which has the module's bytes and nothing to fetch them from.
    */
   loadCompositor?: () => Promise<EgfxFactory>;
+  /**
+   * Where a pipeline's picture comes from: a WebGL canvas. Injectable for a test,
+   * whose runtime has no GPU.
+   */
+  makePicture?: () => GraphicsPicture;
   /** EXPERIMENTAL: decode passed HEVC in software (see `createDesktopVideo`). */
   softwareHevc?: boolean;
 }): FramePainter {
@@ -91,23 +97,32 @@ export function createFramePainter(options: {
   // The decoder, built on the first announcement or unit.
   let video: DesktopVideo | null = null;
 
-  // The pipeline being composed, from its `graphicsStart`. `compositor` is null
-  // until the module has loaded, and for good once `broken`: a compositor that
-  // refused a command no longer holds what the host believes its client does, and
-  // nothing composed from it afterwards could be trusted.
+  // The pipeline being composed, from its `graphicsStart`. `compositor` and
+  // `picture` are null until the module has loaded, and for good once `broken`: a
+  // compositor that refused a command no longer holds what the host believes its
+  // client does, and nothing composed from it afterwards could be trusted.
   interface Pipeline {
     compositor: EgfxCompositor | null;
+    picture: GraphicsPicture | null;
     broken: boolean;
     ready: Promise<void>;
   }
   let pipeline: Pipeline | null = null;
   const loadCompositor = options.loadCompositor ?? (() => loadEgfx());
+  const makePicture = options.makePicture ?? createGraphicsPicture;
+
+  // Whatever a pipeline holds, given back; it composes nothing more.
+  const finish = (done: Pipeline) => {
+    done.broken = true;
+    done.compositor?.close();
+    done.compositor = null;
+    done.picture?.close();
+    done.picture = null;
+  };
 
   const releasePipeline = () => {
-    pipeline?.compositor?.close();
     if (pipeline) {
-      pipeline.compositor = null;
-      pipeline.broken = true;
+      finish(pipeline);
     }
     pipeline = null;
   };
@@ -185,9 +200,7 @@ export function createFramePainter(options: {
     if (broken.broken) {
       return;
     }
-    broken.broken = true;
-    broken.compositor?.close();
-    broken.compositor = null;
+    finish(broken);
     videoComplained = false;
     options.onVideoError(
       `This browser could not compose the host's graphics (${why}). Reload the page to start the session over.`,
@@ -219,13 +232,19 @@ export function createFramePainter(options: {
       return;
     }
     await current.ready;
-    const compositor = current.compositor;
-    if (generation !== born || current !== pipeline || !compositor) {
+    const { compositor, picture } = current;
+    if (
+      generation !== born ||
+      current !== pipeline ||
+      !compositor ||
+      !picture
+    ) {
       return;
     }
     let run: ReturnType<EgfxCompositor["compose"]>;
     try {
       run = compositor.compose(record.data);
+      picture.upload(run);
     } catch (error) {
       endPipeline(current, describe(error));
       return;
@@ -234,17 +253,10 @@ export function createFramePainter(options: {
     if (!context || run.width === 0 || run.height === 0) {
       return;
     }
-    const image = new ImageData(run.pixels, run.width, run.height);
+    // Each painted rectangle from the picture, as a tile is drawn.
     for (let i = 0; i + 3 < run.painted.length; i += 4) {
-      context.putImageData(
-        image,
-        0,
-        0,
-        run.painted[i],
-        run.painted[i + 1],
-        run.painted[i + 2],
-        run.painted[i + 3],
-      );
+      const [x, y, w, h] = run.painted.subarray(i, i + 4);
+      context.drawImage(picture.canvas, x, y, w, h, x, y, w, h);
     }
   };
 
@@ -339,25 +351,26 @@ export function createFramePainter(options: {
       releaseVideo();
       const starting: Pipeline = {
         compositor: null,
+        picture: null,
         broken: false,
         ready: Promise.resolve(),
       };
-      starting.ready = loadCompositor().then(
-        (make) => {
+      starting.ready = loadCompositor()
+        .then((make) => {
           // Replaced or cleared while the module loaded: nothing to make one for.
           if (!starting.broken) {
             starting.compositor = make();
+            starting.picture = makePicture();
           }
-        },
-        (error: unknown) => {
+        })
+        .catch((error: unknown) => {
           if (!starting.broken) {
-            starting.broken = true;
+            finish(starting);
             options.onVideoError(
               `This browser could not load the graphics compositor (${describe(error)}).`,
             );
           }
-        },
-      );
+        });
       pipeline = starting;
     },
     setVideoFormat(format) {

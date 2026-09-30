@@ -17,9 +17,10 @@
 // gateway's two headers make of every page it serves (src/assets.rs).
 //
 // The framebuffer stays in the module's memory, and a canvas takes no image data
-// out of a shared one. So the compositor keeps the picture a second time, in a
-// memory of its own, and copies into it the rectangles each run painted: `pixels`
-// is that copy, good until the next `compose` that resets the output.
+// out of a shared one; a WebGL texture takes an upload from one. So `pixels` is a
+// view on the framebuffer where it is, good until the next `compose`, and the
+// painted rectangles are uploaded out of it into the pipeline's picture
+// (egfxPicture.ts).
 import init, {
   module as compiled,
   Egfx,
@@ -36,13 +37,24 @@ const MOST_THREADS = 4;
 
 /** What one run of commands did to the picture. */
 export interface ComposedRun {
-  /** The rectangles the run painted: `x, y, width, height` for each. */
+  /**
+   * The rectangles the run painted: `x, y, width, height` for each, those that
+   * share a row band and touch along it merged into one.
+   */
   painted: Uint32Array;
   /** The framebuffer's size, in its own pixels. Zero before the first reset. */
   width: number;
   height: number;
-  /** The whole picture, RGBA, top row first. */
-  pixels: Uint8ClampedArray<ArrayBuffer>;
+  /**
+   * Whether the run reset the output: the framebuffer is blank but for what the
+   * run painted after, at a size that may be the same.
+   */
+  resized: boolean;
+  /**
+   * The whole picture, RGBX with the fourth byte unused, top row first: a view on
+   * the module's shared memory, good until the next `compose`.
+   */
+  pixels: Uint8ClampedArray;
 }
 
 export interface EgfxCompositor {
@@ -111,20 +123,32 @@ async function startThreads(
   startPool(threads);
 }
 
-/** A framebuffer's rectangle, copied row by row into the same place in `to`. */
-function copyRect(
-  from: Uint8ClampedArray,
-  to: Uint8ClampedArray,
-  stride: number,
-  x: number,
-  y: number,
-  width: number,
-  height: number,
-) {
-  for (let row = y; row < y + height; row += 1) {
-    const at = row * stride + x * 4;
-    to.set(from.subarray(at, at + width * 4), at);
+/**
+ * The rectangles a run painted, with those that share a row band and touch or
+ * overlap along it merged into one. A Progressive frame is reported tile by tile,
+ * and each rectangle costs an upload and a draw, whatever its width.
+ */
+function coalesce(painted: Uint32Array): Uint32Array {
+  const rects: number[][] = [];
+  for (let i = 0; i + 3 < painted.length; i += 4) {
+    rects.push([painted[i], painted[i + 1], painted[i + 2], painted[i + 3]]);
   }
+  rects.sort((a, b) => a[1] - b[1] || a[3] - b[3] || a[0] - b[0]);
+  const merged: number[][] = [];
+  for (const rect of rects) {
+    const last = merged[merged.length - 1];
+    if (
+      last &&
+      last[1] === rect[1] &&
+      last[3] === rect[3] &&
+      rect[0] <= last[0] + last[2]
+    ) {
+      last[2] = Math.max(last[0] + last[2], rect[0] + rect[2]) - last[0];
+    } else {
+      merged.push(rect);
+    }
+  }
+  return Uint32Array.from(merged.flat());
 }
 
 /**
@@ -144,34 +168,23 @@ export function loadEgfx(
       }
       return () => {
         const egfx = new Egfx();
-        let pixels = new Uint8ClampedArray(0);
         return {
           compose(commands: Uint8Array): ComposedRun {
             egfx.compose(commands);
             const width = egfx.width();
             const height = egfx.height();
-            const bytes = width * height * 4;
-            if (egfx.resized() || pixels.length !== bytes) {
-              pixels = new Uint8ClampedArray(bytes);
-            }
-            const painted = egfx.painted();
-            const shared = new Uint8ClampedArray(
+            const pixels = new Uint8ClampedArray(
               memory.buffer,
               egfx.pixels(),
-              bytes,
+              width * height * 4,
             );
-            for (let i = 0; i + 3 < painted.length; i += 4) {
-              copyRect(
-                shared,
-                pixels,
-                width * 4,
-                painted[i],
-                painted[i + 1],
-                painted[i + 2],
-                painted[i + 3],
-              );
-            }
-            return { painted, width, height, pixels };
+            return {
+              painted: coalesce(egfx.painted()),
+              width,
+              height,
+              resized: egfx.resized(),
+              pixels,
+            };
           },
           close() {
             egfx.free();

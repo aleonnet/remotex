@@ -96,28 +96,16 @@ impl Surface {
     /// Write one rectangle of packed `BGRX32` rows, top row first, swizzling into
     /// the framebuffer's order on the way.
     fn write(&mut self, rect: Rect16, bgrx: &[u8]) {
-        self.write_rows(rect, bgrx, usize::from(rect.width()) * 4);
-    }
-
-    /// Write one rectangle of `BGRX32` rows that start `stride` bytes apart — a
-    /// window onto a larger buffer — swizzling into the framebuffer's order.
-    fn write_rows(&mut self, rect: Rect16, bgrx: &[u8], src_stride: usize) {
         let width = usize::from(rect.width());
         let stride = self.stride();
-        for row in 0..usize::from(rect.height()) {
-            let src = &bgrx[row * src_stride..row * src_stride + width * 4];
+        for (row, src) in bgrx.chunks_exact(width * 4).take(usize::from(rect.height())).enumerate() {
             let at = (usize::from(rect.top) + row) * stride + usize::from(rect.left) * 4;
             let dst = &mut self.pixels[at..at + width * 4];
             for (out, px) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
                 *out = [px[2], px[1], px[0], 0];
             }
         }
-        self.invalidate(Rect {
-            x: u32::from(rect.left),
-            y: u32::from(rect.top),
-            width: u32::from(rect.width()),
-            height: u32::from(rect.height()),
-        });
+        self.invalidate(to_rect(rect));
     }
 
     /// Whether an arbitrary rectangle lies inside this surface.
@@ -155,13 +143,22 @@ impl Surface {
     /// rectangle, and record it as changed. The caller has checked the rectangle
     /// fits.
     fn copy_in(&mut self, x: u32, y: u32, width: u32, height: u32, packed: &[u8]) {
+        let rect = Rect { x, y, width, height };
+        self.copy_rows(rect, packed, width as usize * 4);
+    }
+
+    /// Write rows already in this surface's order — a Progressive tile's — that
+    /// start `src_stride` bytes apart into a rectangle, and record it as changed.
+    /// The caller has checked the rectangle fits.
+    fn copy_rows(&mut self, rect: Rect, rows: &[u8], src_stride: usize) {
         let stride = self.stride();
-        let bytes = width as usize * 4;
-        for (row, src) in packed.chunks_exact(bytes).take(height as usize).enumerate() {
-            let at = (y as usize + row) * stride + x as usize * 4;
+        let bytes = rect.width as usize * 4;
+        for row in 0..rect.height as usize {
+            let src = &rows[row * src_stride..row * src_stride + bytes];
+            let at = (rect.y as usize + row) * stride + rect.x as usize * 4;
             self.pixels[at..at + bytes].copy_from_slice(src);
         }
-        self.invalidate(Rect { x, y, width, height });
+        self.invalidate(rect);
     }
 
     /// Record a rectangle drawn into — see [`stage`] for how the list is kept to
@@ -636,7 +633,7 @@ impl Graphics {
         let progressive = self.progressive.get_or_insert_with(|| Box::new(progressive::Progressive::new()));
         let budget = MAX_DESKTOP_BYTES.saturating_sub(surfaces);
         let outcome = progressive.decompress(surface, found.width, found.height, data, budget, |rect, rows, stride| {
-            found.write_rows(rect, rows, stride);
+            found.copy_rows(to_rect(rect), rows, stride);
         });
         if let Err(e) = outcome {
             // The regions before the fault are painted; the host will draw the rest
@@ -1063,7 +1060,7 @@ mod tests {
         let updates = receive(&mut graphics, &framebuffer, &[start(1), wire2(1, CODEC_CAPROGRESSIVE, &first), end(1)]);
         let painted = Rect { x: 64, y: 66, width: 36, height: 4 };
         assert_eq!(updates, vec![Update::Paint(painted), Update::Frame { id: 1, decoded: 1 }]);
-        let expected = { let g = grey(9); [g[2], g[1], g[0], 0] };
+        let expected = grey(9);
         framebuffer.with(|frame| {
             for row in frame.rows(painted) {
                 for px in row.as_chunks::<4>().0 {
@@ -1332,16 +1329,6 @@ mod tests {
         });
         // A command that does not decode is the end of what can be trusted.
         assert!(compositor.compose(&[0x09, 0, 0, 0, 0xFF, 0, 0, 0]).is_err());
-
-        // Read as RGBA, what was painted is opaque and what never was is not drawn.
-        let mut opaque = Compositor::opaque();
-        opaque.compose(&opening).unwrap();
-        opaque.compose(&frame).unwrap();
-        opaque.framebuffer().with(|picture| {
-            let at = (picture.width as usize + 1) * 4;
-            assert_eq!(picture.pixels[at..at + 4], [30, 20, 10, 0xFF]);
-            assert_eq!(picture.pixels[..4], [0; 4]);
-        });
     }
 
     #[test]

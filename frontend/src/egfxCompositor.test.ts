@@ -5,8 +5,8 @@
 // and not its agreement with its own writer. The codecs have their tests where
 // they are written (crates/remotex-rdp-graphics); what is pinned here is the
 // boundary — that the module loads and starts its threads, composes a pipeline from
-// its first command, says what it painted, and hands back a picture a canvas can
-// take.
+// its first command, says what it painted, and hands back the picture where a
+// texture takes it from.
 //
 // Run with `bun run test` from frontend/, which builds the module first.
 import assert from "node:assert/strict";
@@ -94,15 +94,35 @@ test("a pipeline is composed from its first command, frame by frame", async () =
 
   const ended = compositor.compose(run(endFrame(1)));
   assert.deepEqual([...ended.painted], [2, 1, 4, 2]);
-  // Red, green, blue, and opaque where painted: what a canvas's image data is.
-  assert.deepEqual(pixel(ended, 2, 1), [0x10, 0x20, 0x30, 0xff]);
-  assert.deepEqual(pixel(ended, 5, 2), [0x10, 0x20, 0x30, 0xff]);
+  assert.equal(ended.resized, false);
+  // Red, green, blue, and a byte unused: what a texture is uploaded from.
+  assert.deepEqual(pixel(ended, 2, 1), [0x10, 0x20, 0x30, 0]);
+  assert.deepEqual(pixel(ended, 5, 2), [0x10, 0x20, 0x30, 0]);
   assert.deepEqual(pixel(ended, 6, 2), [0, 0, 0, 0], "outside the fill");
   assert.equal(ended.pixels.length, 8 * 4 * 4);
   assert.ok(
-    ended.pixels.buffer instanceof ArrayBuffer,
-    "the picture is in a memory a canvas takes image data from, not the shared one",
+    ended.pixels.buffer instanceof SharedArrayBuffer,
+    "the picture is the module's own framebuffer, in the memory its threads share",
   );
+  compositor.close();
+});
+
+test("rectangles that touch along one row band are painted as one", async () => {
+  const compositor = (await loadEgfx(module))();
+  compositor.compose(
+    run(resetGraphics(8, 4), createSurface(1, 8, 4), mapToOutput(1, 0, 0)),
+  );
+  const composed = compositor.compose(
+    run(
+      startFrame(1),
+      solidFill(1, [1, 2, 3], [rect(0, 1, 2, 3), rect(2, 1, 5, 3)]),
+      solidFill(1, [4, 5, 6], [rect(0, 3, 2, 4)]),
+      endFrame(1),
+    ),
+  );
+  assert.deepEqual([...composed.painted], [0, 1, 5, 2, 0, 3, 2, 1]);
+  assert.deepEqual(pixel(composed, 4, 2), [3, 2, 1, 0]);
+  assert.deepEqual(pixel(composed, 1, 3), [6, 5, 4, 0]);
   compositor.close();
 });
 
@@ -119,8 +139,8 @@ test("pixels on the wire land where their rectangle says", async () => {
     ),
   );
   assert.deepEqual([...composed.painted], [1, 2, 2, 1]);
-  assert.deepEqual(pixel(composed, 1, 2), [3, 2, 1, 0xff]);
-  assert.deepEqual(pixel(composed, 2, 2), [6, 5, 4, 0xff]);
+  assert.deepEqual(pixel(composed, 1, 2), [3, 2, 1, 0]);
+  assert.deepEqual(pixel(composed, 2, 2), [6, 5, 4, 0]);
   compositor.close();
 });
 
@@ -140,6 +160,7 @@ test("a reset resizes the framebuffer and starts the picture over", async () => 
     run(resetGraphics(6, 2), createSurface(2, 6, 2), mapToOutput(2, 0, 0)),
   );
   assert.deepEqual([resized.width, resized.height], [6, 2]);
+  assert.equal(resized.resized, true);
   assert.equal(resized.pixels.length, 6 * 2 * 4);
   assert.ok(
     resized.pixels.every((byte) => byte === 0),

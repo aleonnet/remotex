@@ -7,8 +7,7 @@
 //! worker makes (`frontend/src/egfxCompositor.ts`).
 //!
 //! The framebuffer stays in this module's memory, which is shared with the threads
-//! below and so is nothing a canvas takes: the page copies the rectangles a run
-//! painted out of it.
+//! below: the page uploads the rectangles a run painted out of it, into a texture.
 //!
 //! Progressive's tiles are decoded side by side, on rayon's pool, and a page has no
 //! threads to spawn: a thread is a worker the page starts, running an instance of
@@ -85,7 +84,7 @@ pub struct Egfx {
 impl Egfx {
     #[wasm_bindgen(constructor)]
     pub fn new() -> Egfx {
-        Egfx { compositor: Compositor::opaque(), painted: Vec::new(), resized: false }
+        Egfx { compositor: Compositor::new(), painted: Vec::new(), resized: false }
     }
 
     /// Compose one `GRAPHICS` record's commands, and return how many frames they
@@ -125,8 +124,8 @@ impl Egfx {
     }
 
     /// Where the framebuffer is in this module's memory: `width * height * 4`
-    /// bytes, RGBA, top row first. Good until the next [`Self::compose`], which may
-    /// move it.
+    /// bytes, `RGBX` — the fourth byte unused — top row first. Good until the next
+    /// [`Self::compose`], which may move it.
     pub fn pixels(&self) -> *const u8 {
         self.compositor.framebuffer().with(|frame| frame.pixels.as_ptr())
     }
