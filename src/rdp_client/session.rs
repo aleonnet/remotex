@@ -254,7 +254,10 @@ struct PassedFrames {
     /// Composed, and not acknowledged to the host yet; oldest first.
     kept: VecDeque<u32>,
     /// How many have been acknowledged, which each acknowledgement reports as
-    /// finished in all.
+    /// finished in all — not how many are composed, which runs ahead of it while
+    /// frames are kept. The host holds the two together: told of more frames
+    /// finished than it had acknowledgements for, a Windows host slowed to a
+    /// quarter of the rate it was paced at and then stopped drawing altogether.
     acknowledged: u32,
 }
 
