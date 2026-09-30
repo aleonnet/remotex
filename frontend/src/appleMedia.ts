@@ -27,8 +27,8 @@
 // EXPERIMENTAL: a picture the browser's `VideoDecoder` refuses can still be decoded
 // in software — libavcodec's HEVC decoder compiled to WebAssembly, with SIMD128 and
 // slice threads (hevcWasmDecoder.ts) — where the gateway is configured with
-// `[hevc_wasm]`, which serves the decoder and makes the page cross-origin
-// isolated, and the browser runs shared-memory SIMD WebAssembly. The page asks the
+// `[hevc_wasm]`, which serves the decoder, and the browser runs shared-memory SIMD
+// WebAssembly on the cross-origin isolated page every gateway serves. The page asks the
 // gateway for the decoder rather than assuming it. Chrome on a GPU without HEVC
 // Range Extensions then says yes, decoding the sound itself and the picture here. `?hevc_decoder=software` in the page's URL takes the
 // software decoder even where the browser's own would do, to try it.
@@ -150,7 +150,8 @@ const SIMD_PROBE = Uint8Array.of(
  */
 async function decodesPictureInSoftware(): Promise<boolean> {
   try {
-    // A gateway without the decoder does not isolate the page, and says so first.
+    // Every gateway isolates the page; a proxy that drops the headers does not,
+    // and says so first.
     if (globalThis.crossOriginIsolated !== true) {
       return false;
     }

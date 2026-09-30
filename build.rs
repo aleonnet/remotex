@@ -91,6 +91,14 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
         "RUSTC_WORKSPACE_WRAPPER",
         "RUSTDOCFLAGS",
         "RUSTFLAGS",
+        // The module is built by the toolchain its own directory pins
+        // (frontend/wasm/egfx/rust-toolchain.toml), which the one this build runs
+        // under, and the compiler Cargo names to its build scripts, would
+        // otherwise be chosen over.
+        "CARGO",
+        "RUSTC",
+        "RUSTDOC",
+        "RUSTUP_TOOLCHAIN",
     ] {
         bun.env_remove(inherited);
     }

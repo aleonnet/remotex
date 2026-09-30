@@ -83,9 +83,10 @@ jobs:
       - uses: oven-sh/setup-bun@v2
 
       # The bundle holds a WebAssembly module, built by the frontend's own build
-      # from the gateway's graphics crate (frontend/wasm/egfx).
-      - name: Add the WebAssembly target
-        run: rustup target add wasm32-unknown-unknown
+      # from the gateway's graphics crate (frontend/wasm/egfx), with the nightly
+      # toolchain that directory pins.
+      - name: Install the WebAssembly module's toolchain
+        run: cd frontend/wasm/egfx && rustup toolchain install
 
       - name: Build frontend
         run: cd frontend && bun install --frozen-lockfile && bun run build

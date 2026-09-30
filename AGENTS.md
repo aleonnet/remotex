@@ -44,8 +44,12 @@ documentation.
 - There is one frontend build, compiled from Cargo's `OUT_DIR` into the gateway
   binary (`src/assets.rs`) and served from its origin root. It holds one
   WebAssembly module, built by the frontend's own build from the gateway's
-  graphics crate (`frontend/wasm/egfx`, around `crates/remotex-rdp-graphics`),
-  which takes Rust's `wasm32-unknown-unknown` target. A standalone frontend
+  graphics crate (`frontend/wasm/egfx`, around `crates/remotex-rdp-graphics`)
+  for `wasm32-unknown-unknown`, with threads, by the dated nightly that
+  directory's `rust-toolchain.toml` pins. The pin is the module's alone: the
+  gateway builds on stable, and so must the graphics crate. Its threads share a
+  memory, so every file `src/assets.rs` serves carries the two cross-origin
+  isolation headers; keep them, and load nothing from another origin. A standalone frontend
   build and the platform-independent release artifact use `frontend/dist`; a
   Cargo build either produces the same bundle in its private output or stages
   that artifact there. Do not add a web root, a `static_dir`, or any run-time path
