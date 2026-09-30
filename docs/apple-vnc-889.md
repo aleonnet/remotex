@@ -861,8 +861,8 @@ from RFB. RFB only negotiates a media stream: the viewer sends an offer, and
 `ScreensharingAgent` then sends the screen and the system audio through
 AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with SRTP,
 straight to the viewer. Remotex does the same on an `ard-high-performance` target
-(`src/vnc_apple_media.rs`). ZRLE is decoded to keep its stream in step and never
-shown: the browser stays behind its resize notice until the stream delivers, at
+(`src/vnc_apple_media.rs`). ZRLE is stepped over undecoded and never shown: the
+browser stays behind its resize notice until the stream delivers, at
 connect and across display changes. A stream that fails ends the session, as it
 ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
 sound, and one that stops (see [Liveness](#the-stream)).
@@ -872,8 +872,8 @@ the target sets `media_passthrough` and the browser decodes the Mac's HEVC and
 AAC-ELD: then each access unit goes to the browser as it came, described by the
 stream's own sequence parameter set, each sound unit goes on `/ws/audio` as it
 came, described by the AudioSpecificConfig below. A PLI is its repaint. Either
-way ZRLE's rectangles are decoded to keep its stream in step and never shown: the
-browser stays behind its resize notice until the stream delivers. See
+way ZRLE's rectangles are stepped over undecoded and never shown: the browser
+stays behind its resize notice until the stream delivers. See
 [Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through).
 
 The two decoders are FFmpeg's HEVC decoder for the picture (libavcodec,

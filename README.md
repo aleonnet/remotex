@@ -252,8 +252,8 @@ with the same authentication error as incorrect credentials. See
 Apple Screen Sharing Standard mode (`ard`) lists the Mac's physical screens, can
 show one screen or all of them, reports each screen's pixel density, keeps pixels
 at full fidelity, and supports the native Apple pasteboard. Every Apple subtype
-asks the Mac for ZRLE rectangles from the start, although High Performance decodes
-them only to keep the deflate stream in step and never displays them.
+asks the Mac for ZRLE rectangles from the start, although High Performance steps
+over them undecoded and never displays them.
 
 High Performance (`ard-high-performance`) takes the same credentials and the same
 encrypted protocol revision. It requests one virtual display at the

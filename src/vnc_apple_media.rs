@@ -30,8 +30,7 @@
 //! sound within [`STREAM_START`] of its offer, one that sends neither for
 //! [`STREAM_SILENCE`], and one whose receiver fails ([`MediaStream::overdue`],
 //! [`MediaStream::failure`]).
-//! ZRLE rectangles are decoded only to keep their deflate stream in step and never
-//! shown. Until the first media picture, and across display changes which stop the
+//! ZRLE rectangles are stepped over by their length, never inflated or shown. Until the first media picture, and across display changes which stop the
 //! stream until the next offer, the browser stays behind its resize notice.
 //!
 //! Every packet in is authenticated before it is decrypted — AES-256 counter mode

@@ -628,11 +628,11 @@ struct DesktopState {
     /// The picture comes from the media stream ([`vnc_apple_media`]): a decoded
     /// picture of the current size has been shown since the last display change.
     /// Pixel polling then holds to [`HP_HOLD_REQUEST`], which still brings the
-    /// cursor shapes and layouts, and ZRLE pixels are decoded but not shown.
+    /// cursor shapes and layouts.
     media_live: bool,
     /// The picture is the media stream alone, decoded here or passed: a High
-    /// Performance session, whose ZRLE pixels are decoded but never shown, in the
-    /// stream's gaps either — the seconds before it delivers, and across a display
+    /// Performance session, whose ZRLE rectangles are stepped over undecoded and
+    /// never shown, in the stream's gaps either — the seconds before it delivers, and across a display
     /// change — so a session that passes the stream encodes no video at all.
     media_only: bool,
     /// The browser is behind its resize notice waiting for the stream's first
@@ -3661,8 +3661,8 @@ async fn read_loop<R: AsyncRead + Unpin>(
                             // whole desktop, and a full request would only have it
                             // send a second one, which no shadow is there to skip.
                             // Every other resized source gets the normal full request.
-                            // A media-only Mac's ZRLE reply is decoded to keep its
-                            // deflate stream in step but is never shown.
+                            // A media-only Mac's ZRLE reply is stepped over
+                            // undecoded.
                             let full = resized && !(passthrough.is_some() && sink.passing());
                             send(uplink, &update_request(!full, size)).await?;
                         }
@@ -4661,25 +4661,23 @@ async fn read_rect<R: AsyncRead + Unpin>(
     // position — sends that framing whatever its geometry says, and the RFB stream
     // has no framing of its own above the record layer, so stepping past by the
     // wrong number of bytes desyncs everything after it.
+    //
+    // A session with a media stream shows none of the Mac's rectangles
+    // ([`DesktopState::media_only`]) for as long as it lasts, though the Mac still
+    // answers the one-pixel polls, pushes a whole screen on its own at a login, and
+    // sends the display between streams. They are stepped over, not decoded.
+    if desktop.lock().unwrap().media_only {
+        decoders.step_over(reader, payload, shadow, w, h).await?;
+        return Ok(Rect::from_size(x, y, w, h).map_or(RectEffect::NOTHING, RectEffect::pixels));
+    }
     let decoded = decoders
         .decode(reader, payload, shadow, w, h)
         .await?;
     let Some(rect) = Rect::from_size(x, y, w, h) else {
         return Ok(RectEffect::NOTHING);
     };
-    // On a session with a media stream, ZRLE is decoded only to keep its deflate
-    // stream in step: the Mac still answers the one-pixel polls, pushes a whole
-    // screen on its own at a login, and sends the display between streams. None
-    // of it is shown ([`DesktopState::media_only`]), so a CopyRect with no known
-    // source is nothing to repaint for either.
-    let unshown = {
-        let d = desktop.lock().unwrap();
-        d.media_live || d.media_only
-    };
     let rgb = match decoded {
-        Decoded::Pixels(_) if unshown => return Ok(RectEffect::pixels(rect)),
         Decoded::Pixels(rgb) => rgb,
-        Decoded::Unavailable if unshown => return Ok(RectEffect::pixels(rect)),
         // A CopyRect whose source this side never learned. Guessing would leave
         // wrong pixels on screen until something else happened to change that area;
         // one full request makes the source known instead.
@@ -6220,7 +6218,7 @@ async fn read_bytes<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<Vec<
 }
 
 /// Drain and drop exactly `n` bytes.
-async fn discard<R: AsyncRead + Unpin>(reader: &mut R, n: u64) -> anyhow::Result<()> {
+pub(crate) async fn discard<R: AsyncRead + Unpin>(reader: &mut R, n: u64) -> anyhow::Result<()> {
     let copied = tokio::io::copy(&mut reader.take(n), &mut tokio::io::sink()).await?;
     anyhow::ensure!(copied == n, "connection closed while skipping {n} bytes");
     Ok(())
@@ -9620,9 +9618,9 @@ mod tests {
     }
 
     /// The picture of a session with a media stream is the stream alone: the
-    /// screen the Mac sends as ZRLE between streams is decoded and dropped, so a
-    /// passed stream is never displaced by video encoded here, and a session that
-    /// passes builds no encoder.
+    /// screen the Mac sends as ZRLE between streams is stepped over undecoded, so
+    /// a passed stream is never displaced by video encoded here, and a session
+    /// that passes builds no encoder.
     #[tokio::test]
     async fn the_screen_between_streams_is_not_encoded() {
         let bgrx = [0x30, 0x20, 0x10, 0].repeat(4);
@@ -9641,12 +9639,16 @@ mod tests {
         sink.flush().await;
         assert_eq!(units(&mut rx).len(), 1, "the passed unit");
 
-        // The stream stops, and the Mac sends the screen as ZRLE.
+        // The stream stops, and the Mac sends the screen as ZRLE: a chunk that is
+        // no deflate stream, since none is inflated, and raw pixels behind it.
         desktop.lock().unwrap().media_live = false;
+        let mut zrle = geometry(0, 0, 2, 2, ENCODING_ZRLE);
+        zrle.extend_from_slice(&8u32.to_be_bytes());
+        zrle.extend_from_slice(&[0xff; 8]);
         let mut raw = geometry(0, 0, 2, 2, ENCODING_RAW);
         raw.extend_from_slice(&bgrx);
         let err = read_loop(
-            std::io::Cursor::new(update(&[raw])),
+            std::io::Cursor::new(update(&[zrle, raw])),
             shared,
             ReadFlags { clipboard: false, poll: false },
             None,
