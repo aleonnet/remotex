@@ -2233,8 +2233,10 @@ export function useRemoteDesktop(
     const el = overlayRef.current;
     // View-only is the absence of every listener below rather than a flag each
     // of them tests, so there is no path left that could forward a key or a
-    // click while the menu has the screen.
-    if (!el || viewOnly) {
+    // click while the menu has the screen. An oversize desktop is the same: the
+    // remote is not on screen to see what a key does to it, and the notice over
+    // it wants Tab for its own buttons.
+    if (!el || viewOnly || oversize) {
       return;
     }
 
@@ -2592,7 +2594,15 @@ export function useRemoteDesktop(
       el.removeEventListener("keyup", onKeyUp);
       el.removeEventListener("blur", onBlur);
     };
-  }, [overlayRef, canvasRef, graphicsRef, syncCursor, touchActive, viewOnly]);
+  }, [
+    overlayRef,
+    canvasRef,
+    graphicsRef,
+    syncCursor,
+    touchActive,
+    viewOnly,
+    oversize,
+  ]);
 
   // The desktop takes the keyboard as soon as it is on screen, so the first
   // thing typed reaches the remote — the surface is the only thing on it worth
@@ -2608,11 +2618,11 @@ export function useRemoteDesktop(
   // opens only once its fetch has answered, which is a later commit than the one
   // that closed the drawer, so its own focus lands after this.
   useEffect(() => {
-    if (mode !== "desktop" || viewOnly) {
+    if (mode !== "desktop" || viewOnly || oversize) {
       return;
     }
     overlayRef.current?.focus({ preventScroll: true });
-  }, [mode, viewOnly, overlayRef]);
+  }, [mode, viewOnly, oversize, overlayRef]);
 
   return {
     status,
