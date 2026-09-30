@@ -160,8 +160,8 @@ state directory of a `--config` run), and names that target with
 `REMOTEX_PLAYWRIGHT_HEVC_TARGET`:
 
 ```sh
-curl -fLO --output-dir tmp \
-  https://github.com/andrewtheguy/hevc-wasm/releases/download/v0.1.0/hevc-wasm-v0.1.0.tar.gz
+gh release download v0.0.1 --repo andrewtheguy/hevc-wasm-archives \
+  --pattern hevc-wasm-v0.0.1.tar.gz --dir tmp
 cargo run --profile qa -- serve --config tmp/qa_hevc.toml
 ```
 

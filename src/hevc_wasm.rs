@@ -3,8 +3,10 @@
 //! (`frontend/src/hevcWasmDecoder.ts`).
 //!
 //! It is libavcodec's HEVC decoder compiled to WebAssembly, a release of
-//! andrewtheguy/hevc-wasm, and no build of this binary holds it: an operator who
-//! wants it downloads the release archive and names it in `[hevc_wasm]`. The
+//! andrewtheguy/hevc-wasm published to the private
+//! andrewtheguy/hevc-wasm-archives, and no build of this binary holds it: an
+//! operator who wants it downloads the release archive and names it in
+//! `[hevc_wasm]`. The
 //! gateway reads that archive once at start-up, refuses it unless it is exactly the
 //! release pinned here — the page's worker calls the module's exports as this
 //! version has them, so any other build is one the page cannot drive — and serves
@@ -20,7 +22,7 @@ use flate2::read::GzDecoder;
 use sha2::{Digest as _, Sha256};
 
 /// The hevc-wasm release this gateway's page is written against.
-pub const VERSION: &str = "0.1.0";
+pub const VERSION: &str = "0.0.1";
 
 /// The SHA-256 of that release's archive, as its `SHA256SUMS` publishes it.
 const SHA256: &str = "4a1a758d5157a53e5478982d2a0e2658de31e3a8955496e1c003eaf61a5906f4";
@@ -30,10 +32,11 @@ pub fn archive_name() -> String {
     format!("hevc-wasm-v{VERSION}.tar.gz")
 }
 
-/// Where the pinned archive is downloaded from.
-pub fn release_url() -> String {
+/// How the pinned archive is downloaded: through `gh`, since the repository
+/// holding it is private.
+pub fn download_command() -> String {
     format!(
-        "https://github.com/andrewtheguy/hevc-wasm/releases/download/v{VERSION}/{}",
+        "gh release download v{VERSION} --repo andrewtheguy/hevc-wasm-archives --pattern {}",
         archive_name()
     )
 }
@@ -61,16 +64,16 @@ impl HevcDecoder {
         let bytes = std::fs::read(archive).with_context(|| {
             format!(
                 "cannot read the software HEVC decoder {} ([hevc_wasm].archive) — \
-                 download {} there",
+                 download it there with `{}`",
                 archive.display(),
-                release_url()
+                download_command()
             )
         })?;
         Self::from_archive(&bytes, SHA256).with_context(|| {
             format!(
-                "{} ([hevc_wasm].archive) is not hevc-wasm v{VERSION} — download {}",
+                "{} ([hevc_wasm].archive) is not hevc-wasm v{VERSION} — download it with `{}`",
                 archive.display(),
-                release_url()
+                download_command()
             )
         })
     }
@@ -180,6 +183,6 @@ pub(crate) mod tests {
         let err = HevcDecoder::load(Path::new("/nonexistent/hevc-wasm.tar.gz")).unwrap_err();
         let message = format!("{err:#}");
         assert!(message.contains("[hevc_wasm].archive"), "{message}");
-        assert!(message.contains(&release_url()), "{message}");
+        assert!(message.contains(&download_command()), "{message}");
     }
 }
