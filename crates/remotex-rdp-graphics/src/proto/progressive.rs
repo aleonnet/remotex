@@ -34,7 +34,7 @@ const TILE: usize = 64;
 const COEFFS: usize = TILE * TILE;
 /// What one [`Tile`] holds: its pixels, then two coefficient arrays of `i16`.
 const TILE_BYTES: usize = COEFFS * 4 + COEFFS * 3 * 2 * 2;
-/// Bytes of `BGRX32` per tile row.
+/// Bytes of pixels per tile row.
 const TILE_STRIDE: usize = TILE * 4;
 
 const WBT_SYNC: u16 = 0xCCC0;
@@ -136,7 +136,8 @@ impl ProgQuant {
 
 /// One tile of one surface, as it stands between passes.
 struct Tile {
-    /// The tile's pixels, `BGRX32`, 64 rows of 64.
+    /// The tile's pixels, 64 rows of 64, in the surface's order: `RGBX`, as the
+    /// framebuffer holds them, so that painting a tile is a copy.
     pixels: Vec<u8>,
     /// Each component's coefficients as last decoded, before the inverse wavelet;
     /// what an upgrade pass refines. Y, then Cb, then Cr, 4096 each.
@@ -270,9 +271,9 @@ impl Progressive {
 
     /// Decode one PDU's worth of blocks for a surface of `width`×`height`, and hand
     /// each repainted rectangle to `paint` as `(rect, rows, stride)`: `rows` starts
-    /// at the rectangle's top-left `BGRX32` pixel and each row is `stride` bytes
-    /// after the last. Every surface's tiles together stay within `budget` bytes; a
-    /// tile past it is refused.
+    /// at the rectangle's top-left pixel, `RGBX` as the surface holds it, and each
+    /// row is `stride` bytes after the last. Every surface's tiles together stay
+    /// within `budget` bytes; a tile past it is refused.
     pub fn decompress(
         &mut self,
         surface: u16,
@@ -491,7 +492,7 @@ fn decode_tile(tile: &mut Tile, passes: &[Pass<'_>]) {
                     }
                 }
             }
-            to_bgrx(work, &mut tile.pixels);
+            to_rgbx(work, &mut tile.pixels);
         }
     });
 }
@@ -639,17 +640,27 @@ fn upgrade_component(srl: &[u8], raw: &[u8], shift: Quant, bits: Quant, current:
             }
             continue;
         }
-        for (c, s) in cur.iter_mut().zip(&mut sign[at..at + len]) {
-            let input = match (*s).cmp(&0) {
-                std::cmp::Ordering::Greater => raw.take(num_bits) as i32,
-                std::cmp::Ordering::Less => -(raw.take(num_bits) as i32),
-                std::cmp::Ordering::Equal => {
-                    let v = srl.read(num_bits);
-                    *s = v;
-                    i32::from(v)
+        let sign = &mut sign[at..at + len];
+        let mut i = 0;
+        while i < len {
+            let input = if sign[i] == 0 {
+                if srl.nz > 0 {
+                    // Zeros still owed cover this coefficient and every one after
+                    // it whose sign is unknown, as far as they go: nothing to add.
+                    let run = sign[i..].iter().take(srl.nz as usize).take_while(|&&s| s == 0).count();
+                    srl.nz -= run as u32;
+                    i += run;
+                    continue;
                 }
+                let v = srl.read(num_bits);
+                sign[i] = v;
+                i32::from(v)
+            } else {
+                let v = raw.take(num_bits) as i32;
+                if sign[i] < 0 { -v } else { v }
             };
-            *c = (i32::from(*c) + (input << shift)) as i16;
+            cur[i] = (i32::from(cur[i]) + (input << shift)) as i16;
+            i += 1;
         }
     }
 }
@@ -694,13 +705,28 @@ impl Srl<'_> {
         if num_bits == 1 {
             return if negative { -1 } else { 1 };
         }
+        // The magnitude in unary: one more for each zero until a one, which is
+        // consumed, or until `max`, which leaves the bit after alone.
         let mut mag: u32 = 1;
         let max = (1u32 << num_bits) - 1;
         while mag < max {
-            if self.bits.take(1) == 1 {
+            let room = max - mag;
+            let avail = (self.bits.remaining().min(32)) as u32;
+            let zeros = self.bits.peek().leading_zeros().min(avail);
+            if zeros < avail {
+                // A one follows `zeros` zeros.
+                let counted = zeros.min(room);
+                self.bits.skip(counted as usize + usize::from(zeros < room));
+                mag += counted;
                 break;
             }
-            mag += 1;
+            let counted = zeros.min(room);
+            self.bits.skip(counted as usize);
+            mag += counted;
+            if avail < 32 {
+                // The stream has ended: every bit past it reads as zero.
+                mag = max;
+            }
         }
         let mag = mag.min(i16::MAX as u32) as i16;
         if negative { -mag } else { mag }
@@ -708,43 +734,71 @@ impl Srl<'_> {
 }
 
 /// A bit stream read most-significant bit first, zero past its end, the way
-/// WinPR's `wBitStream` presents one.
+/// WinPR's `wBitStream` presents one. The bits ahead are held in a 64-bit window
+/// that is topped up a byte at a time as they are consumed, so that a read is a
+/// shift and a mask rather than a walk over the bytes it spans.
 struct Bits<'a> {
     data: &'a [u8],
-    /// Bits consumed.
-    at: usize,
+    /// The next byte to load into the window.
+    next: usize,
+    /// The bits not yet consumed, the next one at the top, zero below `have`.
+    window: u64,
+    /// How many of the window's bits are the stream's.
+    have: u32,
 }
 
 impl<'a> Bits<'a> {
     fn new(data: &'a [u8]) -> Self {
-        Self { data, at: 0 }
+        Self { data, next: 0, window: 0, have: 0 }
     }
 
     fn remaining(&self) -> usize {
-        self.data.len() * 8 - self.at
+        self.have as usize + (self.data.len() - self.next) * 8
+    }
+
+    /// Load bytes until the window holds more than 56 bits, or the whole rest of
+    /// the stream.
+    fn fill(&mut self) {
+        while self.have <= 56 {
+            let Some(&byte) = self.data.get(self.next) else { return };
+            self.window |= u64::from(byte) << (56 - self.have);
+            self.have += 8;
+            self.next += 1;
+        }
     }
 
     /// The next 32 bits, most significant first, zero past the end.
-    fn peek(&self) -> u32 {
-        let (byte, bit) = (self.at / 8, self.at % 8);
-        let mut acc: u64 = 0;
-        for i in 0..5 {
-            acc = (acc << 8) | u64::from(self.data.get(byte + i).copied().unwrap_or(0));
+    fn peek(&mut self) -> u32 {
+        if self.have < 32 {
+            self.fill();
         }
-        ((acc >> (8 - bit)) & 0xFFFF_FFFF) as u32
+        (self.window >> 32) as u32
     }
 
+    /// Consume `n` bits, `n` in `0..=32`, or what remains if fewer.
     fn skip(&mut self, n: usize) {
-        self.at = (self.at + n).min(self.data.len() * 8);
+        let n = n as u32;
+        if n > self.have {
+            // Which leaves the window short only when the stream is in it whole.
+            self.fill();
+        }
+        let n = n.min(self.have);
+        self.window <<= n;
+        self.have -= n;
     }
 
-    /// Consume `n` bits, `n` in `0..=32`, as a number.
+    /// Consume `n` bits, `n` in `0..=32`, as a number, zero past the end.
     fn take(&mut self, n: u32) -> u32 {
         if n == 0 {
             return 0;
         }
-        let v = self.peek() >> (32 - n);
-        self.skip(n as usize);
+        if self.have < n {
+            self.fill();
+        }
+        let v = (self.window >> (64 - n)) as u32;
+        let n = n.min(self.have);
+        self.window <<= n;
+        self.have -= n;
         v
     }
 
@@ -878,12 +932,20 @@ fn clamp16(v: i32) -> i16 {
     v.clamp(i32::from(i16::MIN), i32::from(i16::MAX)) as i16
 }
 
+/// `v / 2`, spelled as shifts: the quotient towards zero, as a division rounds,
+/// which is the floor of the value one up for a negative one. A division has no
+/// vector instruction in WebAssembly, so a compiler pulls each lane out to divide
+/// it; shifts it keeps in the lanes.
+fn half(v: i32) -> i32 {
+    (v + ((v >> 31) & 1)) >> 1
+}
+
 /// The reduce-extrapolate inverse wavelet over one component, three levels, in
 /// place. [MS-RDPEGFX] 3.3.8.1.4, as FreeRDP has it.
 fn idwt(buf: &mut [i16], temp: &mut [i16]) {
-    idwt_level(&mut buf[3807..], temp, 3);
-    idwt_level(&mut buf[3007..], temp, 2);
-    idwt_level(buf, temp, 1);
+    idwt_level::<8>(&mut buf[3807..], temp, 3);
+    idwt_level::<16>(&mut buf[3007..], temp, 2);
+    idwt_level::<32>(buf, temp, 1);
 }
 
 fn band_l(level: u32) -> usize {
@@ -895,15 +957,16 @@ fn band_h(level: u32) -> usize {
 }
 
 /// One level: HL, LH, HH and LL sub-bands at the front of `buf` become the LL of
-/// the level above, written over them.
+/// the level above, written over them. `N` is the lanes of the horizontal pass
+/// ([`idwt_row`]): the level's high band's length, rounded up to eight.
 ///
 /// Every sample of a line depends on the bands alone, or on the even samples
 /// beside it — never on the sample computed before it — so a line is computed as
 /// whole runs rather than one sample after another: along a row for the horizontal
 /// pass, and a row of every column at once for the vertical. This is where a
-/// Progressive tile's time goes, and runs over slices are what a compiler turns
-/// into vector instructions, here and in the page's WebAssembly alike.
-fn idwt_level(buf: &mut [i16], temp: &mut [i16], level: u32) {
+/// Progressive tile's time goes, and such runs are what a compiler turns into
+/// vector instructions, here and in the page's WebAssembly alike.
+fn idwt_level<const N: usize>(buf: &mut [i16], temp: &mut [i16], level: u32) {
     let (l, h) = (band_l(level), band_h(level));
     let step = l + h;
     let hl = 0;
@@ -913,18 +976,16 @@ fn idwt_level(buf: &mut [i16], temp: &mut [i16], level: u32) {
     let (low, high) = temp.split_at_mut(l * step);
 
     // Horizontal: rows of (LL, HL) become L; rows of (LH, HH) become H.
+    let mut line = Line::new();
     for row in 0..l {
-        idwt_row(&buf[ll + row * l..][..l], &buf[hl + row * h..][..h], &mut low[row * step..][..step]);
+        idwt_row::<N>(&buf[ll + row * l..], l, &buf[hl + row * h..], h, &mut low[row * step..][..step], &mut line);
     }
     for row in 0..h {
-        idwt_row(&buf[lh + row * l..][..l], &buf[hh + row * h..][..h], &mut high[row * step..][..step]);
+        idwt_row::<N>(&buf[lh + row * l..], l, &buf[hh + row * h..], h, &mut high[row * step..][..step], &mut line);
     }
     // Vertical: columns of (L, H) become the level above.
     idwt_columns(&low[..l * step], &high[..h * step], &mut buf[..step * step], step);
 }
-
-/// The most samples a band holds along one axis: level 1's low band.
-const BAND_MAX: usize = 33;
 
 /// `low - high`, the first even sample of a line.
 fn even_first(low: &[i16], high: &[i16], out: &mut [i16]) {
@@ -936,21 +997,21 @@ fn even_first(low: &[i16], high: &[i16], out: &mut [i16]) {
 /// `low - (before + after) / 2`, an even sample between two high ones.
 fn even_between(low: &[i16], before: &[i16], after: &[i16], out: &mut [i16]) {
     for (((out, &l), &h0), &h1) in out.iter_mut().zip(low).zip(before).zip(after) {
-        *out = clamp16(i32::from(l) - (i32::from(h0) + i32::from(h1)) / 2);
+        *out = clamp16(i32::from(l) - half(i32::from(h0) + i32::from(h1)));
     }
 }
 
 /// `low - high / 2`, the even sample past the last high one of a band two longer.
 fn even_past(low: &[i16], high: &[i16], out: &mut [i16]) {
     for ((out, &l), &h) in out.iter_mut().zip(low).zip(high) {
-        *out = clamp16(i32::from(l) - i32::from(h) / 2);
+        *out = clamp16(i32::from(l) - half(i32::from(h)));
     }
 }
 
 /// `(before + after) / 2 + 2 * high`, the odd sample between two even ones.
 fn odd_between(before: &[i16], after: &[i16], high: &[i16], out: &mut [i16]) {
     for (((out, &x0), &x2), &h) in out.iter_mut().zip(before).zip(after).zip(high) {
-        *out = clamp16((i32::from(x0) + i32::from(x2)) / 2 + 2 * i32::from(h));
+        *out = clamp16(half(i32::from(x0) + i32::from(x2)) + 2 * i32::from(h));
     }
 }
 
@@ -964,40 +1025,94 @@ fn odd_last(even: &[i16], high: &[i16], out: &mut [i16]) {
 /// `(even + low) / 2`, the sample that ends a line whose low band is two longer.
 fn mean(even: &[i16], low: &[i16], out: &mut [i16]) {
     for ((out, &x), &l) in out.iter_mut().zip(even).zip(low) {
-        *out = clamp16((i32::from(x) + i32::from(l)) / 2);
+        *out = clamp16(half(i32::from(x) + i32::from(l)));
     }
 }
 
-/// One line along a row: `low` and `high` interleave into `dst`, whose length is
-/// theirs together.
-fn idwt_row(low: &[i16], high: &[i16], dst: &mut [i16]) {
-    let (nl, nh) = (low.len(), high.len());
-    // The even samples, which are the line's every other one, and then the odd
-    // ones between them.
-    let mut even = [0i16; BAND_MAX];
-    let mut odd = [0i16; BAND_MAX];
-    let evens = if nl > nh { nh + 1 } else { nh };
-    even_first(&low[..1], &high[..1], &mut even[..1]);
-    even_between(&low[1..nh], &high[..nh - 1], &high[1..nh], &mut even[1..nh]);
-    if nl == nh + 1 {
-        even_first(&low[nh..=nh], &high[nh - 1..nh], &mut even[nh..=nh]);
-    } else if nl > nh + 1 {
-        even_past(&low[nh..=nh], &high[nh - 1..nh], &mut even[nh..=nh]);
+/// The most samples a line holds, and then some: the width of the scratch a row
+/// is computed in.
+const LINE: usize = 48;
+
+/// A row's scratch: the even samples, which are the line's every other one, and
+/// the odd ones between them. One per level, not per row, so that no row zeroes
+/// it.
+struct Line {
+    even: [i16; LINE],
+    odd: [i16; LINE],
+}
+
+impl Line {
+    fn new() -> Self {
+        Self { even: [0; LINE], odd: [0; LINE] }
     }
-    odd_between(&even[..evens - 1], &even[1..evens], &high[..evens - 1], &mut odd[..evens - 1]);
+}
+
+/// One line along a row: the first `nl` samples of `low` and the first `nh` of
+/// `high` interleave into `dst`, whose length is theirs together. A row's line is
+/// short — 33 samples at the widest — and a loop as long as it is not one a
+/// compiler vectorizes well at every level, so every sample between the line's
+/// ends is computed over `N` lanes at once, `N` at least `nh` and a multiple of
+/// eight, and the lanes past the line are thrown away. The ends themselves are one
+/// sample each. `high` is read one sample past `N`, which is within the band's
+/// coefficients, or the ones after them.
+fn idwt_row<const N: usize>(low: &[i16], nl: usize, high: &[i16], nh: usize, dst: &mut [i16], line: &mut Line) {
+    let Line { even, odd } = line;
+    let evens = if nl > nh { nh + 1 } else { nh };
+    even_lanes::<N>(lanes(&low[1..]), lanes(high), lanes(&high[1..]), lanes_mut(&mut even[1..]));
+    even[0] = clamp16(i32::from(low[0]) - i32::from(high[0]));
+    if nl == nh + 1 {
+        even[nh] = clamp16(i32::from(low[nh]) - i32::from(high[nh - 1]));
+    } else if nl > nh + 1 {
+        even[nh] = clamp16(i32::from(low[nh]) - half(i32::from(high[nh - 1])));
+    }
+    odd_lanes::<N>(lanes(even), lanes(&even[1..]), lanes(high), lanes_mut(odd));
     let mut odds = evens - 1;
     if nl <= nh {
-        odd_last(&even[nh - 1..nh], &high[nh - 1..nh], &mut odd[nh - 1..nh]);
+        odd[nh - 1] = clamp16(i32::from(even[nh - 1]) + 2 * i32::from(high[nh - 1]));
         odds = nh;
     } else if nl > nh + 1 {
-        mean(&even[nh..=nh], &low[nh + 1..nh + 2], &mut odd[nh..=nh]);
+        odd[nh] = clamp16(half(i32::from(even[nh]) + i32::from(low[nh + 1])));
         odds = nh + 1;
     }
-    for (pair, (&even, &odd)) in dst.as_chunks_mut::<2>().0.iter_mut().zip(even.iter().zip(&odd[..odds])) {
-        *pair = [even, odd];
+    // Interleaved: eight pairs at a time, then the pairs left, then an even sample
+    // with no odd one after it.
+    let blocks = odds / 8;
+    let pairs = even.as_chunks::<8>().0.iter().zip(odd.as_chunks::<8>().0);
+    for (out, (even, odd)) in dst.as_chunks_mut::<16>().0.iter_mut().zip(pairs).take(blocks) {
+        for k in 0..8 {
+            out[2 * k] = even[k];
+            out[2 * k + 1] = odd[k];
+        }
+    }
+    for i in blocks * 8..odds {
+        dst[2 * i] = even[i];
+        dst[2 * i + 1] = odd[i];
     }
     if evens > odds {
         dst[2 * odds] = even[odds];
+    }
+}
+
+/// The first `N` samples of a line, as the lanes.
+fn lanes<const N: usize>(samples: &[i16]) -> &[i16; N] {
+    samples.first_chunk().expect("a line holds its lanes")
+}
+
+fn lanes_mut<const N: usize>(samples: &mut [i16]) -> &mut [i16; N] {
+    samples.first_chunk_mut().expect("a line holds its lanes")
+}
+
+/// [`even_between`] over the lanes: a constant width, whatever the line's.
+fn even_lanes<const N: usize>(low: &[i16; N], before: &[i16; N], after: &[i16; N], out: &mut [i16; N]) {
+    for i in 0..N {
+        out[i] = clamp16(i32::from(low[i]) - half(i32::from(before[i]) + i32::from(after[i])));
+    }
+}
+
+/// [`odd_between`] over the lanes.
+fn odd_lanes<const N: usize>(before: &[i16; N], after: &[i16; N], high: &[i16; N], out: &mut [i16; N]) {
+    for i in 0..N {
+        out[i] = clamp16(half(i32::from(before[i]) + i32::from(after[i])) + 2 * i32::from(high[i]));
     }
 }
 
@@ -1035,14 +1150,14 @@ fn idwt_columns(low: &[i16], high: &[i16], dst: &mut [i16], step: usize) {
 }
 
 /// The three transformed components — 11.5 fixed-point YCbCr — to a tile of
-/// `BGRX32`, in the reference's fixed point.
+/// pixels in the surface's order, `RGBX`, in the reference's fixed point.
 ///
 /// The reference works in 64 bits, `(y + 4096) << 16` and each product added to it,
 /// then down 21. The same numbers are reached here in 32, which is what lets the
 /// loop be vector instructions: red's and blue's coefficients are multiples of
 /// four and eight, which come out of the sum and the shift together, and green's
 /// two products are taken apart at the sixteenth bit and carried by hand.
-fn to_bgrx(work: &[i16], pixels: &mut [u8]) {
+fn to_rgbx(work: &[i16], pixels: &mut [u8]) {
     let (y, rest) = work.split_at(COEFFS);
     let (cb, cr) = rest.split_at(COEFFS);
     for (px, ((&y, &cb), &cr)) in pixels.as_chunks_mut::<4>().0.iter_mut().zip(y.iter().zip(cb).zip(cr)) {
@@ -1058,12 +1173,13 @@ fn to_bgrx(work: &[i16], pixels: &mut [u8]) {
         let left = (p & 0xFFFF) + (q & 0xFFFF);
         let whole = (p >> 16) + (q >> 16) + (left >> 16);
         let g = (y - whole - i32::from(left & 0xFFFF != 0)) >> 5;
-        *px = [clip(b), clip(g), clip(r), 0];
+        // One word a pixel, rather than four bytes: a store the lanes make whole.
+        *px = (clip(r) | (clip(g) << 8) | (clip(b) << 16)).to_le_bytes();
     }
 }
 
-fn clip(v: i32) -> u8 {
-    v.clamp(0, 255) as u8
+fn clip(v: i32) -> u32 {
+    v.clamp(0, 255) as u32
 }
 
 /// Write every tile decoded so far in the frame to the surface, clipped to the
@@ -1267,7 +1383,7 @@ pub(crate) mod testing {
         v
     }
 
-    /// The `BGRX` a flat tile at `dc` decodes to.
+    /// The pixel a flat tile at `dc` decodes to.
     pub(crate) fn grey(dc: u8) -> [u8; 4] {
         [128 + dc, 128 + dc, 128 + dc, 0]
     }
@@ -1328,14 +1444,14 @@ mod tests {
     }
 
     /// The colour conversion in the reference's own 64 bits.
-    fn reference_bgrx(y: i16, cb: i16, cr: i16) -> [u8; 4] {
+    fn reference_rgbx(y: i16, cb: i16, cr: i16) -> [u8; 4] {
         let clip = |v: i64| v.clamp(0, 255) as u8;
         let y = (i64::from(y) + 4096) << 16;
         let (cb, cr) = (i64::from(cb), i64::from(cr));
         let r = ((cr * 91916 + y) >> 16) >> 5;
         let g = ((y - cb * 22527 - cr * 46819) >> 16) >> 5;
         let b = ((cb * 115992 + y) >> 16) >> 5;
-        [clip(b), clip(g), clip(r), 0]
+        [clip(r), clip(g), clip(b), 0]
     }
 
     /// The conversion in 32 bits is the reference's in 64, for every sample sixteen
@@ -1360,9 +1476,9 @@ mod tests {
                 work[COEFFS + i] = *cb;
                 work[2 * COEFFS + i] = *cr;
             }
-            to_bgrx(&work, &mut pixels);
+            to_rgbx(&work, &mut pixels);
             for (px, (cb, cr)) in pixels.as_chunks::<4>().0.iter().zip(&pairs) {
-                assert_eq!(*px, reference_bgrx(y, *cb, *cr), "y {y}, cb {cb}, cr {cr}");
+                assert_eq!(*px, reference_rgbx(y, *cb, *cr), "y {y}, cb {cb}, cr {cr}");
                 checked += 1;
             }
         }
@@ -1391,15 +1507,22 @@ mod tests {
     /// band two longer than the high one, one longer, and no longer.
     #[test]
     fn a_row_of_the_wavelet_is_the_reference_sample_for_sample() {
-        for (seed, (nl, nh)) in [(33, 31), (17, 16), (9, 8), (8, 8), (2, 1), (3, 1)].into_iter().enumerate() {
+        let mut line = Line::new();
+        let mut row = |lanes: usize, low: &[i16], nl: usize, high: &[i16], nh: usize, dst: &mut [i16]| match lanes {
+            32 => idwt_row::<32>(low, nl, high, nh, dst, &mut line),
+            16 => idwt_row::<16>(low, nl, high, nh, dst, &mut line),
+            _ => idwt_row::<8>(low, nl, high, nh, dst, &mut line),
+        };
+        for (seed, (nl, nh, lanes)) in [(33, 31, 32), (17, 16, 16), (9, 8, 8), (8, 8, 8), (2, 1, 8), (3, 1, 8)].into_iter().enumerate() {
             for round in 0..50 {
-                let low = samples(nl, (seed * 100 + round) as u32);
-                let high = samples(nh, (seed * 100 + round + 7_000) as u32);
+                // Each band with what lies past it, which the lanes read and must not show.
+                let low = samples(nl + lanes, (seed * 100 + round) as u32);
+                let high = samples(nh + lanes, (seed * 100 + round + 7_000) as u32);
                 let len = if nl <= nh { 2 * nh } else { nl + nh };
                 let mut expected = vec![0i16; len];
-                reference_line(&low, 1, &high, 1, &mut expected, 1, nl, nh);
+                reference_line(&low[..nl], 1, &high[..nh], 1, &mut expected, 1, nl, nh);
                 let mut got = vec![0i16; len];
-                idwt_row(&low, &high, &mut got);
+                row(lanes, &low, nl, &high, nh, &mut got);
                 assert_eq!(got, expected, "a {nl}+{nh} line, round {round}");
             }
         }

@@ -129,6 +129,8 @@ impl Frame {
 /// the lock for longer than that copy.
 pub struct Framebuffer {
     frame: Mutex<Frame>,
+    /// Whether what is painted is made opaque — see [`Self::opaque`].
+    opaque: bool,
 }
 
 /// Fold `rect` into the damage already staged, keeping the list to `cap`
@@ -178,7 +180,15 @@ impl Default for Framebuffer {
 
 impl Framebuffer {
     pub fn new() -> Self {
-        Self { frame: Mutex::new(Frame { width: 0, height: 0, stride: 0, pixels: Vec::new() }) }
+        Self { frame: Mutex::new(Frame { width: 0, height: 0, stride: 0, pixels: Vec::new() }), opaque: false }
+    }
+
+    /// A framebuffer read as RGBA: every pixel painted into it has its fourth byte
+    /// set to 255, where the decoders leave zero. For a reader — a canvas's image
+    /// data — where a zero there is a transparent pixel. What has never been
+    /// painted stays zero throughout, which such a reader does not draw.
+    pub fn opaque() -> Self {
+        Self { opaque: true, ..Self::new() }
     }
 
     /// Read the frame. The lock is held for the duration of `f`.
@@ -272,29 +282,17 @@ impl Framebuffer {
                 return false;
             };
             let to = (rect.y as usize + row) * stride + left;
-            frame.pixels[to..to + bytes].copy_from_slice(src);
-        }
-        true
-    }
-
-    /// Make one rectangle opaque: the fourth byte of each of its pixels, which the
-    /// decoders leave at zero, set to 255. For a reader that takes the frame as
-    /// RGBA — a canvas's image data — where a zero there is a transparent pixel. A
-    /// rectangle that does not fit the frame is left alone.
-    pub(crate) fn seal(&self, rect: Rect) {
-        let mut frame = self.lock();
-        if rect.x.saturating_add(rect.width) > frame.width
-            || rect.y.saturating_add(rect.height) > frame.height
-        {
-            return;
-        }
-        let stride = frame.stride;
-        for row in 0..rect.height as usize {
-            let from = (rect.y as usize + row) * stride + rect.x as usize * 4;
-            for px in frame.pixels[from..from + rect.width as usize * 4].as_chunks_mut::<4>().0 {
-                px[3] = 0xFF;
+            let dst = &mut frame.pixels[to..to + bytes];
+            if self.opaque {
+                // A word a pixel, its top byte set: a copy the lanes make whole.
+                for (out, px) in dst.as_chunks_mut::<4>().0.iter_mut().zip(src.as_chunks::<4>().0) {
+                    *out = (u32::from_le_bytes(*px) | 0xFF00_0000).to_le_bytes();
+                }
+            } else {
+                dst.copy_from_slice(src);
             }
         }
+        true
     }
 }
 
@@ -302,18 +300,19 @@ impl Framebuffer {
 mod tests {
     use super::*;
 
-    /// Sealing touches the fourth byte of the rectangle's pixels and nothing else.
+    /// An opaque framebuffer sets the fourth byte of the pixels painted into it
+    /// and nothing else; a plain one copies them as they are.
     #[test]
-    fn a_sealed_rectangle_is_opaque_and_the_rest_is_as_it_was() {
-        let framebuffer = Framebuffer::new();
-        framebuffer.resize(3, 2);
-        assert!(framebuffer.blit(&[1, 2, 3, 0, 4, 5, 6, 0], Rect { x: 1, y: 1, width: 2, height: 1 }));
-        framebuffer.seal(Rect { x: 1, y: 1, width: 1, height: 1 });
-        framebuffer.seal(Rect { x: 2, y: 1, width: 2, height: 1 });
-        framebuffer.with(|frame| {
-            assert_eq!(frame.pixels[..12], [0; 12]);
-            assert_eq!(frame.pixels[12..], [0, 0, 0, 0, 1, 2, 3, 0xFF, 4, 5, 6, 0]);
-        });
+    fn a_painted_rectangle_is_opaque_and_the_rest_is_as_it_was() {
+        for (opaque, alpha) in [(false, 0), (true, 0xFF)] {
+            let framebuffer = if opaque { Framebuffer::opaque() } else { Framebuffer::new() };
+            framebuffer.resize(3, 2);
+            assert!(framebuffer.blit(&[1, 2, 3, 0, 4, 5, 6, 0], Rect { x: 1, y: 1, width: 2, height: 1 }));
+            framebuffer.with(|frame| {
+                assert_eq!(frame.pixels[..12], [0; 12]);
+                assert_eq!(frame.pixels[12..], [0, 0, 0, 0, 1, 2, 3, alpha, 4, 5, 6, alpha]);
+            });
+        }
     }
 
     #[test]

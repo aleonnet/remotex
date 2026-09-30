@@ -106,6 +106,25 @@ test("a pipeline is composed from its first command, frame by frame", async () =
   compositor.close();
 });
 
+test("rectangles that touch along one row band are painted as one", async () => {
+  const compositor = (await loadEgfx(module))();
+  compositor.compose(
+    run(resetGraphics(8, 4), createSurface(1, 8, 4), mapToOutput(1, 0, 0)),
+  );
+  const composed = compositor.compose(
+    run(
+      startFrame(1),
+      solidFill(1, [1, 2, 3], [rect(0, 1, 2, 3), rect(2, 1, 5, 3)]),
+      solidFill(1, [4, 5, 6], [rect(0, 3, 2, 4)]),
+      endFrame(1),
+    ),
+  );
+  assert.deepEqual([...composed.painted], [0, 1, 5, 2, 0, 3, 2, 1]);
+  assert.deepEqual(pixel(composed, 4, 2), [3, 2, 1, 0xff]);
+  assert.deepEqual(pixel(composed, 1, 3), [6, 5, 4, 0xff]);
+  compositor.close();
+});
+
 test("pixels on the wire land where their rectangle says", async () => {
   const compositor = (await loadEgfx(module))();
   compositor.compose(

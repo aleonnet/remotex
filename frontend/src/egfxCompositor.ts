@@ -36,7 +36,10 @@ const MOST_THREADS = 4;
 
 /** What one run of commands did to the picture. */
 export interface ComposedRun {
-  /** The rectangles the run painted: `x, y, width, height` for each. */
+  /**
+   * The rectangles the run painted: `x, y, width, height` for each, those that
+   * share a row band and touch along it merged into one.
+   */
   painted: Uint32Array;
   /** The framebuffer's size, in its own pixels. Zero before the first reset. */
   width: number;
@@ -111,6 +114,34 @@ async function startThreads(
   startPool(threads);
 }
 
+/**
+ * The rectangles a run painted, with those that share a row band and touch or
+ * overlap along it merged into one. A Progressive frame is reported tile by tile,
+ * and each rectangle costs a copy and a paint per row, whatever its width.
+ */
+function coalesce(painted: Uint32Array): Uint32Array {
+  const rects: number[][] = [];
+  for (let i = 0; i + 3 < painted.length; i += 4) {
+    rects.push([painted[i], painted[i + 1], painted[i + 2], painted[i + 3]]);
+  }
+  rects.sort((a, b) => a[1] - b[1] || a[3] - b[3] || a[0] - b[0]);
+  const merged: number[][] = [];
+  for (const rect of rects) {
+    const last = merged[merged.length - 1];
+    if (
+      last &&
+      last[1] === rect[1] &&
+      last[3] === rect[3] &&
+      rect[0] <= last[0] + last[2]
+    ) {
+      last[2] = Math.max(last[0] + last[2], rect[0] + rect[2]) - last[0];
+    } else {
+      merged.push(rect);
+    }
+  }
+  return Uint32Array.from(merged.flat());
+}
+
 /** A framebuffer's rectangle, copied row by row into the same place in `to`. */
 function copyRect(
   from: Uint8ClampedArray,
@@ -154,7 +185,7 @@ export function loadEgfx(
             if (egfx.resized() || pixels.length !== bytes) {
               pixels = new Uint8ClampedArray(bytes);
             }
-            const painted = egfx.painted();
+            const painted = coalesce(egfx.painted());
             const shared = new Uint8ClampedArray(
               memory.buffer,
               egfx.pixels(),
