@@ -1,5 +1,6 @@
 //! The session: its configuration, its thread, and the loop that drives it.
 
+use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
@@ -67,9 +68,12 @@ pub struct Connect {
     /// somewhere else.
     ///
     /// The channel is still this client's: it unwraps the bulk compression, answers
-    /// the capability exchange and acknowledges every frame. What it stops doing is
-    /// decoding — no [`Event::Paint`] follows a command, and the framebuffer holds
-    /// nothing of what the pipeline draws. Means nothing without [`Connect::egfx`],
+    /// the capability exchange and writes every frame's acknowledgement. What it
+    /// stops doing is decoding — no [`Event::Paint`] follows a command, and the
+    /// framebuffer holds nothing of what the pipeline draws — and so it no longer
+    /// knows when a frame is finished: the caller says, with
+    /// [`Input::frame_composed`], and the host is told then. Means nothing without
+    /// [`Connect::egfx`],
     /// and nothing for a host that answers the offer with bitmap updates, which are
     /// decoded into the framebuffer as always.
     pub pass_graphics: bool,
@@ -146,14 +150,20 @@ pub enum Event {
     /// The graphics pipeline's commands, for a session configured with
     /// [`Connect::pass_graphics`]: whole PDUs as the host sent them, out of their
     /// bulk compression, in order. A run ends at a frame's end or where the host's
-    /// own PDU did, and the [`Event::Frame`] that follows one has been acknowledged
-    /// to the host by then.
+    /// own PDU did.
+    ///
+    /// `frame` is the frame the run ends, and an [`Event::Frame`] follows it. The
+    /// host is owed that frame's acknowledgement once the run has been composed,
+    /// and paces what it draws by how long that takes, as it does with a client
+    /// that decodes for itself: the caller says so with [`Input::frame_composed`],
+    /// for every frame, in any order, and the session holds the host a few frames
+    /// ahead of the caller on that ([`PASSED_AHEAD`]).
     ///
     /// They are meaningful only from the pipeline's first command on: a surface, a
     /// cache slot and each codec's own state are built by the commands before.
     /// [`Event::FramesMarked`] is where a pipeline begins, and it is sent again when
     /// a host closes the channel and opens another.
-    Graphics(Vec<u8>),
+    Graphics { commands: Vec<u8>, frame: Option<u32> },
     /// The server confirmed the graphics pipeline, so every [`Event::Paint`] from
     /// here on arrives inside a frame that ends in an [`Event::Frame`]. Sent before
     /// the first such paint, so a consumer pacing frames itself stops guessing
@@ -216,6 +226,70 @@ pub enum Event {
     /// The session is over, and the channel is about to close. `Ok(())` is an
     /// orderly disconnection from either side.
     Ended(Result<(), Error>),
+}
+
+/// How many frames of a passed pipeline the caller is left holding, uncomposed,
+/// before the host is kept from drawing another.
+///
+/// A Windows host draws until about eleven of its frames are unacknowledged, and
+/// then one more for each acknowledgement. Acknowledged as they are composed, a
+/// caller that composes more slowly than the host draws is therefore kept eleven
+/// frames behind the desktop for as long as it is slower: measured at 50 ms a
+/// frame, half a second. So while more than this many wait for the caller, the
+/// frames it has composed are not acknowledged yet, and the host's count fills
+/// with those instead of with frames still to compose — see
+/// [`PassedFrames::composed`].
+///
+/// Three, because the host draws its next frame some tens of milliseconds after
+/// the acknowledgement that allows it: with two waiting, a caller was left with
+/// nothing to compose often enough to show, and with three it never was.
+const PASSED_AHEAD: usize = 3;
+
+/// The frames of a passed pipeline ([`Connect::pass_graphics`]), between the
+/// caller that composes them and the host that waits to hear of each.
+#[derive(Default)]
+struct PassedFrames {
+    /// Handed to the caller, which has not said they are composed; oldest first.
+    owed: VecDeque<u32>,
+    /// Composed, and not acknowledged to the host yet; oldest first.
+    kept: VecDeque<u32>,
+    /// How many have been acknowledged, which each acknowledgement reports as
+    /// finished in all.
+    acknowledged: u32,
+}
+
+impl PassedFrames {
+    /// The acknowledgements to send now that the run ending `frame` is composed,
+    /// each a frame and how many are finished with it. None for a frame not waited
+    /// on: one already covered by a later frame's, or one of a channel since closed.
+    ///
+    /// Frames are acknowledged in the host's order and never before they are
+    /// composed — `frame` and every frame handed over before it are, since a run is
+    /// composed only after the runs before it. How soon after is what holds the
+    /// host to [`PASSED_AHEAD`]: nothing is acknowledged while more than that many
+    /// wait for the caller, one frame for each composed at exactly that many, and
+    /// two while fewer wait, until the caller has composed all it was handed, when
+    /// everything is. So a caller that keeps up is acknowledged at once, and no
+    /// acknowledgement outlasts the frames in front of it.
+    fn composed(&mut self, frame: u32) -> Vec<(u32, u32)> {
+        let Some(through) = self.owed.iter().position(|owed| *owed == frame) else {
+            return Vec::new();
+        };
+        self.kept.extend(self.owed.drain(..=through));
+        let due = match self.owed.len() {
+            0 => self.kept.len(),
+            waiting if waiting < PASSED_AHEAD => 2,
+            PASSED_AHEAD => 1,
+            _ => 0,
+        };
+        self.kept
+            .drain(..due.min(self.kept.len()))
+            .map(|frame| {
+                self.acknowledged = self.acknowledged.wrapping_add(1);
+                (frame, self.acknowledged)
+            })
+            .collect()
+    }
 }
 
 /// How many events may wait for the caller before the session thread waits for it.
@@ -597,6 +671,8 @@ struct Active<'a> {
     /// The graphics pipeline's surfaces and decompressor, for a session that offered
     /// it.
     graphics: Option<Graphics>,
+    /// The frames of a pipeline that is passed on, between the caller and the host.
+    passed: PassedFrames,
     /// Whether [`Event::ResizeReady`] has gone out.
     resize_ready: bool,
     /// The most recent size asked for before the channel was ready — only the most
@@ -832,6 +908,7 @@ impl<'a> Active<'a> {
                 true => Graphics::passing(),
                 false => Graphics::new(),
             }),
+            passed: PassedFrames::default(),
             resize_ready: false,
             pending_resize: None,
             clip_ready: false,
@@ -1022,7 +1099,8 @@ impl<'a> Active<'a> {
     /// goes unanswered is never opened.
     async fn on_dynamic(&mut self, payload: &[u8]) -> Result<()> {
         let (replies, updates) = {
-            let Self { chunks, incoming, dynamics, graphics, sound, capture, recorder, framebuffer, .. } = self;
+            let Self { chunks, incoming, dynamics, graphics, passed, sound, capture, recorder, framebuffer, .. } =
+                self;
             let pdu = match chunks.push(payload)? {
                 Chunk::Whole(pdu) => pdu,
                 Chunk::Partial => return Ok(()),
@@ -1054,6 +1132,9 @@ impl<'a> Active<'a> {
                     debug!("rdp: the host closed the graphics channel");
                     dynamics.graphics = None;
                     *graphics = graphics.as_ref().map(Graphics::fresh);
+                    // Its frames went with it: an acknowledgement still to come is
+                    // for a channel that is no longer there to be told.
+                    *passed = PassedFrames::default();
                     (vec![dvc::close(channel)], Vec::new())
                 }
                 // The sound, on the channel a current host prefers for it. Every
@@ -1156,7 +1237,15 @@ impl<'a> Active<'a> {
                     self.announce_desktop(width, height).await;
                 }
                 gfx::Update::Paint(rect) => self.paint(rect),
-                gfx::Update::Passed(commands) => self.send(Event::Graphics(commands)).await,
+                // Handed over, not finished: the frame a run ends is acknowledged
+                // when the caller says it has been composed.
+                gfx::Update::Passed { commands, frame } => {
+                    self.passed.owed.extend(frame);
+                    self.send(Event::Graphics { commands, frame }).await;
+                    if frame.is_some() {
+                        self.send(Event::Frame).await;
+                    }
+                }
                 gfx::Update::Frame { id, decoded } => {
                     self.send(Event::Frame).await;
                     self.acknowledge_frame(id, decoded).await?;
@@ -1225,6 +1314,19 @@ impl<'a> Active<'a> {
         let pdus = recorder.settle(channel, turn)?;
         for pdu in pdus {
             self.write_channel(dynamic, &pdu).await?;
+        }
+        Ok(())
+    }
+
+    /// The caller has composed the passed run that ended `frame`, so the host is
+    /// told, of that frame and of any handed over before it that it has not been
+    /// told of: a run is composed only after every run before it.
+    ///
+    /// A frame this session is not waiting on is one already covered that way, or
+    /// one of a channel the host has closed since, and nothing is said for it.
+    async fn on_frame_composed(&mut self, frame: u32) -> Result<()> {
+        for (frame, finished) in self.passed.composed(frame) {
+            self.acknowledge_frame(frame, finished).await?;
         }
         Ok(())
     }
@@ -1464,6 +1566,7 @@ impl<'a> Active<'a> {
                             self.send_layout().await?;
                         }
                         Command::Clipboard(what) => self.send_clipboard(what).await?,
+                        Command::FrameComposed(frame) => self.on_frame_composed(frame).await?,
                         Command::Input(_) => unreachable!("matched above"),
                     }
                 }
@@ -1726,6 +1829,41 @@ fn narrow(v: u32) -> u16 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A caller that composes each frame before the next arrives is acknowledged
+    /// at once, in the host's order, each acknowledgement counting one more
+    /// finished; a frame nobody is waiting on is acknowledged to nobody.
+    #[test]
+    fn a_caller_that_keeps_up_is_acknowledged_as_it_composes() {
+        let mut passed = PassedFrames::default();
+        passed.owed.push_back(7);
+        assert_eq!(passed.composed(7), vec![(7, 1)]);
+        passed.owed.extend([8, 9]);
+        assert_eq!(passed.composed(9), vec![(8, 2), (9, 3)], "8 was composed before 9 could be");
+        assert_eq!(passed.composed(8), Vec::new(), "already acknowledged");
+        assert_eq!(passed.composed(99), Vec::new(), "never handed over");
+    }
+
+    /// A caller with more than [`PASSED_AHEAD`] frames waiting is slower than the
+    /// host: what it composes is acknowledged only as its backlog comes down to
+    /// that, then one for one, so the host is held to that many frames ahead of it
+    /// — and everything is acknowledged once nothing waits.
+    #[test]
+    fn a_caller_that_is_behind_holds_the_host_to_a_few_frames_ahead() {
+        let mut passed = PassedFrames::default();
+        passed.owed.extend(1..=6);
+        assert_eq!(passed.composed(1), Vec::new(), "five wait");
+        assert_eq!(passed.composed(2), Vec::new(), "four wait");
+        assert_eq!(passed.composed(3), vec![(1, 1)], "three wait: one for one");
+        // The host draws another on that acknowledgement.
+        passed.owed.push_back(7);
+        assert_eq!(passed.composed(4), vec![(2, 2)]);
+        // It draws none, and the caller catches up.
+        assert_eq!(passed.composed(5), vec![(3, 3), (4, 4)], "two wait");
+        assert_eq!(passed.composed(6), vec![(5, 5), (6, 6)], "one waits");
+        assert_eq!(passed.composed(7), vec![(7, 7)], "none waits, and none is kept");
+        assert!(passed.owed.is_empty() && passed.kept.is_empty());
+    }
 
     /// The two channels this client takes, out of the dozen a Windows host offers —
     /// and each only when the session asked for what rides on it.

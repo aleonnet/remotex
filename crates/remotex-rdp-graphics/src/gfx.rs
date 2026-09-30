@@ -63,8 +63,10 @@ pub enum Update {
     Frame { id: u32, decoded: u32 },
     /// Commands for whoever composes the desktop in this client's place
     /// ([`Graphics::passing`]): whole PDUs as the host sent them, decompressed, in
-    /// the order they came. Each run ends at a frame's end or at the buffer's.
-    Passed(Vec<u8>),
+    /// the order they came. Each run ends at a frame's end or at the buffer's, and
+    /// `frame` is the frame it ends: the one the host is owed an acknowledgement
+    /// for once whoever composes the run has.
+    Passed { commands: Vec<u8>, frame: Option<u32> },
 }
 
 /// One surface: its pixels in `RGBX32`, where it shows on the output, and what has
@@ -298,7 +300,8 @@ impl Graphics {
     /// whole ([`Update::Passed`]). Nothing is decoded, no surface is kept and the
     /// framebuffer is never drawn into; what this end still reads is what the
     /// session itself answers — the confirmation, the output's size and each
-    /// frame's end, which is owed an acknowledgement whoever draws it.
+    /// frame's end, which is owed an acknowledgement once whoever draws the frame
+    /// has: a frame is not finished here, so none is counted here.
     pub fn passing() -> Self {
         let mut passing = Self::new();
         passing.pass = true;
@@ -352,14 +355,14 @@ impl Graphics {
     /// A buffer of commands for whoever composes them, cut where the session has
     /// something of its own to do: before the confirmation and before a reset, so
     /// what the session says about either reaches its caller ahead of the commands
-    /// that follow it, and after each frame's end, which is acknowledged once the
-    /// frame has been handed over.
+    /// that follow it, and after each frame's end, so that a run names the one
+    /// frame it ends.
     fn hand_on(&mut self, commands: &[u8]) -> Result<Vec<Update>> {
         let mut updates = Vec::new();
         let mut from = 0;
-        let cut = |updates: &mut Vec<Update>, from: &mut usize, to: usize| {
+        let cut = |updates: &mut Vec<Update>, from: &mut usize, to: usize, frame: Option<u32>| {
             if to > *from {
-                updates.push(Update::Passed(commands[*from..to].to_vec()));
+                updates.push(Update::Passed { commands: commands[*from..to].to_vec(), frame });
             }
             *from = to;
         };
@@ -376,25 +379,21 @@ impl Graphics {
                         "rdp: the host confirmed graphics pipeline version {version:#010x}, flags {flags:#x}; \
                          its commands are passed on"
                     );
-                    cut(&mut updates, &mut from, command.start);
+                    cut(&mut updates, &mut from, command.start, None);
                     updates.push(Update::Confirmed);
                 }
                 Some(Message::ResetGraphics { width, height, monitors }) => {
                     affordable(width, height)?;
                     debug!("rdp: graphics reset to {width}x{height} over {monitors} monitors");
                     self.output = Some((width, height));
-                    cut(&mut updates, &mut from, command.start);
+                    cut(&mut updates, &mut from, command.start, None);
                     updates.push(Update::Reset { width, height });
                 }
-                Some(Message::EndFrame { frame }) => {
-                    cut(&mut updates, &mut from, command.end);
-                    self.decoded = self.decoded.wrapping_add(1);
-                    updates.push(Update::Frame { id: frame, decoded: self.decoded });
-                }
+                Some(Message::EndFrame { frame }) => cut(&mut updates, &mut from, command.end, Some(frame)),
                 _ => {}
             }
         }
-        cut(&mut updates, &mut from, commands.len());
+        cut(&mut updates, &mut from, commands.len(), None);
         Ok(updates)
     }
 
@@ -777,7 +776,8 @@ impl Drop for Graphics {
     /// The measurement, said once when the channel is done with.
     fn drop(&mut self) {
         if !self.tally.commands.is_empty() {
-            info!("rdp: the graphics pipeline carried {} frames; {}", self.decoded, self.tally.summary());
+            let frames = self.tally.commands.get(&gfx::CMD_END_FRAME).copied().unwrap_or(0);
+            info!("rdp: the graphics pipeline carried {frames} frames; {}", self.tally.summary());
         }
     }
 }
@@ -1256,7 +1256,7 @@ mod tests {
 
     /// A passing pipeline hands every command on as it came and draws none of them:
     /// what it says for itself is the confirmation and the reset, each ahead of the
-    /// commands that follow it, and each frame's end behind the frame.
+    /// commands that follow it, and which frame a run ends.
     #[test]
     fn a_passing_pipeline_hands_its_commands_on_whole_and_in_order() {
         let framebuffer = Framebuffer::new();
@@ -1269,16 +1269,15 @@ mod tests {
         let updates = receive(&mut graphics, &framebuffer, &pdus);
         assert_eq!(updates, vec![
             Update::Confirmed,
-            Update::Passed(opening[0].clone()),
+            Update::Passed { commands: opening[0].clone(), frame: None },
             Update::Reset { width: 4, height: 4 },
-            Update::Passed([&opening[1..], &first[..]].concat().concat()),
-            Update::Frame { id: 1, decoded: 1 },
-            Update::Passed(second.concat()),
+            Update::Passed { commands: [&opening[1..], &first[..]].concat().concat(), frame: Some(1) },
+            Update::Passed { commands: second.concat(), frame: None },
         ]);
         let passed: Vec<u8> = updates
             .iter()
             .filter_map(|update| match update {
-                Update::Passed(commands) => Some(commands.clone()),
+                Update::Passed { commands, .. } => Some(commands.clone()),
                 _ => None,
             })
             .flatten()
@@ -1288,8 +1287,8 @@ mod tests {
         assert!(graphics.surfaces.is_empty() && graphics.clear.is_none(), "and nothing is kept");
     }
 
-    /// A frame that ends in a later packet is passed as it arrives, and its end is
-    /// still the only place a frame is reported.
+    /// A frame that ends in a later packet is passed as it arrives, and the run that
+    /// ends it is the only one that names it.
     #[test]
     fn a_passing_pipeline_passes_a_frame_split_across_packets() {
         let framebuffer = Framebuffer::new();
@@ -1298,12 +1297,12 @@ mod tests {
         let tail = [solidfill(1, [1, 2, 3, 0], &[(0, 0, 4, 4)]), end(7)];
         assert_eq!(receive(&mut graphics, &framebuffer, &head), vec![
             Update::Reset { width: 4, height: 4 },
-            Update::Passed(head.concat()),
+            Update::Passed { commands: head.concat(), frame: None },
         ]);
-        assert_eq!(receive(&mut graphics, &framebuffer, &tail), vec![
-            Update::Passed(tail.concat()),
-            Update::Frame { id: 7, decoded: 1 },
-        ]);
+        assert_eq!(receive(&mut graphics, &framebuffer, &tail), vec![Update::Passed {
+            commands: tail.concat(),
+            frame: Some(7),
+        }]);
     }
 
     /// What is passed is what a compositor composes: the same commands, handed on
@@ -1352,7 +1351,7 @@ mod tests {
         let relayed = Framebuffer::new();
         let mut composer = Graphics::new();
         for update in receive(&mut passing, &Framebuffer::new(), &pdus) {
-            if let Update::Passed(commands) = update {
+            if let Update::Passed { commands, .. } = update {
                 composer.compose(&commands, &relayed).expect("well-formed commands");
             }
         }

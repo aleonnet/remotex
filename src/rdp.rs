@@ -36,7 +36,7 @@ use crate::engine::{self, clamp_u16};
 use crate::keymap;
 use crate::protocol::{
     ClientMsg, ClipboardSnapshot, CursorShape, CursorUnit, HostDisplay, MAX_CLIPBOARD_BYTES,
-    MAX_CURSOR_DIM, MouseButton, ServerMsg, UNSCALED, WheelUnit,
+    MAX_CURSOR_DIM, MouseButton, Painted, ServerMsg, UNSCALED, WheelUnit,
 };
 use crate::rdp_camera;
 use crate::rdp_mic;
@@ -1017,9 +1017,17 @@ async fn active_loop(
                             sink.graphics_start().await?;
                         }
                     }
-                    // The pipeline's commands, for the browser to compose. Waiting
-                    // here for the browser's queue is waiting to read the host.
-                    Event::Graphics(commands) => sink.pass_graphics(commands).await?,
+                    // The pipeline's commands, for the browser to compose. The
+                    // frame a run ends is acknowledged to the host when the
+                    // browser has painted it, which is what the host paces its
+                    // drawing by.
+                    Event::Graphics { commands, frame } => {
+                        let frame = frame.map(|frame| {
+                            let input = input.clone();
+                            Painted::new(move || input.frame_composed(frame))
+                        });
+                        sink.pass_graphics(commands, frame).await?;
+                    }
                     Event::Cursor(cursor) => pointer.set(cursor),
                     Event::ResizeReady { max_area } => {
                         debug!("rdp: the remote offers dynamic resize, up to {max_area} pixels");

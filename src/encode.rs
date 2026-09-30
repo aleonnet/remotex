@@ -29,7 +29,7 @@ use desktop_vp9::walk::{LAG_CLEAR, QualityWalk};
 
 use crate::config::{Chroma, RenderPlan};
 use crate::feedback::LinkFeedback;
-use crate::protocol::{GraphicsUnit, Held, ServerMsg, Tile, VideoUnit};
+use crate::protocol::{GraphicsUnit, Held, Painted, ServerMsg, Tile, VideoUnit};
 use crate::stream::{DesktopStream, Produced, Round};
 use crate::shadow::Rect;
 use crate::video;
@@ -689,18 +689,24 @@ impl VideoSink {
     /// ([`crate::rdp_client::Event::Graphics`]).
     ///
     /// As [`Self::pass`] in what the queue does — the run takes its size out of
-    /// [`QUEUE_BUDGET`] and goes out in order with the messages around it, so a
-    /// browser that is behind holds the engine, and through it the host — and unlike
-    /// it in having no restart: nothing in a pipeline is a keyframe, and a run is
-    /// never dropped for one. A browser that needs the picture from the start is
-    /// given a session that starts.
-    pub async fn pass_graphics(&self, commands: Vec<u8>) -> anyhow::Result<()> {
+    /// [`QUEUE_BUDGET`] and goes out in order with the messages around it — and
+    /// unlike it in having no restart: nothing in a pipeline is a keyframe, and a
+    /// run is never dropped for one. A browser that needs the picture from the
+    /// start is given a session that starts.
+    ///
+    /// `frame` is the acknowledgement the host is owed for the frame the run ends,
+    /// if it ends one, said once the browser has painted it. That, and not the
+    /// queue, is what paces the host: no frame can be dropped between it and the
+    /// page, so a page that composes more slowly than the host draws has to be what
+    /// the host hears from. The budget is what is left for a browser that says
+    /// nothing at all.
+    pub async fn pass_graphics(&self, commands: Vec<u8>, frame: Option<Painted>) -> anyhow::Result<()> {
         self.shared.passing.store(true, Ordering::Relaxed);
         let bytes = commands.len();
         let held = self.hold(bytes).await;
         self.shared.graphics.fetch_add(1, Ordering::Relaxed);
         self.shared.graphics_bytes.fetch_add(bytes as u64, Ordering::Relaxed);
-        self.push(Pending::Msg(ServerMsg::Graphics(GraphicsUnit { data: commands, held }))).await
+        self.push(Pending::Msg(ServerMsg::Graphics(GraphicsUnit { data: commands, frame, held }))).await
     }
 
     /// Whether the picture is the remote's stream passed through ([`Self::pass`]).
@@ -1231,9 +1237,9 @@ mod tests {
     async fn a_graphics_pipeline_is_passed_in_order_and_nothing_is_encoded_beside_it() {
         let (sink, mut rx) = video_sink(64, 32).await;
         sink.graphics_start().await.unwrap();
-        sink.pass_graphics(vec![1; 40]).await.unwrap();
+        sink.pass_graphics(vec![1; 40], None).await.unwrap();
         sink.msg(ServerMsg::Resize { w: 32, h: 32, scale: UNSCALED }).await.unwrap();
-        sink.pass_graphics(vec![2; 9]).await.unwrap();
+        sink.pass_graphics(vec![2; 9], Some(Painted::default())).await.unwrap();
         assert!(sink.passing());
         assert!(sink.due_at().await.is_none(), "there is nothing to come back and encode");
         sink.frame().await.unwrap();
@@ -1241,9 +1247,9 @@ mod tests {
 
         let out = drain(&mut rx, 4).await;
         assert!(matches!(out[0], ServerMsg::GraphicsStart));
-        assert!(matches!(&out[1], ServerMsg::Graphics(run) if run.data == vec![1; 40]));
+        assert!(matches!(&out[1], ServerMsg::Graphics(run) if run.data == vec![1; 40] && run.frame.is_none()));
         assert!(matches!(out[2], ServerMsg::Resize { w: 32, h: 32, .. }));
-        assert!(matches!(&out[3], ServerMsg::Graphics(run) if run.data == vec![2; 9]));
+        assert!(matches!(&out[3], ServerMsg::Graphics(run) if run.data == vec![2; 9] && run.frame.is_some()));
         assert!(rx.try_recv().is_err(), "and no access unit beside them");
     }
 
@@ -1253,13 +1259,13 @@ mod tests {
     #[tokio::test]
     async fn a_passed_graphics_run_holds_its_share_of_the_budget() {
         let (sink, mut rx) = video_sink(64, 32).await;
-        sink.pass_graphics(vec![0; QUEUE_BUDGET as usize]).await.unwrap();
+        sink.pass_graphics(vec![0; QUEUE_BUDGET as usize], None).await.unwrap();
         sink.flush().await;
         let held = drain(&mut rx, 1).await;
-        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_graphics(vec![0; 16])).await;
+        let waiting = tokio::time::timeout(Duration::from_millis(50), sink.pass_graphics(vec![0; 16], None)).await;
         assert!(waiting.is_err(), "the budget is spent, so the next run waits");
         drop(held);
-        tokio::time::timeout(Duration::from_secs(1), sink.pass_graphics(vec![0; 16]))
+        tokio::time::timeout(Duration::from_secs(1), sink.pass_graphics(vec![0; 16], None))
             .await
             .expect("the share came back with the run")
             .unwrap();

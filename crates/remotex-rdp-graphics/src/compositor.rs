@@ -63,7 +63,7 @@ impl Compositor {
                 }
                 Update::Paint(rect) => composed.painted.push(rect),
                 Update::Frame { .. } => composed.frames += 1,
-                Update::Confirmed | Update::Passed(_) => {}
+                Update::Confirmed | Update::Passed { .. } => {}
             }
         }
         Ok(composed)

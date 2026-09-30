@@ -79,7 +79,16 @@ impl Wire {
                             self.push(Record::Tile(tile), &mut frames)?;
                         }
                     }
-                    ServerMsg::Graphics(unit) => self.push(Record::Graphics(unit), &mut frames)?,
+                    // A frame's last run is its batch's last record: the browser
+                    // shows a batch once it has drawn all of it, and acknowledges
+                    // it then, which is this frame's acknowledgement to the host.
+                    ServerMsg::Graphics(unit) => {
+                        let ends_frame = unit.frame.is_some();
+                        self.push(Record::Graphics(unit), &mut frames)?;
+                        if ends_frame {
+                            self.flush(&mut frames)?;
+                        }
+                    }
                     // Audio has no pixel-order dependency, so do not delay it
                     // behind the current batch.
                     ServerMsg::Audio(packets) => {
@@ -125,6 +134,7 @@ impl Wire {
         // Each record's share of the queue budget moves to the batch, which is where
         // its bytes are from here on.
         let mut held = Vec::with_capacity(self.pending.len());
+        let mut painted = Vec::new();
         for record in self.pending.drain(..) {
             held.push(match record {
                 Record::Video(unit) => {
@@ -140,13 +150,14 @@ impl Wire {
                 Record::Graphics(unit) => {
                     self.totals.graphics(unit.record_len());
                     unit.write_record(&mut frame);
+                    painted.extend(unit.frame);
                     unit.held
                 }
             });
         }
         self.pending_bytes = 0;
         self.totals.frame(frame.len());
-        frames.push(WireFrame::Batch { sequence, bytes: frame, held });
+        frames.push(WireFrame::Batch { sequence, bytes: frame, held, painted });
         Ok(())
     }
 }
@@ -514,7 +525,7 @@ mod tests {
     #[test]
     fn graphics_runs_are_records_in_their_place() {
         let run = |seed: u8, len: usize| {
-            ServerMsg::Graphics(crate::protocol::GraphicsUnit { data: vec![seed; len], held: Held::default() })
+            ServerMsg::Graphics(crate::protocol::GraphicsUnit { data: vec![seed; len], frame: None, held: Held::default() })
         };
         let mut wire = Wire::default();
         let frames = wire.encode(vec![ServerMsg::GraphicsStart, run(1, 5), run(2, 700), resize(), run(3, 1)]).unwrap();
@@ -541,6 +552,29 @@ mod tests {
         assert_eq!(seen, vec![(1, 5), (2, 700), (3, 1)]);
         assert_eq!(binary(&frames).len(), 2, "the resize between them flushed the first batch");
         assert_eq!((wire.totals.graphics, wire.totals.graphics_bytes), (3, 5 + 700 + 1 + 3 * 5));
+    }
+
+    /// The run that ends a frame ends its batch, which carries what that frame is
+    /// owed: the browser shows a batch once it has drawn all of it, and its
+    /// acknowledgment of the batch is the frame's.
+    #[test]
+    fn a_frames_last_run_ends_its_batch() {
+        use crate::protocol::{GraphicsUnit, Painted};
+        let run = |seed: u8, ends: bool| {
+            let frame = ends.then(Painted::default);
+            ServerMsg::Graphics(GraphicsUnit { data: vec![seed; 4], frame, held: Held::default() })
+        };
+        let mut wire = Wire::default();
+        let frames =
+            wire.encode(vec![run(1, false), run(2, true), run(3, true), run(4, false), run(5, false)]).unwrap();
+        let shape: Vec<(u16, usize)> = frames
+            .iter()
+            .map(|frame| match frame {
+                WireFrame::Batch { bytes, painted, .. } => (u16::from_le_bytes([bytes[2], bytes[3]]), painted.len()),
+                other => panic!("expected a batch, got {other:?}"),
+            })
+            .collect();
+        assert_eq!(shape, vec![(2, 1), (1, 1), (2, 0)], "records, and frames owed, in each batch");
     }
 
     /// A unit's share of the queue budget rides the batch it went out in.

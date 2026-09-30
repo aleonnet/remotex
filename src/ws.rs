@@ -73,7 +73,7 @@ use crate::{
     config::{Chroma, Decoders},
     feedback::LinkFeedback,
     mic::MicSignal,
-    protocol::{self, ClientMsg, Held, ServerMsg, WireFrame},
+    protocol::{self, ClientMsg, Held, Painted, ServerMsg, WireFrame},
     server::AppState,
     session::{AttachEvent, REATTACH_GRACE_PERIOD, SessionManager, UplinkRefused},
     throughput::{Socket, ThroughputMeters},
@@ -227,6 +227,10 @@ struct PendingPaint {
     /// buffer or on the link — and so given back by the two things that say it is
     /// not: its acknowledgment, or a pong for a ping written after it.
     held: Vec<Held>,
+    /// What the batch's payloads are owed once it is painted ([`Painted`]), kept
+    /// until its acknowledgment: a pong says the browser has the batch, not that it
+    /// has drawn it.
+    painted: Vec<Painted>,
 }
 
 /// What waiting for the window cost one batch — reported by
@@ -413,6 +417,7 @@ impl PaintTracker {
     fn let_go(&mut self) {
         for paint in &mut self.pending {
             paint.held.clear();
+            paint.painted.clear();
         }
     }
 
@@ -472,11 +477,20 @@ impl PaintTracker {
             sequence,
             sent: Instant::now(),
             held,
+            painted: Vec::new(),
         });
         self.sent += 1;
         self.max_in_flight = self.max_in_flight.max(self.pending.len() as u64);
         self.publish_owed();
         released
+    }
+
+    /// What the batch just recorded ([`Self::sent`]) owes its payloads once it is
+    /// painted, kept with it until its acknowledgment whichever the client is.
+    fn owes(&mut self, painted: Vec<Painted>) {
+        if let Some(paint) = self.pending.back_mut() {
+            paint.painted = painted;
+        }
     }
 
     /// Record what a batch's admission cost, once that batch is on the socket.
@@ -638,13 +652,18 @@ async fn send_batch<S>(
     ws_tx: &mut S,
     sequence: u32,
     batch: Message,
-    held: Vec<Held>,
+    (held, painted): (Vec<Held>, Vec<Painted>),
     admission: Admission,
 ) -> Result<(), S::Error>
 where
     S: futures_util::Sink<Message> + Unpin,
 {
-    let released = paint.lock().unwrap().sent(sequence, held);
+    let released = {
+        let mut paint = paint.lock().unwrap();
+        let released = paint.sent(sequence, held);
+        paint.owes(painted);
+        released
+    };
     if let Err(e) = ws_tx.send(batch).await {
         paint.lock().unwrap().unsent(sequence);
         return Err(e);
@@ -1272,7 +1291,7 @@ async fn session(
             };
             for frame in frames {
                 match frame {
-                    WireFrame::Batch { sequence, bytes, held } => {
+                    WireFrame::Batch { sequence, bytes, held, painted } => {
                         // The one hop with no backpressure of its own. Waiting
                         // here — before the write, after the encode — is what
                         // makes the browser's paint queue as bounded as every
@@ -1293,7 +1312,7 @@ async fn session(
                             &mut ws_tx,
                             sequence,
                             Message::Binary(bytes.into()),
-                            held,
+                            (held, painted),
                             admission,
                         )
                         .await
@@ -1718,6 +1737,35 @@ mod tests {
         assert_eq!(admission, Admission::Immediate);
     }
 
+    /// What a batch's payloads are owed once it is painted waits for the painter,
+    /// not for the link: a pong says the browser has the batch, and a pipeline's
+    /// host is paced by how soon its frames are drawn.
+    #[tokio::test(start_paused = true)]
+    async fn what_a_batch_owes_is_said_when_it_is_painted() {
+        let said = Arc::new(Mutex::new(Vec::new()));
+        let owes = |frame: u32| {
+            let said = Arc::clone(&said);
+            vec![Painted::new(move || said.lock().unwrap().push(frame))]
+        };
+        let said = || said.lock().unwrap().clone();
+        let mut paint = PaintTracker::default();
+        for sequence in 1..=4 {
+            paint.sent(sequence, Vec::new());
+            paint.owes(owes(sequence));
+        }
+        paint.received_through(4);
+        assert_eq!(said(), Vec::<u32>::new(), "received is not painted");
+        // An acknowledgment completes every batch before its own.
+        paint.acknowledge(2, 0, 0);
+        assert_eq!(said(), vec![1, 2]);
+        // A write the socket refused never reached a painter, and a socket that
+        // ends leaves nobody to paint the rest: neither keeps a host waiting.
+        paint.unsent(4);
+        assert_eq!(said(), vec![1, 2, 4]);
+        drop(paint);
+        assert_eq!(said(), vec![1, 2, 4, 3]);
+    }
+
     /// The queue budget a batch carried is the engine's room to send more, so it
     /// goes back the moment the batch is known to be at the client and not before:
     /// written is not delivered, and a slow link is exactly where they differ.
@@ -1897,7 +1945,7 @@ mod tests {
             &mut DeadSocket,
             1,
             Message::Binary(Vec::new().into()),
-            Vec::new(),
+            (Vec::new(), Vec::new()),
             // The admission that used to be recorded before the write, so a
             // failed write reported a batch as having run past the window while
             // the same batch was rolled out of `sent`.
@@ -1929,7 +1977,7 @@ mod tests {
             &mut futures_util::sink::drain(),
             1,
             Message::Binary(Vec::new().into()),
-            Vec::new(),
+            (Vec::new(), Vec::new()),
             Admission::PastWindow,
         )
         .await

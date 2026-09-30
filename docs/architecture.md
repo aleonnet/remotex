@@ -525,14 +525,32 @@ the pipeline.
   target with its pipeline on.
 - **What passes** (`VideoSink::pass_graphics`). The RDP client still owns the
   channel: it answers the capability exchange, unwraps the bulk compression —
-  whose history is the connection's — and acknowledges every frame, as it does
-  when it composes (`Graphics::passing` in `crates/remotex-rdp-graphics/src/gfx.rs`). It decodes
+  whose history is the connection's — and writes every frame's acknowledgement
+  (`Graphics::passing` in `crates/remotex-rdp-graphics/src/gfx.rs`). It decodes
   nothing. What it unwrapped goes to the engine as `Event::Graphics`: whole
   `RDPGFX` PDUs, headers and all, in order, each run ending at a frame's end or
-  where the host's own packet did. The engine queues each as a `GRAPHICS` record,
-  which takes its share of `QUEUE_BUDGET` like an access unit, so a browser that
-  is behind holds the engine, the engine stops reading the host, and the host
-  slows. H.264 stays refused in the capability advertise, passed or composed.
+  where the host's own packet did, and naming the frame it ends. The engine
+  queues each as a `GRAPHICS` record, which takes its share of `QUEUE_BUDGET`
+  like an access unit. H.264 stays refused in the capability advertise, passed
+  or composed.
+- **The page paces the host.** A frame is acknowledged to the host when the
+  page has composed it, not when the gateway read it. Nothing between the host
+  and the page can drop a frame — every command is state the next one draws
+  against — so a page that composes more slowly than the host draws has to be
+  what the host hears from, and the host paces itself by its acknowledgements as
+  it does for a client that decodes for itself. The run that ends a frame ends
+  its batch (`wire.rs`), so the page draws and shows one frame per batch and its
+  `paintAck` is that frame's; the acknowledgement rides the run and then its
+  batch as the queue budget does (`Painted` in `protocol.rs`), said when the
+  batch is acknowledged — or wherever the batch is dropped instead, so a socket
+  that closes leaves the host waiting on nothing. The RDP client keeps the host
+  a few frames ahead of the page rather than as far as the host would go
+  ([The pipeline, passed on](rdp-client.md#the-pipeline-passed-on)). Measured
+  with a stand-in page composing at 35 ms a frame against a host drawing at
+  30 frames/s: acknowledged as the gateway read them, the page was sent frames
+  four to a batch and showed 8 a second of the 28 it composed, a quarter of a
+  second and then two thirds behind; paced this way it shows 28 a second, each
+  35 ms after the last, a tenth of a second behind.
 - **A pipeline is announced where it starts.** `graphicsStart` goes out when the
   host confirms the pipeline, ahead of its first command, and again if the host
   closes the channel and opens another. It says the pipeline starts from nothing,
@@ -939,7 +957,8 @@ GRAPHICS op 0x04: u32 len | commands[len]
 ```
 
 One frame carries every record ready at once, so a backlog does not cost one
-WebSocket event per record. Receivers reject unknown operations and truncated
+WebSocket event per record — save that a `GRAPHICS` record ending a frame ends
+its batch, since a batch is shown once. Receivers reject unknown operations and truncated
 records, and reject a nonzero frame flags byte. A `VIDEO` record's own flags byte
 is `0x01` for a keyframe and nothing else — any other bit is rejected the same
 way. A `TILE` record is one rectangle the remote sent, as a PNG, drawn at `(x, y)`
@@ -955,8 +974,10 @@ length is rejected.
 attachment. After the paint worker has finished the batch's ordered
 parse/decode/draw pass, the client sends `paintAck` with that sequence plus its
 worker queue and draw times. `ws.rs` consumes this transport feedback rather than
-forwarding it to the remote engine, and logs those measurements with the
-attachment totals. A socket generation travels through the worker so a late
+forwarding it to the remote engine — save a passed graphics pipeline, where a
+batch's acknowledgment is its frame's to the host
+([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)) —
+and logs those measurements with the attachment totals. A socket generation travels through the worker so a late
 completion from a dead attachment cannot acknowledge a new one. This is the
 measurement contract for application-level backpressure, and the gateway acts on
 it three times: the paint window in `ws.rs` holds the next batch when too many are
