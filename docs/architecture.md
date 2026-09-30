@@ -412,7 +412,8 @@ Three controls with similar names therefore remain separate:
   gateway reads it once at start-up and refuses to start unless it is the release `src/hevc_wasm.rs` pins by SHA-256, since the page's
   worker calls that build's exports. Where the browser's
   `VideoDecoder` refuses the picture, the page, if isolated, asks the gateway for
-  the decoder and, served it and running shared-memory SIMD WebAssembly, decodes
+  the decoder and, served it, running shared-memory SIMD WebAssembly and holding
+  a WebGL 2 canvas that takes the stream's primaries to present on, decodes
   the picture with it in a worker of its own. That browser answers yes when its
   `AudioDecoder` decodes the sound, so Chrome on a GPU without HEVC Range
   Extensions is passed the whole stream: its own decoder for the sound, the page's
