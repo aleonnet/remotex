@@ -39,12 +39,6 @@ embedded-gateway = ["dep:crossterm", "dep:libc", "dep:windows-sys"]
 # build has them and none compiles or links either. This links both from their
 # private static archives instead, for a build that brings its own.
 apple-hp-media-static = ["dep:avcodec-hevc-sys", "dep:fdk-aac-prebuilt-sys"]
-# EXPERIMENTAL: the page's software HEVC decoder, for a browser whose own refuses
-# a High Performance Mac's 4:4:4 under `media_passthrough`. It is libavcodec in
-# WebAssembly, a release of andrewtheguy/hevc-wasm that build.rs downloads (or
-# takes from REMOTEX_HEVC_WASM_DIR), served at /hevc/ with the page made
-# cross-origin isolated (src/assets.rs). In no release artifact.
-hevc-wasm = []
 
 [dependencies]
 axum = { version = "0.8", features = ["ws"] }
@@ -185,6 +179,10 @@ sha1 = "0.11"
 # suppresses it. See `deflate_chunk` in src/vnc_encodings.rs; the production
 # deflate and inflate loops are correct under either.
 flate2 = "1"
+# EXPERIMENTAL: the software HEVC decoder's release archive, read once at start-up
+# (src/hevc_wasm.rs) and never written. No default features: nothing here reads
+# extended attributes.
+tar = { version = "0.4", default-features = false }
 # Tuned TCP keepalive on every engine socket (src/engine.rs), so a remote host
 # that is switched off — no FIN, no RST, just silence — is noticed in seconds
 # rather than the kernel default's couple of hours. Already in the tree behind
@@ -237,8 +235,6 @@ hmac = "0.13"
 
 [build-dependencies]
 anyhow = "1"
-# The hevc-wasm release's checksum (build.rs); the version already in the tree.
-sha2 = "0.11"
 
 # The global allocator on every Unix build (src/main.rs): glibc's per-thread arenas
 # kept freed session memory, and the gateway grew with every session. Windows' heap

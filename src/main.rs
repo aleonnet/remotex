@@ -129,6 +129,21 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
     Ok(())
 }
 
+/// EXPERIMENTAL: read the software HEVC decoder `[hevc_wasm]` names, before the
+/// gateway listens, so an archive it cannot serve is a refused start.
+fn load_hevc_decoder(config: &AppConfig) -> anyhow::Result<Option<remotex::hevc_wasm::HevcDecoder>> {
+    let Some(archive) = &config.hevc_wasm else {
+        return Ok(None);
+    };
+    let decoder = remotex::hevc_wasm::HevcDecoder::load(archive)?;
+    info!(
+        "serving the software HEVC decoder hevc-wasm v{} from {}, cross-origin isolated",
+        remotex::hevc_wasm::VERSION,
+        archive.display()
+    );
+    Ok(Some(decoder))
+}
+
 async fn serve(config: AppConfig) -> anyhow::Result<()> {
     if let Some(recording) = &config.meter {
         info!("recording websocket throughput to {}", recording.database.display());
@@ -138,7 +153,8 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         config.targets.iter().map(|target| target.name.clone()).collect(),
     )
         .context("cannot record websocket throughput ([meter].database)")?;
-    let app = server::router(config.clone(), throughput);
+    let hevc_decoder = load_hevc_decoder(&config)?;
+    let app = server::router(config.clone(), throughput, hevc_decoder);
 
     // One server per listener over the same router — `Router` is `Clone`, and the
     // session slot behind it is a single `Arc`, so which socket a browser arrived on

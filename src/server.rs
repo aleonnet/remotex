@@ -17,6 +17,7 @@ use crate::{
     auth::{self, AuthSessions},
     config::AppConfig,
     error::{ApiResult, AppError},
+    hevc_wasm::HevcDecoder,
     session::SessionManager,
     throughput::{self, Throughput},
     ws,
@@ -35,6 +36,8 @@ pub struct AppState {
     pub auth: Arc<AuthSessions>,
     /// Every browser socket's byte counters, and the database `[meter]` records them in.
     pub throughput: Throughput,
+    /// EXPERIMENTAL: the software HEVC decoder `[hevc_wasm]` names, read at start-up.
+    pub hevc_decoder: Option<HevcDecoder>,
 }
 
 /// A [`tokio::net::TcpListener`] whose accepted sockets have `TCP_NODELAY` set.
@@ -211,10 +214,15 @@ fn bind_one(socket: std::net::SocketAddr) -> std::io::Result<std::net::TcpListen
 ///
 /// `throughput` is where the browser sockets count their bytes and, when `[meter].enabled`
 /// is set, the database [`crate::throughput::start`] records them in and
-/// `/api/throughput` reads.
-pub fn router(config: AppConfig, throughput: Throughput) -> Router {
+/// `/api/throughput` reads. `hevc_decoder` is what [`HevcDecoder::load`] read from
+/// `[hevc_wasm].archive`, which the fallback serves.
+pub fn router(
+    config: AppConfig,
+    throughput: Throughput,
+    hevc_decoder: Option<HevcDecoder>,
+) -> Router {
     let sessions = Arc::new(SessionManager::new(config.targets.clone()));
-    router_with_sessions(config, sessions, throughput)
+    router_with_sessions(config, sessions, throughput, hevc_decoder)
 }
 
 /// [`router`] over a caller-supplied session slot.
@@ -226,6 +234,7 @@ pub(crate) fn router_with_sessions(
     config: AppConfig,
     sessions: Arc<SessionManager>,
     throughput: Throughput,
+    hevc_decoder: Option<HevcDecoder>,
 ) -> Router {
     // Two shapes of the same three routes, and which one is registered is decided
     // here rather than inside the handlers. An embedded gateway *has* no login —
@@ -257,6 +266,7 @@ pub(crate) fn router_with_sessions(
         sessions,
         auth: Arc::new(AuthSessions::default()),
         throughput,
+        hevc_decoder,
     };
     let require_auth = middleware::from_fn_with_state(state.clone(), require_auth);
 
@@ -301,7 +311,9 @@ pub(crate) fn router_with_sessions(
     routed
         // `.fallback` returns the SPA's response as-is, where `.not_found_service`
         // would force a 404 onto the index a client-side route is answered with.
-        .fallback(crate::assets::serve)
+        .fallback(|State(state): State<AppState>, request: Request| async move {
+            crate::assets::serve(state.hevc_decoder.as_ref(), &request)
+        })
         // Added last and therefore **outermost**: it sees every request before
         // routing, because what it acts on is the `Host` a browser arrived under
         // rather than which handler would answer. Inert unless
@@ -936,7 +948,7 @@ mod tests {
             source: crate::config::LogoSource::Inline(bytes::Bytes::from_static(PNG)),
         });
 
-        let response = router(config, Throughput::default())
+        let response = router(config, Throughput::default(), None)
             .oneshot(
                 axum::http::Request::builder()
                     .uri("/api/logo")
@@ -958,7 +970,7 @@ mod tests {
     /// assertion below is about the redirect, and a request that is *not*
     /// redirected only has to be shown not to be one.
     fn dev_router(dev_hostname: Option<&str>) -> Router {
-        router(router_config(dev_hostname), Throughput::default())
+        router(router_config(dev_hostname), Throughput::default(), None)
     }
 
     /// The config both test routers are built from, so the only thing that ever
@@ -1008,6 +1020,7 @@ mod tests {
             },
             dev_hostname: dev_hostname.map(str::to_owned),
             meter: None,
+            hevc_wasm: None,
         }
     }
 
@@ -1323,11 +1336,12 @@ mod tests {
             },
             dev_hostname: None,
             meter: None,
+            hevc_wasm: None,
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
         let addr = listener.local_addr().unwrap();
-        let app = router_with_sessions(config, sessions, Throughput::default());
+        let app = router_with_sessions(config, sessions, Throughput::default(), None);
         tokio::spawn(async move {
             axum::serve(listener, app).await.unwrap();
         });
@@ -1453,7 +1467,7 @@ mod tests {
         meters.counter(None, throughput::Socket::Session).received(4);
         meters.sample(now - 9);
         meters.counter(None, throughput::Socket::Session).received(2);
-        let app = router(router_config(None), Throughput { meters, store: Some(Arc::new(store)) });
+        let app = router(router_config(None), Throughput { meters, store: Some(Arc::new(store)) }, None);
 
         let response = app.clone().oneshot(get("/api/throughput", None)).await.unwrap();
         assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
@@ -1523,7 +1537,7 @@ mod tests {
             format!(r#"{{"at":{},"rates":[{{"target":null,"socket":"session","sentPerSec":0,"receivedPerSec":4}}]}}"#, now - 9)
         );
 
-        let app = router(router_config(None), Throughput::default());
+        let app = router(router_config(None), Throughput::default(), None);
         let cookie = log_in(app.clone()).await;
         let response = app.clone().oneshot(get("/api/throughput", Some(&cookie))).await.unwrap();
         assert_eq!(response.status(), StatusCode::NOT_FOUND);

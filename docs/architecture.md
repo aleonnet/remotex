@@ -398,13 +398,15 @@ Three controls with similar names therefore remain separate:
   missing from the device's list), so the "no" was right.
   A browser that decodes the sound but not the picture, as that one did, loses
   nothing by being sent both re-encoded.
-- **EXPERIMENTAL: the picture in software.** A gateway built with the non-default
-  `hevc-wasm` feature serves [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm),
+- **EXPERIMENTAL: the picture in software.** A gateway configured with
+  `[hevc_wasm]` serves [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm),
   libavcodec's HEVC decoder compiled to WebAssembly with SIMD128 and slice threads,
-  at `/hevc/` — a release `build.rs` downloads and checks against its pinned
-  SHA-256 — and every file with COOP `same-origin` and COEP `require-corp`, which
+  at `/hevc/`, and every file with COOP `same-origin` and COEP `require-corp`, which
   make the page cross-origin isolated for the threads' shared memory
-  (`src/assets.rs`). No release artifact has it. Where the browser's
+  (`src/assets.rs`). No build holds the decoder: the operator downloads the
+  release archive, and the gateway reads it once at start-up and refuses to start
+  unless it is the release `src/hevc_wasm.rs` pins by SHA-256, since the page's
+  worker calls that build's exports. Where the browser's
   `VideoDecoder` refuses the picture, the page, if isolated, asks the gateway for
   the decoder and, served it and running shared-memory SIMD WebAssembly, decodes
   the picture with it in a worker of its own. That browser answers yes when its

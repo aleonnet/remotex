@@ -44,13 +44,13 @@ says so in the DOM, which is what stands in for the picture here.
 
 `software-hevc.spec.ts` is the EXPERIMENTAL software HEVC decoder, on a High
 Performance target with `media_passthrough` and the page loaded with
-`?hevc_decoder=software`. Against a gateway built with `--features hevc-wasm` it
+`?hevc_decoder=software`. Against a gateway configured with `[hevc_wasm]` it
 asserts that the page is cross-origin isolated and says it decodes the Mac's
 stream, that the gateway passes the HEVC, that the page asks for the decoder and
 its worker loads it, and that the first passed keyframe's batch is acknowledged
 with no video error or repaint request before it — an ordering, not a timing,
 because a failed decoder reports before the paint worker acknowledges. Against a
-gateway built without the feature it asserts the fallback: no isolation, no
+gateway without the table it asserts the fallback: no isolation, no
 decoder asked for, and VP9.
 
 `audio-socket.spec.ts` keeps sound on its dedicated `/ws/audio` connection. It
@@ -154,11 +154,15 @@ bunx playwright test '/egfx-passthrough\.spec\.ts$'
 ```
 
 The software HEVC spec needs a gateway whose config has an
-`ard-high-performance` target with `media_passthrough = true`, built with the
-decoder, and names that target with `REMOTEX_PLAYWRIGHT_HEVC_TARGET`:
+`ard-high-performance` target with `media_passthrough = true` and an enabled
+`[hevc_wasm]` table, with the pinned release archive beside the config (the
+state directory of a `--config` run), and names that target with
+`REMOTEX_PLAYWRIGHT_HEVC_TARGET`:
 
 ```sh
-cargo run --profile qa --features hevc-wasm -- serve --config tmp/qa_hevc.toml
+curl -fLO --output-dir tmp \
+  https://github.com/andrewtheguy/hevc-wasm/releases/download/v0.1.0/hevc-wasm-v0.1.0.tar.gz
+cargo run --profile qa -- serve --config tmp/qa_hevc.toml
 ```
 
 ```sh
@@ -170,8 +174,8 @@ REMOTEX_PLAYWRIGHT_HEVC_TARGET='macvmhevc' \
 bun run test:hevc
 ```
 
-Against a gateway built without `--features hevc-wasm`, add
-`REMOTEX_PLAYWRIGHT_HEVC_WASM=0`, which runs the fallback test instead.
+Against a gateway without `[hevc_wasm]`, add `REMOTEX_PLAYWRIGHT_HEVC_WASM=0`,
+which runs the fallback test instead.
 
 The audio spec uses the test-tone gateway instead of a live target:
 

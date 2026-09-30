@@ -26,8 +26,8 @@
 //
 // EXPERIMENTAL: a picture the browser's `VideoDecoder` refuses can still be decoded
 // in software — libavcodec's HEVC decoder compiled to WebAssembly, with SIMD128 and
-// slice threads (hevcWasmDecoder.ts) — where the gateway was built with the
-// `hevc-wasm` feature, which serves the decoder and makes the page cross-origin
+// slice threads (hevcWasmDecoder.ts) — where the gateway is configured with
+// `[hevc_wasm]`, which serves the decoder and makes the page cross-origin
 // isolated, and the browser runs shared-memory SIMD WebAssembly. The page asks the
 // gateway for the decoder rather than assuming it. Chrome on a GPU without HEVC
 // Range Extensions then says yes, decoding the sound itself and the picture here. `?hevc_decoder=software` in the page's URL takes the

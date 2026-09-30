@@ -80,6 +80,24 @@
 #database = "meter.sqlite3"
 #max_records = 10080
 
+# EXPERIMENTAL: the page's software HEVC decoder, for a browser whose own
+# VideoDecoder refuses a High Performance Mac's 4:4:4 picture under
+# media_passthrough — Chrome on a GPU without HEVC Range Extensions, for one. It is
+# libavcodec compiled to WebAssembly, and no remotex build holds it: download the
+# release this gateway pins,
+#
+#   https://github.com/andrewtheguy/hevc-wasm/releases/download/v0.1.0/hevc-wasm-v0.1.0.tar.gz
+#
+# into the state directory (as for [meter] above), as it is — the gateway reads
+# the archive itself, at start-up, and refuses to start unless it is exactly that
+# release. archive names another file; a relative path is taken from
+# the state directory. With the decoder, every page is served cross-origin
+# isolated, which its threads need.
+#
+#[hevc_wasm]
+#enabled = true
+#archive = "hevc-wasm-v0.1.0.tar.gz"
+
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,
 # because it is one decision — a host without a port is half an answer.

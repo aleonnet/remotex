@@ -1,5 +1,5 @@
 // EXPERIMENTAL: the software HEVC decoder (frontend/src/hevcWasmDecoder.ts), which
-// a gateway built with `--features hevc-wasm` serves at /hevc/ and which the page
+// a gateway configured with `[hevc_wasm]` serves at /hevc/ and which the page
 // takes, under `?hevc_decoder=software`, for a High Performance Mac's passed stream.
 //
 // What is asserted is what the system decides: whether the page is cross-origin
@@ -13,9 +13,10 @@
 // the ack (framePainter.ts, useRemoteDesktop.ts).
 //
 // It needs a gateway whose local config has an `ard-high-performance` target with
-// `media_passthrough = true`, which only a live Mac serves:
+// `media_passthrough = true`, which only a live Mac serves, and `[hevc_wasm]` with
+// the release archive beside the config:
 //
-//     cargo run --profile qa --features hevc-wasm -- serve --config tmp/qa_hevc.toml
+//     cargo run --profile qa -- serve --config tmp/qa_hevc.toml
 //
 //     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52889/ \
 //     REMOTEX_PLAYWRIGHT_USERNAME=admin \
@@ -23,8 +24,8 @@
 //     REMOTEX_PLAYWRIGHT_HEVC_TARGET=macvmhevc \
 //     bun run test:hevc
 //
-// Against a gateway built without the feature, set REMOTEX_PLAYWRIGHT_HEVC_WASM=0:
-// the same page must then find no decoder and take VP9 and Opus.
+// Against a gateway without `[hevc_wasm]`, set REMOTEX_PLAYWRIGHT_HEVC_WASM=0: the
+// same page must then find no decoder and take VP9 and Opus.
 import { expect, type Page, test } from "@playwright/test";
 
 import { leaveSession, logInAndConnectTo } from "./support";
@@ -32,10 +33,10 @@ import { leaveSession, logInAndConnectTo } from "./support";
 /// The opt-in, and the target name in one, as the video spec's.
 const HEVC_TARGET = process.env.REMOTEX_PLAYWRIGHT_HEVC_TARGET;
 
-/// Whether the gateway under test was built with `hevc-wasm`: said by whoever built
-/// it, because asking the gateway would let a build that lost its decoder pass as
-/// one built without.
-const BUILT_WITH_DECODER = process.env.REMOTEX_PLAYWRIGHT_HEVC_WASM !== "0";
+/// Whether the gateway under test serves the decoder: said by whoever configured
+/// it, because asking the gateway would let one that lost its decoder pass as one
+/// configured without.
+const SERVES_DECODER = process.env.REMOTEX_PLAYWRIGHT_HEVC_WASM !== "0";
 
 const SOFTWARE = "?hevc_decoder=software";
 
@@ -130,7 +131,7 @@ test.describe("a High Performance target under ?hevc_decoder=software", () => {
   test("with the decoder served, the passed stream is decoded in software", async ({
     page,
   }) => {
-    test.skip(!BUILT_WITH_DECODER, "the gateway was built without hevc-wasm");
+    test.skip(!SERVES_DECODER, "the gateway has no [hevc_wasm]");
     const seen = watchSession(page);
     await logInAndConnectTo(page, HEVC_TARGET ?? "", SOFTWARE);
 
@@ -165,7 +166,7 @@ test.describe("a High Performance target under ?hevc_decoder=software", () => {
   });
 
   test("without the decoder, the page takes VP9 and Opus", async ({ page }) => {
-    test.skip(BUILT_WITH_DECODER, "the gateway was built with hevc-wasm");
+    test.skip(SERVES_DECODER, "the gateway has [hevc_wasm]");
     const seen = watchSession(page);
     await logInAndConnectTo(page, HEVC_TARGET ?? "", SOFTWARE);
 

@@ -234,7 +234,7 @@ function softwareDecoderPage(
     value: isolated,
     configurable: true,
   });
-  // The gateway, asked for the decoder: built with the `hevc-wasm` feature or not.
+  // The gateway, asked for the decoder: configured with `[hevc_wasm]` or not.
   scope.fetch = async (url: string, init?: RequestInit) => {
     assert.equal(url, "/hevc/hevc.wasm");
     assert.equal(init?.method, "HEAD");
