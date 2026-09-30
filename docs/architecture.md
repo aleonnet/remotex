@@ -404,8 +404,8 @@ Three controls with similar names therefore remain separate:
   at `/hevc/`, and every file with COOP `same-origin` and COEP `require-corp`, which
   make the page cross-origin isolated for the threads' shared memory
   (`src/assets.rs`). No build holds the decoder: the operator downloads the
-  release archive, and the gateway reads it once at start-up and refuses to start
-  unless it is the release `src/hevc_wasm.rs` pins by SHA-256, since the page's
+  release archive from the private `andrewtheguy/hevc-wasm-archives`, and the
+  gateway reads it once at start-up and refuses to start unless it is the release `src/hevc_wasm.rs` pins by SHA-256, since the page's
   worker calls that build's exports. Where the browser's
   `VideoDecoder` refuses the picture, the page, if isolated, asks the gateway for
   the decoder and, served it and running shared-memory SIMD WebAssembly, decodes
