@@ -585,9 +585,10 @@ impl State {
         }
     }
 
-    /// What the reattach grace guards once the browser has gone: the running
-    /// engine, or a selected session with none, which is one the browser that left
-    /// could not be served.
+    /// What the reattach grace guards once the browser has gone or been replaced:
+    /// the running engine, or a selected session with none, which is one the
+    /// browser that left could not be served or one a claim change ended for the
+    /// claimant to reconnect.
     fn bump_epoch_for_detach(&mut self) -> Option<(Option<u64>, u64)> {
         self.attachment_epoch = self.attachment_epoch.wrapping_add(1);
         match &self.engine {
@@ -730,17 +731,12 @@ impl SessionManager {
             // The epoch bump covers both reasons to arm a grace timer: a socket was
             // evicted (as on any detach), or the takeover teardown above left a
             // reconnect standing that must lapse if the claimant never attaches.
+            // With no engine left to guard, whether this claim ended it or the
+            // evicted browser was one the session could not serve, the timer
+            // expires the *selected* target instead, unless a browser attaches
+            // first.
             let expiry = if evicted.is_some() || engine_taken {
-                st.attachment_epoch = st.attachment_epoch.wrapping_add(1);
-                if engine_taken {
-                    // No engine left to guard: the timer expires the *selected*
-                    // target instead, unless a browser attaches first.
-                    Some((None, st.attachment_epoch))
-                } else {
-                    st.engine
-                        .as_ref()
-                        .map(|engine| (Some(engine.generation), st.attachment_epoch))
-                }
+                st.bump_epoch_for_detach()
             } else {
                 None
             };
@@ -2485,6 +2481,39 @@ mod tests {
         tokio::task::yield_now().await;
         assert!(mgr.state.lock().unwrap().selected.is_none(), "and let go after it");
         let mut later = mgr.attach(&token, None, TAKES).await.unwrap();
+        expect_picker(&mut later.events).await;
+    }
+
+    /// The same holds when the covered browser is replaced rather than gone: a
+    /// claim that evicts it finds a selected target and no engine to end, and the
+    /// claimant that never attaches must not leave that target standing.
+    #[tokio::test]
+    async fn an_unserved_session_taken_over_and_never_attached_lapses() {
+        tokio::time::pause();
+        let (hook_tx, hook_rx) = std_mpsc::channel();
+        let spawner: EngineSpawner = Box::new(
+            move |_target, _choices, _plan, _display, input_rx, frame_tx, _audio, _camera, _feedback| {
+                hook_tx.send((input_rx, frame_tx)).unwrap();
+            },
+        );
+        let mgr = Arc::new(SessionManager::with_spawner(vec![mac_target("mac")], spawner));
+        let token = mgr.claim(false, None).unwrap();
+        let mut att = mgr.attach(&token, None, TAKES).await.unwrap();
+        expect_picker(&mut att.events).await;
+        mgr.connect(att.id, "mac", None, PASSED).await.unwrap();
+        let _engine = hook_rx.try_recv().unwrap();
+        expect_passed_mac(&mut att.events).await;
+
+        let mut covered = mgr.attach(&token, None, DECLINES).await.unwrap();
+        expect_unserved_mac(&mut covered.events).await;
+        let taken = mgr.claim(true, None).unwrap();
+        assert!(mgr.state.lock().unwrap().selected.is_some(), "kept for the grace period");
+
+        tokio::task::yield_now().await;
+        tokio::time::advance(REATTACH_GRACE_PERIOD + Duration::from_millis(1)).await;
+        tokio::task::yield_now().await;
+        assert!(mgr.state.lock().unwrap().selected.is_none(), "and let go after it");
+        let mut later = mgr.attach(&taken, None, TAKES).await.unwrap();
         expect_picker(&mut later.events).await;
     }
 
