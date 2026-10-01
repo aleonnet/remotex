@@ -1195,8 +1195,49 @@ pub struct ConfigFile {
     /// [`Self::branding`]'s reason.
     #[serde(default)]
     pub hevc_wasm: Option<HevcWasmSection>,
+    /// The `[hp_decoders]` table: on Windows, the folders a High Performance
+    /// target's decoders are loaded from, for a gateway that keeps them off
+    /// `PATH`. Absent, they are looked for when a session needs them. Top-level
+    /// for [`Self::branding`]'s reason.
+    #[serde(default)]
+    pub hp_decoders: Option<HpDecoders>,
     #[serde(default)]
     pub targets: Vec<TargetConfig>,
+}
+
+/// The `[hp_decoders]` table as written, and as resolved: the folders are
+/// absolute, so there is nothing to place. See [`crate::libav`] and
+/// [`crate::aac_eld`].
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct HpDecoders {
+    /// The folder holding FFmpeg's `avcodec` and `avutil` DLLs, a shared build's
+    /// `bin`. Named, it is the only place FFmpeg is loaded from.
+    pub ffmpeg_dir: Option<PathBuf>,
+    /// The folder holding `libfdk-aac-2.dll`. Named, it is the only place fdk-aac
+    /// is loaded from.
+    pub fdk_aac_dir: Option<PathBuf>,
+}
+
+impl HpDecoders {
+    /// Load each decoder the table names a folder for, before the gateway
+    /// listens: a gateway told where a decoder is refuses to start without it, as
+    /// with `[hevc_wasm]`'s archive. One it names no folder for is still looked
+    /// for when a session needs it.
+    pub fn load(&self) -> anyhow::Result<()> {
+        // Only Windows is let name a folder, and only a build that loads its
+        // decoders: `ConfigFile::parse_with` refuses the table of any other.
+        #[cfg(all(windows, not(feature = "apple-hp-media-static")))]
+        {
+            if let Some(dir) = &self.ffmpeg_dir {
+                crate::libav::load_from(dir)?;
+            }
+            if let Some(dir) = &self.fdk_aac_dir {
+                crate::aac_eld::load_from(dir)?;
+            }
+        }
+        Ok(())
+    }
 }
 
 /// The `[hevc_wasm]` table as written. See [`crate::hevc_wasm`].
@@ -1266,6 +1307,9 @@ pub struct AppConfig {
     /// `[hevc_wasm]` names, or the one found in the data directory. `None` serves
     /// no decoder.
     pub hevc_wasm: Option<PathBuf>,
+    /// `[hp_decoders]`: the folders the gateway loads the High Performance
+    /// decoders from at start-up. Empty looks for them when a session needs them.
+    pub hp_decoders: HpDecoders,
 }
 
 impl ConfigFile {
@@ -1364,6 +1408,32 @@ impl ConfigFile {
                  out for {} in the gateway's data directory",
                 crate::hevc_wasm::archive_name()
             );
+        }
+        if let Some(decoders) = &config.hp_decoders {
+            anyhow::ensure!(
+                cfg!(windows),
+                "[hp_decoders] is for a gateway on Windows, which has no library folder of \
+                 its own. Here the decoders are found by the system loader's search. Remove \
+                 the table."
+            );
+            anyhow::ensure!(
+                !cfg!(feature = "apple-hp-media-static"),
+                "[hp_decoders] names folders to load the decoders from, and this build links \
+                 its own. Remove the table."
+            );
+            anyhow::ensure!(
+                decoders.ffmpeg_dir.is_some() || decoders.fdk_aac_dir.is_some(),
+                "[hp_decoders] names no folder — set ffmpeg_dir, fdk_aac_dir or both, or \
+                 leave the table out for the decoders found on PATH"
+            );
+            for (key, dir) in [("ffmpeg_dir", &decoders.ffmpeg_dir), ("fdk_aac_dir", &decoders.fdk_aac_dir)] {
+                // Absolute, because a DLL loaded by a relative path is looked for
+                // from wherever the gateway happened to be started.
+                anyhow::ensure!(
+                    dir.as_ref().is_none_or(|dir| dir.is_absolute()),
+                    "[hp_decoders].{key} must be the folder's whole path, drive included"
+                );
+            }
         }
         for target in &config.targets {
             anyhow::ensure!(
@@ -1670,6 +1740,7 @@ impl ConfigFile {
             dev_hostname: None,
             meter: Self::resolve_meter(self.meter, state_dir),
             hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
+            hp_decoders: self.hp_decoders.unwrap_or_default(),
         })
     }
 
@@ -1782,6 +1853,7 @@ impl ConfigFile {
                 .context("invalid [server].dev_subdomain")?,
             meter: Self::resolve_meter(self.meter, state_dir),
             hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
+            hp_decoders: self.hp_decoders.unwrap_or_default(),
         })
     }
 }
@@ -2531,6 +2603,45 @@ mod tests {
             let err = ConfigFile::parse(&format!("[hevc_wasm]\n{bad}\n{}", minimal()))
                 .expect_err(bad);
             assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
+        }
+    }
+
+    /// `[hp_decoders]` is Windows': a gateway there names the folders its decoders
+    /// are loaded from, whole paths and at least one of them. Every other gateway
+    /// refuses the table, its loader having a search of its own.
+    #[test]
+    fn hp_decoders_names_whole_folders_on_windows_alone() {
+        let parse = |table: &str| ConfigFile::parse(&format!("{table}\n{}", minimal()));
+        assert_eq!(
+            parse("").unwrap().resolve().unwrap().hp_decoders,
+            HpDecoders::default(),
+            "no table names no folder"
+        );
+        #[cfg(not(windows))]
+        {
+            let err = parse("[hp_decoders]\nffmpeg_dir = \"/opt/ffmpeg/bin\"").expect_err("not Windows");
+            assert!(format!("{err:#}").contains("on Windows"), "{err:#}");
+        }
+        #[cfg(all(windows, not(feature = "apple-hp-media-static")))]
+        {
+            assert_eq!(
+                parse("[hp_decoders]\nffmpeg_dir = 'C:\\ffmpeg\\bin'").unwrap().resolve().unwrap().hp_decoders,
+                HpDecoders { ffmpeg_dir: Some(PathBuf::from(r"C:\ffmpeg\bin")), fdk_aac_dir: None }
+            );
+            assert_eq!(
+                parse("[hp_decoders]\nfdk_aac_dir = 'D:/fdk'").unwrap().resolve().unwrap().hp_decoders,
+                HpDecoders { ffmpeg_dir: None, fdk_aac_dir: Some(PathBuf::from("D:/fdk")) }
+            );
+            for (bad, says) in [
+                ("", "names no folder"),
+                ("ffmpeg_dir = 'ffmpeg\\bin'", "[hp_decoders].ffmpeg_dir"),
+                ("ffmpeg_dir = 'C:\\ffmpeg\\bin'\nfdk_aac_dir = ''", "[hp_decoders].fdk_aac_dir"),
+                ("fdk_aac_dir = '\\fdk'", "[hp_decoders].fdk_aac_dir"),
+                ("dir = 'C:\\ffmpeg\\bin'", "dir"),
+            ] {
+                let err = parse(&format!("[hp_decoders]\n{bad}")).expect_err(bad);
+                assert!(format!("{err:#}").contains(says), "{bad}: {err:#}");
+            }
         }
     }
 

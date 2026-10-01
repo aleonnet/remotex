@@ -158,6 +158,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
     )
         .context("cannot record websocket throughput ([meter].database)")?;
     let hevc_decoder = load_hevc_decoder(&config)?;
+    config.hp_decoders.load()?;
     let app = server::router(config.clone(), throughput, hevc_decoder);
 
     // One server per listener over the same router — `Router` is `Clone`, and the

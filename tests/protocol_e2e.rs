@@ -1150,6 +1150,7 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
+        hp_decoders: Default::default(),
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();

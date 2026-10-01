@@ -1021,6 +1021,7 @@ mod tests {
             dev_hostname: dev_hostname.map(str::to_owned),
             meter: None,
             hevc_wasm: None,
+            hp_decoders: Default::default(),
         }
     }
 
@@ -1337,6 +1338,7 @@ mod tests {
             dev_hostname: None,
             meter: None,
             hevc_wasm: None,
+            hp_decoders: Default::default(),
         };
 
         let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

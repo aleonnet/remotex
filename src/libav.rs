@@ -4,7 +4,8 @@
 //! The gateway loads the system's shared libraries the first time a session
 //! needs them (see [`load`]): FFmpeg 6.1 to 9, libavcodec 60 to 63
 //! with the libavutil each was released with, so the default build compiles and
-//! links no FFmpeg. `apple-hp-media-static` links `libavcodec-hevc-prebuilt`'s private
+//! links no FFmpeg. On Windows `[hp_decoders].ffmpeg_dir` names the folder
+//! instead, loaded from at start-up. `apple-hp-media-static` links `libavcodec-hevc-prebuilt`'s private
 //! static archives instead. Either way the calls below are the whole interface.
 //!
 //! Those releases lay their structures out differently, so this reads none past
@@ -205,19 +206,61 @@ fn open(file: &str) -> Result<libloading::Library, libloading::Error> {
     }
 }
 
-/// FFmpeg, loaded from the system on the first call that finds it. A failure is
-/// not remembered, so a library installed while the gateway runs is found by the
-/// next session.
+/// FFmpeg, once loaded.
+#[cfg(not(feature = "apple-hp-media-static"))]
+static API: std::sync::OnceLock<Api> = std::sync::OnceLock::new();
+
+/// FFmpeg, loaded from the system on the first call that finds it, unless
+/// [`load_from`] loaded it at start-up. A failure is not remembered, so a library
+/// installed while the gateway runs is found by the next session.
 #[cfg(not(feature = "apple-hp-media-static"))]
 pub fn api() -> anyhow::Result<&'static Api> {
-    use anyhow::Context as _;
-
-    static API: std::sync::OnceLock<Api> = std::sync::OnceLock::new();
     if let Some(api) = API.get() {
         return Ok(api);
     }
+    match find(DIRS) {
+        Ok(api) => Ok(API.get_or_init(|| api)),
+        Err(refused) => anyhow::bail!(
+            "the HEVC decoder, FFmpeg's libavcodec, is not installed: {INSTALL} ({})",
+            refused.join("; ")
+        ),
+    }
+}
+
+/// Load FFmpeg from `dir`, the folder `[hp_decoders].ffmpeg_dir` names, and from
+/// nowhere else: a gateway told where its FFmpeg is does not decode with another
+/// it happens to find. Called before the gateway listens, so a folder without one
+/// is a refused start.
+#[cfg(all(windows, not(feature = "apple-hp-media-static")))]
+pub fn load_from(dir: &std::path::Path) -> anyhow::Result<()> {
+    // A prefix as [`DIRS`] has them, in backslashes, which is what [`open`] takes
+    // for a path and what the altered search wants.
+    let mut prefix = dir.to_string_lossy().replace('/', "\\");
+    if !prefix.ends_with('\\') {
+        prefix.push('\\');
+    }
+    match find(&[&prefix]) {
+        Ok(api) => {
+            API.get_or_init(|| api);
+            Ok(())
+        }
+        Err(refused) => anyhow::bail!(
+            "the HEVC decoder, FFmpeg's libavcodec, is not in [hp_decoders].ffmpeg_dir, {}: name \
+             a shared FFmpeg build's bin folder ({})",
+            dir.display(),
+            refused.join("; ")
+        ),
+    }
+}
+
+/// The first FFmpeg in `dirs` that loads and is the release its file name says,
+/// or why each one tried was refused.
+#[cfg(not(feature = "apple-hp-media-static"))]
+fn find(dirs: &[&str]) -> Result<Api, Vec<String>> {
+    use anyhow::Context as _;
+
     let mut refused = Vec::new();
-    for dir in DIRS {
+    for dir in dirs {
         for major in MAJORS {
             let [avcodec, avutil] = files(dir, major);
             let library = match open(&avcodec) {
@@ -249,13 +292,10 @@ pub fn api() -> anyhow::Result<&'static Api> {
                 continue;
             }
             log::info!("vnc: the HEVC decoder is libavcodec {}, from {avcodec}", dotted(versions.0));
-            return Ok(API.get_or_init(|| api));
+            return Ok(api);
         }
     }
-    anyhow::bail!(
-        "the HEVC decoder, FFmpeg's libavcodec, is not installed: {INSTALL} ({})",
-        refused.join("; ")
-    )
+    Err(refused)
 }
 
 #[cfg(not(feature = "apple-hp-media-static"))]
@@ -279,5 +319,19 @@ pub fn hw_device_ctx(api: &Api) -> Option<usize> {
         60 => Some(864),
         61..=63 => Some(560),
         _ => None,
+    }
+}
+
+#[cfg(all(test, windows, not(feature = "apple-hp-media-static")))]
+mod tests {
+    /// A folder the config names is the only place looked in: one that holds no
+    /// FFmpeg is an error naming the key and the folder, whatever `PATH` has.
+    #[test]
+    fn a_named_folder_without_ffmpeg_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = format!("{:#}", super::load_from(dir.path()).expect_err("an empty folder"));
+        assert!(err.contains("[hp_decoders].ffmpeg_dir"), "{err}");
+        assert!(err.contains(&dir.path().display().to_string()), "{err}");
+        assert!(err.contains("avcodec-63.dll") && err.contains("avcodec-60.dll"), "{err}");
     }
 }

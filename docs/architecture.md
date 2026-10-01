@@ -215,6 +215,7 @@ message, or add a key that selects it. See
   as SRTCP. The Mac refuses one leg without the other, so the target always
   carries sound and takes no `audio` key. Its decoders, FFmpeg's libavcodec and
   fdk-aac, are the system's shared libraries, loaded when a session needs them,
+  or on Windows from the folders `[hp_decoders]` names, loaded at start-up,
   so published release artifacts link neither; only the non-default
   `apple-hp-media-static` feature
   links static archives instead. A gateway whose host lacks either ends the

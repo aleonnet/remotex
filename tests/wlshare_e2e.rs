@@ -65,6 +65,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
+        hp_decoders: Default::default(),
         targets: vec![TargetConfig {
             name: TARGET.to_owned(),
             protocol: Protocol::Vnc,

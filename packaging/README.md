@@ -160,7 +160,8 @@ licences keep them out of every artifact: FFmpeg's libavcodec
 (LGPL-2.1-or-later) for the HEVC picture and Fraunhofer's fdk-aac, whose licence
 is not OSI-approved and grants no patents, for the AAC-ELD sound. Published release
 artifacts compile and link neither: the gateway loads the system's shared libraries
-when a session needs them (`src/libav.rs`, `src/aac_eld.rs`), and a host without them
+when a session needs them, or on Windows the ones in the folders `[hp_decoders]`
+names when it starts (`src/libav.rs`, `src/aac_eld.rs`), and a host without them
 runs those targets only with `media_passthrough`, for browsers that decode the
 stream. The `.deb` recommends the Linux ones, the public container image carries
 neither and the private one `publish-full-image.sh` builds carries Debian's;

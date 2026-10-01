@@ -15,7 +15,9 @@ Only `ard-high-performance` needs them. `rdp`, plain `vnc` and `ard` targets,
 
 The gateway loads them when a session needs them, and looks again at every
 session until it finds them. So they can be installed while the gateway runs:
-the next session uses them.
+the next session uses them. A Windows gateway whose config names their folders
+loads them from there when it starts instead: see
+[Decoders kept in a folder of their own](#decoders-kept-in-a-folder-of-their-own).
 
 - [Debian](#debian)
 - [Ubuntu](#ubuntu)
@@ -138,21 +140,42 @@ dependencies:
 The gateway finds `libfdk-aac-2.dll` in `C:\msys64\ucrt64\bin` with nothing to
 configure. `PATH` does not need that folder.
 
-### Other builds and folders
+### Decoders kept in a folder of their own
 
-MSYS2 has an FFmpeg too, `mingw-w64-ucrt-x86_64-ffmpeg`, and the gateway finds
-it beside fdk-aac. It is a full build that brings more than a hundred packages
-and about 1.5 GB with it, which is why the steps above take FFmpeg from
-elsewhere.
+`[hp_decoders]` in the gateway's config names the folders, for DLLs that are
+not on `PATH`: a shared FFmpeg build unzipped somewhere, an MSYS2 outside
+`C:\msys64`, or a gateway run by another user than the one winget installed
+for.
 
-Any other shared build serves, found through Windows' own search:
+```toml
+[hp_decoders]
+ffmpeg_dir = 'C:\ffmpeg\bin'
+fdk_aac_dir = 'C:\fdk-aac'
+```
 
-| Library | File | Where |
-|---|---|---|
-| FFmpeg | `avcodec-60.dll` to `avcodec-63.dll`, and the `avutil-58.dll` to `avutil-61.dll` released with it | put the build's `bin` folder on `PATH`, then restart the gateway |
-| fdk-aac | `libfdk-aac-2.dll` | on `PATH`, or beside `remotex.exe` |
+| Key | The folder holds |
+|---|---|
+| `ffmpeg_dir` | `avcodec-60.dll` to `avcodec-63.dll`, the `avutil-58.dll` to `avutil-61.dll` released with it, and the other DLLs of that build: a shared build's `bin` |
+| `fdk_aac_dir` | `libfdk-aac-2.dll` |
 
-A build on `PATH` is used before MSYS2's.
+Each is a whole path, drive included. Either key can be left out.
+
+A named folder is the only place that decoder is loaded from, and the gateway
+loads it when it starts: one that does not find the decoder there refuses to
+start, and says which file it tried. Only a gateway on Windows takes this
+table.
+
+### Where the gateway looks without it
+
+For a decoder `[hp_decoders]` names no folder for, the gateway looks when a
+session needs it, in this order:
+
+1. Windows' own search: beside `remotex.exe`, then the folders on `PATH`.
+2. MSYS2's `C:\msys64\ucrt64\bin`.
+
+MSYS2 has an FFmpeg too, `mingw-w64-ucrt-x86_64-ffmpeg`, which the gateway
+finds there. It is a full build that brings more than a hundred packages and
+about 1.5 GB with it, which is why the steps above take FFmpeg from elsewhere.
 
 ## Container
 
@@ -170,11 +193,14 @@ RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.li
 ## Checking the install
 
 Connect to the `ard-high-performance` target from a browser. When the gateway
-decodes the stream, its log names the FFmpeg it loaded:
+decodes the stream, its log names the libraries it loaded:
 
 ```text
 vnc: the HEVC decoder is libavcodec 61.19.101, from libavcodec.so.61
+vnc: the AAC-ELD decoder is fdk-aac, from libfdk-aac.so.2
 ```
+
+A Windows gateway with `[hp_decoders]` logs the same lines when it starts.
 
 When a library is missing, the page shows the reason and the log repeats it,
 naming the library, how to install it, and every file it tried:
