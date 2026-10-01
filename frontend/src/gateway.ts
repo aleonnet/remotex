@@ -68,8 +68,8 @@ export function gatewaySocketUrl(
 }
 
 /// The software HEVC decoder's files, `hevc.js` and `hevc.wasm`: a release of
-/// andrewtheguy/hevc-wasm the gateway serves beside the bundle when configured with
-/// `[hevc_wasm]`, as they were built, because the module starts its slice
+/// andrewtheguy/hevc-wasm the gateway serves beside the bundle when it has the
+/// release archive, as they were built, because the module starts its slice
 /// threads as workers of its own script, found by its own URL.
 export function hevcDecoderUrl(file: "hevc.js" | "hevc.wasm"): string {
   return gatewayUrl(`/hevc/${file}`);

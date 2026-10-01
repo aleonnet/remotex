@@ -181,8 +181,9 @@ instead, and is in no release artifact. No artifact holds the EXPERIMENTAL
 software HEVC decoder either, libavcodec in WebAssembly for the page: an operator
 downloads the release that `src/hevc_wasm.rs` pins by version and SHA-256 from
 the private `andrewtheguy/hevc-wasm-archives` through `gh`, and every build
-serves it under `[hevc_wasm]`. Every release target looks for it by its release
-name in `share/remotex`, beside the `share/doc/remotex` it installs:
+serves it when it finds it. Every release target looks for it by its release
+name in `share/remotex`, beside the `share/doc/remotex` it installs, unless
+`[hevc_wasm].archive` names another file:
 `/usr/share/remotex` for the `.deb` and `.rpm`, `/usr/local/share/remotex` for
 the `.pkg`, `share\remotex` under the `.msi`'s install directory, the unpacked
 tarball's own, and `/opt/remotex/versions/<version>/share/remotex` in the

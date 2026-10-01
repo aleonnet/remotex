@@ -5,8 +5,8 @@
 //! It is libavcodec's HEVC decoder compiled to WebAssembly, a release of
 //! andrewtheguy/hevc-wasm published to the private
 //! andrewtheguy/hevc-wasm-archives, and no build of this binary holds it: an
-//! operator who wants it downloads the release archive and names it in
-//! `[hevc_wasm]`. The
+//! operator who wants it downloads the release archive into the gateway's data
+//! directory, or anywhere else and names it in `[hevc_wasm]`. The
 //! gateway reads that archive once at start-up, refuses it unless it is exactly the
 //! release pinned here — the page's worker calls the module's exports as this
 //! version has them, so any other build is one the page cannot drive — and serves

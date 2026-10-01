@@ -36,7 +36,7 @@ pub struct AppState {
     pub auth: Arc<AuthSessions>,
     /// Every browser socket's byte counters, and the database `[meter]` records them in.
     pub throughput: Throughput,
-    /// EXPERIMENTAL: the software HEVC decoder `[hevc_wasm]` names, read at start-up.
+    /// EXPERIMENTAL: the software HEVC decoder, read at start-up.
     pub hevc_decoder: Option<HevcDecoder>,
 }
 
@@ -215,7 +215,7 @@ fn bind_one(socket: std::net::SocketAddr) -> std::io::Result<std::net::TcpListen
 /// `throughput` is where the browser sockets count their bytes and, when `[meter].enabled`
 /// is set, the database [`crate::throughput::start`] records them in and
 /// `/api/throughput` reads. `hevc_decoder` is what [`HevcDecoder::load`] read from
-/// `[hevc_wasm].archive`, which the fallback serves.
+/// the archive, which the fallback serves.
 pub fn router(
     config: AppConfig,
     throughput: Throughput,

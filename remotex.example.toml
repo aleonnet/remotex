@@ -98,14 +98,16 @@
 # container image. It belongs to the binary, not to the state directory: it is
 # pinned to this version, so an upgrade that pins another release wants that one
 # beside it. A gateway run from a Cargo build looks in its config's directory.
-# The gateway reads the archive itself, at start-up, and refuses to start unless
-# it is exactly that release. archive names another file; a relative path is
-# taken from that same directory. Every page is cross-origin isolated for the
-# graphics compositor's threads; the decoder's threads require that isolation too.
+# A gateway that finds the archive there serves the decoder, with nothing set
+# here; one that does not serves none. It reads the archive itself, at start-up,
+# and refuses to start unless it is exactly that release. This table is only for
+# an archive kept elsewhere: archive names the file, a relative path is taken
+# from that same directory, and a gateway that cannot read the file it was told
+# of refuses to start. Every page is cross-origin isolated for the graphics
+# compositor's threads; the decoder's threads require that isolation too.
 #
 #[hevc_wasm]
-#enabled = true
-#archive = "hevc-wasm-v0.0.1.tar.gz"
+#archive = "/srv/remotex/hevc-wasm-v0.0.1.tar.gz"
 
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,

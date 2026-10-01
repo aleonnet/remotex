@@ -18,7 +18,7 @@
 //! through (`frontend/src/egfxCompositor.ts`), as the software HEVC decoder's do.
 //! It costs the page nothing, since all it loads is this origin's.
 //!
-//! EXPERIMENTAL: a gateway configured with `[hevc_wasm]` also serves the software
+//! EXPERIMENTAL: a gateway that has the archive also serves the software
 //! HEVC decoder ([`crate::hevc_wasm`]), which it read at start-up, at `/hevc/` under
 //! the names it was built with: the module starts its slice threads as workers of
 //! its own script, found by its own URL. Without it `/hevc/` is a 404 and the
@@ -52,7 +52,7 @@ fn index() -> EmbeddedFile {
 /// 200 so the page's own routes resolve. This is the router's fallback service,
 /// so only paths no route claimed arrive here — `/api/*` has its own 404.
 ///
-/// `decoder` is the software HEVC decoder a `[hevc_wasm]` gateway loaded, whose
+/// `decoder` is the software HEVC decoder a gateway that has it loaded, whose
 /// files are served under `/hevc/`.
 pub fn serve(decoder: Option<&HevcDecoder>, request: &Request) -> Response {
     if !matches!(*request.method(), Method::GET | Method::HEAD) {

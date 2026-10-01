@@ -44,7 +44,7 @@ says so in the DOM, which is what stands in for the picture here.
 
 `software-hevc.spec.ts` is the EXPERIMENTAL software HEVC decoder, on a High
 Performance target with `media_passthrough` and the page loaded with
-`?hevc_decoder=software`. Against a gateway configured with `[hevc_wasm]` it
+`?hevc_decoder=software`. Against a gateway that has the decoder's archive it
 asserts that the page is cross-origin isolated and says it decodes the Mac's
 stream, that the gateway passes the HEVC, that the page asks for the decoder and
 its worker loads it, and that the first passed keyframe's batch is acknowledged
@@ -154,9 +154,9 @@ bunx playwright test '/egfx-passthrough\.spec\.ts$'
 ```
 
 The software HEVC spec needs a gateway whose config has an
-`ard-high-performance` target with `media_passthrough = true` and an enabled
-`[hevc_wasm]` table, with the pinned release archive beside the config (where
-a gateway run from a Cargo build looks for it), and names that target with
+`ard-high-performance` target with `media_passthrough = true`, with the pinned
+release archive beside the config (where a gateway run from a Cargo build looks
+for it), and names that target with
 `REMOTEX_PLAYWRIGHT_HEVC_TARGET`:
 
 ```sh
@@ -174,7 +174,7 @@ REMOTEX_PLAYWRIGHT_HEVC_TARGET='macvmhevc' \
 bun run test:hevc
 ```
 
-Against a gateway without `[hevc_wasm]`, add `REMOTEX_PLAYWRIGHT_HEVC_WASM=0`,
+Against a gateway without the archive, add `REMOTEX_PLAYWRIGHT_HEVC_WASM=0`,
 which runs the fallback test instead.
 
 The audio spec uses the test-tone gateway instead of a live target:
