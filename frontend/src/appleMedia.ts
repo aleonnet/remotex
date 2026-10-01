@@ -108,10 +108,14 @@ const FORMS: Description[] = [(config) => config, esDescriptor];
 /** Who decodes the Mac's picture: the browser's `VideoDecoder`, or hevc-wasm. */
 export type HevcDecoder = "native" | "software";
 
-let answer: {
-  sound: Description | null;
-  picture: HevcDecoder | null;
-} | null = null;
+let answer: { picture: HevcDecoder | null } | null = null;
+
+/**
+ * The form the sound decoded in, null for neither, and undefined until the
+ * question, which `chooseAppleMedia` starts and does not wait for, is answered.
+ */
+let soundForm: Description | null | undefined;
+let soundProbe: Promise<void> | null = null;
 
 /** A function returning a SIMD128 value, which only a SIMD engine validates. */
 const SIMD_PROBE = Uint8Array.of(
@@ -278,24 +282,44 @@ async function decodesSound(description: Uint8Array): Promise<boolean> {
   return output && !failed;
 }
 
+async function probeSound(): Promise<void> {
+  let found: Description | null = null;
+  for (const form of FORMS) {
+    if (await decodesSound(form(ELD_CONFIG))) {
+      found = form;
+      break;
+    }
+  }
+  soundForm = found;
+}
+
 /**
  * Ask the browser once, and remember the answers. Resolves to whether it decodes
- * the Mac's picture, which is what `decodesAppleMedia()` then says.
+ * the Mac's picture, which is what `decodesAppleMedia()` then says. The sound's
+ * question is started here and not waited for: a decoder that never answers
+ * takes each form's whole timeout, and only a Mac's sound needs the answer
+ * (`appleSoundProbed`), so the page does not mount behind it.
  */
 export async function chooseAppleMedia(): Promise<boolean> {
   if (answer !== null) {
     return answer.picture !== null;
   }
+  soundProbe ??= probeSound();
   const picture = await decodesPicture();
-  let sound: Description | null = null;
-  for (const form of FORMS) {
-    if (await decodesSound(form(ELD_CONFIG))) {
-      sound = form;
-      break;
-    }
-  }
-  answer = { sound, picture };
+  answer = { picture };
   return picture !== null;
+}
+
+/**
+ * Resolves once the sound's question is answered, which `appleEldConfig` needs.
+ * Null where it already is, so a caller can carry on in the same turn.
+ */
+export function appleSoundProbed(): Promise<void> | null {
+  if (soundForm !== undefined) {
+    return null;
+  }
+  soundProbe ??= probeSound();
+  return soundProbe;
 }
 
 /**
@@ -328,7 +352,10 @@ export function appleEldConfig(format: {
   channels: number;
   head: Uint8Array;
 }): AudioDecoderConfig {
-  const form = answer?.sound;
+  if (soundForm === undefined) {
+    throw new Error("appleEldConfig() before appleSoundProbed() resolved");
+  }
+  const form = soundForm;
   if (!form) {
     throw new Error("This browser does not decode the Mac's AAC-ELD sound.");
   }
@@ -343,5 +370,7 @@ export function appleEldConfig(format: {
 /** Test seam: forget the answer so the question can be asked again. */
 export function resetAppleMediaForTests(timeoutMs = 2000): void {
   answer = null;
+  soundForm = undefined;
+  soundProbe = null;
   attemptTimeoutMs = timeoutMs;
 }

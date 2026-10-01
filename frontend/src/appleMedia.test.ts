@@ -24,11 +24,19 @@ const globals = globalThis as unknown as {
 const {
   appleEldConfig,
   appleHevcDecoder,
+  appleSoundProbed,
   chooseAppleMedia,
   decodesAppleMedia,
   esDescriptor,
   resetAppleMediaForTests,
 } = await import("./appleMedia.ts");
+
+/** Both questions answered: the picture's, and the sound's it does not wait for. */
+async function choose(): Promise<boolean> {
+  const picture = await chooseAppleMedia();
+  await appleSoundProbed();
+  return picture;
+}
 
 const hex = (bytes: Uint8Array) =>
   Array.from(bytes, (b) => b.toString(16).padStart(2, "0")).join("");
@@ -118,7 +126,7 @@ test("a browser that decodes the bare configuration, as Chrome does, is played w
   const asked = browser(yes, (description) =>
     description === CONFIG ? "sound" : "error",
   );
-  assert.equal(await chooseAppleMedia(), true);
+  assert.equal(await choose(), true);
   assert.equal(decodesAppleMedia(), true);
   // The configuration macwork's stream announces: Range Extensions 4:4:4.
   assert.deepEqual(asked.probes, ["hev1.4.10.L150.BE.8"]);
@@ -136,7 +144,7 @@ test("a browser that decodes only the ES_Descriptor, as Safari does, is played w
   const asked = browser(yes, (description) =>
     description === DESCRIPTOR ? "sound" : "error",
   );
-  assert.equal(await chooseAppleMedia(), true);
+  assert.equal(await choose(), true);
   assert.deepEqual(
     asked.tried.map((t) => t.description),
     [CONFIG, DESCRIPTOR],
@@ -153,7 +161,7 @@ test("only a form the browser says it takes is decoded", async () => {
   const asked = browser(yes, (description) =>
     description === CONFIG ? "unsupported" : "sound",
   );
-  assert.equal(await chooseAppleMedia(), true);
+  assert.equal(await choose(), true);
   assert.deepEqual(asked.asked, [CONFIG, DESCRIPTOR]);
   assert.deepEqual(
     asked.tried.map((t) => t.description),
@@ -161,18 +169,14 @@ test("only a form the browser says it takes is decoded", async () => {
   );
 
   const refused = browser(yes, () => "unsupported");
-  assert.equal(
-    await chooseAppleMedia(),
-    true,
-    "the picture is its own question",
-  );
+  assert.equal(await choose(), true, "the picture is its own question");
   assert.deepEqual(refused.tried, [], "a form it refuses is never decoded");
 });
 
 test("the picture and the sound are answered apart", async () => {
   // The picture passes to a browser that cannot play the sound, which says why.
   browser(yes, () => "error");
-  assert.equal(await chooseAppleMedia(), true);
+  assert.equal(await choose(), true);
   assert.throws(
     () =>
       appleEldConfig({
@@ -188,7 +192,7 @@ test("the picture and the sound are answered apart", async () => {
     async () => ({ supported: false }),
     () => "sound",
   );
-  assert.equal(await chooseAppleMedia(), false);
+  assert.equal(await choose(), false);
   assert.deepEqual(asked.tried, [{ codec: "mp4a.40.2", description: CONFIG }]);
   const config = appleEldConfig({
     sampleRate: 48_000,
@@ -205,15 +209,15 @@ test("anything but a definite yes keeps VP9", async () => {
     },
     () => "sound",
   );
-  assert.equal(await chooseAppleMedia(), false);
+  assert.equal(await choose(), false);
   browser(
     async () => ({}),
     () => "sound",
   );
-  assert.equal(await chooseAppleMedia(), false);
+  assert.equal(await choose(), false);
   // A sound decoder that never answers is a no, once the attempt runs out of time.
   browser(yes, () => "silent", 10);
-  assert.equal(await chooseAppleMedia(), true);
+  assert.equal(await choose(), true);
   assert.throws(() =>
     appleEldConfig({
       sampleRate: 48_000,
@@ -223,11 +227,28 @@ test("anything but a definite yes keeps VP9", async () => {
   );
 });
 
+test("the page does not mount behind a sound decoder that never answers", async () => {
+  browser(yes, () => "silent", 50);
+  assert.equal(await chooseAppleMedia(), true);
+  assert.equal(decodesAppleMedia(), true);
+  const probed = appleSoundProbed();
+  assert.notEqual(probed, null, "the sound's question is still out");
+  assert.throws(() =>
+    appleEldConfig({
+      sampleRate: 48_000,
+      channels: 2,
+      head: new Uint8Array(4),
+    }),
+  );
+  await probed;
+  assert.equal(appleSoundProbed(), null);
+});
+
 test("the question is asked once, and the answer is not available before it", async () => {
   const asked = browser(yes, () => "sound");
   assert.throws(() => decodesAppleMedia());
-  await chooseAppleMedia();
-  await chooseAppleMedia();
+  await choose();
+  await choose();
   assert.equal(asked.probes.length, 1);
   assert.equal(asked.tried.length, 1);
 });
@@ -301,15 +322,15 @@ test("a picture the browser's decoder refuses is decoded in software on an isola
   const undo = softwareDecoderPage(true);
   try {
     browser(no, () => "sound");
-    assert.equal(await chooseAppleMedia(), true);
+    assert.equal(await choose(), true);
     assert.equal(appleHevcDecoder(), "software");
 
     browser(yes, () => "sound");
-    assert.equal(await chooseAppleMedia(), true);
+    assert.equal(await choose(), true);
     assert.equal(appleHevcDecoder(), "native", "the browser's own comes first");
 
     browser(no, () => "error");
-    assert.equal(await chooseAppleMedia(), true);
+    assert.equal(await choose(), true);
     assert.equal(appleHevcDecoder(), "software", "whatever the sound's answer");
   } finally {
     undo();
@@ -320,7 +341,7 @@ test("a page that is not cross-origin isolated has no software decoder", async (
   const undo = softwareDecoderPage(false);
   try {
     browser(no, () => "sound");
-    assert.equal(await chooseAppleMedia(), false);
+    assert.equal(await choose(), false);
     assert.equal(appleHevcDecoder(), null);
   } finally {
     undo();
@@ -331,7 +352,7 @@ test("an isolated page whose gateway serves no decoder has no software decoder",
   const undo = softwareDecoderPage(true, "", false);
   try {
     browser(no, () => "sound");
-    assert.equal(await chooseAppleMedia(), false);
+    assert.equal(await choose(), false);
     assert.equal(appleHevcDecoder(), null);
   } finally {
     undo();
@@ -344,7 +365,7 @@ test("a page that cannot present the software decoder's pictures has no software
     const undo = softwareDecoderPage(true, "", true, webgl);
     try {
       browser(no, () => "sound");
-      assert.equal(await chooseAppleMedia(), false, webgl);
+      assert.equal(await choose(), false, webgl);
       assert.equal(appleHevcDecoder(), null, webgl);
     } finally {
       undo();
@@ -356,7 +377,7 @@ test("a gateway that never answers for the decoder is read as serving none", asy
   const undo = softwareDecoderPage(true, "", "never");
   try {
     browser(no, () => "sound", 20);
-    assert.equal(await chooseAppleMedia(), false);
+    assert.equal(await choose(), false);
     assert.equal(appleHevcDecoder(), null);
   } finally {
     undo();
@@ -367,7 +388,7 @@ test("?hevc_decoder=software takes the software decoder without asking the brows
   const undo = softwareDecoderPage(true, "?hevc_decoder=software");
   try {
     const asked = browser(yes, () => "sound");
-    assert.equal(await chooseAppleMedia(), true);
+    assert.equal(await choose(), true);
     assert.equal(appleHevcDecoder(), "software");
     assert.deepEqual(asked.probes, []);
   } finally {
@@ -377,7 +398,7 @@ test("?hevc_decoder=software takes the software decoder without asking the brows
   try {
     browser(yes, () => "sound");
     assert.equal(
-      await chooseAppleMedia(),
+      await choose(),
       false,
       "asked for software where it cannot run: VP9 and Opus, not the browser's own",
     );

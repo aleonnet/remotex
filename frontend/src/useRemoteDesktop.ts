@@ -22,7 +22,11 @@ import { versionMismatch } from "./gatewayVersion.ts";
 import { HeldModifiers, modifierFlags } from "./heldModifiers.ts";
 import { type MicSender, startMicSender } from "./micSender.ts";
 import "./keyboardLock.ts";
-import { decodesAppleMedia } from "./appleMedia.ts";
+import {
+  APPLE_ELD_CODEC,
+  appleSoundProbed,
+  decodesAppleMedia,
+} from "./appleMedia.ts";
 import {
   isMacHost,
   MacKeyboardTranslator,
@@ -891,6 +895,11 @@ export function useRemoteDesktop(
     // Sound has a socket of its own, so that it never queues behind a picture — see
     // src/ws.rs. Opening it *is* the subscription; there is no message for audio.
     let audioWs: WebSocket | null = null;
+    // A Mac's `audioFormat` held until the page's sound question is answered.
+    let awaitedAudioFormat: Extract<
+      ControlMsg,
+      { type: "audioFormat" }
+    > | null = null;
     // The claim the sockets attach with, kept so audio can be opened and closed at any
     // point in the session rather than only when the session socket is built.
     let session: string | null = null;
@@ -1332,6 +1341,28 @@ export function useRemoteDesktop(
       socket?.close();
     };
 
+    // A Mac's sound is configured in the form this browser was found to decode it
+    // in, a question asked at load and not waited for there. While it is still
+    // out the format is held, and started when the answer comes unless its socket
+    // or a later format replaced it. Returns whether it was held.
+    const heldForAppleSound = (
+      msg: Extract<ControlMsg, { type: "audioFormat" }>,
+    ): boolean => {
+      awaitedAudioFormat = null;
+      const probed = msg.codec === APPLE_ELD_CODEC ? appleSoundProbed() : null;
+      if (!probed) {
+        return false;
+      }
+      const socket = audioWs;
+      awaitedAudioFormat = msg;
+      void probed.then(() => {
+        if (!disposed && audioWs === socket && awaitedAudioFormat === msg) {
+          startAudio(msg);
+        }
+      });
+      return true;
+    };
+
     // Build the decoder the format describes, around the context the click made.
     //
     // A *second* format on the same socket is a new desktop — the audio socket
@@ -1341,6 +1372,9 @@ export function useRemoteDesktop(
     const startAudio = (msg: Extract<ControlMsg, { type: "audioFormat" }>) => {
       if (audioPlayerRef.current) {
         releaseAudio();
+      }
+      if (heldForAppleSound(msg)) {
+        return;
       }
       // The click's context when there is one, which is the first format after the
       // toggle. Otherwise a fresh one: either a second format on a socket a click
