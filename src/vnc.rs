@@ -10,8 +10,8 @@
 //! The mode follows ServerInit, as it does there. `subtype = "ard"` is Standard
 //! mode: the Mac's physical displays, with their list, selection and density, in
 //! ZRLE rectangles. `subtype = "ard-high-performance"` is High Performance mode:
-//! one virtual display at the target's pinned `width` and `height`, or at the
-//! connecting client's screen resolution when no size is pinned, with the picture
+//! one virtual display at the session's opening size — the target's kept size, or
+//! the connecting client's screen where the window drives it — with the picture
 //! and sound from the Mac's media stream ([`crate::vnc_apple_media`]) alone, the
 //! browser covered by its resize notice until the stream is up. The unofficial
 //! `virtual_display = true` gives `ard` High Performance's display and resizing
@@ -38,7 +38,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Bu
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::config::{Choices, RenderPlan, Subtype, TargetConfig};
+use crate::config::{Choices, RenderPlan, Sizing, Subtype, TargetConfig};
 use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
@@ -579,8 +579,8 @@ struct DesktopState {
     /// A desktop size, in points, that could not be asked for yet — no support
     /// declared, or the density report still awaited — replayed on the first
     /// ExtendedDesktopSize rect or the report. A browser viewport report while
-    /// the session runs, and at session-open the operator's pinned size
-    /// ([`Flags::pinned`]).
+    /// the session runs, and at session-open the size the session keeps
+    /// ([`Flags::kept`]).
     pending: Option<(u16, u16)>,
     /// The window's last requested size in points, kept so a scale report can
     /// ask for the same window again in the new pixels. `None` until the first
@@ -1505,11 +1505,11 @@ pub async fn run(
 ) {
     // A desktop past the video ceiling holds the session open without a picture,
     // on a session the window does not size: only the remote can bring it back
-    // within, as a Mac on All Displays does when one display is chosen. Started
-    // with resize, the gateway asks for every size and holds each under the
+    // within, as a Mac on All Displays does when one display is chosen. Following
+    // the window, the gateway asks for every size and holds each under the
     // ceiling, and a remote that answers past it is refused. So is High
     // Performance's, whose virtual display is held under the ceiling too.
-    let oversize = if choices.resize || config.media_stream() {
+    let oversize = if choices.resize() || config.media_stream() {
         Oversize::Refuse
     } else {
         Oversize::Hold
@@ -1612,10 +1612,10 @@ async fn session(
         (width, height),
         Flags {
             macos,
-            resize: choices.resize,
+            resize: choices.resize(),
             clipboard: config.clipboard,
-            default_size: config.default_size(),
-            pinned: (!apple).then(|| config.pinned_size()).flatten(),
+            kept: (!apple && !choices.resize())
+                .then(|| config.opening_size(choices.size, display)),
             apple,
             virtual_display,
             wlshare_audio,
@@ -1647,31 +1647,17 @@ struct Flags {
     macos: bool,
     resize: bool,
     clipboard: bool,
-    /// What [`ClientMsg::DefaultSize`] resolves to here —
-    /// [`TargetConfig::default_size`], the pinned size or the built-in default.
-    /// Carried rather than read from the config at the point of use because
-    /// [`active_loop`] is given the handshaken link and these switches, not the
-    /// profile behind them.
-    default_size: (u16, u16),
-    /// The operator's pinned size ([`TargetConfig::pinned_size`]), in points,
-    /// on a generic target. The desktop is asked for it once, as soon as the
-    /// server declares SetDesktopSize support — a pin is the operator's opening
-    /// size and not the window's, so it is offered whether or not `resize` is
-    /// granted.
+    /// The size the session keeps, in points, on a plain or wlshare target that
+    /// does not follow a window: the configured size or the default
+    /// ([`TargetConfig::opening_size`]). The desktop is asked for it once, as
+    /// soon as the server declares SetDesktopSize support; a server that never
+    /// declares it, or refuses, keeps its own size.
     ///
-    /// Under `resize` it commonly never goes out, and that is the intended
-    /// outcome rather than a race lost: the browser reports its window the
-    /// moment `connected` reaches it, which is well before the handshake can
-    /// declare support, and a held request is superseded by the newest size the
-    /// window wants — see [`DesktopState::generic_resize`]. Asking for the pin
-    /// first would redraw the whole desktop for a size the browser had already
-    /// left. A client that reports no window at all (a phone) leaves the pin to
-    /// go out on the declaration.
-    ///
-    /// `None` on both Apple subtypes, where a pin is either spent by
-    /// [`opening_mode`] at connect (High Performance) or refused by the config
-    /// file (Standard `ard` exposes physical displays).
-    pinned: Option<(u16, u16)>,
+    /// `None` in a session that follows the window, whose first viewport report
+    /// is the request, and on both Apple subtypes, where the size is either
+    /// stated by [`opening_mode`] at connect (a virtual display) or never
+    /// stated at all (Standard `ard` exposes physical displays).
+    kept: Option<(u16, u16)>,
     /// Whether this is Apple's revision, 003.889, with the metadata encodings both
     /// Apple subtypes negotiate: the read loop's ZRLE stream, cursor cache and
     /// display list, and the Mac's reading of the pointer mask.
@@ -1835,7 +1821,8 @@ async fn connect(
             sock.write_all(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut reader).await?;
             let pass_media = plan.apple_media;
-            apple_preface(reader, sock, server, macos, wrap_key, config, display, addresses, pass_media).await
+            let opening = opening_mode(config, choices.size, display);
+            apple_preface(reader, sock, server, macos, wrap_key, config, opening, addresses, pass_media).await
         }
     }
 }
@@ -2110,8 +2097,8 @@ fn rfb38_encoding_list(clipboard: bool) -> Vec<i32> {
     // Cursor With Alpha, which only improves on it, and so are the two size
     // pseudo-encodings. They are how a server *tells* this end its
     // framebuffer changed size, which is not the same as being asked to change it:
-    // that is asked for where a SetDesktopSize is decided, by the window under
-    // `resize` and once at session-open under a pinned size. A server whose size
+    // that is asked for where a SetDesktopSize is decided, by the window where
+    // it drives the size and once at session-open where a size is kept. A server whose size
     // changes under a client that listed neither has no way to say so and hangs
     // up.
     //
@@ -2180,20 +2167,27 @@ fn wlshare_encoding_list(clipboard: bool, audio: bool, camera: bool, microphone:
 
 /// The virtual display a High Performance session opens with.
 ///
-/// The points come from [`TargetConfig::opening_size`] — the pinned config
-/// size, else the full resolution of the client's own screen, which is how
-/// Apple's client opens: at the display it is on, never at a smaller target
-/// size. The opening size matters more than any later one, because macOS lays
-/// every remote window out on the virtual display at that size and windows
-/// squeezed together onto a small opening display do not spread back out when
-/// it grows. The density is the client screen's whatever named the points, so
-/// a Retina client gets a sharp desktop even at a pinned size — quantized to
+/// The points come from [`TargetConfig::opening_size`] — the size the session
+/// keeps, or following the window the full resolution of the client's own
+/// screen, which is how Apple's client opens: at the display it is on, never at
+/// a smaller target size. The opening size matters more than any later one,
+/// because macOS lays every remote window out on the virtual display at that
+/// size and windows squeezed together onto a small opening display do not
+/// spread back out when it grows. The density is the client screen's whatever
+/// named the points, as Apple's client has it, so a Retina client gets a sharp
+/// desktop even at a kept size, where an RDP host is left at its own scaling as
+/// Microsoft's client leaves it with "Optimize for Retina displays" unchecked
+/// (`opening_layout` in src/rdp.rs) — quantized to
 /// the 1x or 2x a virtual display can be backed at
 /// ([`crate::protocol::render_density`]): a Mac asked for 1.25x or 1.5x
 /// answers with a small 2x display rather than a rounded one.
-fn opening_mode(config: &TargetConfig, display: Option<HostDisplay>) -> vnc_apple::VirtualMode {
+fn opening_mode(
+    config: &TargetConfig,
+    sizing: Sizing,
+    display: Option<HostDisplay>,
+) -> vnc_apple::VirtualMode {
     vnc_apple::virtual_display_mode(
-        config.opening_size(display),
+        config.opening_size(sizing, display),
         display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
     )
 }
@@ -2224,7 +2218,7 @@ async fn apple_preface(
     macos: bool,
     wrap_key: [u8; 16],
     config: &TargetConfig,
-    display: Option<HostDisplay>,
+    opening: vnc_apple::VirtualMode,
     (peer, local): (std::net::SocketAddr, std::net::SocketAddr),
     pass_media: bool,
 ) -> anyhow::Result<Connected> {
@@ -2278,7 +2272,7 @@ async fn apple_preface(
         // reports and screen changes; its dynamic-resolution flag is set here
         // regardless, so every fresh session restores the Mac's checkbox to on.
         uplink
-            .send(&vnc_apple::set_display_configuration(opening_mode(config, display)))
+            .send(&vnc_apple::set_display_configuration(opening))
             .await?;
     }
     uplink.send(&set_pixel_format()).await?;
@@ -2389,8 +2383,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         macos,
         resize,
         clipboard: clipboard_enabled,
-        default_size,
-        pinned,
+        kept,
         apple,
         virtual_display,
         wlshare_audio,
@@ -2418,10 +2411,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         scale: UNSCALED,
         host_density,
         screen: None,
-        // A pinned size is seeded as a held request: nothing can be asked for
+        // A kept size is seeded as a held request: nothing can be asked for
         // before the server declares SetDesktopSize support, and the hold is
-        // already replayed on that declaration — see [`Flags::pinned`].
-        pending: pinned,
+        // already replayed on that declaration — see [`Flags::kept`].
+        pending: kept,
         viewport: None,
         // Only a wlshare target listed the density request, and it is the one
         // whose listing came back from the preface.
@@ -2620,12 +2613,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 if let Err(e) = send_all(&uplink, &msgs).await {
                     break Err(e);
                 }
-                // Viewport reports drive dynamic resize, not an input event;
-                // `DefaultSize` is the same request with the size supplied from
-                // here instead of by the client — see [`ClientMsg::DefaultSize`]
-                // — so the two resolve to a size first and share the one call,
-                // which is also how the second inherits the stash-until-supported
-                // and drop-the-no-op behaviour `request_resize` already has.
+                // Viewport reports drive dynamic resize, not an input event.
                 //
                 // `HostDisplay` is that request with no size of its own:
                 // mid-session it is a *density* report. High Performance can
@@ -2635,7 +2623,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 // The size it carries mattered only at session-open.
                 let ask = match input {
                     ClientMsg::Viewport { w, h } => Some(ResizeAsk::Viewport((w, h))),
-                    ClientMsg::DefaultSize => Some(ResizeAsk::Points(default_size)),
                     // On a wlshare target the report is forwarded as the client's
                     // declared density, once the server has shown it listens
                     // and not while an earlier declaration is unanswered — see
@@ -2959,15 +2946,12 @@ fn held_messages(
         .collect()
 }
 
-/// The unit a resize request states its size in. Everything resolves to logical
-/// points first, because that is the one unit all three speak: a viewport report
-/// and the configured default are points outright, and a density change carries
-/// no size at all.
+/// What a resize request asks for. Everything resolves to logical points first:
+/// a viewport report is points outright, and a density change carries no size
+/// at all.
 enum ResizeAsk {
     /// A browser viewport report: points.
     Viewport((u16, u16)),
-    /// The target-defined default size: logical points.
-    Points((u16, u16)),
     /// No new size — the client's screen changed density, so the current size is
     /// re-expressed at the new [`DesktopState::host_density`].
     Density,
@@ -2998,7 +2982,7 @@ async fn request_resize(
         let mut d = desktop.lock().unwrap();
         let want = match ask {
             ResizeAsk::Viewport((0, _) | (_, 0)) => return Ok(()),
-            ResizeAsk::Viewport(points) | ResizeAsk::Points(points) => points,
+            ResizeAsk::Viewport(points) => points,
             // The current size, in the points it is rendered from: the one
             // request that starts from pixels, and from this end's own. A size
             // still settling is the newer word on the points: a window dragged
@@ -5677,7 +5661,7 @@ fn translate_input(
             }
         }
         // Intercepted by the input loop (request_resize) before translation.
-        ClientMsg::Viewport { .. } | ClientMsg::DefaultSize => Vec::new(),
+        ClientMsg::Viewport { .. } => Vec::new(),
         // Intercepted by the input loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
         // Intercepted by the input loop (the clipboard bridge, which needs the
@@ -8254,19 +8238,16 @@ mod tests {
         assert_eq!(desktop.lock().unwrap().viewport, Some((640, 480)));
     }
 
-    /// The operator's pinned size on a generic target is seeded as a held
-    /// request, so the desktop is asked for it as soon as the server declares
-    /// SetDesktopSize support — and asked for it on a target *without*
-    /// `resize`, which is the whole point of a pin: `resize` decides whether
-    /// the window drives the size afterwards, not whether the operator's
-    /// opening size is spent at all.
+    /// The size a plain or wlshare session keeps is seeded as a held request, so
+    /// the desktop is asked for it as soon as the server declares SetDesktopSize
+    /// support, in a session the window does not drive.
     #[tokio::test]
-    async fn a_pinned_size_is_asked_for_on_a_target_without_resize() {
+    async fn a_kept_size_is_asked_for_once_support_is_declared() {
         let (uplink, wire) = test_uplink();
         let (sink, _rx) = test_sink();
         let screen = Screen { id: 9, flags: 1 };
-        // What `active_loop` builds for `width = 1440`, `height = 900` and a
-        // session without resize, against a server whose desktop is 1920x1080.
+        // What `active_loop` builds for a session kept at 1440×900, against a
+        // server whose desktop is 1920x1080.
         let desktop = shared_desktop((1920, 1080), None, Some((1440, 900)));
         desktop.lock().unwrap().resize = false;
 
@@ -8285,18 +8266,17 @@ mod tests {
 
         assert_eq!(written(&wire), set_desktop_size((1440, 900), screen));
         let d = desktop.lock().unwrap();
-        assert_eq!(d.pending, None, "the pin was spent, not held again");
+        assert_eq!(d.pending, None, "the size was asked for, not held again");
         assert_eq!(d.viewport, Some((1440, 900)), "and it is what a scale report re-asks for");
     }
 
-    /// The same declaration on an unpinned target asks for nothing: a session
-    /// with no pin keeps the server's own size until the window says otherwise.
+    /// The same declaration in a session that follows a window which has not
+    /// reported yet asks for nothing: there is no kept size to ask for.
     #[tokio::test]
-    async fn an_unpinned_target_asks_for_nothing_when_support_is_declared() {
+    async fn a_session_following_its_window_asks_for_nothing_before_a_report() {
         let (uplink, wire) = test_uplink();
         let (sink, _rx) = test_sink();
         let desktop = shared_desktop((1920, 1080), None, None);
-        desktop.lock().unwrap().resize = false;
 
         let payload = eds_payload(Screen { id: 9, flags: 1 });
         read_extended_desktop_size(
@@ -8313,14 +8293,13 @@ mod tests {
         assert!(written(&wire).is_empty());
     }
 
-    /// The same pin under `resize`, which is the ordering every desktop browser
-    /// produces: the window is reported the moment `connected` reaches it, long
-    /// before a rect can declare SetDesktopSize support, so the report supersedes
-    /// the held pin exactly as it supersedes any older hold. One request goes out
-    /// on the declaration and it is the window's — the pin is never asked for
-    /// behind a size the browser has already left.
+    /// A newer viewport report supersedes a held one, which is the ordering every
+    /// desktop browser produces: the window is reported the moment `connected`
+    /// reaches it, long before a rect can declare SetDesktopSize support. One
+    /// request goes out on the declaration and it is the newest — a size the
+    /// browser has already left is never asked for.
     #[tokio::test]
-    async fn a_viewport_report_supersedes_a_pin_that_has_not_gone_out() {
+    async fn a_viewport_report_supersedes_a_held_one_that_has_not_gone_out() {
         let (uplink, wire) = test_uplink();
         let (sink, _rx) = test_sink();
         let screen = Screen { id: 9, flags: 1 };
@@ -8329,7 +8308,7 @@ mod tests {
         // The browser's first viewport, handled before any rect has arrived.
         request_resize(&uplink, &desktop, ResizeAsk::Viewport((1280, 800)), false).await.unwrap();
         assert!(written(&wire).is_empty(), "nothing goes out before support is declared");
-        assert_eq!(desktop.lock().unwrap().pending, Some((1280, 800)), "the pin gave way");
+        assert_eq!(desktop.lock().unwrap().pending, Some((1280, 800)), "the older size gave way");
 
         let payload = eds_payload(screen);
         read_extended_desktop_size(
@@ -8462,7 +8441,7 @@ mod tests {
         assert!(desktop.lock().unwrap().pending.is_none());
     }
     #[test]
-    fn a_session_opens_at_the_pinned_size_or_the_clients_own_screen() {
+    fn a_session_opens_at_its_kept_size_or_the_clients_own_screen() {
         let target = |size: &str| -> TargetConfig {
             toml::from_str(&format!(
                 "name = \"t\"\nprotocol = \"vnc\"\nsubtype = \"ard-high-performance\"\n\
@@ -8472,22 +8451,37 @@ mod tests {
         };
         let screen = crate::protocol::HostDisplay { w: 1728, h: 1117, scale: 200, fit: false };
 
-        // No pinned size: the client's screen, at the client's density — how
+        // Following the window: the client's screen, at the client's density — how
         // Apple's own client opens, and the layout every remote window gets.
         assert_eq!(
-            opening_mode(&target(""), Some(screen)),
+            opening_mode(&target(""), Sizing::Window, Some(screen)),
             vnc_apple::virtual_display_mode((1728, 1117), 2.0)
         );
 
-        // A pinned size wins, but the density is still the client screen's.
+        // A kept size is the configured one or the default, and the density is
+        // still the client screen's.
+        let sized = target("size = \"1600x1000\"");
         assert_eq!(
-            opening_mode(&target("width = 1600\nheight = 1000"), Some(screen)),
+            opening_mode(&sized, Sizing::Target, Some(screen)),
             vnc_apple::virtual_display_mode((1600, 1000), 2.0)
         );
-
-        // No screen named at all (a probe): the pinned size or the default, at 1x.
         assert_eq!(
-            opening_mode(&target(""), None),
+            opening_mode(&sized, Sizing::BuiltIn, Some(screen)),
+            vnc_apple::virtual_display_mode(crate::config::DEFAULT_SIZE, 2.0)
+        );
+        assert_eq!(
+            opening_mode(&target(""), Sizing::Target, Some(screen)),
+            vnc_apple::virtual_display_mode(crate::config::DEFAULT_SIZE, 2.0)
+        );
+        // And following the window, the configured size is not used.
+        assert_eq!(
+            opening_mode(&sized, Sizing::Window, Some(screen)),
+            vnc_apple::virtual_display_mode((1728, 1117), 2.0)
+        );
+
+        // No screen named at all (a probe): the default, at 1x.
+        assert_eq!(
+            opening_mode(&target(""), Sizing::Window, None),
             vnc_apple::virtual_display_mode(crate::config::DEFAULT_SIZE, 1.0)
         );
     }

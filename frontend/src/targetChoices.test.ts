@@ -1,20 +1,32 @@
 // Which options a target shows at the picker, which are greyed, and what Start
-// then sends. The properties under test are the picker's three rules: not offered
+// then sends. The properties under test are the picker's rules: the size a session
+// will have is always shown and is a choice only where there are two, not offered
 // is not shown, offered but unavailable is greyed with the reason, and a target
 // that can only be passed cannot start in a browser that cannot take it.
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
 import {
   type Abilities,
-  type Choices,
   readRememberedChoices,
   rememberChoice,
   type TargetInfo,
   targetOptions,
 } from "./targetChoices.ts";
 
-const ABLE: Abilities = { appleMedia: true, rdpGraphics: true };
-const UNABLE: Abilities = { appleMedia: false, rdpGraphics: false };
+// A desktop browser, whose window a desktop can follow.
+const ABLE: Abilities = {
+  appleMedia: true,
+  rdpGraphics: true,
+  follows: "window",
+};
+const UNABLE: Abilities = {
+  appleMedia: false,
+  rdpGraphics: false,
+  follows: "window",
+};
+const TABLET: Abilities = { ...ABLE, follows: "screen" };
+const PHONE: Abilities = { ...ABLE, follows: null };
+const DEFAULT_SIZE = { w: 1440, h: 900 };
 
 function target(offers: Partial<TargetInfo>): TargetInfo {
   return {
@@ -24,6 +36,8 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     host: "192.0.2.1",
     port: 5900,
     resize: false,
+    size: null,
+    defaultSize: DEFAULT_SIZE,
     audio: false,
     passthrough: null,
     passthroughOnly: false,
@@ -43,21 +57,79 @@ const HIGH_PERFORMANCE = target({
   passthrough: "apple-media",
 });
 
-function keys(rows: { key: keyof Choices }[]): string[] {
+const SIZED = { w: 1920, h: 1080 };
+
+function keys(rows: { key: string }[]): string[] {
   return rows.map((row) => row.key);
 }
 
+/** The sizes a target offers a client, as `[value, label]`. */
+function sizes(offered: TargetInfo, abilities: Abilities): string[][] {
+  return targetOptions(offered, undefined, abilities).sizes.map((size) => [
+    size.value,
+    size.label,
+  ]);
+}
+
+test("a target the window cannot drive keeps one size, on every client", () => {
+  // A plain VNC server, and an RDP host on bitmap updates.
+  for (const abilities of [ABLE, TABLET, PHONE]) {
+    assert.deepEqual(sizes(target({}), abilities), [["target", "1440×900"]]);
+    assert.deepEqual(sizes(target({ size: SIZED }), abilities), [
+      ["target", "1920×1080"],
+    ]);
+  }
+  // A plain server's answer to a size is not known before it is dialled.
+  const plain = targetOptions(target({}), undefined, ABLE);
+  assert.match(plain.sizes[0].note, /takes no size keeps its own/);
+  assert.equal(plain.choices.size, "target");
+});
+
+test("a desktop browser and a tablet follow, beside a configured size", () => {
+  assert.deepEqual(sizes(RDP, ABLE), [["window", "This window's size"]]);
+  assert.deepEqual(sizes(RDP, TABLET), [["window", "This screen's size"]]);
+  // The configured size comes first, so it is the size until somebody chooses.
+  const sized = { ...RDP, size: SIZED };
+  assert.deepEqual(sizes(sized, ABLE), [
+    ["target", "1920×1080"],
+    ["window", "This window's size"],
+  ]);
+  assert.deepEqual(sizes(sized, TABLET), [
+    ["target", "1920×1080"],
+    ["window", "This screen's size"],
+  ]);
+  assert.equal(targetOptions(sized, undefined, ABLE).choices.size, "target");
+  assert.equal(targetOptions(RDP, undefined, ABLE).choices.size, "window");
+});
+
+test("a phone is offered sizes the desktop keeps, never its window", () => {
+  assert.deepEqual(sizes(RDP, PHONE), [["target", "1440×900"]]);
+  assert.deepEqual(sizes({ ...RDP, size: SIZED }, PHONE), [
+    ["target", "1920×1080"],
+    ["default", "1440×900"],
+  ]);
+});
+
+test("a Mac sharing its physical displays is shown at their size", () => {
+  const standard = targetOptions(
+    target({ subtype: "ard", defaultSize: null }),
+    undefined,
+    PHONE,
+  );
+  assert.deepEqual(
+    standard.sizes.map((size) => size.value),
+    ["target"],
+  );
+  assert.match(standard.sizes[0].label, /own size/);
+});
+
 test("only what the target's type offers has a row", () => {
   assert.deepEqual(keys(targetOptions(RDP, undefined, ABLE).rows), [
-    "resize",
     "audio",
     "passthrough",
   ]);
-  // A plain VNC server: resize, and nothing else to choose.
-  assert.deepEqual(
-    keys(targetOptions(target({ resize: true }), undefined, ABLE).rows),
-    ["resize"],
-  );
+  // A plain VNC server has nothing to choose.
+  assert.deepEqual(targetOptions(target({}), undefined, ABLE).rows, []);
   // wlshare's VP9 is the subtype's picture, not a choice.
   assert.deepEqual(
     keys(
@@ -67,23 +139,23 @@ test("only what the target's type offers has a row", () => {
         ABLE,
       ).rows,
     ),
-    ["resize", "audio"],
+    ["audio"],
   );
   // Standard Screen Sharing on the Mac's physical displays offers nothing.
   const standard = targetOptions(target({ subtype: "ard" }), undefined, ABLE);
   assert.deepEqual(standard.rows, []);
   assert.deepEqual(standard.choices, {
-    resize: false,
+    size: "target",
     audio: false,
     passthrough: false,
   });
   assert.equal(standard.blocked, null);
 });
 
-test("nothing is chosen until somebody chooses it", () => {
+test("nothing is ticked until somebody ticks it", () => {
   const options = targetOptions(RDP, undefined, ABLE);
   assert.deepEqual(options.choices, {
-    resize: false,
+    size: "window",
     audio: false,
     passthrough: false,
   });
@@ -91,22 +163,28 @@ test("nothing is chosen until somebody chooses it", () => {
   assert.ok(options.rows.every((row) => !row.checked && !row.disabled));
 });
 
-test("what was ticked last time is what Start sends", () => {
-  const options = targetOptions(RDP, { resize: true, audio: true }, ABLE);
+test("what was chosen last time is what Start sends", () => {
+  const sized = { ...RDP, size: SIZED };
+  const options = targetOptions(sized, { size: "window", audio: true }, ABLE);
   assert.deepEqual(options.choices, {
-    resize: true,
+    size: "window",
     audio: true,
     passthrough: false,
   });
   assert.equal(options.sound, true);
-  // A choice remembered for something the target no longer offers is not sent.
+  // A choice remembered for something the target does not offer here is not
+  // sent: a phone has no window, and a plain server neither that nor sound.
+  assert.equal(
+    targetOptions(sized, { size: "window" }, PHONE).choices.size,
+    "target",
+  );
   const plain = targetOptions(
-    target({ resize: true }),
-    { resize: true, audio: true, passthrough: true },
+    target({}),
+    { size: "window", audio: true, passthrough: true },
     ABLE,
   );
   assert.deepEqual(plain.choices, {
-    resize: true,
+    size: "target",
     audio: false,
     passthrough: false,
   });
@@ -114,7 +192,7 @@ test("what was ticked last time is what Start sends", () => {
 
 test("High Performance's sound has no row and is always carried", () => {
   const options = targetOptions(HIGH_PERFORMANCE, undefined, ABLE);
-  assert.deepEqual(keys(options.rows), ["resize", "passthrough"]);
+  assert.deepEqual(keys(options.rows), ["passthrough"]);
   assert.equal(options.choices.audio, false);
   assert.equal(options.sound, true);
 });
@@ -183,11 +261,11 @@ beforeEach(() => {
 test("choices are remembered per target", () => {
   assert.deepEqual(readRememberedChoices(), {});
   let remembered = rememberChoice({}, "win", "audio", true);
-  remembered = rememberChoice(remembered, "win", "resize", true);
+  remembered = rememberChoice(remembered, "win", "size", "window");
   remembered = rememberChoice(remembered, "mac", "passthrough", true);
   remembered = rememberChoice(remembered, "win", "audio", false);
   const expected = {
-    win: { audio: false, resize: true },
+    win: { audio: false, size: "window" },
     mac: { passthrough: true },
   };
   assert.deepEqual(remembered, expected);
@@ -206,7 +284,7 @@ test("unreadable storage remembers nothing and still returns the choice", () => 
     },
   };
   assert.deepEqual(readRememberedChoices(), {});
-  assert.deepEqual(rememberChoice({}, "win", "resize", true), {
-    win: { resize: true },
+  assert.deepEqual(rememberChoice({}, "win", "size", "window"), {
+    win: { size: "window" },
   });
 });

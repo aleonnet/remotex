@@ -36,7 +36,8 @@ username = "me"              # the account wlshare runs as; its [pam] table chec
 password = "…"
 ```
 
-The session is started with resize, ticked under the target at the picker.
+The session is started with resize: its size is the window's, chosen under the
+target at the picker.
 `subtype = "wlshare"` names the server, and is what makes the gateway list the
 pseudo-encoding in its `SetEncodings`, after everything that decides pixels and
 immediately before the output-list request, so it never weighs on encoding

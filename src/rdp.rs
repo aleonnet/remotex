@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::audio::{AudioBridge, PcmFormat};
-use crate::config::{Choices, RenderPlan, TargetConfig};
+use crate::config::{Choices, RenderPlan, Sizing, TargetConfig};
 use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16};
 use crate::keymap;
@@ -167,7 +167,7 @@ pub async fn run(
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = VideoSink::new("rdp", frame_tx, plan, feedback, Oversize::Refuse);
-    session(config, choices.resize, plan.rdp_graphics, display, input_rx, audio, uplinks, &sink).await;
+    session(config, choices.size, plan.rdp_graphics, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }
 
@@ -198,7 +198,7 @@ impl AudioSink for Sound {
 #[allow(clippy::too_many_arguments)]
 async fn session(
     config: TargetConfig,
-    resize: bool,
+    sizing: Sizing,
     pass_graphics: bool,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
@@ -206,7 +206,8 @@ async fn session(
     uplinks: Uplinks,
     sink: &VideoSink,
 ) {
-    let opening = opening_layout(&config, resize, display);
+    let resize = sizing == Sizing::Window;
+    let opening = opening_layout(&config, sizing, display);
     let (session, mut events) =
         Session::start(connect_config(&config, resize, opening, pass_graphics, audio, &uplinks));
     // The feeds exist from here, so the camera and mic sockets' traffic has somewhere to
@@ -252,7 +253,6 @@ async fn session(
             resize,
             pass_graphics,
             clipboard: config.clipboard,
-            default_size: config.default_size(),
         },
         (width, height),
         applied,
@@ -334,9 +334,9 @@ async fn await_desktop(
     }
 }
 
-/// The layout a session opens at: the pinned config size, else the full
-/// resolution of the client's own screen — the same rule every engine resolves —
-/// in points, carried up to the client's density and held under the video
+/// The layout a session opens at: the size it keeps, or following the window the
+/// full resolution of the client's own screen — the same rule every engine
+/// resolves — in points, carried up to the client's density and held under the video
 /// stream's ceiling as every later layout is (see `Layout::held`).
 ///
 /// At the client's density from the handshake rather than 1x and a Display
@@ -346,12 +346,16 @@ async fn await_desktop(
 /// size. Opened at the final layout, the logon — or the reconnection of a session
 /// left at another size — is drawn at it from the start.
 ///
-/// 1x in a session started without resize, where a density is not this end's to
-/// change: the target then keeps its size and scaling as the operator set them.
-fn opening_layout(config: &TargetConfig, resize: bool, display: Option<HostDisplay>) -> Layout {
-    let (width, height) = config.opening_size(display);
+/// 1x in a session at a kept size, where a density is not this end's to change:
+/// the target then keeps its size and scaling as the operator set them, which is
+/// how Microsoft's client on a Mac behaves with "Optimize for Retina displays"
+/// unchecked. A High Performance Mac differs, opening at the client's density whatever its
+/// size, because that is how Apple's own client opens one (`opening_mode` in
+/// src/vnc.rs).
+fn opening_layout(config: &TargetConfig, sizing: Sizing, display: Option<HostDisplay>) -> Layout {
+    let (width, height) = config.opening_size(sizing, display);
     let density = display
-        .filter(|_| resize)
+        .filter(|_| sizing == Sizing::Window)
         .map_or(Density::One, |screen| Density::from_host(screen.scale));
     Layout { w: u32::from(width), h: u32::from(height), density: Density::One }
         .at_density(density)
@@ -402,11 +406,6 @@ struct Flags {
     /// is answered as a session with no clipboard rather than as one with an empty
     /// one.
     clipboard: bool,
-    /// What [`ClientMsg::DefaultSize`] means here —
-    /// [`TargetConfig::default_size`], in *points*: the pinned config size or
-    /// the built-in default. Points rather than pixels because the density can
-    /// move underneath it — see [`Density::pixels`].
-    default_size: (u16, u16),
 }
 
 /// How dense a desktop this session has asked the RDP server to render.
@@ -887,7 +886,7 @@ async fn active_loop(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    let Flags { resize, pass_graphics, clipboard: clipboard_enabled, default_size } = flags;
+    let Flags { resize, pass_graphics, clipboard: clipboard_enabled } = flags;
     let input = session.input();
     let framebuffer = session.framebuffer();
 
@@ -1221,21 +1220,12 @@ async fn active_loop(
                 // this end applies each report it receives and ignores them all
                 // unless resize was negotiated.
                 //
-                // The size arrives in *points*, and so does `DefaultSize` — the
-                // pinned `width`/`height`, or the built-in default when no size
-                // was pinned (see [`ClientMsg::DefaultSize`]). Both are a 1x
-                // layout carried up to the density this end is applying, or the
-                // denser one already pending; without a density attached the
-                // request would tell the server to forget one it is already
-                // applying.
-                let wanted_size = match msg {
-                    ClientMsg::Viewport { w, h } => Some((u32::from(w), u32::from(h))),
-                    ClientMsg::DefaultSize => {
-                        Some((u32::from(default_size.0), u32::from(default_size.1)))
-                    }
-                    _ => None,
-                };
-                if let Some((w, h)) = wanted_size {
+                // The size arrives in *points*: a 1x layout carried up to the
+                // density this end is applying, or the denser one already
+                // pending; without a density attached the request would tell the
+                // server to forget one it is already applying.
+                if let ClientMsg::Viewport { w, h } = msg {
+                    let (w, h) = (u32::from(w), u32::from(h));
                     if resize {
                         // Scheduled, not sent-and-forgotten, for the same reason a
                         // density is: a size that arrives before the Display Control
@@ -1437,9 +1427,7 @@ fn install_layout(
 /// place here rather than at the callers: this is the one engine where asking for
 /// what you already have is *expensive*, since the server answers any request with
 /// a full renegotiation. VNC drops an unchanged request itself, so
-/// this is what makes the client requests idempotent across both engines —
-/// which matters most for the automatic [`ClientMsg::DefaultSize`] a
-/// mobile client sends on every reattach.
+/// this is what makes the client requests idempotent across both engines.
 ///
 /// Compared after the size adjustment, because that is the layout that would
 /// actually be asked for: an odd width lands on the even one beside it, and
@@ -1680,9 +1668,7 @@ fn translate_input(
         // Handled by the active loop (client-initiated resize, and the density
         // that is a resize here) before translation, so these arms are
         // unreachable in practice.
-        ClientMsg::Viewport { .. } | ClientMsg::DefaultSize | ClientMsg::HostDisplay { .. } => {
-            Vec::new()
-        }
+        ClientMsg::Viewport { .. } | ClientMsg::HostDisplay { .. } => Vec::new(),
         // Handled by the active loop (full repaint) before translation.
         ClientMsg::Refresh => Vec::new(),
         // Both halves of the clipboard pair are answered by the active loop, on the
@@ -2348,7 +2334,7 @@ mod tests {
     /// A session opens at the layout it will stay at: a phone's 3x screen is the
     /// default size at 2x from the handshake, not a 1x desktop waiting for a
     /// Display Control layout that a Windows host applies in two visible steps.
-    /// Without resize the density is not this end's, and it opens at 1x.
+    /// At a kept size the density is not this end's, and it opens at 1x.
     #[test]
     fn a_session_opens_at_the_clients_density_when_it_may_set_one() {
         let phone = HostDisplay { w: 430, h: 932, scale: 300, fit: true };
@@ -2357,17 +2343,33 @@ mod tests {
 
         let target = rdp_target("");
         assert_eq!(
-            opening_layout(&target, true, Some(phone)),
+            opening_layout(&target, Sizing::Window, Some(phone)),
             Layout { w: w * 2, h: h * 2, density: Density::Two }
         );
         let retina = HostDisplay { w: 1728, h: 1117, scale: 200, fit: false };
         assert_eq!(
-            opening_layout(&target, true, Some(retina)),
+            opening_layout(&target, Sizing::Window, Some(retina)),
             Layout { w: 3456, h: 2234, density: Density::Two }
         );
-        assert_eq!(opening_layout(&target, true, None), Layout { w, h, density: Density::One });
+        assert_eq!(opening_layout(&target, Sizing::Window, None), Layout { w, h, density: Density::One });
 
-        assert_eq!(opening_layout(&target, false, Some(phone)), Layout { w, h, density: Density::One });
+        for display in [Some(phone), Some(retina)] {
+            assert_eq!(
+                opening_layout(&target, Sizing::Target, display),
+                Layout { w, h, density: Density::One }
+            );
+        }
+        // A configured size is what a kept session opens at, and a window ignores.
+        let sized = rdp_target("size = \"1920x1080\"");
+        assert_eq!(
+            opening_layout(&sized, Sizing::Target, Some(retina)),
+            Layout { w: 1920, h: 1080, density: Density::One }
+        );
+        assert_eq!(opening_layout(&sized, Sizing::BuiltIn, Some(retina)), Layout { w, h, density: Density::One });
+        assert_eq!(
+            opening_layout(&sized, Sizing::Window, Some(retina)),
+            Layout { w: 3456, h: 2234, density: Density::Two }
+        );
     }
 
     #[test]

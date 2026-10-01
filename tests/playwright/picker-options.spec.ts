@@ -8,9 +8,9 @@
 // browser that cannot take the session's passthrough is told and shown. Nothing
 // here looks at the canvas.
 //
-// It needs a gateway with an `rdp` target, the one type that offers all three
-// choices. The tone harness in `src/server.rs` is one, with a scripted engine and
-// no remote:
+// It needs a gateway with an `rdp` target that configures a size, the one type that
+// offers all three choices. The tone harness in `src/server.rs` is one, with a
+// scripted engine and no remote:
 //
 //     cargo test --lib serve_a_test_tone -- --ignored --nocapture
 //
@@ -24,6 +24,7 @@
 import { expect, type Locator, type Page, test } from "@playwright/test";
 
 import {
+  FOLLOWS_WINDOW,
   leaveSession,
   logIn,
   logInAndConnectTo,
@@ -35,7 +36,7 @@ import {
 const PICKER_TARGET = process.env.REMOTEX_PLAYWRIGHT_PICKER_TARGET;
 
 interface Choices {
-  resize: boolean;
+  size: "target" | "default" | "window";
   audio: boolean;
   passthrough: boolean;
 }
@@ -89,7 +90,6 @@ async function openTarget(page: Page): Promise<Locator> {
   return page.getByRole("listitem").filter({ has: row });
 }
 
-const RESIZE = /^Resize with this window/;
 const SOUND = /^Sound/;
 const PASSED = /^Pass the graphics pipeline through/;
 
@@ -104,14 +104,14 @@ test.describe("the picker's options", () => {
     await leaveSession(page);
   });
 
-  test("Start carries what was ticked, and the session reports it back", async ({
+  test("Start carries what was chosen, and the session reports it back", async ({
     page,
   }) => {
     const seen = watchSession(page);
     await logInAndConnectTo(page, PICKER_TARGET ?? "", "", { resize: true });
 
     expect(seen.connects).toEqual([
-      { resize: true, audio: false, passthrough: false },
+      { size: "window", audio: false, passthrough: false },
     ]);
     const connected = seen.statuses.at(-1);
     expect(connected).toMatchObject({
@@ -138,9 +138,15 @@ test.describe("the picker's options", () => {
       page.getByRole("button", { name: "Start", exact: true }),
     ).toHaveCount(0);
 
-    // An rdp target offers all three, and what was ticked is how it comes back.
+    // An rdp target offers all three, and what was chosen is how it comes back.
+    // The size it will have is shown before Start: the one its config sets, which
+    // is the size until somebody chooses the window.
     const item = await openTarget(page);
-    await expect(item.getByRole("checkbox", { name: RESIZE })).not.toBeChecked();
+    const sizes = item.getByRole("group", { name: "Size" }).getByRole("radio");
+    await expect(sizes).toHaveCount(2);
+    await expect(sizes.first()).toHaveAccessibleName(/^\d+×\d+/);
+    await expect(sizes.first()).toBeChecked();
+    await expect(item.getByRole("radio", { name: FOLLOWS_WINDOW })).not.toBeChecked();
     await expect(item.getByRole("checkbox", { name: SOUND })).toBeChecked();
     await expect(item.getByRole("checkbox", { name: PASSED })).not.toBeChecked();
     await expect(
@@ -148,13 +154,13 @@ test.describe("the picker's options", () => {
     ).toBeEnabled();
 
     // Kept by the browser, not by the page: a reload finds it as it was left.
-    await item.getByRole("checkbox", { name: RESIZE }).check();
+    await item.getByRole("radio", { name: FOLLOWS_WINDOW }).check();
     await page.reload();
     await expect(
       page.getByRole("heading", { name: "Pick a target" }),
     ).toBeVisible({ timeout: 20_000 });
     const again = await openTarget(page);
-    await expect(again.getByRole("checkbox", { name: RESIZE })).toBeChecked();
+    await expect(again.getByRole("radio", { name: FOLLOWS_WINDOW })).toBeChecked();
     await expect(again.getByRole("checkbox", { name: SOUND })).toBeChecked();
   });
 
@@ -221,5 +227,56 @@ test.describe("the picker's options", () => {
     await expect(
       page.getByRole("heading", { name: "Pick a target" }),
     ).toBeVisible({ timeout: 20_000 });
+  });
+});
+
+test.describe("the picker on a phone", () => {
+  test.skip(
+    !PICKER_TARGET,
+    "set REMOTEX_PLAYWRIGHT_PICKER_TARGET=<rdp target> against a gateway with one",
+  );
+
+  // A phone as the page tells one: a screen whose short side is a phone's, and,
+  // set in the test, the two touch points a pinch needs.
+  test.use({
+    viewport: { width: 390, height: 844 },
+    hasTouch: true,
+    isMobile: true,
+  });
+
+  test.afterEach(async ({ page }) => {
+    await leaveSession(page);
+  });
+
+  test("a phone is offered sizes the desktop keeps, never its window", async ({
+    page,
+  }) => {
+    await page.addInitScript(() => {
+      Object.defineProperty(Navigator.prototype, "maxTouchPoints", {
+        get: () => 5,
+      });
+    });
+    const seen = watchSession(page);
+    await logIn(page);
+
+    // The size the target configures, and the default beside it.
+    const item = await openTarget(page);
+    const sizes = item.getByRole("group", { name: "Size" }).getByRole("radio");
+    await expect(sizes).toHaveCount(2);
+    await expect(sizes.first()).toBeChecked();
+    await expect(
+      item.getByRole("radio", { name: FOLLOWS_WINDOW }),
+    ).toHaveCount(0);
+
+    await item.getByRole("radio", { name: /^1440×900/ }).check();
+    await item.getByRole("button", { name: "Start", exact: true }).click();
+    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
+      timeout: 20_000,
+    });
+    expect(seen.connects.at(-1)).toMatchObject({ size: "default" });
+    expect(seen.statuses.at(-1)).toMatchObject({
+      type: "connected",
+      resize: false,
+    });
   });
 });

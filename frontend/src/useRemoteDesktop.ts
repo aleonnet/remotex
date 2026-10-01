@@ -182,8 +182,8 @@ export const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
 export const HAS_TOUCH = (navigator.maxTouchPoints || 0) >= 1;
 
 // Tablets request their screen's landscape dimensions less the band a status
-// bar or browser bar keeps above the page; phones request the target default.
-// See tabletGuestSize. Read when sent rather than at load: the band is measured
+// bar or browser bar keeps above the page; phones request nothing, and are
+// offered no session that would ask. See tabletGuestSize. Read when sent rather than at load: the band is measured
 // off the page as it is at that moment.
 function mobileGuestSize(): { w: number; h: number } | null {
   const el = document.documentElement;
@@ -191,6 +191,17 @@ function mobileGuestSize(): { w: number; h: number } | null {
     { w: screen.width, h: screen.height },
     { w: el.clientWidth, h: el.clientHeight },
   );
+}
+
+// What of this client a desktop can follow, for the picker (targetChoices.ts): a
+// pointer client's window, which it reports on every change; a tablet's screen,
+// which it asks for once; nothing on a phone, whose portrait screen is no
+// desktop's shape and which is offered sizes the desktop keeps instead.
+export function sizeFollows(): "window" | "screen" | null {
+  if (!CAN_PINCH_ZOOM) {
+    return "window";
+  }
+  return mobileGuestSize() ? "screen" : null;
 }
 
 // The touch view transform: the pinch zoom and pan offset the
@@ -1098,8 +1109,9 @@ export function useRemoteDesktop(
       sendRef.current(msg);
     };
     // A tablet's one size request, sent once on `connected`; rotations do not
-    // revise it. A phone sends nothing: it opened at the gateway's default
-    // already, which is the size it wants (see `fit` in hostDisplayMsg).
+    // revise it. A phone sends nothing: the picker offers it only sizes the
+    // desktop keeps, and a session another client started to follow its window
+    // stays as it finds it (see `fit` in hostDisplayMsg).
     const sendMobileSize = () => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
@@ -1882,7 +1894,7 @@ export function useRemoteDesktop(
   /// `takeOver`: nothing here is holding the slot, so there is nobody to evict.
   const retry = useCallback(() => startRef.current?.(false), []);
 
-  // Start a target from the picker, with what was ticked under it: its session
+  // Start a target from the picker, with what was chosen under it: its session
   // is started over the live socket. The server answers `connected` (→ desktop)
   // or `error` (shown on the picker). `sound` is whether that session will carry
   // the remote's sound.
@@ -1904,10 +1916,10 @@ export function useRemoteDesktop(
       if (sound) {
         audioContextRef.current = createAudioContext();
       }
-      // The connect names this window's screen, so a target with no pinned
-      // config size opens at its full resolution — before any message this
-      // client could send after the fact — or, from the pinch-zoom client, at
-      // the gateway's default.
+      // The connect names this window's screen, so a session that follows the
+      // window opens at its full resolution — before any message this client
+      // could send after the fact — or, from the pinch-zoom client, at the
+      // gateway's default.
       const { w, h, scale, fit } = hostDisplayMsg();
       sendRef.current({
         type: "connect",

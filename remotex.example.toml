@@ -190,27 +190,38 @@ site_passwd = ""
 #
 # Three things about a session are not keys here. Whoever starts it chooses them
 # at the picker: picking a target opens it, its options show under it, and Start
-# connects with what is ticked. They hold for the life of the session — a browser
+# connects with what is chosen. They hold for the life of the session — a browser
 # that takes it over gets it as it was started — and the browser remembers them
 # per target for the next time. Which a target shows is its type's to say:
 #
-#   target                           resize   sound            passthrough
-#   rdp                              shown    shown            shown (experimental)
-#   vnc                              shown    —                —
-#   vnc, wlshare                     shown    shown            —
+#   target                           window   sound            passthrough
+#   rdp                              yes      shown            shown (experimental)
+#   vnc                              —        —                —
+#   vnc, wlshare                     yes      shown            —
 #   vnc, ard                         —        —                —
-#   vnc, ard with virtual_display    shown    —                —
-#   vnc, ard-high-performance        shown    always carried   shown
+#   vnc, ard with virtual_display    yes      —                —
+#   vnc, ard-high-performance        yes      always carried   shown
 #
-# Resize hands the remote desktop's size to the client's window, which then
-# reports every window change. Plain VNC needs a server that accepts
-# SetDesktopSize — the TigerVNC family. Standard Apple `ard` shares physical
-# displays, so it has no resize unless the unofficial `virtual_display = true`
-# below puts it on a virtual one. Apple `ard-high-performance` uses Apple's
-# dynamic-resolution feature to replace its one virtual display's configuration
-# with arbitrary viewport sizes within its fixed 3840×2160 backing ceiling. An
-# "rdp" desktop is resized through its graphics pipeline, so `egfx = false` takes
-# the option away. Started without it, the desktop keeps its opening size.
+# Size is how the desktop is sized, and the picker shows it before Start. A
+# desktop either keeps one size for the session — the target's `size` below, or
+# 1440×900 where it sets none — or follows the client's window, which then
+# reports every window change. "window" above says which targets can follow one:
+#
+#   - A target that cannot keeps its size, on every client.
+#   - One that can is offered the window by a desktop browser or a tablet, and
+#     its `size` beside that where it sets one. With no `size` it follows the
+#     window. A tablet's window is its screen, asked for once in landscape.
+#   - A phone is never offered its window, which is no desktop's shape: it is
+#     offered the target's `size` and the 1440×900 default, or the default alone.
+#
+# A plain "vnc" target keeps its size: whether its server takes one is known only
+# once it is dialled, which is too late for the picker to offer the window.
+# Standard Apple `ard` shares physical displays, shown as they are, unless the
+# unofficial `virtual_display = true` below puts it on a virtual one. Apple
+# `ard-high-performance` uses Apple's dynamic-resolution feature to replace its
+# one virtual display's configuration with arbitrary viewport sizes within its
+# fixed 3840×2160 backing ceiling. An "rdp" desktop is resized through its
+# graphics pipeline, so `egfx = false` leaves it at the size it keeps.
 #
 # Sound takes the remote's sound. An "rdp" target negotiates sound redirection
 # (MS-RDPEA) when it connects, as 44100 Hz 16-bit stereo PCM, and a Windows host
@@ -250,36 +261,32 @@ password = "change-me"
 # Optional domain (leave unset for a local account). RDP only, rejected elsewhere.
 #domain = ""
 
-# Optional pinned opening size. Set both keys or neither.
+# Optional size the desktop is kept at, as "WIDTHxHEIGHT". Without it a kept
+# desktop is 1440×900.
 #
-# RDP connects at the pinned size, "ard-high-performance" creates its virtual
-# display at it, and a plain or wlshare VNC server is asked for it once, as soon as it
-# declares SetDesktopSize support. With neither key, RDP and a High Performance
-# Mac instead open at the full resolution of the connecting client's own screen,
-# falling back to 1440×900 only when the client supplies no screen; an unpinned
-# plain or wlshare VNC server is asked for no size at all and keeps its own.
+# RDP connects at the size, "ard-high-performance" creates its virtual display at
+# it, and a plain or wlshare VNC server is asked for it once, as soon as it
+# declares SetDesktopSize support; a server that never does, or refuses, keeps
+# its own. Refused on `subtype = "ard"` without `virtual_display`, which shows the
+# Mac's physical displays as they are.
 #
-# This is independent of the session's resize, which decides only whether the
-# browser window drives the size afterwards. Pinned and started without resize
-# stays at the pin. Pinned and started with it opens at the pin and then follows
-# the window on RDP and a High Performance Mac, which name a size at connect; a
-# plain or wlshare VNC server is asked only for the window, because the browser reports it
-# before the server can declare SetDesktopSize support and the newer size
-# supersedes the pin. `subtype = "ard"` is the exception — it exposes the Mac's
-# physical displays, which this gateway never resizes, so there these keys only
-# answer a later default-size request.
+# A session that follows the client's window does not use it: that one opens at
+# the full resolution of the connecting client's own screen and then takes the
+# window's size. Where the window can be followed, the picker offers this size
+# beside it, and the size is what is chosen until somebody picks the window.
 #
-# These are points, not backing pixels. RDP opens at 1x and, in a session started
-# with resize, a Retina client then asks for twice the pixels. A High Performance
-# Mac opens at the connecting client's density even when its point size is pinned.
-#width = 1920
-#height = 1080
+# These are points, not backing pixels. An RDP session at a kept size leaves the
+# host at its own scaling, as Microsoft's client on a Mac does with "Optimize for
+# Retina displays" unchecked; only one that follows the window renders at the
+# client's density, where a Retina client asks for twice the pixels. A High Performance Mac opens at the
+# connecting client's density whatever the size, as Apple's Screen Sharing does.
+#size = "1920x1080"
 
 # RDP graphics pipeline (MS-RDPEGFX), on by default. On, a Windows host draws the
 # desktop through the pipeline's surfaces and marks every frame, and each resize
 # is a graphics reset, cheap enough for the window to drive continuously. Off, the
-# host draws with bitmap updates and the desktop keeps its opening size — the
-# picker then offers neither resize nor the pipeline's passthrough; that is the
+# host draws with bitmap updates and the desktop keeps its size — the
+# picker then offers neither the window nor the pipeline's passthrough; that is the
 # escape hatch for a host whose pipeline the decoders cannot paint. RDP only, and
 # refused on VNC even when set to false.
 #
@@ -383,7 +390,7 @@ password = "change-me"
 #microphone = false
 
 # A plain VNC target needs host and, usually, one of the two passwords; domain is
-# refused, and width/height follow the opening-size rules above.
+# refused, and it is asked once for `size`, or 1440×900, as above.
 # `vnc_password` is the server's own password and is all a server without user
 # accounts takes. It is the RFB baseline: the picture comes as ZRLE and is encoded
 # here, shown at 1x, with no sound, camera or microphone.
@@ -396,7 +403,7 @@ password = "change-me"
 # A wlroots-based Wayland desktop behind the wlshare VNC server says so with
 # `subtype = "wlshare"`, which makes the gateway list wlshare's extensions: its own
 # VP9 stream, passed to the browser untouched; its pixel density, so a `scale 2`
-# output is shown at 2x and a resizing window is asked for in points × scale; its
+# output is shown at 2x and a window it follows is asked for in points × scale; its
 # output list; its sound, in a session started with it; and, with the keys above,
 # the camera and the microphone.
 # Without the subtype the same server is a plain target, read as any VNC server
@@ -417,9 +424,9 @@ password = "change-me"
 # Mac who is connecting, and macOS answers a viewer that names nobody by creating a
 # new login window on a virtual display instead of sharing its screen. So every
 # Apple subtype requires username and password (that account's) and takes no
-# vnc_password. Resize is where they part: `ard` offers none, because it shares
-# the Mac's physical displays, while "ard-high-performance" offers it for the one
-# virtual display it makes; the unofficial `virtual_display = true` gives `ard`
+# vnc_password. Size is where they part: `ard` has none to set, because it shares
+# the Mac's physical displays, while "ard-high-performance" sizes the one
+# virtual display it makes, by `size` or by the window; the unofficial `virtual_display = true` gives `ard`
 # that display too. A third-party VNC server that happens to run on a Mac is not
 # this: it is a plain "vnc" target.
 #
@@ -441,7 +448,7 @@ password = "change-me"
 
 # UNOFFICIAL: `virtual_display = true` opens that same Standard session on one
 # virtual display instead of the Mac's physical ones. The display is High
-# Performance's — created at the pinned `width`/`height` or the client's screen,
+# Performance's — created at the size the session keeps or at the client's screen,
 # at its density, the physical displays disabled meanwhile, and in a session
 # started with resize replaced from every viewport report — and everything else
 # is `ard`'s:
@@ -466,8 +473,8 @@ password = "change-me"
 # too.
 #
 # It requests one virtual display instead of the Mac's physical displays. It opens
-# at the pinned `width` and `height` when both are set, or at the full resolution
-# of the client's screen otherwise, at that screen's density. Once connected, the
+# at the size the session keeps, or at the full resolution of the client's screen
+# where the window drives it, at that screen's density either way. Once connected, the
 # Mac's physical displays are disabled and all of its windows are placed on this
 # virtual display. Apple's official macOS Screen Sharing client can choose up to
 # two virtual displays; remotex requests one. In a session started with resize,
