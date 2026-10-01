@@ -2,32 +2,50 @@
 // `AudioBuffer`, and Web Audio schedules it with bounded lead. The scheduling
 // half below is where the interesting behaviour is.
 //
+// The one stream WebCodecs is not asked for is a lossless one, FLAC, which the
+// page decodes in a WebAssembly module of its own (flacDecoder.ts) and schedules
+// the same way.
+//
 // AudioContext creation stays in the enabling click wherever the browser needs one
 // (AUDIO_NEEDS_GESTURE). That WebCodecs exists at all is
 // not a question asked here: it is the client's entry condition (preflight.ts).
 
 import { APPLE_ELD_CODEC, appleEldConfig } from "./appleMedia.ts";
 import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
+import { type FlacDecoder, loadFlac } from "./flacDecoder.ts";
+
+/**
+ * What `audioFormat` names lossless sound as: a target with
+ * `audio_format = "flac"`. Each packet is one FLAC frame, decoded here rather
+ * than by WebCodecs.
+ */
+export const FLAC_CODEC = "flac";
 
 /** What `audioFormat` said, which is everything needed to play the packets. */
 export interface AudioFormat {
   /**
    * The WebCodecs codec string: `"opus"`, or `"mp4a.40.39"` for a High Performance
-   * Mac's AAC-ELD passed as it came.
+   * Mac's AAC-ELD passed as it came. Or `"flac"` ({@link FLAC_CODEC}), which is
+   * not WebCodecs' to decode here.
    */
   codec: string;
   /**
    * The rate the packets are at: 48 kHz, because that is what the gateway
-   * resampled to. An `AudioBuffer` carries its own rate, so a context at a
-   * different one simply resamples on playback.
+   * resampled to, or for FLAC the source's own, which is 44.1 kHz from an RDP
+   * host. An `AudioBuffer` carries its own rate, so a context at a different one
+   * simply resamples on playback.
    */
   sampleRate: number;
   channels: number;
-  /** Samples in one packet at `sampleRate`: 960 for Opus, 480 for the Mac's AAC-ELD. */
+  /**
+   * Samples in one packet at `sampleRate`: 960 for Opus, 480 for the Mac's
+   * AAC-ELD, and twenty milliseconds of the source for FLAC.
+   */
   packetFrames: number;
   /**
    * The decoder's configuration: `OpusHead`, verbatim, which WebCodecs takes as the
-   * config's `description`, or the Mac's AudioSpecificConfig.
+   * config's `description`, or the Mac's AudioSpecificConfig. Empty for FLAC,
+   * whose frames each state their own shape.
    */
   head: Uint8Array;
 }
@@ -189,7 +207,7 @@ export interface AudioHandlers {
  * Throws if the format is not one a decoder can be configured from — a `head` that
  * is not an `OpusHead`, a channel count nothing can play. An *unsupported codec* is
  * not a throw, because WebCodecs reports that asynchronously: it arrives at
- * `onError`.
+ * `onError`. So does a FLAC stream whose module did not load.
  */
 export function createAudioPlayer(
   format: AudioFormat,
@@ -204,34 +222,63 @@ export function createAudioPlayer(
   // Each keeps its gain node so the stop can be a fade rather than a cut.
   let playing: { source: AudioBufferSourceNode; gain: GainNode }[] = [];
 
-  const decoder = new AudioDecoder({
-    output: (data) => {
-      try {
-        // Checked before the buffer is built, not after: `createBuffer`
-        // throws on a zero-length buffer rather than returning an empty one.
-        if (data.numberOfFrames > 0) {
-          schedule(toAudioBuffer(context, data));
+  // A FLAC stream's decoder, once its module has loaded; packets before then are
+  // dropped, as sound that arrived before there was anything to play it.
+  let flac: FlacDecoder | null = null;
+  if (format.codec === FLAC_CODEC) {
+    loadFlac().then(
+      (make) => {
+        if (closed) {
+          return;
         }
-      } finally {
-        data.close();
-      }
-    },
-    // Nothing is recoverable here: a decoder that has failed will not decode the
-    // next packet either, and there is no second representation to switch to. This
-    // is also where "this browser cannot decode this codec" lands — `configure`
-    // accepts an unsupported codec and fails asynchronously — so the message names
-    // the codec, which is the thing worth putting in a bug report.
-    error: (e) => {
-      console.error("audio: the decoder failed", e);
-      close();
-      handlers.onError(
-        e instanceof Error && e.name === "NotSupportedError"
-          ? `This browser cannot decode the ${format.codec} audio the gateway sends.`
-          : "This browser's audio decoder failed.",
-      );
-    },
-  });
-  decoder.configure(decoderConfig(format));
+        try {
+          flac = make(format);
+        } catch (e) {
+          fail(e);
+        }
+      },
+      (e: unknown) => fail(e),
+    );
+  }
+  function fail(e: unknown): void {
+    console.error("audio: the FLAC decoder could not be set up", e);
+    close();
+    handlers.onError("This browser could not load the FLAC decoder.");
+  }
+
+  const decoder = format.codec === FLAC_CODEC ? null : webCodecsDecoder(format);
+
+  function webCodecsDecoder(format: AudioFormat): AudioDecoder {
+    const decoder = new AudioDecoder({
+      output: (data) => {
+        try {
+          // Checked before the buffer is built, not after: `createBuffer`
+          // throws on a zero-length buffer rather than returning an empty one.
+          if (data.numberOfFrames > 0) {
+            schedule(toAudioBuffer(context, data));
+          }
+        } finally {
+          data.close();
+        }
+      },
+      // Nothing is recoverable here: a decoder that has failed will not decode the
+      // next packet either, and there is no second representation to switch to. This
+      // is also where "this browser cannot decode this codec" lands — `configure`
+      // accepts an unsupported codec and fails asynchronously — so the message names
+      // the codec, which is the thing worth putting in a bug report.
+      error: (e) => {
+        console.error("audio: the decoder failed", e);
+        close();
+        handlers.onError(
+          e instanceof Error && e.name === "NotSupportedError"
+            ? `This browser cannot decode the ${format.codec} audio the gateway sends.`
+            : "This browser's audio decoder failed.",
+        );
+      },
+    });
+    decoder.configure(decoderConfig(format));
+    return decoder;
+  }
 
   function schedule(buffer: AudioBuffer): void {
     if (closed || buffer.length === 0) {
@@ -295,15 +342,49 @@ export function createAudioPlayer(
       held.source.stop();
     }
     playing = [];
-    if (decoder.state !== "closed") {
+    if (decoder && decoder.state !== "closed") {
       decoder.close();
     }
+    flac?.close();
+    flac = null;
     void context.close();
+  }
+
+  function playFlac(packets: Uint8Array[]): void {
+    if (!flac) {
+      return;
+    }
+    for (const packet of packets) {
+      let planes: Float32Array<ArrayBuffer>[];
+      try {
+        planes = flac.decode(packet);
+      } catch (e) {
+        // One frame's worth of sound: the next decodes on its own.
+        console.warn("audio: dropped a FLAC frame", e);
+        continue;
+      }
+      const buffer = context.createBuffer(
+        planes.length,
+        planes[0].length,
+        format.sampleRate,
+      );
+      for (const [channel, plane] of planes.entries()) {
+        buffer.copyToChannel(plane, channel);
+      }
+      schedule(buffer);
+    }
   }
 
   return {
     push(packets) {
-      if (closed || decoder.state !== "configured") {
+      if (closed) {
+        return;
+      }
+      if (!decoder) {
+        playFlac(packets);
+        return;
+      }
+      if (decoder.state !== "configured") {
         return;
       }
       for (const packet of packets) {

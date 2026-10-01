@@ -1086,8 +1086,13 @@ pub enum ServerMsg {
     /// ([`crate::vnc_apple_media::PASSED_SOUND`]): `mp4a.40.39`, AAC-ELD, with its
     /// AudioSpecificConfig in `head`.
     ///
+    /// A target with `audio_format = "flac"` says `flac` with an empty `head`:
+    /// each packet is one FLAC frame at the source's own rate, which the page
+    /// decodes itself ([`crate::audio::FLAC_CODEC`]).
+    ///
     /// `packet_frames` is the one thing a client cannot work out for itself: 960
-    /// samples in a 20 ms Opus packet, 480 in a 10 ms AAC-ELD unit.
+    /// samples in a 20 ms Opus packet, 480 in a 10 ms AAC-ELD unit, and 20 ms of
+    /// the source in a FLAC frame.
     AudioFormat {
         codec: &'static str,
         sample_rate: u32,

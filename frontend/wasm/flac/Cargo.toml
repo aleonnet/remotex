@@ -1,0 +1,33 @@
+# The page's decoder for a session's lossless sound (`audio_format = "flac"`), as
+# a WebAssembly module of its own: one FLAC frame in, its samples out.
+#
+# It is the page's alone. The gateway's FLAC is libFLAC, loaded at run time
+# through `desktop-flac`, which a page cannot have, and the gateway decodes no
+# frame it sends on, so no crate is shared with it: the decoder is src/decoder.rs
+# and this is the binding around it.
+#
+# Built by `bun run build:wasm` in frontend/, into pkg/, beside the compositor's
+# module (../egfx) and sharing nothing with it: no threads, so no shared memory,
+# no page that must be cross-origin isolated, and the stable toolchain. Not a
+# member of the gateway's workspace, which names it in `exclude`: it builds for
+# `wasm32-unknown-unknown` alone, with the profile and the lockfile here.
+[package]
+name = "remotex-flac"
+version = "0.0.0"
+license = "MIT"
+edition = "2024"
+publish = false
+
+[lib]
+crate-type = ["cdylib"]
+
+[dependencies]
+# FLAC frames, in Rust alone.
+claxon = "0.4"
+wasm-bindgen = "0.2"
+
+[profile.release]
+opt-level = 3
+lto = true
+codegen-units = 1
+panic = "abort"

@@ -73,13 +73,19 @@ area and points here; read the area's section before changing what it covers.
   bundle privately or stages that artifact. Do not add a web root, a
   `static_dir`, or any run-time path the SPA is read from. Every URL the page
   uses goes through `frontend/src/gateway.ts`.
-- The bundle holds one WebAssembly module, `frontend/wasm/egfx` around
-  `crates/remotex-rdp-graphics`, built by the frontend's build for
-  `wasm32-unknown-unknown` with threads, by the dated nightly that directory's
-  `rust-toolchain.toml` pins. The pin is the module's alone: the gateway and the
-  graphics crate build on stable. Its threads share a memory, so every file
-  `src/assets.rs` serves carries the two cross-origin isolation headers; keep
-  them, and load nothing from another origin.
+- The bundle holds two WebAssembly modules, each a directory of its own under
+  `frontend/wasm` and built by the frontend's build for
+  `wasm32-unknown-unknown`. `frontend/wasm/egfx` is the compositor, around
+  `crates/remotex-rdp-graphics`, built with threads by the dated nightly that
+  directory's `rust-toolchain.toml` pins. The pin is that module's alone: the
+  gateway and the graphics crate build on stable. Its threads share a memory, so
+  every file `src/assets.rs` serves carries the two cross-origin isolation
+  headers; keep them, and load nothing from another origin.
+  `frontend/wasm/flac` is the EXPERIMENTAL lossless sound's decoder, the page's
+  alone: the gateway's FLAC is libFLAC and shares no code with it, so it has no
+  crate under `crates/`. It has no threads, needs no shared memory, and builds
+  on stable. Do not fold one module into the other, or add a third without a
+  stream that needs it.
 - The only versioned client asset read at run time is the EXPERIMENTAL software
   HEVC decoder's release archive, found in the data directory or named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at
@@ -239,9 +245,18 @@ that selects the stream. See
 - Remote audio uses its own `/ws/audio` socket and queue; opening the socket is
   the subscription. Do not put audio on the session socket. It is Opus encoded
   here, save a High Performance Mac's AAC-ELD, which every session passes as it
-  came and the gateway never decodes; there is no codec key, and do not add
-  another encoder, another passthrough or a decoder for the Mac's sound. Preserve claim-bound eviction and the source-format/resampling
+  came and the gateway never decodes; do not add a decoder for the Mac's sound.
+  Preserve claim-bound eviction and the source-format/resampling
   boundaries in [Audio frames](#audio-frames).
+- `audio_format = "flac"` is the one codec key, EXPERIMENTAL, and a key rather
+  than a choice at the picker while it is: the target's sound is sent lossless.
+  A `wlshare` target's FLAC frames are passed as they came, undecoded, and an
+  `rdp` target's PCM is coded as FLAC here by libFLAC; the page decodes either
+  in its own WebAssembly module (`frontend/wasm/flac`), never through WebCodecs.
+  It is refused on every other target: `ard-high-performance` passes the Mac's
+  AAC-ELD and nothing else, and `ard` and a plain `vnc` target carry no sound.
+  Do not transcode a passed frame, add a third format, or give the FLAC a rate
+  to walk. See [Lossless sound](#lossless-sound).
 - VNC audio is wlshare's audio extension (FLAC frames, with the QEMU Audio
   extension's control messages), on a `wlshare` target: a session started with
   sound makes the gateway list it, and a server that never announces it leaves
@@ -351,7 +366,8 @@ experimental wherever it is named to an operator. See
 | `shadow.rs` | change detection: what the client already has |
 | `encode.rs`, `stream.rs`, `video.rs` | the ordered, paced, congestion-aware stream: its mirror, its rounds, and the picture limits |
 | `vp9.rs` | the VP9 stream over the mirror, coded by the `desktop-vp9` crate wlshare shares — the one place libvpx is spoken to for either side |
-| `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding, resampling |
+| `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding, resampling, and the FLAC coding of a lossless target's PCM |
+| `frontend/wasm/flac/` | the page's FLAC decoder for a lossless target's sound, a WebAssembly module of its own |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
 Each engine consumes `ClientMsg` input and emits the same `ServerMsg` stream.
@@ -1265,8 +1281,9 @@ and `GET /api/targets` carries it:
   and so cannot decode a Mac's picture at all: there the picture can only
   be passed, the row shows it chosen, and where the browser cannot take it
   either Start is greyed and says why, before the Mac is dialled. It says as
-  `audioUnavailable` where the host lacks libFLAC and so cannot decode
-  wlshare's sound: the sound's row is greyed and names the library. A `connect`
+  `audioUnavailable` where the host lacks libFLAC and the target's sound needs
+  it — to decode wlshare's for Opus, or to code an RDP host's as FLAC: the
+  sound's row is greyed and names the library. A `connect`
   that asks for a passthrough the browser said it cannot take is refused like an
   unoffered one.
 - **The choice reaches the remote.** A session started without sound asks for
@@ -1507,6 +1524,51 @@ of an incoming buffer instead of turning temporary jitter into lasting latency.
 The client does not decode anything itself: the stream goes to WebCodecs, so a
 codec a browser will not take surfaces as a decoder error naming it rather than
 as silence.
+
+#### Lossless sound
+
+EXPERIMENTAL. A target with `audio_format = "flac"` is sent its sound lossless,
+on the same socket and in the same frames: `audioFormat` says `codec` `flac`, an
+empty `head`, the source's own `sampleRate` and a `packetFrames` of twenty
+milliseconds of it, and each packet is one FLAC frame. It is a config key, on an
+`rdp` or a `wlshare` target, and not a choice at the picker; the Opus keys are
+refused beside it, since there is no rate to set or walk.
+
+| Target | What the gateway does | `audioFormat` | libFLAC on the host |
+|---|---|---|---|
+| `wlshare` | passes wlshare's frames as they came | 48 kHz, 960 frames | not needed |
+| `rdp` | codes the host's PCM as FLAC | 44.1 kHz, 882 frames | needed |
+| `ard-high-performance` | not supported: the Mac's AAC-ELD is passed | | |
+| any other | not supported: no sound | | |
+
+- **wlshare's frames are passed.** The VNC engine reads each frame message and
+  queues the frame undecoded (`AudioBridge::unit`), between a begin and an end as
+  ever, and the audio socket hands the units on (`vnc_audio::PASSED_FLAC`,
+  `AudioListener::into_passed`). No decoder is made, so such a session needs no
+  libFLAC and its row at the picker is never greyed for the want of it. Nothing
+  here checks a frame but its length, which must fit the socket's 16-bit packet
+  length: the page's decoder is what refuses a bad one.
+- **An RDP host's PCM is coded here.** `AudioListener::into_flac` takes the wave
+  buffers as they come, at the 44.1 kHz the host sends with no resampler in the
+  way, and makes a frame of every 882, each a FLAC stream of its own as
+  wlshare's are (`desktop-flac`'s encoder). What does not fill a block waits for
+  the next buffer, and is dropped with a buffer the queue dropped, so no frame
+  joins samples that were never neighbours. It needs libFLAC: the picker greys
+  the sound where the host has none, and a session started with it all the same
+  ends before the host is dialled.
+- **The page decodes in a module of its own.** `frontend/wasm/flac` is a Rust
+  FLAC frame decoder built to WebAssembly, loaded by the first FLAC stream
+  (`frontend/src/flacDecoder.ts`). WebCodecs is not asked: what travels is bare
+  frames with no stream header, each numbered zero. The decoder holds every
+  frame to what `audioFormat` announced — rate, channels, block, 16 bits — and
+  checks its CRCs; a frame it refuses is dropped with a console warning and
+  costs its twenty milliseconds. The samples become an `AudioBuffer` at the
+  stream's rate and go through the schedule every other stream uses, so the
+  lead clamp and the splice fades are unchanged. A page whose module does not
+  load plays the session without sound and says so under Audio.
+- **There is no walk.** Music is roughly a megabit a second and silence a few
+  bytes a frame. A link that cannot carry it loses whole buffers at the bridge,
+  oldest first, as an Opus stream at its floor would; use Opus there.
 
 An **`ard-high-performance`** engine always carries sound, from the Mac's media
 stream: AAC-ELD at 48 kHz stereo over SRTP, authenticated and decrypted per

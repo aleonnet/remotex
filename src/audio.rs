@@ -10,6 +10,12 @@
 //! then carries the Mac's own AAC-ELD units ([`AudioBridge::unit`]), and the
 //! listener hands them on as packets with no encoder behind them
 //! ([`AudioListener::into_passed`]).
+//!
+//! A target with `audio_format = "flac"` is sent its sound lossless instead
+//! (EXPERIMENTAL): wlshare's own FLAC frames are passed the same way
+//! ([`crate::vnc_audio::PASSED_FLAC`]), and an RDP host's PCM is coded as FLAC
+//! here ([`AudioListener::into_flac`]). The page decodes either in its
+//! WebAssembly module, and there is no rate to walk.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicI32, Ordering};
@@ -398,6 +404,86 @@ impl AudioListener {
             signals: None,
             packets: stream,
         }
+    }
+}
+
+/// What `audioFormat` names lossless sound as. Not a WebCodecs registration's
+/// string to this client: the page decodes these frames itself.
+pub const FLAC_CODEC: &str = "flac";
+
+impl AudioListener {
+    /// Everything the client has to be told about `format` coded as FLAC here, and
+    /// a live-only stream of its frames: twenty milliseconds each, a FLAC stream
+    /// of its own as wlshare's are, so each decodes alone and a dropped buffer
+    /// costs its own samples. No walk and no silence to shed: silence is a few
+    /// bytes a frame already. Fails where libFLAC is not on this host.
+    pub fn into_flac(self, format: PcmFormat) -> anyhow::Result<EncodedAudio<impl Stream<Item = Vec<Bytes>>>> {
+        struct State {
+            encoder: desktop_flac::Encoder,
+            waves: broadcast::Receiver<Bytes>,
+            /// Samples not yet a whole block's worth, as the engine gave them.
+            pending: Vec<u8>,
+            /// One block as libFLAC takes it, a signed integer to a sample.
+            block: Vec<i32>,
+        }
+
+        anyhow::ensure!(
+            format.bits_per_sample == 16 && (1..=2).contains(&format.channels),
+            "cannot carry {format:?} as FLAC: the page decodes 16-bit mono or stereo"
+        );
+        let stream = desktop_flac::Stream {
+            rate: format.sample_rate,
+            channels: format.channels as u8,
+            bits: 16,
+            block: (format.sample_rate / 50) as u16,
+        };
+        let encoder = desktop_flac::Encoder::new(stream).with_context(|| format!("cannot carry {format:?} as FLAC"))?;
+        let block_bytes = stream.samples() * 2;
+
+        let state = State { encoder, waves: self.waves, pending: Vec::new(), block: Vec::new() };
+        let packets = futures_util::stream::unfold(state, move |mut state| async move {
+            loop {
+                let samples = match state.waves.recv().await {
+                    Ok(samples) => samples,
+                    // As for Opus: skipping forward is the point. What was held
+                    // of the block before the gap goes with it, so no frame
+                    // joins samples that were never neighbours.
+                    Err(broadcast::error::RecvError::Lagged(dropped)) => {
+                        debug!("audio: listener fell behind, {dropped} buffer(s) dropped");
+                        state.pending.clear();
+                        continue;
+                    }
+                    Err(broadcast::error::RecvError::Closed) => return None,
+                };
+                state.pending.extend_from_slice(&samples);
+                let whole = state.pending.len() / block_bytes;
+                let mut frames = Vec::with_capacity(whole);
+                for bytes in state.pending.chunks_exact(block_bytes) {
+                    state.block.clear();
+                    state.block.extend(bytes.as_chunks::<2>().0.iter().map(|&pair| i32::from(i16::from_le_bytes(pair))));
+                    let mut frame = Vec::new();
+                    if let Err(e) = state.encoder.encode(&state.block, &mut frame) {
+                        warn!("audio: the FLAC encoder failed, ending the stream: {e}");
+                        return None;
+                    }
+                    frames.push(Bytes::from(frame));
+                }
+                state.pending.drain(..whole * block_bytes);
+                // Yielding nothing would end the stream, so keep reading.
+                if !frames.is_empty() {
+                    return Some((frames, state));
+                }
+            }
+        });
+        Ok(EncodedAudio {
+            codec: FLAC_CODEC,
+            sample_rate: format.sample_rate,
+            channels: format.channels,
+            packet_frames: u32::from(stream.block),
+            head: Vec::new(),
+            signals: None,
+            packets,
+        })
     }
 }
 
@@ -804,6 +890,53 @@ mod tests {
 
         drop(bridge);
         assert!(next(&mut stream).await.is_none());
+    }
+
+    /// An RDP host's PCM coded as FLAC: described as what it is, one frame for
+    /// every twenty milliseconds whatever the buffers' sizes, each decoding on
+    /// its own to exactly the samples that went in.
+    #[tokio::test]
+    async fn pcm_coded_as_flac_is_whole_frames_of_the_same_samples() {
+        if desktop_flac::load().is_err() {
+            eprintln!("skipped: libFLAC is not installed on this host");
+            return;
+        }
+        let bridge = AudioBridge::new();
+        let flac = bridge.take_listener().into_flac(PCM_CD_QUALITY).expect("flac");
+        assert_eq!(
+            (flac.codec, flac.sample_rate, flac.channels, flac.packet_frames),
+            ("flac", 44_100, 2, 882)
+        );
+        assert!(flac.head.is_empty(), "a frame states its own shape");
+        assert!(flac.signals.is_none(), "lossless has no bitrate to walk");
+        let mut stream = Box::pin(flac.packets);
+
+        // Two and a half blocks of a tone, in buffers that do not line up with them.
+        let block = 882 * 4;
+        let pcm: Vec<u8> = one_frame_of_tone().iter().copied().cycle().take(block * 5 / 2).collect();
+        bridge.wave(pcm[..100].to_vec());
+        bridge.wave(pcm[100..block * 2 + 8].to_vec());
+        let frames = next(&mut stream).await.expect("frames");
+        assert_eq!(frames.len(), 2, "two whole blocks, and the rest waits");
+        bridge.wave(pcm[block * 2 + 8..].to_vec());
+        bridge.wave(vec![0u8; block / 2]);
+        let mut frames = [frames, next(&mut stream).await.expect("the third block")].concat();
+        assert_eq!(frames.len(), 3);
+
+        let mut decoder =
+            desktop_flac::Decoder::new(desktop_flac::Stream { rate: 44_100, channels: 2, bits: 16, block: 882 })
+                .unwrap();
+        let mut samples = Vec::new();
+        let mut decoded = Vec::new();
+        for frame in frames.drain(..) {
+            assert!(frame.len() <= usize::from(u16::MAX), "a packet's length is a u16 on the wire");
+            samples.clear();
+            decoder.decode(&frame, &mut samples).expect("a frame decodes on its own");
+            decoded.extend(samples.iter().flat_map(|&sample| (sample as i16).to_le_bytes()));
+        }
+        let mut sent = pcm.clone();
+        sent.extend_from_slice(&vec![0u8; block / 2]);
+        assert!(decoded == sent[..block * 3], "FLAC is lossless");
     }
 
     /// The backpressure rule: the producer is never held up, and what gives way

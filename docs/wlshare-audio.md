@@ -131,7 +131,9 @@ the gateway asks for a signed one, so it never flips. Decoded samples are
 interleaved, little-endian, and bit for bit what wlshare captured.
 
 FLAC is lossless, so the gateway's Opus encode stays the only lossy step on the
-way to the browser. On the
+way to the browser, and a target with `audio_format = "flac"` (EXPERIMENTAL) has
+none: its frames are passed to the browser as they came
+([Lossless sound](architecture.md#lossless-sound)). On the
 RFB connection music and speech cost about two-thirds of their 1.5 Mbit/s PCM
 rate or less, and a desktop playing nothing, whose capture still runs, a few
 bytes a frame.
@@ -162,6 +164,10 @@ announces late is still taken.
   20 ms and nothing after it. So is a frame outside a begin and an end. The
   decoder checks the frame's header against the format and both of its CRCs,
   and takes one whole frame and nothing more.
+- On a target with `audio_format = "flac"` no decoder is made and libFLAC is
+  not needed: each frame between a begin and an end goes to the bridge as it
+  came, one unit a frame, and the page decodes it. An empty frame, or one past
+  the audio socket's 16-bit packet length, is dropped with a warning.
 - A frame length past 64 KiB is read past rather than allocated: a frame is
   3840 bytes of samples before compression, and FLAC adds a few header bytes at
   worst, so anything larger is a server that has lost its framing.

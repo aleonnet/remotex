@@ -270,6 +270,19 @@ pub enum ChromaChoice {
     Full,
 }
 
+/// What a target's sound is sent to the browser as: [`TargetConfig::audio_format`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum AudioFormat {
+    /// Encoded here, at the rate the audio keys hold.
+    #[default]
+    Opus,
+    /// EXPERIMENTAL. Lossless: wlshare's own FLAC frames passed as they came, or
+    /// an RDP host's PCM coded as FLAC here, decoded by the page's WebAssembly
+    /// module either way.
+    Flac,
+}
+
 /// A target's audio keys as the encoder consumes them, resolved by
 /// [`TargetConfig::audio_plan`]. In bits per second because that is libopus's
 /// unit; the config speaks kbit/s because a person does.
@@ -713,6 +726,19 @@ pub struct TargetConfig {
     /// records in, so there is no codec or quality key beside this one.
     #[serde(default)]
     pub microphone: bool,
+    /// EXPERIMENTAL. What this target's sound is sent to the browser as; `None`
+    /// reads as [`AudioFormat::Opus`]. `"flac"` sends it lossless: a `wlshare`
+    /// target's FLAC frames are passed as wlshare made them, so the gateway
+    /// needs no libFLAC for them, and an `rdp` target's PCM is coded as FLAC
+    /// here, by libFLAC. The page decodes either in its WebAssembly module.
+    ///
+    /// A key rather than a choice at the picker while it is experimental. It is
+    /// the uncompressed rate less a third or so, about a megabit a second of
+    /// music, with no walk under it: for a link with room. Refused on a target
+    /// with no sound to choose, which includes `ard-high-performance`, whose
+    /// sound is the Mac's own AAC-ELD.
+    #[serde(default)]
+    pub audio_format: Option<AudioFormat>,
     /// The Opus bitrate this target's sound holds on a link that can carry it,
     /// in kbit/s (6–510); `None` reads as [`DEFAULT_AUDIO_BITRATE_KBPS`].
     ///
@@ -989,6 +1015,22 @@ impl TargetConfig {
         };
         let decoders = Decoders { chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false };
         self.render_plan(Choices::default(), decoders).card(slot)
+    }
+
+    /// Whether this target's sound is sent lossless, as FLAC:
+    /// [`Self::audio_format`].
+    pub fn lossless(&self) -> bool {
+        self.audio_format == Some(AudioFormat::Flac)
+    }
+
+    /// Whether a session with this target's sound needs libFLAC on this host: to
+    /// decode wlshare's frames for the Opus encoder, or to code an RDP host's PCM
+    /// as FLAC. wlshare's frames sent as FLAC are passed, and need none.
+    pub fn needs_libflac(&self) -> bool {
+        match self.protocol {
+            Protocol::Rdp => self.lossless(),
+            Protocol::Vnc => self.wlshare() && !self.lossless(),
+        }
     }
 
     /// Whether the Opus bitrate walks with the link — on unless the operator
@@ -1717,6 +1759,23 @@ impl ConfigFile {
             // own AAC-ELD ([`crate::vnc_apple_media`]), so the keys could not do
             // anything there.
             let sound = target.offers().audio;
+            anyhow::ensure!(
+                target.audio_format.is_none() || sound,
+                "target {:?} is {kind} and sets audio_format — it is what the sound of an \
+                 rdp or a wlshare target is sent to the browser as, and no session there has \
+                 sound to choose a format for. Remove the key.",
+                target.name
+            );
+            anyhow::ensure!(
+                !target.lossless()
+                    || (target.audio_bitrate.is_none()
+                        && target.audio_adaptive.is_none()
+                        && target.audio_adaptive_min.is_none()),
+                "target {:?} sets audio_format = \"flac\" beside audio_bitrate, audio_adaptive \
+                 or audio_adaptive_min — those tune the Opus encoder, and FLAC is lossless, \
+                 with no rate to set or walk. Remove them.",
+                target.name
+            );
             anyhow::ensure!(
                 target.audio_bitrate.is_none() || sound,
                 "target {:?} is {kind} and sets audio_bitrate — it is the encoder's rate, \
@@ -4063,6 +4122,47 @@ mod tests {
             site_passwd_line()
         ))?
         .resolve()
+    }
+
+    /// `audio_format` is Opus unless it says FLAC, on the two targets whose sound
+    /// is a choice. FLAC moves libFLAC from one to the other: wlshare's frames
+    /// are then passed, and an RDP host's PCM is coded with it. The Opus keys
+    /// have nothing to tune beside it.
+    #[test]
+    fn audio_format_selects_lossless_sound_where_there_is_sound_to_choose() {
+        let wlshare = |body: &str| parse_audio_target(body).map(|cfg| cfg.targets[0].clone());
+        let rdp = |body: &str| parse_target(body).map(|cfg| cfg.targets[0].clone());
+
+        for target in [wlshare("").unwrap(), wlshare("audio_format = \"opus\"").unwrap()] {
+            assert!(!target.lossless());
+            assert!(target.needs_libflac(), "wlshare's FLAC is decoded here for Opus");
+        }
+        for target in [rdp("").unwrap(), rdp("audio_format = \"opus\"").unwrap()] {
+            assert!(!target.lossless());
+            assert!(!target.needs_libflac());
+        }
+        let passed = wlshare("audio_format = \"flac\"").unwrap();
+        assert!(passed.lossless() && !passed.needs_libflac(), "passed frames need no codec here");
+        let coded = rdp("audio_format = \"flac\"").unwrap();
+        assert!(coded.lossless() && coded.needs_libflac());
+
+        assert!(rdp("audio_format = \"pcm\"").is_err(), "no third format");
+        for key in ["audio_bitrate = 96", "audio_adaptive = false", "audio_adaptive = true", "audio_adaptive_min = 24"] {
+            let err = rdp(&format!("audio_format = \"flac\"\n{key}")).unwrap_err();
+            assert!(format!("{err:#}").contains("FLAC is lossless"), "{key}: {err:#}");
+        }
+        // No sound to choose a format for: a plain vnc target, and both Macs.
+        for kind in ["", "subtype = \"ard\"\nusername = \"u\"", "subtype = \"ard-high-performance\"\nusername = \"u\""] {
+            for format in ["flac", "opus"] {
+                let err = ConfigFile::parse(&format!(
+                    "[server]\n{}\n[[targets]]\nname = \"v\"\nprotocol = \"vnc\"\n{kind}\nhost = \"h\"\npassword = \"p\"\naudio_format = \"{format}\"\n",
+                    site_passwd_line()
+                ))
+                .and_then(ConfigFile::resolve)
+                .unwrap_err();
+                assert!(format!("{err:#}").contains("sets audio_format"), "{kind}: {err:#}");
+            }
+        }
     }
 
     /// The switch resolves into the plan, and the plan says so.

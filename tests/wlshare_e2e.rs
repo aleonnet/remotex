@@ -114,6 +114,7 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         audio_bitrate: None,
         audio_adaptive: None,
         audio_adaptive_min: None,
+        audio_format: None,
     }
 }
 

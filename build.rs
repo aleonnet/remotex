@@ -68,6 +68,12 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
         "frontend/wasm/egfx/src",
         "crates/remotex-rdp-graphics/Cargo.toml",
         "crates/remotex-rdp-graphics/src",
+        // The page's decoder for lossless sound, a module of its own
+        // (frontend/wasm/flac), named file by file for the same reason.
+        "frontend/wasm/flac/Cargo.toml",
+        "frontend/wasm/flac/Cargo.lock",
+        "frontend/wasm/flac/rust-toolchain.toml",
+        "frontend/wasm/flac/src",
     ] {
         println!("cargo:rerun-if-changed={path}");
     }
@@ -75,13 +81,15 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
     let frontend_dir = root.join("frontend");
     let mut bun = Command::new("bun");
     bun.args(["run", "build"]).current_dir(&frontend_dir).env("REMOTEX_FRONTEND_OUT_DIR", output);
-    // The frontend's build runs Cargo for its WebAssembly module, and that Cargo
+    // The frontend's build runs Cargo for its WebAssembly modules, and that Cargo
     // must not take this one's for its own: the flags and wrappers this build was
     // given are for the gateway's target — under `cargo clippy` the wrapper *is*
     // clippy — the job server's descriptors are not passed down, and a target
     // directory shared with the build that is waiting on this script is a lock
-    // neither would ever be given.
+    // neither would ever be given, so each module builds in its own directory's.
     for inherited in [
+        "CARGO_BUILD_TARGET_DIR",
+        "CARGO_TARGET_DIR",
         "CARGO_BUILD_TARGET",
         "CARGO_ENCODED_RUSTFLAGS",
         "CARGO_MAKEFLAGS",
@@ -92,10 +100,10 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
         "RUSTC_WORKSPACE_WRAPPER",
         "RUSTDOCFLAGS",
         "RUSTFLAGS",
-        // The module is built by the toolchain its own directory pins
-        // (frontend/wasm/egfx/rust-toolchain.toml), which the one this build runs
-        // under, and the compiler Cargo names to its build scripts, would
-        // otherwise be chosen over.
+        // Each module is built by the toolchain its own directory names
+        // (frontend/wasm/egfx/rust-toolchain.toml pins a nightly), which the one
+        // this build runs under, and the compiler Cargo names to its build
+        // scripts, would otherwise be chosen over.
         "CARGO",
         "RUSTC",
         "RUSTDOC",
@@ -103,7 +111,6 @@ fn build_frontend(root: &Path, output: &Path) -> Result<()> {
     ] {
         bun.env_remove(inherited);
     }
-    bun.env("CARGO_TARGET_DIR", frontend_dir.join("wasm/egfx/target"));
     let status = bun
         .status()
         .context("failed to run `bun run build` for the frontend")?;
