@@ -4,8 +4,7 @@
 
 Install a native package from the
 [latest release](https://github.com/andrewtheguy/remotex/releases/latest). The
-package manager owns the gateway executable, config example, licence, and
-third-party notices; the web client is compiled into the executable. It does not
+package manager owns the gateway executable, config example and licence; the web client is compiled into the executable. It does not
 own the live config, so an upgrade or removal never replaces or deletes
 credentials.
 
@@ -25,7 +24,6 @@ Use the `arm64` filename on an arm64 host. The package installs:
 /usr/bin/remotex
 /usr/share/doc/remotex/remotex.example.toml
 /usr/share/doc/remotex/LICENSE
-/usr/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
 It depends on the distribution's libFLAC, which decodes a wlshare target's
@@ -62,7 +60,6 @@ It installs:
 /usr/local/lib/remotex/libFLAC.14.dylib
 /usr/local/share/doc/remotex/remotex.example.toml
 /usr/local/share/doc/remotex/LICENSE
-/usr/local/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
 The library decodes a wlshare target's sound. It is the package's own copy, in a
@@ -92,7 +89,6 @@ C:\Program Files\remotex\bin\libFLAC.dll
 C:\Program Files\remotex\VERSION
 C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
 C:\Program Files\remotex\share\doc\remotex\LICENSE
-C:\Program Files\remotex\share\doc\remotex\THIRD-PARTY-NOTICES.txt
 ```
 
 The gateway reads its config from `%ProgramData%\remotex\remotex.toml`. Add

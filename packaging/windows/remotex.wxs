@@ -17,7 +17,7 @@
   progress, and the finish page that says the install succeeded — without it an MSI run by
   double-click shows a progress bar and simply closes, which reads as "did it work?". Its
   licence page is skipped, below: the MIT licence asks nothing of whoever installs it, and it
-  is installed with the third-party notices under share\doc\remotex.
+  is installed under share\doc\remotex.
   `msiexec /qn` never shows any of it, so the unattended install and the CI smoke test are
   unchanged.
 -->
@@ -70,9 +70,6 @@
       </Component>
       <Component Directory="DocDir">
         <File Source="$(var.Stage)\share\doc\remotex\LICENSE" />
-      </Component>
-      <Component Directory="DocDir">
-        <File Source="$(var.Stage)\share\doc\remotex\THIRD-PARTY-NOTICES.txt" />
       </Component>
       <Component Directory="INSTALLFOLDER">
         <File Source="$(var.Stage)\VERSION" />

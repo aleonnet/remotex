@@ -129,7 +129,7 @@ if [ "$os" = macos ]; then
   pkgutil --payload-files "$output" > "$stage/pkg-contents"
   grep -qx './usr/local/bin/remotex' "$stage/pkg-contents"
   grep -qx './usr/local/lib/remotex/libFLAC.14.dylib' "$stage/pkg-contents"
-  for doc in remotex.example.toml LICENSE THIRD-PARTY-NOTICES.txt; do
+  for doc in remotex.example.toml LICENSE; do
     grep -qx "./usr/local/share/doc/remotex/$doc" "$stage/pkg-contents"
   done
   echo ">> wrote $output"
@@ -179,7 +179,7 @@ dpkg-deb --build --root-owner-group "$deb_root" "$deb_output"
 [ "$(dpkg-deb --field "$deb_output" Package)" = remotex ]
 dpkg-deb --contents "$deb_output" > "$stage/deb-contents"
 grep -q '\./usr/bin/remotex$' "$stage/deb-contents"
-for doc in remotex.example.toml LICENSE THIRD-PARTY-NOTICES.txt; do
+for doc in remotex.example.toml LICENSE; do
   grep -q "\./usr/share/doc/remotex/$doc\$" "$stage/deb-contents"
 done
 echo ">> wrote $deb_output"
@@ -221,7 +221,6 @@ spec="$rpm_top/SPECS/remotex.spec"
   echo '/usr/bin/remotex'
   echo '/usr/share/doc/remotex/remotex.example.toml'
   echo '%license /usr/share/doc/remotex/LICENSE'
-  echo '%license /usr/share/doc/remotex/THIRD-PARTY-NOTICES.txt'
 } > "$spec"
 
 rpmbuild -bb \
@@ -235,7 +234,7 @@ rpm_output="dist/remotex-linux-${asset_arch}.rpm"
 cp "$rpm_built" "$rpm_output"
 rpm -qpl "$rpm_output" > "$stage/rpm-contents"
 grep -qx '/usr/bin/remotex' "$stage/rpm-contents"
-for doc in remotex.example.toml LICENSE THIRD-PARTY-NOTICES.txt; do
+for doc in remotex.example.toml LICENSE; do
   grep -qx "/usr/share/doc/remotex/$doc" "$stage/rpm-contents"
 done
 echo ">> wrote $rpm_output"

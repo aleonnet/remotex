@@ -13,8 +13,7 @@
 #   ├── bin\libFLAC.dll
 #   └── share\doc\remotex\
 #       ├── remotex.example.toml
-#       ├── LICENSE
-#       └── THIRD-PARTY-NOTICES.txt
+#       └── LICENSE
 #
 # Runs on Windows under PowerShell 7 with cargo, the MSVC toolchain and WiX 5 on PATH
 # (`dotnet tool install --global wix --version 5.0.2`; the UI extension the wizard pages
@@ -22,8 +21,7 @@
 # prebuilt static archives from their `-prebuilt` crates. `cargo build` compiles the frontend
 # from Cargo's OUT_DIR into the exe; release CI points REMOTEX_PREBUILT_FRONTEND at its shared
 # platform-independent bundle. packaging/verify-windows-msi.ps1 then installs the result, runs
-# it and removes it. Unless REMOTEX_PREBUILT_NOTICES names release CI's notices, it makes them,
-# which takes uv, cargo-about and frontend\node_modules as well.
+# it and removes it.
 #Requires -Version 7
 $ErrorActionPreference = 'Stop'
 Set-Location (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
@@ -87,15 +85,6 @@ try {
     Copy-Item "$stage\flac\flac-1.5.0-win\Win64\libFLAC.dll" "$stage\bin\libFLAC.dll"
     Remove-Item -Recurse -Force $flacZip, "$stage\flac"
     Copy-Item 'remotex.example.toml', 'LICENSE' "$stage\share\doc\remotex\"
-    # The notices are a build output, as in build-tarball.sh: release CI's, named in
-    # REMOTEX_PREBUILT_NOTICES, or made here with cargo-about and frontend\node_modules.
-    $notices = "$stage\share\doc\remotex\THIRD-PARTY-NOTICES.txt"
-    if ($env:REMOTEX_PREBUILT_NOTICES) {
-        Copy-Item $env:REMOTEX_PREBUILT_NOTICES $notices
-    } else {
-        & uv run --python 3.13 packaging\third-party-notices.py $notices
-        if ($LASTEXITCODE -ne 0) { throw "third-party-notices.py failed (exit $LASTEXITCODE)" }
-    }
     # Bare LF and no BOM, like the tarball's VERSION.
     [System.IO.File]::WriteAllText("$stage\VERSION", "$version`n")
 

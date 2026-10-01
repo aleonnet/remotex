@@ -18,7 +18,6 @@ Linux package managers own the conventional FHS paths directly:
 /usr/bin/remotex
 /usr/share/doc/remotex/remotex.example.toml
 /usr/share/doc/remotex/LICENSE
-/usr/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
 The macOS package owns the corresponding local prefix:
@@ -27,7 +26,6 @@ The macOS package owns the corresponding local prefix:
 /usr/local/bin/remotex
 /usr/local/share/doc/remotex/remotex.example.toml
 /usr/local/share/doc/remotex/LICENSE
-/usr/local/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
 By default the Windows package (`.msi`) owns the same tree under the 64-bit Program
@@ -39,25 +37,9 @@ C:\Program Files\remotex\bin\remotex.exe
 C:\Program Files\remotex\VERSION
 C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
 C:\Program Files\remotex\share\doc\remotex\LICENSE
-C:\Program Files\remotex\share\doc\remotex\THIRD-PARTY-NOTICES.txt
 ```
 
-Every artifact, container images included, carries remotex's MIT
-`LICENSE` and `THIRD-PARTY-NOTICES.txt`, the notices of what a release build
-contains that remotex did not write: the C libraries linked from their prebuilt
-archives, whose licences are kept in `notices/`, the web client's packages, and
-the Rust crates cargo-about finds under `packaging/about.toml` and, for the web
-client's WebAssembly module, `packaging/about-wasm.toml`. It is a build
-output, not a file in the repository: `third-party-notices.py` writes it into the
-tree `build-tarball.sh` and `build-windows-msi.ps1` package, which takes
-`bun install` done in `frontend/` and cargo-about
-(`cargo install cargo-about --locked --features cli`). Release CI makes it once,
-in its `notices` job, and hands it to every target in
-`REMOTEX_PREBUILT_NOTICES`, as it hands over the frontend bundle. cargo-about
-refuses a crate under a licence `packaging/about.toml` does not accept, so such a
-dependency fails the packaging. It covers the default build, not
-`apple-hp-media-static`, whose
-distributor adds FFmpeg's LGPL terms.
+Every artifact, container images included, carries remotex's MIT `LICENSE`.
 
 There is no package wrapper, version directory, active-version symlink, or
 package-managed rollback. The package manager replaces and removes its files.
@@ -97,9 +79,7 @@ bash packaging/build-tarball.sh
 bash packaging/build-native-packages.sh
 ```
 
-The tarball build makes the notices unless `REMOTEX_PREBUILT_NOTICES` supplies
-them, so it needs cargo-about and uv beside the frontend's `node_modules`; the
-native-package build consumes those notices from the tarball. The frontend's
+The frontend's
 build compiles a WebAssembly module from the gateway's graphics crate
 (`frontend/wasm/egfx` around
 `crates/remotex-rdp-graphics`, the page's compositor for a passed RDP pipeline), so wherever the frontend is built — `bun run build`, or a
@@ -183,8 +163,7 @@ and nothing links (`src/vnc_audio.rs`). Every artifact brings it, FLAC 1.5's or
 | `.msi` | `bin\libFLAC.dll` beside the executable, from FLAC's own Windows release |
 
 The source and the Windows release are each checked against a SHA-256 the
-script pins. libFLAC is BSD-3-Clause, and its notice is in
-`THIRD-PARTY-NOTICES.txt`.
+script pins.
 
 The non-default `apple-hp-media-static` feature links private static archives
 instead, and is in no release artifact. No artifact holds the EXPERIMENTAL
