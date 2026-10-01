@@ -8,8 +8,8 @@
 //   choice only to a browser that says yes here, and greys it for one that says no,
 //   which starts the target with VP9 as from any other. The answer rides every
 //   session socket this page opens (`gateway.ts`), for the same reason the chroma
-//   does: a gateway holding a session another browser started with the picture
-//   passed covers a page that said no instead of sending it what it cannot decode.
+//   does: a page that comes back to its session saying no is returned to the
+//   picker instead of being sent what it cannot decode.
 // - The sound. Every session on such a Mac is sent its AAC-ELD as it came: the
 //   gateway has no decoder for it. So this answer chooses nothing and is told to
 //   nobody. It is which form of the configuration the player uses

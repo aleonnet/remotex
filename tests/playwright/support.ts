@@ -296,8 +296,8 @@ export async function logIn(page: Page, search = ""): Promise<void> {
   // A third landing, and the one that used to end a run before it started: the slot
   // is held by a browser that is gone or busy — a previous test's context, a QA tab
   // left open — and the page offers the takeover rather than deciding for anybody.
-  // Taking it is what a test run wants and is the flow the product documents; a
-  // session survives it, so nothing is lost by claiming a slot nobody is watching.
+  // Taking it is what a test run wants and is the flow the product documents: it
+  // ends whatever session was there, and this page lands on the picker.
   const takeOver = page.getByRole("button", { name: "Take over" });
   const picker = page.getByRole("heading", { name: "Pick a target" });
   const menu = page.getByRole("button", { name: "Open menu" });

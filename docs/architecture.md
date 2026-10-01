@@ -185,12 +185,14 @@ and whether it composes an RDP host's graphics pipeline. The
 gateway *selects* a chroma on the first and never refuses a client for it. The
 other two say which passthrough the browser can take. They grey the choice at
 the picker, where a browser that says no starts the target encoded here; they
-refuse a `connect` that asks for the passthrough all the same; and they cover a
-browser that attaches to a session another one started with it. The one target
+refuse a `connect` that asks for the passthrough all the same; and they end the
+session of an owner that comes back answering no, which lands on the picker
+([Session lifecycle](#session-lifecycle)). No other browser's answers meet a
+running session: a takeover ends it first. The one target
 they can leave unstartable is a High Performance Mac on a gateway whose host
 lacks FFmpeg, which can only pass the picture. Do not grow them into
-a wider capability negotiation, and do not let either change what a running
-session is.
+a wider capability negotiation, and do not let either rebuild a session with
+choices nobody made.
 Preserve the announced configuration and color-space behavior in
 [The codec](#the-codec) and
 [Choosing a chroma](#choosing-a-chroma).

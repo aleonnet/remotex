@@ -10,10 +10,10 @@
 // worker's is, to present the picture on (egfxPicture.ts).
 //
 // The answer greys the choice at the picker where it is no, and rides every session
-// socket this page opens (`gateway.ts`), so a gateway holding a session another
-// browser started with the pipeline passed covers this one instead of sending it a
-// stream it cannot compose. Unlike the chroma it is not a selection: nothing is
-// rebuilt for a page that says no.
+// socket this page opens (`gateway.ts`), so a page that comes back to its session
+// saying no is returned to the picker instead of being sent a stream it cannot
+// compose. Unlike the chroma it is not a selection: nothing is rebuilt for a page
+// that says no.
 
 let answer: boolean | null = null;
 

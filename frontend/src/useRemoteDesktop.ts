@@ -1131,8 +1131,7 @@ export function useRemoteDesktop(
     };
     // A tablet's one size request, sent once on `connected`; rotations do not
     // revise it. A phone sends nothing: the picker offers it only sizes the
-    // desktop keeps, and a session another client started to follow its window
-    // stays as it finds it (see `fit` in hostDisplayMsg).
+    // desktop keeps (see `fit` in hostDisplayMsg).
     const sendMobileSize = () => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;

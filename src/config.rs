@@ -479,7 +479,7 @@ pub struct NotOffered {
 /// ([`crate::ws`]): the questions the page asks once at load and states on every
 /// session socket it opens. The chroma *selects* a stream. The other two say which
 /// passthrough this browser can be served, which is what the picker greys a choice
-/// by and what holds a session another browser started with one
+/// by and what ends a session whose owner comes back unable to take its own
 /// ([`TargetConfig::beyond`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Decoders {
@@ -954,7 +954,7 @@ impl TargetConfig {
     }
 
     /// The passthrough a session started with `choices` runs on that `decoders`'
-    /// browser cannot take. Such a browser is not served the session.
+    /// browser cannot take. Such a browser is not started one, and its own ends.
     pub fn beyond(&self, choices: Choices, decoders: Decoders) -> Option<Passthrough> {
         self.passthrough(choices).filter(|passthrough| !decoders.takes(*passthrough))
     }
