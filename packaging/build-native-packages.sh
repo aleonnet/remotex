@@ -130,7 +130,7 @@ mkdir -p "$deb_root/DEBIAN"
   echo "Depends: ca-certificates, libc6 (>= 2.39)"
   # High Performance's decoders, loaded at run time (src/libav.rs,
   # src/aac_eld.rs): any libavcodec the gateway loads, and fdk-aac, which is
-  # Debian's non-free and Ubuntu's multiverse, so apt skips it where those are off.
+  # Debian's non-free and Ubuntu's universe, so apt skips it where those are off.
   echo "Recommends: libavcodec63 | libavcodec62 | libavcodec61 | libavcodec60, libfdk-aac2t64 | libfdk-aac2"
   echo "Homepage: https://github.com/andrewtheguy/remotex"
   echo "Description: Single-user browser remote desktop gateway"

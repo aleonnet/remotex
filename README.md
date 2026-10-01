@@ -204,7 +204,8 @@ remotex serve
 ```
 
 See [`docs/install.md`](docs/install.md) for package upgrades, removal, and macOS
-config setup.
+config setup, and [`docs/high-performance-decoders.md`](docs/high-performance-decoders.md)
+for the two libraries an `ard-high-performance` target needs beside the package.
 
 ## Local instances
 
@@ -277,17 +278,13 @@ at connect and across display changes, and a stream that fails ends the session,
 it does in Apple's viewer. A playing
 video does not delay the Mac's reading of the input, as RFB pixels' deflate does. The Mac refuses the picture without the sound, and
 mutes its own speakers while it streams, so the target always carries sound, and
-nothing reaches an AirPlay speaker the Mac plays to. It is **experimental**. Decoding
-the stream needs its decoders, FFmpeg's libavcodec (LGPL, 6.1 to 9) and Fraunhofer's
-fdk-aac (licence not OSI-approved), which the gateway loads from the system when a
-session needs them:
-`libavcodec61` (or 60 to 63) and `libfdk-aac2t64` (`libfdk-aac2` before trixie) on
-Debian (non-free) and Ubuntu (multiverse), `brew install ffmpeg fdk-aac` on macOS, and on Windows MSYS2's
-`mingw-w64-ucrt-x86_64-ffmpeg` and `mingw-w64-ucrt-x86_64-fdk-aac`, whose DLLs are found
-in `C:\msys64\ucrt64\bin`, on `PATH` or beside `remotex.exe`.
-No release artifact links either; a build with `--features apple-hp-media-static` links
-both from private archives instead. A gateway that finds either missing still passes the
-stream under `media_passthrough = true`, and refuses a browser that cannot decode it. See
+nothing reaches an AirPlay speaker the Mac plays to. It is **experimental**.
+
+Decoding the stream needs two libraries on the gateway's host that no release
+artifact contains: FFmpeg's libavcodec and Fraunhofer's fdk-aac. Install them as
+[High Performance decoders](docs/high-performance-decoders.md) says for Linux,
+macOS and Windows. A gateway without them still passes the stream under
+`media_passthrough = true`, and refuses a browser that cannot decode it. See
 [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
 Every Apple subtype supports the native Apple pasteboard when `clipboard =

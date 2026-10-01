@@ -152,7 +152,7 @@ const INSTALL: &str = if cfg!(target_os = "macos") {
     "install MSYS2's mingw-w64-ucrt-x86_64-fdk-aac, or put its libfdk-aac-2.dll beside \
      remotex.exe or on PATH"
 } else {
-    "install libfdk-aac2 (Debian's non-free, Ubuntu's multiverse) or your \
+    "install libfdk-aac2t64 (Debian's non-free), libfdk-aac2 (Ubuntu's universe) or your \
      distribution's fdk-aac"
 };
 

@@ -464,11 +464,10 @@ password = "change-me"
 #
 # EXPERIMENTAL. Decoding the stream here takes the host's FFmpeg (libavcodec 60 to
 # 63) and Fraunhofer's fdk-aac, whose licence is not OSI-approved, which the
-# gateway loads when a session needs them: libavcodec61 and libfdk-aac2t64
-# (non-free; libfdk-aac2 before trixie) on Debian, `brew install ffmpeg fdk-aac` on macOS, MSYS2's ffmpeg and fdk-aac on
-# Windows. Without them a session still passes the stream under
-# `media_passthrough = true`, and refuses a browser that cannot decode it. See
-# docs/apple-vnc-889.md, "The media stream".
+# gateway loads when a session needs them. docs/high-performance-decoders.md says
+# how to install them on Linux, macOS and Windows. Without them a session still
+# passes the stream under `media_passthrough = true`, and refuses a browser that
+# cannot decode it. See docs/apple-vnc-889.md, "The media stream".
 #
 # `media_passthrough = true` sends the Mac's stream to a browser that decodes it, as
 # the Mac sent it, for a LAN of 100 Mbit/s or more: its HEVC rather than VP9 encoded

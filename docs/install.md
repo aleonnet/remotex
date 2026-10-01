@@ -144,6 +144,10 @@ For a Mac target, configure `protocol = "vnc"`, `subtype = "ard"`, and the Mac
 account's username and password. The gateway connects directly to macOS Screen
 Sharing; nothing is installed on the target Mac.
 
+`subtype = "ard-high-performance"` needs two libraries on the gateway's host
+that no package contains, FFmpeg and fdk-aac. See
+[High Performance decoders](high-performance-decoders.md) for installing them.
+
 ## Upgrade
 
 Download the new asset and hand it to the same package manager:

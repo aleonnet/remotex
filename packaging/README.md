@@ -164,17 +164,9 @@ when a session needs them (`src/libav.rs`, `src/aac_eld.rs`), and a host without
 runs those targets only with `media_passthrough`, for browsers that decode the
 stream. The `.deb` recommends the Linux ones, the public container image carries
 neither and the private one `publish-full-image.sh` builds carries Debian's;
-elsewhere they are installed by hand:
-
-| | libavcodec (FFmpeg 6.1 to 9) | fdk-aac |
-|---|---|---|
-| Linux | `libavcodec.so.60` to `.63`, e.g. Debian's `libavcodec61` | `libfdk-aac.so.2`, `libfdk-aac2t64`, `libfdk-aac2` before trixie (Debian non-free, Ubuntu multiverse) |
-| macOS | `libavcodec.60.dylib` to `.63`, `brew install ffmpeg` | `libfdk-aac.2.dylib`, `brew install fdk-aac` |
-| Windows | `avcodec-60.dll` to `-63`, MSYS2's `mingw-w64-ucrt-x86_64-ffmpeg` | `libfdk-aac-2.dll`, MSYS2's `mingw-w64-ucrt-x86_64-fdk-aac` |
-
-Each is looked for by the platform loader's own search, then in Homebrew's and
-MacPorts' `lib` or MSYS2's `C:\msys64\ucrt64\bin`. On macOS the loaded
-libavcodec decodes through VideoToolbox.
+elsewhere the operator installs them, as
+[High Performance decoders](../docs/high-performance-decoders.md) says for each
+platform.
 
 The non-default `apple-hp-media-static` feature links private static archives
 instead, and is in no release artifact. No artifact holds the EXPERIMENTAL
