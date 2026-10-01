@@ -428,16 +428,23 @@ pub mod batch {
 ///
 /// ```text
 /// offset 0: u8  frame kind, always 0x03 (audio)
-/// offset 1: u8  flags, always 0 — a receiver rejects anything else
+/// offset 1: u8  flags — bit 0 a gap; a receiver rejects the rest
 /// offset 2: u16 packet count
 /// offset 4: packets, each u16 length | length bytes  (little-endian throughout)
 /// ```
 ///
-/// Receivers reject nonzero flags. Packet lengths delimit multiple packets within
-/// one WebSocket frame: the Opus packets one wave buffer completed, or the passed
-/// units already queued when the first was read.
+/// Packet lengths delimit multiple packets within one WebSocket frame: the Opus
+/// packets one wave buffer completed, or the passed units already queued when
+/// the first was read.
+///
+/// A gap ([`gap`]) is a frame of no packets with bit 0 set: packets a remote
+/// coded were dropped here, so the next one does not follow the last the client
+/// was sent. A decoder that carries state from packet to packet — Opus, AAC-ELD
+/// — starts afresh at it rather than decode against history it never had.
 pub mod audio {
     pub const FRAME_KIND: u8 = 0x03;
+    /// The flag of a frame that marks a gap.
+    pub const GAP: u8 = 0x01;
     pub const HEADER_LEN: usize = 4;
     /// Bytes each packet costs besides its own bytes.
     pub const PACKET_HEADER_LEN: usize = 2;
@@ -465,6 +472,11 @@ pub mod audio {
             frame.extend_from_slice(packet);
         }
         frame
+    }
+
+    /// The frame that tells the client units were dropped before the next.
+    pub fn gap() -> Vec<u8> {
+        vec![FRAME_KIND, GAP, 0, 0]
     }
 }
 
@@ -1111,6 +1123,9 @@ pub enum ServerMsg {
     /// Like an access unit, this has no text encoding and is not a control message: it is a
     /// binary frame, and [`crate::wire`] is what turns it into one.
     Audio(Vec<bytes::Bytes>),
+    /// Passed units were dropped before the next [`Self::Audio`], framed by
+    /// [`audio::gap`]: a binary frame as that is.
+    AudioGap,
     /// How to decode the video that follows on one stream, sent before its first
     /// [`ServerMsg::Video`] and again whenever it changes.
     ///
@@ -1285,7 +1300,7 @@ impl ServerMsg {
     /// caller sending one on its own.
     pub fn text_frame(&self) -> Option<String> {
         Some(match self {
-            ServerMsg::Video(_) | ServerMsg::Graphics(_) | ServerMsg::Audio(_) => {
+            ServerMsg::Video(_) | ServerMsg::Graphics(_) | ServerMsg::Audio(_) | ServerMsg::AudioGap => {
                 return None;
             }
             ServerMsg::GraphicsStart => control(&ControlMsg::GraphicsStart),
@@ -1644,6 +1659,7 @@ mod tests {
                 .is_none(),
             "packets are a binary frame, like an access unit"
         );
+        assert!(ServerMsg::AudioGap.text_frame().is_none(), "and so is the gap between them");
     }
 
     /// The camera frame parser: the one binary the gateway *receives*. The

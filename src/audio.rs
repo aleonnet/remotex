@@ -193,7 +193,8 @@ impl AudioBridge {
 
     /// Queue one already-encoded unit of a passed stream, for a listener built
     /// with [`AudioListener::into_passed`]. The same queue and the same dropping
-    /// as [`Self::wave`]: a unit is one packet, and nothing after it depends on it.
+    /// as [`Self::wave`]: a unit is one packet, and a listener that lost some is
+    /// told so ([`EncodedAudio::gap`]), since the next may decode from them.
     pub fn unit(&self, unit: Vec<u8>) {
         let _ = self.waves.send(Bytes::from(unit));
     }
@@ -389,6 +390,7 @@ impl AudioListener {
             head,
             passthrough: false,
             signals,
+            gap: Arc::default(),
             packets: stream,
         })
     }
@@ -405,24 +407,46 @@ impl AudioListener {
     /// one gets the walk's signals, as an encoder here would: the sender
     /// reports its sends through them, and what the walk asks for goes to the
     /// remote ([`AudioBridge::ask_rate`]) in place of an encoder.
+    ///
+    /// Units this listener fell behind are dropped, as PCM is, but they were
+    /// coded: the remote's encoder went on from them and the client's decoder
+    /// never saw them. [`EncodedAudio::gap`] is raised when that happens, for
+    /// the sender to tell the client before the next batch.
     pub fn into_passed(self, format: PassedFormat, plan: Option<AudioPlan>) -> EncodedAudio<impl Stream<Item = Vec<Bytes>>> {
         let signals = plan
             .filter(|plan| plan.adaptive_floor_bps.is_some())
             .map(|plan| Arc::new(AudioSignals::new(plan.bitrate_bps)));
-        let stream = futures_util::stream::unfold(self.waves, |mut units| async move {
+        let gap = Arc::new(AtomicBool::new(false));
+        // The flag, and whether units were lost after the batch last yielded,
+        // which is a gap before the next one rather than before that one.
+        let state = (self.waves, Arc::clone(&gap), false);
+        let stream = futures_util::stream::unfold(state, |(mut units, gap, mut lost)| async move {
+            if lost {
+                gap.store(true, Ordering::Relaxed);
+                lost = false;
+            }
             loop {
                 match units.recv().await {
                     Ok(unit) => {
                         let mut batch = vec![unit];
-                        while let Ok(unit) = units.try_recv() {
-                            batch.push(unit);
+                        loop {
+                            match units.try_recv() {
+                                Ok(unit) => batch.push(unit),
+                                Err(broadcast::error::TryRecvError::Lagged(dropped)) => {
+                                    debug!("audio: listener fell behind, {dropped} passed unit(s) dropped");
+                                    lost = true;
+                                    break;
+                                }
+                                Err(_) => break,
+                            }
                         }
-                        return Some((batch, units));
+                        return Some((batch, (units, gap, lost)));
                     }
-                    // As for PCM: skipping forward is the point, and each unit
-                    // decodes on its own.
+                    // As for PCM, skipping forward is the point; unlike PCM,
+                    // what was skipped was coded, and the client is told.
                     Err(broadcast::error::RecvError::Lagged(dropped)) => {
                         debug!("audio: listener fell behind, {dropped} passed unit(s) dropped");
+                        gap.store(true, Ordering::Relaxed);
                     }
                     Err(broadcast::error::RecvError::Closed) => return None,
                 }
@@ -436,6 +460,7 @@ impl AudioListener {
             head: format.head.to_vec(),
             passthrough: true,
             signals,
+            gap,
             packets: stream,
         }
     }
@@ -535,6 +560,7 @@ impl AudioListener {
             head: Vec::new(),
             passthrough: false,
             signals: None,
+            gap: Arc::default(),
             packets,
         })
     }
@@ -589,6 +615,11 @@ pub struct EncodedAudio<S> {
     /// the encoder's source of truth for the rate it should be at. A passed
     /// stream's encoder is the remote's, which the sender tells itself.
     pub signals: Option<Arc<AudioSignals>>,
+    /// Raised by a passed stream when units the remote coded were dropped
+    /// before the batch it yields next. The sender takes it down and tells the
+    /// client ([`crate::protocol::audio::gap`]) ahead of that batch. Never
+    /// raised by a stream coded here, whose loss is before its encoder.
+    pub gap: Arc<AtomicBool>,
     pub packets: S,
 }
 
@@ -604,6 +635,7 @@ impl<S: Stream<Item = Vec<Bytes>> + Send + 'static> EncodedAudio<S> {
             head: self.head,
             passthrough: self.passthrough,
             signals: self.signals,
+            gap: self.gap,
             packets: futures_util::StreamExt::boxed(self.packets),
         }
     }
@@ -949,6 +981,29 @@ mod tests {
 
         let fixed = bridge.take_listener().into_passed(crate::vnc_audio::PASSED_OPUS, Some(AudioPlan::fixed()));
         assert!(fixed.signals.is_none(), "a fixed rate is named once and never walked");
+    }
+
+    /// A passed stream that fell behind the queue says so: the units it lost
+    /// were coded, so the batch after them is marked as following a gap, and
+    /// one that lost nothing is not.
+    #[tokio::test]
+    async fn a_passed_stream_that_lost_units_raises_the_gap() {
+        let bridge = AudioBridge::new();
+        let passed = bridge.take_listener().into_passed(crate::vnc_audio::PASSED_OPUS, None);
+        let gap = Arc::clone(&passed.gap);
+        let mut stream = Box::pin(passed.packets);
+
+        bridge.unit(vec![1]);
+        assert_eq!(next(&mut stream).await.unwrap(), [Bytes::from_static(&[1])]);
+        assert!(!gap.load(Ordering::Relaxed), "nothing lost");
+
+        for n in 0..AUDIO_QUEUE_DEPTH as u8 + 3 {
+            bridge.unit(vec![n]);
+        }
+        let batch = next(&mut stream).await.unwrap();
+        assert_eq!(batch.len(), AUDIO_QUEUE_DEPTH, "the queue's depth survived");
+        assert_eq!(batch[0], Bytes::from_static(&[3]), "the oldest went");
+        assert!(gap.load(Ordering::Relaxed), "and the batch follows a gap");
     }
 
     /// A passed stream is the remote's units as they came: described by the format

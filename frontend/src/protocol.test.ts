@@ -10,6 +10,7 @@ import { test } from "node:test";
 import {
   batchFrameSequence,
   clickCount,
+  decodeAudioFrame,
   decodeBatchFrame,
   mouseButtonBit,
   mouseButtonFromEvent,
@@ -108,4 +109,29 @@ test("a wheel delta says which unit it is in", () => {
   assert.equal(wheelUnitFromEvent(2), "page");
   // Anything else is what every browser on macOS actually sends.
   assert.equal(wheelUnitFromEvent(7), "pixel");
+});
+
+// The layout mirrors `audio` in src/protocol.rs, whose `frame` and `gap` write
+// these bytes.
+test("an audio frame is its packets, and a gap is a flagged frame of none", () => {
+  const frame = new Uint8Array([0x03, 0, 2, 0, 1, 0, 9, 2, 0, 7, 8]);
+  const decoded = decodeAudioFrame(frame.buffer);
+  assert.equal(decoded?.gap, false);
+  assert.deepEqual(
+    decoded?.packets.map((packet) => Array.from(packet)),
+    [[9], [7, 8]],
+  );
+
+  const gap = decodeAudioFrame(new Uint8Array([0x03, 1, 0, 0]).buffer);
+  assert.deepEqual(gap, { gap: true, packets: [] });
+});
+
+test("an audio frame with a flag this client does not know is dropped whole", () => {
+  assert.equal(decodeAudioFrame(new Uint8Array([0x03, 2, 0, 0]).buffer), null);
+  assert.equal(decodeAudioFrame(new Uint8Array([0x03, 3, 0, 0]).buffer), null);
+  // A count that the packets present do not match is a truncated frame.
+  assert.equal(
+    decodeAudioFrame(new Uint8Array([0x03, 0, 2, 0, 1, 0, 9]).buffer),
+    null,
+  );
 });

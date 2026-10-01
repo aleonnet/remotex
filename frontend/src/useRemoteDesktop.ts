@@ -1289,9 +1289,12 @@ export function useRemoteDesktop(
       if (binaryFrameKind(data) !== "audio") {
         return;
       }
-      const packets = decodeAudioFrame(data);
-      if (packets) {
-        audioPlayerRef.current?.push(packets);
+      const frame = decodeAudioFrame(data);
+      if (frame?.gap) {
+        audioPlayerRef.current?.gap();
+      }
+      if (frame && frame.packets.length > 0) {
+        audioPlayerRef.current?.push(frame.packets);
       }
     };
 

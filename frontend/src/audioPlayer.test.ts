@@ -79,3 +79,78 @@ test("a stream the module refuses is reported", async () => {
   await settled();
   assert.deepEqual(errors, ["This browser could not load the FLAC decoder."]);
 });
+
+/** WebCodecs' decoder as far as the player drives it, and what it was asked. */
+class FakeAudioDecoder {
+  static calls: string[] = [];
+  state = "unconfigured";
+  configure(): void {
+    this.state = "configured";
+    FakeAudioDecoder.calls.push("configure");
+  }
+  decode(chunk: { data: Uint8Array }): void {
+    FakeAudioDecoder.calls.push(`decode ${chunk.data[0]}`);
+  }
+  reset(): void {
+    this.state = "unconfigured";
+    FakeAudioDecoder.calls.push("reset");
+  }
+  close(): void {
+    this.state = "closed";
+  }
+}
+
+const OPUS: AudioFormat = {
+  codec: "opus",
+  sampleRate: 48_000,
+  channels: 2,
+  packetFrames: 960,
+  head: new Uint8Array(19),
+};
+
+/** Run `body` with WebCodecs' two globals standing in. */
+function withFakeWebCodecs(body: () => void): void {
+  const scope = globalThis as Record<string, unknown>;
+  const had = [scope.AudioDecoder, scope.EncodedAudioChunk];
+  FakeAudioDecoder.calls = [];
+  scope.AudioDecoder = FakeAudioDecoder;
+  scope.EncodedAudioChunk = class {
+    data: Uint8Array;
+    constructor(init: { data: Uint8Array }) {
+      this.data = init.data;
+    }
+  };
+  try {
+    body();
+  } finally {
+    [scope.AudioDecoder, scope.EncodedAudioChunk] = had;
+  }
+}
+
+test("a gap starts the decoder again before the packets after it", () => {
+  withFakeWebCodecs(() => {
+    const player = createAudioPlayer(OPUS, context(), { onError: () => {} });
+    player.push([new Uint8Array([1])]);
+    player.gap();
+    player.push([new Uint8Array([2])]);
+    assert.deepEqual(FakeAudioDecoder.calls, [
+      "configure",
+      "decode 1",
+      "reset",
+      "configure",
+      "decode 2",
+    ]);
+    player.close();
+    player.gap();
+    assert.equal(FakeAudioDecoder.calls.length, 5, "nothing after a close");
+  });
+});
+
+test("a gap is nothing to a FLAC stream, whose frames decode alone", () => {
+  withFakeWebCodecs(() => {
+    const { player } = playerOnPendingLoad();
+    player.gap();
+    assert.deepEqual(FakeAudioDecoder.calls, []);
+    player.close();
+  });
+});

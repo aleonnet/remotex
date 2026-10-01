@@ -1456,9 +1456,16 @@ packets are the remote's own or coded here, which the session card's Audio row
 states — followed by binary frames:
 
 ```text
-u8 kind = 0x03 | u8 flags = 0 | u16 packet count
+u8 kind = 0x03 | u8 flags | u16 packet count
 repeated: u16 packet length | packet bytes
 ```
+
+The one flag is bit 0, a gap, on a frame of no packets. The gateway sends it
+when a listener fell behind a passed stream and units the remote had coded were
+dropped: the next packet does not follow the last one sent, so the player resets
+its decoder, an Opus or AAC-ELD one carrying state from packet to packet. Sound
+coded here needs none, since what a slow listener loses there is PCM, before the
+encoder.
 
 There is no codec byte in the binary frame; the codec is named once, out of
 band, in `audioFormat`. It is Opus encoded here: `codec` is `opus`, `sampleRate`

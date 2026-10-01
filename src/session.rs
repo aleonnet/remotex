@@ -162,7 +162,8 @@ pub struct AudioAttachment {
     /// Identifies this socket for [`SessionManager::detach_audio`], so a socket
     /// closing *after* it was superseded cannot clear its replacement.
     pub id: u64,
-    /// [`ServerMsg::AudioFormat`], then [`ServerMsg::Audio`]. Nothing else is ever
+    /// [`ServerMsg::AudioFormat`], then [`ServerMsg::Audio`], with a
+    /// [`ServerMsg::AudioGap`] where passed units were dropped. Nothing else is ever
     /// sent here, and the format arrives again whenever a new engine is armed.
     pub packets: mpsc::Receiver<ServerMsg>,
     /// Resolves when the session drops this socket — a takeover, a log out, or a
@@ -1211,6 +1212,13 @@ impl SessionManager {
                 // How long the await took is also the adaptive walk's whole
                 // signal: the queue is two deep, so blocking at all means the
                 // socket is not draining sound as fast as the remote produces it.
+                // Units dropped ahead of this batch were coded, and its first
+                // decodes from them: the client is told first.
+                if encoded.gap.swap(false, std::sync::atomic::Ordering::Relaxed)
+                    && out.send(ServerMsg::AudioGap).await.is_err()
+                {
+                    break;
+                }
                 let queued = tokio::time::Instant::now();
                 if out.send(ServerMsg::Audio(packets)).await.is_err() {
                     break;

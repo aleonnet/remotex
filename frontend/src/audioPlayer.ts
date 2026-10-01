@@ -69,6 +69,13 @@ export interface AudioPlayer {
   /** One audio frame's encoded packets, in arrival order. */
   push(packets: Uint8Array[]): void;
   /**
+   * Packets were dropped before the next one pushed. A decoder that carries
+   * state between packets starts afresh, rather than decode what follows
+   * against history it was never given; a FLAC frame decodes alone, and
+   * nothing changes.
+   */
+  gap(): void;
+  /**
    * Stop playing, and release the decoder **and the context** — the player takes
    * ownership of the context it was handed, so a caller needs one call rather than
    * two and cannot leave the audio hardware held open. Getting sound back means a
@@ -398,14 +405,25 @@ export function createAudioPlayer(
         return;
       }
       for (const packet of packets) {
-        // Every packet on this wire is independently decodable — an Opus packet
-        // is — so they are all key frames, which is also why a listener can
-        // attach mid-stream at all.
+        // A decoder can start at any packet on this wire — an Opus packet has
+        // no key frames — so they are all key frames, which is also why a
+        // listener can attach mid-stream at all. Starting is not continuing:
+        // where packets were dropped, `gap` starts the decoder again.
         decoder.decode(
           new EncodedAudioChunk({ type: "key", timestamp, data: packet }),
         );
         timestamp += packetUs;
       }
+    },
+    gap() {
+      if (closed || !decoder || decoder.state !== "configured") {
+        return;
+      }
+      // What was queued to decode came before the gap and goes with it: sound
+      // was lost there already, and the timestamps carry on from where they
+      // were, which is all a decoder asks of them.
+      decoder.reset();
+      decoder.configure(decoderConfig(format));
     },
     close,
   };

@@ -207,6 +207,11 @@ announces late is still taken.
   ([Audio frames](architecture.md#audio-frames)). A new listener's walk starts
   from the ceiling. Silence is not shed, since a passed stream has no samples
   here to tell it by.
+- A listener that falls behind the queue loses its oldest units, as one of PCM
+  does, but these were coded: the pump sends a gap frame
+  ([Audio frames](architecture.md#audio-frames)) ahead of the next batch, and
+  the player resets its Opus decoder there. FLAC frames decode alone, and its
+  player takes no notice.
 - A frame length past 64 KiB is read past rather than allocated: a frame is
   3840 bytes of samples before compression, and FLAC adds a few header bytes at
   worst, so anything larger is a server that has lost its framing.
@@ -247,10 +252,11 @@ rather than on the graph's real-time one — `RT_PROCESS` is deliberately not se
 since the callback encodes, allocates, takes a mutex and wakes a task, none of
 which is real-time safe: on the data thread it could stall the whole audio graph
 and give every application on the host an xrun. It encodes there,
-off the session's task, and queues each finished frame in a sixteen-deep queue,
-dropping the oldest when a client cannot keep up — a dropped FLAC frame is a
-20 ms hole, a dropped Opus packet one the decoder conceals, and a stalled
-capture callback is worse. A set-format on a running stream, or a list that
+off the session's task, and queues each finished frame in a sixteen-deep queue.
+When a client cannot keep up, FLAC drops the oldest — a dropped frame is a
+20 ms hole, and a stalled capture callback is worse — and Opus leaves a buffer
+uncoded while the queue is full, so no packet it coded goes unsent and the
+decoder stays in step with the encoder. A set-format on a running stream, or a list that
 changes its codec, restarts the capture as now asked for; a set-bitrate moves
 the running encoder.
 
