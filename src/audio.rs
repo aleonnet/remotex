@@ -5,8 +5,8 @@
 //! client is attached; quiet remotes emit nothing. A buffer is turned into Opus
 //! packets at the rate the target's [`AudioPlan`] holds.
 //!
-//! The one exception is a High Performance Mac's sound passed to a browser that
-//! decodes it ([`crate::config::Passthrough::AppleMedia`]): the same queue
+//! The one exception is a High Performance Mac's sound, which every browser is
+//! passed as it came ([`crate::vnc_apple_media::PASSED_SOUND`]): the same queue
 //! then carries the Mac's own AAC-ELD units ([`AudioBridge::unit`]), and the
 //! listener hands them on as packets with no encoder behind them
 //! ([`AudioListener::into_passed`]).

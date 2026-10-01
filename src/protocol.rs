@@ -1095,7 +1095,7 @@ pub enum ServerMsg {
     ///
     /// `codec` is `opus`, the WebCodecs codec string, with the RFC 7845 `OpusHead`
     /// in `head` and `sample_rate` the 48 kHz it was resampled to. The one other is a
-    /// High Performance Mac's sound passed as it came
+    /// High Performance Mac's sound, always passed as it came
     /// ([`crate::vnc_apple_media::PASSED_SOUND`]): `mp4a.40.39`, AAC-ELD, with its
     /// AudioSpecificConfig in `head`.
     ///

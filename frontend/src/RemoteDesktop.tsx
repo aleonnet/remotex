@@ -86,7 +86,7 @@ function OversizeNotice({
 // Why a session cannot be shown here, by the passthrough it was started with.
 const UNSERVED_REASON: Record<string, string> = {
   "apple-media":
-    "It was started with the Mac's stream passed through, and this browser does not decode the Mac's HEVC and AAC-ELD.",
+    "It was started with the Mac's picture passed through, and this browser does not decode the Mac's HEVC.",
   "rdp-graphics":
     "It was started with the host's graphics pipeline passed through, and this browser cannot compose it: that needs WebGL 2 and a cross-origin isolated page.",
 };

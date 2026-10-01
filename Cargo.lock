@@ -1024,11 +1024,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "fdk-aac-prebuilt-sys"
-version = "0.1.0"
-source = "git+https://github.com/andrewtheguy/fdk-aac-prebuilt?tag=v2.0.3-20260921052032-4cad928#4cad928cce0b2078a852f69b690982c5c4b901f5"
-
-[[package]]
 name = "ff"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2379,7 +2374,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.309"
+version = "0.0.310"
 dependencies = [
  "aes",
  "anyhow",
@@ -2393,7 +2388,6 @@ dependencies = [
  "desktop-vp9",
  "eax",
  "env_logger",
- "fdk-aac-prebuilt-sys",
  "flacenc",
  "flate2",
  "futures-util",

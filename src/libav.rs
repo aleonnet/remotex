@@ -153,13 +153,11 @@ pub fn api() -> anyhow::Result<&'static Api> {
 const MAJORS: [u32; 4] = [63, 62, 61, 60];
 
 /// Where the libraries are looked for, in order. The empty prefix is the platform
-/// loader's own search; the others are where Homebrew, MacPorts and MSYS2 install
+/// loader's own search; the others are where Homebrew and MacPorts install
 /// FFmpeg, which that search does not reach.
 #[cfg(not(feature = "apple-hp-media-static"))]
 const DIRS: &[&str] = if cfg!(target_os = "macos") {
     &["", "/opt/homebrew/lib/", "/usr/local/lib/", "/opt/local/lib/"]
-} else if cfg!(windows) {
-    &["", r"C:\msys64\ucrt64\bin\"]
 } else {
     &[""]
 };
@@ -183,13 +181,13 @@ const INSTALL: &str = if cfg!(target_os = "macos") {
     "install it with `brew install ffmpeg`"
 } else if cfg!(windows) {
     "put a shared FFmpeg build's bin directory on PATH, as `winget install \
-     BtbN.FFmpeg.LGPL.Shared.9.0` does, or install MSYS2's mingw-w64-ucrt-x86_64-ffmpeg"
+     BtbN.FFmpeg.LGPL.Shared.9.0` does"
 } else {
     "install your distribution's libavcodec, libavcodec60 to libavcodec63"
 };
 
 /// Open one library. On Windows a DLL named by its path finds the DLLs it needs
-/// beside it, as MSYS2's FFmpeg does in its `bin`.
+/// beside it, as a shared build's does in its `bin`.
 #[cfg(not(feature = "apple-hp-media-static"))]
 fn open(file: &str) -> Result<libloading::Library, libloading::Error> {
     // SAFETY: FFmpeg's initialisers set up nothing but its own tables.

@@ -1,20 +1,22 @@
-// Whether this browser decodes a High Performance Mac's own media stream, picture and
-// sound: the second question about its decoders the gateway is told, asked once,
-// before the client mounts, beside the chroma (videoChroma.ts).
+// What this browser decodes of a High Performance Mac's own media stream: the second
+// question about its decoders the gateway is told, asked once, before the client
+// mounts, beside the chroma (videoChroma.ts).
 //
-// A session started with the Mac's stream passed sends it as it came — its HEVC
-// instead of VP9 encoded from decoded pictures, its AAC-ELD instead of Opus encoded
-// from decoded sound. The picker offers that choice only to a browser that says yes
-// here, and greys it for one that says no, which starts the target with VP9 and Opus
-// as from any other. One answer covers both halves. Every browser measured that decodes
-// the picture decodes the sound too (Chrome and Safari, on macOS and iOS), and one that
-// decodes only the sound (Chrome on a GPU without HEVC Range Extensions) loses nothing
-// by being sent both re-encoded. Firefox decodes neither. The answer rides every session
-// socket this page opens (`gateway.ts`), for the same reason the chroma does: a gateway
-// holding a session another browser started with the stream passed covers a page that
-// said no instead of sending it what it cannot decode.
+// The two halves are separate questions with separate consequences:
+// - The picture. A session started with the Mac's picture passed sends its HEVC as
+//   it came, instead of VP9 encoded from decoded pictures. The picker offers that
+//   choice only to a browser that says yes here, and greys it for one that says no,
+//   which starts the target with VP9 as from any other. The answer rides every
+//   session socket this page opens (`gateway.ts`), for the same reason the chroma
+//   does: a gateway holding a session another browser started with the picture
+//   passed covers a page that said no instead of sending it what it cannot decode.
+// - The sound. Every session on such a Mac is sent its AAC-ELD as it came: the
+//   gateway has no decoder for it. So this answer chooses nothing and is told to
+//   nobody. It is which form of the configuration the player uses
+//   (`appleEldConfig`), and a browser with none plays the session without sound
+//   and says why.
 //
-// The two halves are asked differently:
+// They are asked differently:
 // - The picture, HEVC Range Extensions 4:4:4: `VideoDecoder.isConfigSupported`, which
 //   answered as the decoder then behaved on every browser measured.
 // - The sound: `AudioDecoder.isConfigSupported`, then a real decode of one of the
@@ -24,8 +26,7 @@
 //   Safari inside an MPEG-4 ES_Descriptor, since the CoreAudio call WebKit reads it
 //   with refuses a bare one and WebKit then decodes as AAC-LC without it. Both say
 //   yes to both forms, so a yes only narrows the forms worth decoding and decoding
-//   picks one. The configuration that decoded is the one the player then uses
-//   (`appleEldConfig`).
+//   picks one.
 //
 // EXPERIMENTAL: a picture the browser's `VideoDecoder` refuses can still be decoded
 // in software — libavcodec's HEVC decoder compiled to WebAssembly, with SIMD128 and
@@ -34,13 +35,13 @@
 // WebAssembly on the cross-origin isolated page every gateway serves, and presents
 // its pictures on a WebGL 2 canvas (hevcPicture.ts). The page asks the
 // gateway for the decoder rather than assuming it. Chrome on a GPU without HEVC
-// Range Extensions then says yes, decoding the sound itself and the picture here. `?hevc_decoder=software` in the page's URL takes the
+// Range Extensions then says yes, decoding the picture here. `?hevc_decoder=software` in the page's URL takes the
 // software decoder even where the browser's own would do, to try it.
 //
-// The other way round from the chroma on a doubt. VP9 and Opus are what every browser
-// here decodes, so only a definite "yes" offers the Mac's stream, and anything that
+// The other way round from the chroma on a doubt. VP9 is what every browser here
+// decodes, so only a definite "yes" offers the Mac's picture, and anything that
 // throws reads as "no". The one target it can leave unstartable is a Mac on a gateway
-// whose host lacks the decoders' libraries, which has nothing else to send.
+// whose host lacks the HEVC decoder's library, which has no other picture to send.
 
 import { hevcDecoderUrl } from "./gateway.ts";
 
@@ -107,11 +108,14 @@ const FORMS: Description[] = [(config) => config, esDescriptor];
 /** Who decodes the Mac's picture: the browser's `VideoDecoder`, or hevc-wasm. */
 export type HevcDecoder = "native" | "software";
 
-let answer: {
-  decodes: boolean;
-  sound: Description | null;
-  picture: HevcDecoder | null;
-} | null = null;
+let answer: { picture: HevcDecoder | null } | null = null;
+
+/**
+ * The form the sound decoded in, null for neither, and undefined until the
+ * question, which `chooseAppleMedia` starts and does not wait for, is answered.
+ */
+let soundForm: Description | null | undefined;
+let soundProbe: Promise<void> | null = null;
 
 /** A function returning a SIMD128 value, which only a SIMD engine validates. */
 const SIMD_PROBE = Uint8Array.of(
@@ -278,34 +282,55 @@ async function decodesSound(description: Uint8Array): Promise<boolean> {
   return output && !failed;
 }
 
-/** Ask the browser once, and remember the answer for `decodesAppleMedia()`. */
-export async function chooseAppleMedia(): Promise<boolean> {
-  if (answer !== null) {
-    return answer.decodes;
-  }
-  let sound: Description | null = null;
-  const picture = await decodesPicture();
-  if (picture) {
-    for (const form of FORMS) {
-      if (await decodesSound(form(ELD_CONFIG))) {
-        sound = form;
-        break;
-      }
+async function probeSound(): Promise<void> {
+  let found: Description | null = null;
+  for (const form of FORMS) {
+    if (await decodesSound(form(ELD_CONFIG))) {
+      found = form;
+      break;
     }
   }
-  answer = { decodes: sound !== null, sound, picture: sound ? picture : null };
-  return answer.decodes;
+  soundForm = found;
 }
 
 /**
- * The answer. Only valid after `chooseAppleMedia` has resolved, which `main.tsx`
- * awaits before mounting.
+ * Ask the browser once, and remember the answers. Resolves to whether it decodes
+ * the Mac's picture, which is what `decodesAppleMedia()` then says. The sound's
+ * question is started here and not waited for: a decoder that never answers
+ * takes each form's whole timeout, and only a Mac's sound needs the answer
+ * (`appleSoundProbed`), so the page does not mount behind it.
+ */
+export async function chooseAppleMedia(): Promise<boolean> {
+  if (answer !== null) {
+    return answer.picture !== null;
+  }
+  soundProbe ??= probeSound();
+  const picture = await decodesPicture();
+  answer = { picture };
+  return picture !== null;
+}
+
+/**
+ * Resolves once the sound's question is answered, which `appleEldConfig` needs.
+ * Null where it already is, so a caller can carry on in the same turn.
+ */
+export function appleSoundProbed(): Promise<void> | null {
+  if (soundForm !== undefined) {
+    return null;
+  }
+  soundProbe ??= probeSound();
+  return soundProbe;
+}
+
+/**
+ * Whether this browser takes the Mac's picture passed. Only valid after
+ * `chooseAppleMedia` has resolved, which `main.tsx` awaits before mounting.
  */
 export function decodesAppleMedia(): boolean {
   if (answer === null) {
     throw new Error("decodesAppleMedia() before chooseAppleMedia() resolved");
   }
-  return answer.decodes;
+  return answer.picture !== null;
 }
 
 /**
@@ -317,20 +342,22 @@ export function appleHevcDecoder(): HevcDecoder | null {
 }
 
 /**
- * The decoder configuration for the Mac's passed sound, as announced (`sampleRate`,
+ * The decoder configuration for the Mac's sound, as announced (`sampleRate`,
  * `channels`, and its AudioSpecificConfig as `head`), in the form this browser
- * decoded at load.
+ * decoded at load. Throws, in words for the session's Audio row, in a browser
+ * that decoded neither form: the session then plays without sound.
  */
 export function appleEldConfig(format: {
   sampleRate: number;
   channels: number;
   head: Uint8Array;
 }): AudioDecoderConfig {
-  const form = answer?.sound;
+  if (soundForm === undefined) {
+    throw new Error("appleEldConfig() before appleSoundProbed() resolved");
+  }
+  const form = soundForm;
   if (!form) {
-    throw new Error(
-      "the gateway passed the Mac's sound to a page that said it does not decode it",
-    );
+    throw new Error("This browser does not decode the Mac's AAC-ELD sound.");
   }
   return {
     codec: ELD_DECODE_CODEC,
@@ -343,5 +370,7 @@ export function appleEldConfig(format: {
 /** Test seam: forget the answer so the question can be asked again. */
 export function resetAppleMediaForTests(timeoutMs = 2000): void {
   answer = null;
+  soundForm = undefined;
+  soundProbe = null;
   attemptTimeoutMs = timeoutMs;
 }

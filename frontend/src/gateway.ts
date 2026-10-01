@@ -40,7 +40,7 @@ export function gatewayFetch(
 ///
 /// The session socket also names what only this window knows about itself: its
 /// `screen` (the same numbers `connect` carries), the chroma its video decoder
-/// takes, whether it decodes a High Performance Mac's stream, and whether it
+/// takes, whether it decodes a High Performance Mac's picture, and whether it
 /// composes an RDP host's graphics pipeline. All are here for one reason — a
 /// gateway holding a target whose engine a claim change ended reconnects it at
 /// attach time, before any message this client could send, and it must build that

@@ -109,21 +109,17 @@
 #[hevc_wasm]
 #archive = "/srv/remotex/hevc-wasm-v0.0.1.tar.gz"
 
-# On Windows, the folders an `ard-high-performance` target's decoders are loaded
-# from: FFmpeg's avcodec and avutil DLLs, and fdk-aac's libfdk-aac-2.dll. With
-# nothing set here the gateway looks for them when a session needs them, beside
-# remotex.exe, on PATH, and in MSYS2's C:\msys64\ucrt64\bin, which is where the
-# recommended install puts them. This table is the override for any other
-# install: each key names a folder by its whole path, and that folder is then
-# the only place its decoder is loaded from. The gateway loads
-# what is named at start-up, and refuses to start if it is not there. A key left
-# out leaves that decoder to the search. A gateway on another platform refuses
-# the table: its system loader has a search of its own. See
-# docs/high-performance-decoders.md.
+# On Windows, the folder an `ard-high-performance` target's HEVC decoder is
+# loaded from: FFmpeg's avcodec and avutil DLLs. With nothing set here the
+# gateway looks for them when a session needs them, beside remotex.exe and on
+# PATH, which is where the recommended install puts them. This table is the override for any other install: the
+# key names a folder by its whole path, and that folder is then the only place
+# the decoder is loaded from. The gateway loads it at start-up, and refuses to
+# start if it is not there. A gateway on another platform refuses the table: its
+# system loader has a search of its own. See docs/high-performance-decoder.md.
 #
 #[hp_decoders]
 #ffmpeg_dir = 'C:\ffmpeg\bin'
-#fdk_aac_dir = 'C:\fdk-aac'
 
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,
@@ -236,7 +232,7 @@ site_passwd = ""
 #
 # Passthrough sends the remote's own stream to the browser as it came, for a LAN:
 # an "rdp" host's graphics pipeline for the page to compose, or an
-# "ard-high-performance" Mac's HEVC and AAC-ELD. Each is described with its
+# "ard-high-performance" Mac's HEVC. Each is described with its
 # target below. The choice is greyed where the browser cannot take the stream,
 # and a browser that cannot take a session somebody else started with it is shown
 # why and offered End session, not a different session.
@@ -336,9 +332,9 @@ password = "change-me"
 # is 96: well clear of where stereo Opus starts to be audibly lossy. Like
 # `video_quality` it is a ceiling, not a promise — and an average, not a packet
 # size: Opus is variable-rate, so silence costs a few bytes a packet and music
-# about this. Valid on a target whose sessions can carry sound — "rdp",
-# "wlshare" and "ard-high-performance" — and refused rather than ignored on one
-# that has none.
+# about this. Valid on a target whose sound is encoded here — "rdp" and
+# "wlshare" — and refused rather than ignored on one that has none, and on
+# "ard-high-performance", whose sound is passed as the Mac's own AAC-ELD.
 #audio_bitrate = 96
 
 # Let that bitrate follow the audio socket's own backpressure — on by default,
@@ -346,7 +342,7 @@ password = "change-me"
 # `audio_adaptive_min`, sustained clear sends walk it back up to `audio_bitrate`,
 # and silence is shed while the link is behind so old sound does not accumulate.
 # `false` holds `audio_bitrate` whatever the link does. Either value is refused
-# on a target without sound.
+# on a target without sound to encode.
 #audio_adaptive = true
 
 # Floor for that walk in kbit/s, default 32: degraded, but continuous, which is
@@ -497,19 +493,21 @@ password = "change-me"
 # The picture and the sound go together: the Mac refuses one without the other,
 # and mutes its own speakers while it streams. So a session always carries
 # sound and the picker has no choice of it, and an AirPlay speaker the Mac plays
-# to hears nothing.
+# to hears nothing. The sound goes to the browser as the Mac's own AAC-ELD,
+# which the browser decodes, and only while the browser has not muted it. No
+# encoder touches it, so the audio_* keys are refused here.
 #
-# EXPERIMENTAL. Decoding the stream here takes the host's FFmpeg (libavcodec 60 to
-# 63) and Fraunhofer's fdk-aac, whose licence is not OSI-approved, which the
-# gateway loads when they are needed. docs/high-performance-decoders.md says
-# how to install them on Linux, macOS and Windows. Without them the stream can
-# only be passed: the picker shows the passthrough as already chosen, and a
-# browser that cannot decode the stream cannot start the target, which Start
-# says. See docs/apple-vnc-889.md, "The media stream".
+# EXPERIMENTAL. Decoding the picture here takes the host's FFmpeg (libavcodec 60
+# to 63), which the gateway loads when it is needed.
+# docs/high-performance-decoder.md says how to install it on Linux, macOS and
+# Windows. Without it the picture can only be passed: the picker shows the
+# passthrough as already chosen, and a browser that cannot decode the HEVC
+# cannot start the target, which Start says. See docs/apple-vnc-889.md, "The
+# media stream".
 #
-# The passthrough, chosen at the picker, sends the Mac's stream to the browser as
+# The passthrough, chosen at the picker, sends the Mac's picture to the browser as
 # the Mac sent it, for a LAN of 100 Mbit/s or more: its HEVC rather than VP9 encoded
-# here from decoded pictures, and its AAC-ELD rather than Opus. Every picture the
+# here from decoded pictures. Every picture the
 # Mac sends goes, up to 30 a second, at the Mac's own quality. Its ZRLE rectangles
 # are decoded to keep their deflate stream in step but never shown; while the media
 # stream is not flowing, the browser remains behind its resize notice. The HEVC is
@@ -518,9 +516,9 @@ password = "change-me"
 # viewer does, which ends at the gateway: the browser's link does not slow it. High
 # Performance has no Adaptive/Full choice, and the video keys below reach only the
 # whole VP9 picture of a session started without the passthrough. Chrome
-# and Safari, desktop and mobile, were measured decoding both halves where the GPU
-# decodes HEVC 4:4:4; Firefox decodes neither. For a browser that decodes neither
-# the choice is greyed, and its sessions are sent VP9 and Opus.
+# and Safari, desktop and mobile, were measured decoding it where the GPU
+# decodes HEVC 4:4:4; Firefox does not. For a browser that does not, the choice
+# is greyed, and its sessions are sent VP9.
 # [[targets]]
 # name = "mac-high-performance"
 # protocol = "vnc"

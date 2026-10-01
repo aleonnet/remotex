@@ -141,13 +141,13 @@ const PASSTHROUGH: Record<
     only: null,
   },
   "apple-media": {
-    label: "Pass the Mac's stream through",
-    note: "The Mac's own HEVC and AAC-ELD, instead of VP9 and Opus encoded by the gateway. For a LAN.",
-    cannot: "This browser does not decode the Mac's HEVC and AAC-ELD.",
+    label: "Pass the Mac's picture through",
+    note: "The Mac's own HEVC, instead of VP9 encoded by the gateway. For a LAN.",
+    cannot: "This browser does not decode the Mac's HEVC.",
     only: {
-      note: "This gateway cannot decode the Mac's stream, so it is always passed.",
+      note: "This gateway cannot decode the Mac's picture, so it is always passed.",
       blocked:
-        "This gateway cannot decode the Mac's stream, and this browser cannot take it passed through. Use a browser that decodes it, or install FFmpeg and fdk-aac on the gateway's host.",
+        "This gateway cannot decode the Mac's picture, and this browser cannot take it passed through. Use a browser that decodes it, or install FFmpeg on the gateway's host.",
     },
   },
 };

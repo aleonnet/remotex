@@ -1,7 +1,7 @@
 # Turn the Windows CI box (already carrying the VS Build Tools and rustup that the
-# sibling repos' provision scripts install) into one that can also build the C halves
-# remotex links: libvpx (bash + make + perl + nasm + msbuild), the frontend (bun), and
-# the installer (the .NET SDK, and WiX as a dotnet tool).
+# sibling repos' provision scripts install) into one that can also build the frontend
+# (bun) and the installer (the .NET SDK, and WiX as a dotnet tool). The C libraries
+# remotex links come as prebuilt archives, so nothing here compiles C.
 #
 # Runs *on the VM*, elevated, deployed and started as a SYSTEM scheduled task by
 # ../devtools/ci/windows/remote.ps1 (`remote.ps1 provision`), so a dropped connection
@@ -101,54 +101,6 @@ try {
     foreach ($must in @('C:\BuildTools\VC\Auxiliary\Build\vcvars64.bat', 'C:\rust\cargo\bin\cargo.exe')) {
         if (-not (Test-Path $must)) { throw "$must is missing — run a Rust repo's provision (e.g. wrustic) first" }
     }
-
-    # --- MSYS2: bash, make, perl, nasm ---------------------------------------
-    # The same environment GitHub's msys2/setup-msys2 gives a runner, so build.sh runs
-    # under one bash on both. The base sfx is a self-extracting 7z; `-y -oC:\` unpacks
-    # to C:\msys64. The first `pacman -Syuu` may replace the runtime and asks for a
-    # restart of the shell, which is why it runs twice.
-    $Msys = 'C:\msys64'
-    if (-not (Test-Path "$Msys\usr\bin\bash.exe")) {
-        $sfx = "$Root\msys2-base-x86_64-20260611.sfx.exe"
-        Get-File 'https://github.com/msys2/msys2-installer/releases/download/2026-06-11/msys2-base-x86_64-20260611.sfx.exe' $sfx `
-            -Sha256 'c105946e64e08f099ac0e4647461ce762b95333ad211777666476a9a41451d65'
-        Log 'unpacking MSYS2'
-        $p = Start-Process $sfx -Wait -PassThru -ArgumentList @('-y', '-oC:\')
-        if ($p.ExitCode -ne 0) { throw "msys2 sfx failed with $($p.ExitCode)" }
-        if (-not (Test-Path "$Msys\usr\bin\bash.exe")) { throw 'msys2 unpacked but C:\msys64\usr\bin\bash.exe is missing' }
-    } else { Log 'MSYS2 already present' }
-    $MsysBash = "$Msys\usr\bin\bash.exe"
-    # MSYS2_PATH_TYPE=inherit is not wanted here: the login shell must see only its own
-    # PATH while pacman runs. `-lc` gives the login environment.
-    $env:MSYSTEM = 'MSYS'
-    $env:CHERE_INVOKING = '1'
-    # One string, not an array: Start-Process under 5.1 joins array elements with spaces
-    # and quotes none of them, so `@('-lc', 'pacman -Syuu')` reached bash as three words
-    # and pacman ran with no operation. Measured, twice.
-    # The very first login shell runs MSYS2's post-install setup (keyring, trust database)
-    # and ends there, whatever command it was given — measured: `-lc 'pacman -Syuu'` on a
-    # fresh unpack printed "Initial setup complete" and then pacman's "no operation
-    # specified", exit 1. So the first login is asked to do nothing, the way
-    # msys2/setup-msys2 does it.
-    $p = Start-Process $MsysBash -Wait -PassThru -NoNewWindow -ArgumentList '-lc "true"' `
-        -RedirectStandardOutput "$Root\msys2-first-run.out" -RedirectStandardError "$Root\msys2-first-run.err"
-    Log "MSYS2 first login exit $($p.ExitCode)"
-    foreach ($round in 1, 2) {
-        Log "pacman -Syuu (round $round)"
-        $p = Start-Process $MsysBash -Wait -PassThru -NoNewWindow -ArgumentList '-lc "pacman -Syuu --noconfirm"' `
-            -RedirectStandardOutput "$Root\pacman-syuu-$round.out" -RedirectStandardError "$Root\pacman-syuu-$round.err"
-        Get-Content "$Root\pacman-syuu-$round.out" | Select-Object -Last 5 | ForEach-Object { Log "  $_" }
-        if ($p.ExitCode -ne 0) { throw "pacman -Syuu round $round failed with $($p.ExitCode)" }
-    }
-    $wanted = 'make', 'perl', 'nasm', 'diffutils', 'tar', 'gzip', 'curl'
-    Log "pacman -S $($wanted -join ' ')"
-    $p = Start-Process $MsysBash -Wait -PassThru -NoNewWindow -ArgumentList "-lc `"pacman -S --noconfirm --needed $($wanted -join ' ')`"" `
-        -RedirectStandardOutput "$Root\pacman-s.out" -RedirectStandardError "$Root\pacman-s.err"
-    if ($p.ExitCode -ne 0) { throw "pacman -S failed with $($p.ExitCode)" }
-    foreach ($tool in @('make', 'perl', 'nasm')) {
-        if (-not (Test-Path "$Msys\usr\bin\$tool.exe")) { throw "$Msys\usr\bin\$tool.exe is missing after pacman" }
-    }
-    Log "MSYS2 tools: $(& $MsysBash -lc 'make --version | head -1; nasm -v; perl -v | sed -n 2p')"
 
     # --- bun, for the frontend ------------------------------------------------
     if (-not (Test-Path 'C:\tools\bun\bun.exe')) {

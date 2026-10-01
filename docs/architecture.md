@@ -32,8 +32,8 @@ over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
 Apple's viewer reaches it: in Screen Sharing's Standard mode with `subtype = "ard"`,
 or in High Performance with `ard-high-performance` (a virtual display, with its
 picture and sound over the Mac's media stream, as Apple's viewer takes them),
-whose HEVC and AAC-ELD a session started with the passthrough passes to the
-browser rather than re-encoding them — see
+whose AAC-ELD sound every session passes to the browser, and whose HEVC a session
+started with the passthrough passes too rather than re-encoding it — see
 [Apple's media stream, passed through](#apples-media-stream-passed-through). An RDP
 session started with its passthrough is not decoded here either: the host's
 graphics pipeline is passed on for the browser to compose, which is experimental — see
@@ -41,7 +41,7 @@ graphics pipeline is passed on for the browser to compose, which is experimental
 How a session's desktop is sized, whether it takes the remote's sound and whether
 it passes the remote's stream are chosen at the picker before it starts — see
 [What a session is started with](#what-a-session-is-started-with). Remote audio is encoded as
-Opus, save that passed AAC-ELD, and sent on `/ws/audio`, never on the picture queue.
+Opus, save the Mac's passed AAC-ELD, and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
 extension on a `wlshare` target. Its microphone uses `/ws/mic`: browser-encoded
@@ -178,15 +178,15 @@ selects one is not added as a side effect of other work.
 
 The browser is asked three questions, each once at page load and stated on the
 session socket: which VP9 profile its decoder takes (for
-`render_chroma = "auto"`), whether it decodes a High Performance Mac's HEVC
-and AAC-ELD, and whether it composes an RDP host's graphics pipeline. The
+`render_chroma = "auto"`), whether it decodes a High Performance Mac's HEVC,
+and whether it composes an RDP host's graphics pipeline. The
 gateway *selects* a chroma on the first and never refuses a client for it. The
 other two say which passthrough the browser can take. They grey the choice at
 the picker, where a browser that says no starts the target encoded here; they
 refuse a `connect` that asks for the passthrough all the same; and they cover a
 browser that attaches to a session another one started with it. The one target
 they can leave unstartable is a High Performance Mac on a gateway whose host
-lacks FFmpeg or fdk-aac, which can only pass the stream. Do not grow them into
+lacks FFmpeg, which can only pass the picture. Do not grow them into
 a wider capability negotiation, and do not let either change what a running
 session is.
 Preserve the announced configuration and color-space behavior in
@@ -234,9 +234,9 @@ that selects the stream. See
   it changes; do not make it a way to start or stop the remote's sound.
 - Remote audio uses its own `/ws/audio` socket and queue; opening the socket is
   the subscription. Do not put audio on the session socket. It is Opus encoded
-  here, save a High Performance Mac's AAC-ELD in a session that passes its
-  stream; there is no codec key, and do not add another encoder or another
-  passthrough. Preserve claim-bound eviction and the source-format/resampling
+  here, save a High Performance Mac's AAC-ELD, which every session passes as it
+  came and the gateway never decodes; there is no codec key, and do not add
+  another encoder, another passthrough or a decoder for the Mac's sound. Preserve claim-bound eviction and the source-format/resampling
   boundaries in [Audio frames](#audio-frames).
 - VNC audio is wlshare's audio extension (FLAC frames, with the QEMU Audio
   extension's control messages), on a `wlshare` target: a session started with
@@ -255,13 +255,14 @@ that selects the stream. See
   Performance's media stream (`src/vnc_apple_media.rs`): HEVC and AAC-ELD over
   SRTP, every packet authenticated before it is decrypted and every report sent
   as SRTCP. The Mac refuses one leg without the other, so a session always
-  carries sound and the picker offers no choice of it. Its decoders, FFmpeg's
-  libavcodec and fdk-aac, are the system's shared libraries, loaded when they
-  are needed, or on Windows from the folders `[hp_decoders]` names, loaded at
-  start-up, so published release artifacts link neither; only the non-default
-  `apple-hp-media-static` feature
-  links static archives instead. A gateway whose host lacks either can only pass
-  the stream: `/api/targets` says so, the picker shows the passthrough as
+  carries sound and the picker offers no choice of it. The sound is passed to
+  the browser as the Mac's AAC-ELD units in every session, so the gateway has
+  no decoder for it. The picture's decoder, FFmpeg's libavcodec, is the
+  system's shared library, loaded when it is needed, or on Windows from the
+  folder `[hp_decoders]` names, loaded at start-up, so published release
+  artifacts do not link it; only the non-default `apple-hp-media-static` feature
+  links a static archive instead. A gateway whose host lacks it can only pass
+  the picture: `/api/targets` says so, the picker shows the passthrough as
   chosen, and a session started without it all the same ends before it dials
   the Mac.
   ZRLE is stepped over by its length, never inflated or shown; the
@@ -278,11 +279,11 @@ that selects the stream. See
   every other target, and everything but the display follows `ard`. Call it
   unofficial wherever it is named, and tested with macOS 26 only; do not present
   it as a mode of Apple's viewer or grow it into a third subtype.
-- The passthrough on `ard-high-performance` passes the Mac's media stream
-  unaltered, for a LAN: HEVC access units on the session socket, AAC-ELD units
-  on `/ws/audio`. Both pass or neither does. It is offered at the picker to a
-  browser that said it decodes both halves; a session started without it is
-  sent VP9 and Opus. Decoded or passed, the
+- The passthrough on `ard-high-performance` passes the Mac's picture
+  unaltered, for a LAN: HEVC access units on the session socket. It is offered
+  at the picker to a browser that said it decodes the HEVC; a session started
+  without it is sent VP9. The sound is not part of the choice: AAC-ELD units go
+  on `/ws/audio` either way. Decoded or passed, the
   stream is the whole picture: the Mac's ZRLE rectangles are never shown, and
   the browser stays behind its resize notice until the stream's first picture,
   at connect and across every display change. A PLI is a passed stream's
@@ -341,7 +342,7 @@ experimental wherever it is named to an operator. See
 | `rdp_clipboard.rs` | `CF_UNICODETEXT` and the line endings either direction needs |
 | `vnc.rs` | RFB connection, framebuffer, input, cursor, clipboard, resize |
 | `vnc_apple_media.rs` | High Performance's media stream: the offer, SRTP, HEVC depacketizing and decoding, and the sound's receiver |
-| `aac_eld.rs` | the AAC-ELD decoder for that stream's sound |
+| `aac_eld.rs` | what that stream's AAC-ELD sound is, for the browser that decodes it |
 | `camera.rs`, `mic.rs` | browser camera and microphone bridges into the active engine |
 | `shadow.rs` | change detection: what the client already has |
 | `encode.rs`, `stream.rs`, `video.rs` | the ordered, paced, congestion-aware stream: its mirror, its rounds, and the picture limits |
@@ -363,7 +364,7 @@ updates in source order even though each encode runs off the engine's own task.
 Each target has one full-desktop picture path. Ordinarily it is one inter-frame
 VP9 stream, encoded by the gateway or made by wlshare and passed through. Two
 paths, chosen at the picker, keep another representation the remote made: an
-`ard-high-performance` session can pass the Mac's HEVC, with its AAC-ELD sound,
+`ard-high-performance` session can pass the Mac's HEVC,
 and an RDP session can pass the host's graphics pipeline for the browser to
 compose. A VNC desktop past the stream's picture ceiling in a session started
 without resize has no picture until the remote sends a smaller one — see
@@ -395,7 +396,7 @@ A target's stream keys are per target, and every one has a default:
   dial. Turned off, the walk is the pressure-only one.
 
 None of them reaches a passed stream: a session started with the passthrough
-sends the Mac's HEVC and AAC-ELD, or the RDP host's pipeline, as it came.
+sends the Mac's HEVC, or the RDP host's pipeline, as it came.
 
 The engines never see the config keys. They and the session's choices collapse
 to one `RenderPlan` (`quality`, `adaptive`, `chroma`, `apple_media`,
@@ -618,10 +619,11 @@ sends.
 #### Apple's media stream, passed through
 
 `ard-high-performance` decodes the Mac's HEVC here and encodes every picture again
-as VP9, and decodes its AAC-ELD and encodes the sound again as Opus. A session
-started with the passthrough is sent them instead, as
-the Mac sent them, and the gateway neither decodes nor encodes a picture or a sound
-of the stream. Both halves pass or neither does. It is for a LAN. High Performance always enables its
+as VP9. A session started with the passthrough is sent the HEVC instead, as
+the Mac sent it, and the gateway neither decodes nor encodes a picture
+of the stream. The sound is passed in every session, started with the passthrough
+or not: the gateway has no decoder for the Mac's AAC-ELD, and the browser has.
+The passthrough is for a LAN. High Performance always enables its
 own rate controller, between 20 and 60 Mbit/s
 ([Rate control](apple-vnc-889.md#rate-control)); this is automatic media-stream
 behavior, not Standard mode's **Adaptive** quality choice. The gateway offers
@@ -708,7 +710,7 @@ Three controls with similar names therefore remain separate:
   would do. Measured against macvm at 2880×1800 on an M2 Max, a picture took 9 ms
   across eight threads, 44 on one.
   `render_plan` sets `apple_media` for a target with the key and a browser that said
-  yes; any other browser is sent VP9 and Opus exactly as without the key. The plan
+  yes; any other browser is sent VP9 exactly as without the key. The plan
   is fixed for an engine, and a takeover by a browser that answers otherwise
   rebuilds it, as a different chroma does.
 - **What passes** (`VideoSink::pass_hevc`). The receiver reassembles access units as
@@ -744,24 +746,29 @@ Three controls with similar names therefore remain separate:
 - **The dial does not reach it.** `video_quality`, `render_chroma` and the adaptive
   walk govern only VP9: the whole picture of a browser that says no.
   `render_adaptive` neither enables nor disables the Mac's separate, always-on
-  High Performance controller, and the Opus keys reach no passed sound.
-- **The sound passes on `/ws/audio`.** The receiver hands each authenticated,
-  decrypted AAC-ELD unit to the session's audio bridge as it came
-  (`AudioBridge::unit`) instead of to the decoder thread, and the audio socket,
-  armed from the engine's plan, sends it on with no encoder behind it
+  High Performance controller. The Opus keys have no sound to reach and are
+  refused on the target.
+- **The sound always passes, on `/ws/audio`.** With or without the passthrough,
+  the receiver hands each authenticated, decrypted AAC-ELD unit to the
+  session's audio bridge as it came (`AudioBridge::unit`), and the audio socket,
+  armed for the target's type, sends it on with no encoder behind it
   (`AudioListener::into_passed`): an `audioFormat` of `mp4a.40.39`, 48 kHz stereo,
   480 frames a packet and the AudioSpecificConfig as `head`, then the units, each a
   packet in the ordinary audio frame. The player configures its decoder in the form
   the page found at load. Claim-bound eviction, the queue and its dropping of the
   oldest unit are the Opus path's; there is no bitrate to walk and no silence to
-  shed.
-- **Without the decoders.** The decoders are the host's FFmpeg and fdk-aac,
-  loaded when they are needed: when a session without the passthrough starts,
+  shed. A muted browser has no audio socket, so the units go nowhere and cost
+  the gateway nothing: there is no decoder to run for them. A browser that
+  decodes neither form of the configuration plays the session without sound
+  and says so under Audio; Chrome and Safari decode it, and Firefox 153 on
+  Linux accepted the configuration and produced no sound.
+- **Without the decoder.** The picture's decoder is the host's FFmpeg,
+  loaded when it is needed: when a session without the passthrough starts,
   and when `/api/targets` lists a High Performance target, which is how the
-  picker knows. On a host without either the stream can only be passed, so the
+  picker knows. On a host without it the picture can only be passed, so the
   picker shows the passthrough as chosen, and for a browser that cannot take the
-  stream Start is greyed with the reason: that is the one target the browser's
-  answer leaves unstartable. A `connect` that asks for the stream decoded all the
+  HEVC Start is greyed with the reason: that is the one target the browser's
+  answer leaves unstartable. A `connect` that asks for the picture decoded all the
   same is told so by the engine, naming the library, before it dials the Mac.
 
 #### RDP's graphics pipeline, passed through
@@ -1124,7 +1131,7 @@ What survives of asking is three questions. One selects rather than refuses: how
 much colour this decoder takes, for `render_chroma = "auto"` to resolve against
 ([choosing a chroma](#choosing-a-chroma)). A wrong answer to it costs a picture,
 not a desktop. The other two say which passthrough the browser can take: a High
-Performance Mac's HEVC and AAC-ELD, and an RDP host's graphics pipeline. They
+Performance Mac's HEVC, and an RDP host's graphics pipeline. They
 decide what the picker offers before a session starts, where a "no" starts the
 target encoded here, and they keep a session started with a passthrough from
 being sent to a browser that cannot show it
@@ -1150,7 +1157,7 @@ Authentication and desktop ownership are separate:
    attaches to the slot and reports the target picker, the current connected
    target, or a session this browser cannot be served. `chroma`, `apple_media`
    and `rdp_graphics` are required: the most colour this browser's video decoder
-   takes, whether it decodes a High Performance Mac's HEVC and AAC-ELD, and
+   takes, whether it decodes a High Performance Mac's HEVC, and
    whether it composes an RDP host's graphics pipeline; see
    [Choosing a chroma](#choosing-a-chroma),
    [Apple's media stream, passed through](#apples-media-stream-passed-through) and
@@ -1241,11 +1248,11 @@ and `GET /api/targets` carries it:
   the window nor the pipeline's row. A `connect` that names a choice the target does
   not offer is refused with an `error`, and the slot stays as it was.
 - **Offered but unavailable is greyed, with the reason.** A passthrough is
-  greyed wherever the browser cannot take it: one that decodes neither the Mac's
-  HEVC nor its AAC-ELD, a gateway with no HEVC decoder archive to serve a
+  greyed wherever the browser cannot take it: one that does not decode the Mac's
+  HEVC, a gateway with no HEVC decoder archive to serve a
   browser that needs it, a page that cannot compose the pipeline. `/api/targets`
-  also says, as `passthroughOnly`, where a gateway's host lacks FFmpeg or
-  fdk-aac and so cannot decode a Mac's stream at all: there the stream can only
+  also says, as `passthroughOnly`, where a gateway's host lacks FFmpeg
+  and so cannot decode a Mac's picture at all: there the picture can only
   be passed, the row shows it chosen, and where the browser cannot take it
   either Start is greyed and says why, before the Mac is dialled. A `connect`
   that asks for a passthrough the browser said it cannot take is refused like an
@@ -1423,8 +1430,8 @@ There is no codec byte in the binary frame; the codec is named once, out of
 band, in `audioFormat`. It is Opus encoded here: `codec` is `opus`, `sampleRate`
 48 000, `packetFrames` 960 (20 ms), and `head` the `OpusHead`. The rate is
 `audio_bitrate`, default 96 kbit/s, walking down to `audio_adaptive_min`,
-default 32. The one exception is a High Performance Mac's AAC-ELD passed to a
-browser that decodes it: `codec` `mp4a.40.39`, `packetFrames` 480 (10 ms), `head`
+default 32. The one exception is a High Performance Mac's AAC-ELD, passed in
+every session on such a target: `codec` `mp4a.40.39`, `packetFrames` 480 (10 ms), `head`
 the Mac's AudioSpecificConfig, and each packet one of the Mac's units, with no
 encoder and none of the keys below reaching it
 ([Apple's media stream, passed through](#apples-media-stream-passed-through)).
@@ -1495,9 +1502,8 @@ as silence.
 
 An **`ard-high-performance`** engine always carries sound, from the Mac's media
 stream: AAC-ELD at 48 kHz stereo over SRTP, authenticated and decrypted per
-packet, decoded by Fraunhofer's decoder on a thread of its own (`src/aac_eld.rs`)
-and handed to the bridge as 16-bit PCM, 20 ms at a time. The format is announced
-when the decoder opens and withdrawn when the receiver ends. The picker offers
+packet, and handed to the bridge unit by unit as it came (`src/aac_eld.rs` says
+what it is), for the browser to decode. The picker offers
 no choice of it: the Mac refuses the picture without the sound, and mutes its own
 output while it streams. See
 [The media stream](apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).

@@ -36,7 +36,7 @@ for the tiers they are ranked in.
   `subtype = "ard-high-performance"` is its High Performance mode as Apple's
   viewer has it: one virtual display holding every remote window,
   with the picture as HEVC and the sound as AAC-ELD over the Mac's SRTP media
-  stream, decoded by the host's FFmpeg and fdk-aac. Resize
+  stream: the picture decoded by the host's FFmpeg, the sound by the browser. Resize
   needs a virtual display: High Performance's, or the unofficial
   `virtual_display = true` under `ard`, which puts Standard mode's picture on one
   and was tested on macOS 26 only. Both modes are reverse engineered, having no
@@ -123,8 +123,9 @@ The host's own stream, passed through to the browser for a LAN:
   Windows 11 host, with sound and the clipboard beside it, and not yet with the
   camera or the microphone.
 - **macOS Screen Sharing's High Performance mode** (`ard-high-performance`), in a
-  session started with the passthrough: the Mac's HEVC picture and AAC-ELD sound,
-  to a browser that decodes them (Chrome and Safari; not Firefox).
+  session started with the passthrough: the Mac's HEVC picture, to a browser
+  that decodes it (Chrome and Safari; not Firefox). Its AAC-ELD sound is passed
+  in every session.
 
 The passthrough is a choice made at the picker, greyed for a browser that cannot
 take the stream. A passed stream does not adapt to a slow link: the Mac's own
@@ -225,8 +226,8 @@ remotex serve
 ```
 
 See [`docs/install.md`](docs/install.md) for package upgrades, removal, and macOS
-config setup, and [`docs/high-performance-decoders.md`](docs/high-performance-decoders.md)
-for the two libraries an `ard-high-performance` target needs beside the package.
+config setup, and [`docs/high-performance-decoder.md`](docs/high-performance-decoder.md)
+for the library an `ard-high-performance` target needs beside the package.
 
 ## Local instances
 
@@ -290,10 +291,11 @@ SRTP, to the gateway's ports 5900 and 5901, at 20 to 60 Mbit/s as the delay the
 gateway reports to it every 50 ms allows, as Apple's viewer reports. A Linux
 gateway needs `net.core.rmem_max` of at least 4194304 for the screen's socket,
 which the log warns about when it is lower: the stock 212992 loses keyframes at
-Retina sizes. The gateway authenticates and decrypts every packet, decodes both, and sends them on as the VP9 and Opus every
-target uses — or, in a session started with the passthrough, which the picker
-offers a browser that decodes them (Chrome and Safari; not Firefox), sends the HEVC
-and the AAC-ELD on as the Mac sent them, for a LAN;
+Retina sizes. The gateway authenticates and decrypts every packet. The sound it sends on
+as the Mac sent it, AAC-ELD the browser decodes, and to no browser that has muted it. The picture it
+decodes and sends on as the VP9 every target uses — or, in a session started with the passthrough, which the picker
+offers a browser that decodes it (Chrome and Safari; not Firefox), sends the HEVC
+on as the Mac sent it, for a LAN;
 the browser stays behind its resize notice until the stream sends its first picture,
 at connect and across display changes, and a stream that fails ends the session, as
 it does in Apple's viewer. A playing
@@ -302,12 +304,12 @@ mutes its own speakers while it streams, so a session always carries sound, with
 nothing to choose at the picker, and nothing reaches an AirPlay speaker the Mac
 plays to. It is **experimental**.
 
-Decoding the stream needs two libraries on the gateway's host that no release
-artifact contains: FFmpeg's libavcodec and Fraunhofer's fdk-aac. Install them as
-[High Performance decoders](docs/high-performance-decoders.md) says for Linux,
-macOS and Windows. A gateway without them can only pass the stream: the picker
+Decoding the picture needs a library on the gateway's host that no release
+artifact contains: FFmpeg's libavcodec. Install it as
+[High Performance decoder](docs/high-performance-decoder.md) says for Linux,
+macOS and Windows. A gateway without it can only pass the picture: the picker
 shows the passthrough as already chosen, and a browser that cannot decode the
-stream cannot start the target. See
+HEVC cannot start the target. See
 [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
 Every Apple subtype supports the native Apple pasteboard when `clipboard =
@@ -547,5 +549,5 @@ remotex is under the MIT licence in [`LICENSE`](LICENSE). A release build also
 contains third-party software, listed with its licences in the
 `THIRD-PARTY-NOTICES.txt` every artifact carries, which packaging makes from the
 locked dependencies (see [Packaging](packaging/README.md)).
-FFmpeg and fdk-aac, the High Performance decoders, are not in it: the gateway
-loads them from the system.
+FFmpeg, the High Performance decoder, is not in it: the gateway loads it from
+the system.

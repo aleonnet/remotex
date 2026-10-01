@@ -57,7 +57,7 @@ in its `notices` job, and hands it to every target in
 refuses a crate under a licence `packaging/about.toml` does not accept, so such a
 dependency fails the packaging. It covers the default build, not
 `apple-hp-media-static`, whose
-distributor adds fdk-aac's licence and FFmpeg's LGPL terms.
+distributor adds FFmpeg's LGPL terms.
 
 There is no package wrapper, version directory, active-version symlink, or
 package-managed rollback. The package manager replaces and removes its files.
@@ -85,7 +85,7 @@ uses `/opt/remotex/var`, which wants a volume for the records to outlive it.
 | `build-windows-msi.ps1` | build the gateway on Windows and the `.msi` from `windows/remotex.wxs` (WiX 5) |
 | `verify-windows-msi.ps1` | install that `.msi`, run the installed gateway, remove it, check nothing is left |
 | `build-container-binary.sh` | build and verify a gateway with default features disabled, plus any `REMOTEX_CONTAINER_FEATURES` |
-| `publish-full-image.sh` | add Debian's libavcodec and fdk-aac, and the pinned software HEVC decoder's archive, to a release's public linux/amd64 image and push the result to the private `ghcr.io/andrewtheguy/remotex-full` |
+| `publish-full-image.sh` | add Debian's libavcodec, and the pinned software HEVC decoder's archive, to a release's public linux/amd64 image and push the result to the private `ghcr.io/andrewtheguy/remotex-full` |
 | `uninstall-macos-pkg.sh` | remove the installed `.pkg` by its receipt and forget it |
 | `Dockerfile` | build an image from an extracted release tarball |
 
@@ -155,18 +155,18 @@ needs no CMake, assembler, pkg-config, libclang, vcpkg, or system copies of
 those libraries. `LIBVPX_PREBUILT_DIR` and `LIBOPUS_PREBUILT_DIR` select locally
 built archives.
 
-`ard-high-performance` targets decode the Mac's stream with two decoders whose
-licences keep them out of every artifact: FFmpeg's libavcodec
-(LGPL-2.1-or-later) for the HEVC picture and Fraunhofer's fdk-aac, whose licence
-is not OSI-approved and grants no patents, for the AAC-ELD sound. Published release
-artifacts compile and link neither: the gateway loads the system's shared libraries
-when a session needs them, or on Windows the ones in the folders `[hp_decoders]`
-names when it starts (`src/libav.rs`, `src/aac_eld.rs`), and a host without them
-runs those targets only with the stream passed through, for browsers that decode
-it. The `.deb` recommends the Linux ones, the public container image carries
-neither and the private one `publish-full-image.sh` builds carries Debian's;
-elsewhere the operator installs them, as
-[High Performance decoders](../docs/high-performance-decoders.md) says for each
+`ard-high-performance` targets decode the Mac's picture with a decoder whose
+licence keeps it out of every artifact: FFmpeg's libavcodec
+(LGPL-2.1-or-later), for the HEVC. The Mac's AAC-ELD sound needs none: the
+browser decodes it. Published release
+artifacts neither compile nor link FFmpeg: the gateway loads the system's shared libraries
+when a session needs them, or on Windows the ones in the folder `[hp_decoders]`
+names when it starts (`src/libav.rs`), and a host without them
+runs those targets only with the picture passed through, for browsers that decode
+it. The `.deb` recommends the Linux one, the public container image does not
+carry it and the private one `publish-full-image.sh` builds carries Debian's;
+elsewhere the operator installs it, as
+[High Performance decoder](../docs/high-performance-decoder.md) says for each
 platform.
 
 The non-default `apple-hp-media-static` feature links private static archives
@@ -190,8 +190,7 @@ its build script downloads the latest release of
 `LIBAVCODEC_HEVC_PREBUILT_DIR`.
 FFmpeg linked statically obliges a distributor of a binary to let its recipient
 relink it against a modified FFmpeg (see that repository's README).
-`fdk-aac-prebuilt` links fdk-aac the same way, from its own private archives,
-through `gh` or `FDK_AAC_PREBUILT_DIR`. Do not restore
+Do not restore
 `LIBOPUS_STATIC`, `LIBOPUS_NO_PKG`, `CMAKE_POLICY_VERSION_MINIMUM`, or a source
 libopus build in `build-tarball.sh`. The libvpx archives are VP9-only and built
 with `--enable-realtime-only`; additional features need a separately built
