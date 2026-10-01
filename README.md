@@ -75,6 +75,13 @@ Windows pick the value up when their app next launches, so quit and reopen the
 browser app. `defaults delete -g NSConvolutionOverride1` restores Apple's radius
 — 26 points on macOS 26, 10 before it.
 
+There is no backward compatibility between releases, and no legacy path is kept
+for one. A release may change or remove a configuration key, a browser API, the
+WebSocket protocol or a feature, with nothing that reads the old form: check
+[`remotex.example.toml`](remotex.example.toml) against your config when you
+upgrade. The page and the gateway are one release too, so a tab left open across
+an upgrade says both versions and asks to be reloaded.
+
 See [`docs/architecture.md`](docs/architecture.md) for the system design and
 [`docs/known-issues.md`](docs/known-issues.md) for faults worth recognising rather
 than re-investigating.
