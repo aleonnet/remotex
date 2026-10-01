@@ -193,11 +193,12 @@ sudo bash uninstall-macos-pkg.sh
 
 `--dry-run` prints the removals without making them and needs no `sudo`. The
 script forgets the receipt afterwards, and keeps any payload directory that
-still holds a file the operator put there. Doing it by hand is the same three
-steps against the current layout:
+still holds a file the operator put there. Doing it by hand is the same steps
+against the current layout:
 
 ```sh
 sudo rm -f /usr/local/bin/remotex
+sudo rm -rf /usr/local/lib/remotex
 sudo rm -rf /usr/local/share/doc/remotex
 sudo pkgutil --forget com.andrewtheguy.remotex.gateway
 ```

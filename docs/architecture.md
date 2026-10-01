@@ -1264,7 +1264,9 @@ and `GET /api/targets` carries it:
   also says, as `passthroughOnly`, where a gateway's host lacks FFmpeg
   and so cannot decode a Mac's picture at all: there the picture can only
   be passed, the row shows it chosen, and where the browser cannot take it
-  either Start is greyed and says why, before the Mac is dialled. A `connect`
+  either Start is greyed and says why, before the Mac is dialled. It says as
+  `audioUnavailable` where the host lacks libFLAC and so cannot decode
+  wlshare's sound: the sound's row is greyed and names the library. A `connect`
   that asks for a passthrough the browser said it cannot take is refused like an
   unoffered one.
 - **The choice reaches the remote.** A session started without sound asks for
@@ -1322,7 +1324,7 @@ one. Both appear on the client's session card, which
 (`mediaLabel.ts`).
 
 `GET /api/targets` carries `subtype` too, beside the options each target offers
-(`resize`, `audio`, `passthrough` and `passthroughOnly`) and the sizes it keeps
+(`resize`, `audio`, `audioUnavailable`, `passthrough` and `passthroughOnly`) and the sizes it keeps
 (`size`, the configured one, and `defaultSize`), so the picker names it one step
 earlier — the difference between two Macs in that list is a choice being made,
 not something to discover after connecting. The row uses the config spelling

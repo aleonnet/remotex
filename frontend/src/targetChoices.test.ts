@@ -39,6 +39,7 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     size: null,
     defaultSize: DEFAULT_SIZE,
     audio: false,
+    audioUnavailable: false,
     passthrough: null,
     passthroughOnly: false,
     ...offers,
@@ -212,6 +213,25 @@ test("a passthrough this browser cannot take is greyed, with the reason", () => 
     assert.equal(options.choices.passthrough, false);
     assert.equal(options.blocked, null, "the target still starts, encoded");
   }
+});
+
+test("a sound the gateway cannot decode is greyed, with the reason", () => {
+  const wlshare = target({ subtype: "wlshare", resize: true, audio: true });
+  const without = { ...wlshare, audioUnavailable: true };
+  // Chosen last time, on a gateway that could decode it.
+  const options = targetOptions(without, { audio: true }, ABLE);
+  const row = options.rows.find((r) => r.key === "audio");
+  assert.ok(row);
+  assert.equal(row.disabled, true);
+  assert.equal(row.checked, false);
+  assert.match(row.note, /libFLAC/);
+  assert.equal(options.choices.audio, false);
+  assert.equal(options.sound, false);
+  assert.equal(options.blocked, null, "the target still starts, without sound");
+
+  const able = targetOptions(wlshare, { audio: true }, ABLE);
+  assert.equal(able.rows.find((r) => r.key === "audio")?.disabled, false);
+  assert.equal(able.choices.audio, true);
 });
 
 test("a gateway that cannot decode the Mac's picture can only pass it", () => {

@@ -1563,9 +1563,9 @@ async fn session(
         return;
     }
     // wlshare's sound is FLAC, which libFLAC decodes. Every installer brings the
-    // library, so a host without it is one built by hand, and a session started
-    // with sound is told here, naming the library, before wlshare is dialled
-    // rather than at the stream's begin.
+    // library, so a host without it is one built by hand. The picker says so before
+    // Start; a session started with sound all the same is told here, naming the
+    // library, before wlshare is dialled rather than at the stream's begin.
     if config.wlshare()
         && choices.audio
         && let Err(e) = vnc_audio::load()
