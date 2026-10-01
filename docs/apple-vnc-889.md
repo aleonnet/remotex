@@ -16,7 +16,7 @@ evidence behind it is archived outside the repository, in
 
 The implementation is `src/vnc_record.rs` (the 003.889 record layer),
 `src/vnc_apple.rs` (Apple's messages and encodings), `src/vnc_apple_media.rs`
-(High Performance's media stream), `src/aac_eld.rs` (its sound's decoder) and
+(High Performance's media stream), `src/aac_eld.rs` (what its sound is) and
 the two Apple paths in `src/vnc.rs`.
 
 "High Performance" below is Apple's mode: a virtual display and the media stream.
@@ -30,8 +30,9 @@ layer.
 | `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | ZRLE | none; the Mac's own output is left alone |
 
 `ard-high-performance` is High Performance as Apple's viewer has it. Decoding its
-stream needs FFmpeg and fdk-aac on the gateway's host; without them the gateway
-runs it only with the stream passed through, for browsers that decode it.
+picture needs FFmpeg on the gateway's host; without it the gateway runs it only
+with the picture passed through, for browsers that decode it. Its sound is
+always passed, for the browser to decode.
 
 **Unofficial:** `virtual_display = true` on an `ard` target keeps that row's
 picture and sound — ZRLE, none — and takes the display from the other: the same
@@ -868,23 +869,22 @@ connect and across display changes. A stream that fails ends the session, as it
 ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
 sound, and one that stops (see [Liveness](#the-stream)).
 
-Remotex decodes the picture and encodes it as VP9, and the sound as Opus, unless
-the session was started with the stream passed through, which the picker offers
-a browser that decodes the Mac's HEVC and AAC-ELD: then each access unit goes to
-the browser as it came, described by the
-stream's own sequence parameter set, each sound unit goes on `/ws/audio` as it
-came, described by the AudioSpecificConfig below. A PLI is its repaint. Either
+Remotex decodes the picture and encodes it as VP9, unless the session was
+started with the picture passed through, which the picker offers a browser that
+decodes the Mac's HEVC: then each access unit goes to the browser as it came,
+described by the stream's own sequence parameter set, and a PLI is its repaint.
+The sound is never decoded here: in every session each sound unit goes on
+`/ws/audio` as it came, described by the AudioSpecificConfig below. Either
 way ZRLE's rectangles are stepped over undecoded and never shown: the browser
 stays behind its resize notice until the stream delivers. See
 [Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through).
 
-The two decoders are FFmpeg's HEVC decoder for the picture (libavcodec,
-LGPL-2.1-or-later) and Fraunhofer's AAC-ELD decoder for the sound (fdk-aac, a
-licence that is not OSI-approved), loaded from the system's shared libraries when
-a session needs them, so published release artifacts link neither; the `apple-hp-media-static`
-Cargo feature links them statically instead. A gateway that finds either missing
-ends the session of a browser that cannot decode the stream before it dials the
-Mac.
+The one decoder is FFmpeg's HEVC decoder for the picture (libavcodec,
+LGPL-2.1-or-later), loaded from the system's shared libraries when a session
+needs it, so published release artifacts do not link it; the
+`apple-hp-media-static` Cargo feature links it statically instead. A gateway
+that finds it missing ends a session started without the passthrough before it
+dials the Mac.
 
 ### Negotiation
 
@@ -1029,7 +1029,7 @@ other failures (see [Liveness](#the-stream)).
   once-a-second reports keep both legs alive, and the sound leg also sends a
   packet every 10 ms whether or not anything plays. Past any of them, the
   session ends, as it does when the Mac refuses the offer (message 3)
-  and when the receiver fails, on a socket error or a decoder, HEVC or AAC-ELD,
+  and when the receiver fails, on a socket error or an HEVC decoder
   that cannot start or stops. A display change stops the stream and owes nothing
   until its own offer, except the answer to an offer still out. When the Mac
   names its ports and nothing arrives within 5 s, the log names the port and the
@@ -1129,9 +1129,9 @@ link to a physical Mac has not been observed.
     configuration sets 320,000 bit/s whatever the offer says.
   - **A published description** reads field 4 as a bitrate the Mac picks a tier
     from. It is not one.
-- **Decoder.** The gateway decodes AAC-ELD itself (`src/aac_eld.rs`) for a
-  session it sends Opus, and passes it as it came in a session started with the
-  stream passed through. Browsers can decode it.
+- **Decoder.** The gateway does not decode AAC-ELD: it passes every unit as it
+  came, in every session, and the browser decodes it (`src/aac_eld.rs` holds
+  the configuration it is told).
   Chrome 154's WebCodecs on macOS decoded all 3450 units of a capture, but only as
   `mp4a.40.2` with the AudioSpecificConfig above as the description; it refused
   `mp4a.40.39` as an unknown codec name. Safari 26.6 refuses `mp4a.40.39` too,
@@ -1148,25 +1148,22 @@ link to a physical Mac has not been observed.
   bare AudioSpecificConfig, and refused the ES_Descriptor as an unsupported
   configuration, so the two browsers need different descriptions. Both browsers'
   `isConfigSupported` say yes to both descriptions, the one each cannot decode
-  included.
+  included. Firefox 153 on Linux says yes to the bare AudioSpecificConfig and
+  then produces no sound from it, without an error, and fails the ES_Descriptor
+  with an `EncodingError`: it plays a session without sound.
   FFmpeg's native `aac` (libavcodec 62.28) decoded the capture cleanly at the
-  same levels as Chrome and Safari. The gateway's decoder is Fraunhofer's
-  fdk-aac, the system's shared library or, with `apple-hp-media-static`, a
-  prebuilt static archive
-  ([fdk-aac-prebuilt](https://github.com/andrewtheguy/fdk-aac-prebuilt)). Against
-  AudioToolbox's own AAC-ELD (`afconvert -d "aace@48000#480"`), it decoded every
-  packet. It runs on a thread of its own behind a 64-unit queue.
-- **Onward.** The decoder's 16-bit PCM goes to the session's audio bridge two
-  units at a time, one Opus packet's worth, and from there the same way every
-  target's sound goes: Opus on `/ws/audio`. The format is
-  announced when the decoder opens and withdrawn when the receiver ends.
+  same levels as Chrome and Safari.
+- **Onward.** Each unit goes to the session's audio bridge as it came, and from
+  there on `/ws/audio` to a browser that has the socket open, behind an
+  `audioFormat` naming `mp4a.40.39` and the AudioSpecificConfig. A muted
+  browser has no socket open, and nothing is sent or decoded for it.
 - **Authentication.** Every packet is authenticated with its leg's own
   server-to-viewer key before it is decrypted, and the reports that keep the leg
   alive go out as SRTCP, as on the picture's leg. v0.0.249, which also decoded
   this sound, stripped the tag unread and sent plain RTCP.
 - **Display changes.** A change stops the sound with the picture, and the next
-  offer restarts both under new SSRCs on the same ports. The receiver, and with
-  it the decoder, carries on across it.
+  offer restarts both under new SSRCs on the same ports. The receiver carries
+  on across it.
 - **The virtual Mac's sound fails on its own.** On the Apple Virtualization guest,
   a looping tone at a 2x display went distorted after about a minute and then
   silent, and it did the same under Apple's own viewer. Remotex decoded it as it

@@ -214,7 +214,7 @@ test("a passthrough this browser cannot take is greyed, with the reason", () => 
   }
 });
 
-test("a gateway that cannot decode the Mac's stream can only pass it", () => {
+test("a gateway that cannot decode the Mac's picture can only pass it", () => {
   const only = { ...HIGH_PERFORMANCE, passthroughOnly: true };
   const able = targetOptions(only, { passthrough: false }, ABLE);
   const row = able.rows.find((r) => r.key === "passthrough");
@@ -227,7 +227,7 @@ test("a gateway that cannot decode the Mac's stream can only pass it", () => {
   // And where the browser cannot take it either, the target cannot start: Start
   // says so before the Mac is dialled.
   const unable = targetOptions(only, undefined, UNABLE);
-  assert.match(unable.blocked ?? "", /cannot decode the Mac's stream/);
+  assert.match(unable.blocked ?? "", /cannot decode the Mac's picture/);
 });
 
 test("an RDP host's pipeline is never the only way, whatever the entry says", () => {

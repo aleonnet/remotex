@@ -675,9 +675,9 @@ struct TargetInfo {
     /// has none.
     passthrough: Option<crate::config::Passthrough>,
     /// Whether passing that stream is the only way this gateway can serve the
-    /// target: a High Performance Mac on a host without the libraries that decode
-    /// its stream. The picker then shows the choice made, and a browser that
-    /// cannot take the stream cannot start the target.
+    /// target: a High Performance Mac on a host without the library that decodes
+    /// its picture. The picker then shows the choice made, and a browser that
+    /// cannot take the picture cannot start the target.
     #[serde(rename = "passthroughOnly")]
     passthrough_only: bool,
 }
@@ -696,8 +696,8 @@ impl From<(u16, u16)> for Points {
 }
 
 impl TargetInfo {
-    /// `apple_decoders` is whether this gateway's host can decode a Mac's media
-    /// stream.
+    /// `apple_decoders` is whether this gateway's host can decode a Mac's
+    /// picture.
     fn of(target: &crate::config::TargetConfig, apple_decoders: bool) -> Self {
         let offers = target.offers();
         Self {
@@ -720,7 +720,7 @@ impl TargetInfo {
 /// each with the choices its type offers there. Non-secret info only — credentials
 /// never leave the server.
 ///
-/// The Mac's decoders are looked for here, where a High Performance target is
+/// The Mac's HEVC decoder is looked for here, where a High Performance target is
 /// listed, so the picker can say before Start what the engine would otherwise say
 /// after it. Asked on every listing rather than remembered: a library installed
 /// while the gateway runs is found by the next one.

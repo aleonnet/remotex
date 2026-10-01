@@ -1123,13 +1123,13 @@ impl SessionManager {
                 debug!("session: an audio socket is open, but this session has no audio source");
                 return;
             };
-            // The engine's plan, which passes a High Performance Mac's sound with its
-            // picture to a browser that decodes both: the Mac's own units then fill
-            // the bridge, and there is nothing to encode.
+            // A High Performance Mac's sound is passed as it came, whichever way its
+            // picture goes: the Mac's own units fill the bridge, and there is nothing
+            // to encode.
             let passed = st
-                .engine
+                .selected
                 .as_ref()
-                .is_some_and(|engine| engine.plan.apple_media)
+                .is_some_and(|selected| selected.target.media_stream())
                 .then_some(crate::vnc_apple_media::PASSED_SOUND);
             // The target's, not a session setting: the codec and its rate are a
             // property of the link to this desktop, which is what the operator
@@ -1144,7 +1144,7 @@ impl SessionManager {
 
         // The negotiated format when the remote's channel is up, and otherwise the
         // only format this target's source can produce — which is not a guess: RDP
-        // is asked for exactly one format, and the Mac's decoder emits exactly one
+        // is asked for exactly one format, and so is wlshare
         // (see [`TargetConfig::audio_source_format`]), so the encoder can be built
         // before any negotiation has happened.
         //
@@ -3187,12 +3187,11 @@ mod tests {
         assert_eq!(expect_audio(&mut sound.packets).await, 1, "and it keeps going");
     }
 
-    /// A session that passes a High Performance Mac's stream passes its sound with
-    /// it: the engine's own units reach the socket as they came, behind the Mac's
-    /// format. One started without the passthrough is armed with Opus, as on any
-    /// target, and carries the sound all the same.
+    /// A High Performance Mac's sound is passed whichever way its picture goes:
+    /// the engine's own units reach the socket as they came, behind the Mac's
+    /// format, in a session started with the passthrough and in one without.
     #[tokio::test]
-    async fn a_passed_plan_passes_the_engines_sound_behind_its_own_format() {
+    async fn a_macs_sound_is_passed_behind_its_own_format() {
         for apple_media in [true, false] {
             let (hook_tx, hooks) = std_mpsc::channel();
             let spawner: EngineSpawner = Box::new(
@@ -3217,18 +3216,13 @@ mod tests {
             let audio = audio.expect("a session with sound is given a bridge");
 
             let mut sound = mgr.attach_audio(&token).unwrap();
-            if apple_media {
-                audio.unit(vec![7; 380]);
-                assert_eq!(expect_audio_format(&mut sound.packets).await, "mp4a.40.39");
-                match recv_audio(&mut sound.packets).await {
-                    ServerMsg::Audio(units) => {
-                        assert_eq!(units, [bytes::Bytes::from(vec![7u8; 380])], "the unit as it came");
-                    }
-                    other => panic!("expected the passed unit, got {other:?}"),
+            audio.unit(vec![7; 380]);
+            assert_eq!(expect_audio_format(&mut sound.packets).await, "mp4a.40.39");
+            match recv_audio(&mut sound.packets).await {
+                ServerMsg::Audio(units) => {
+                    assert_eq!(units, [bytes::Bytes::from(vec![7u8; 380])], "the unit as it came");
                 }
-            } else {
-                audio.wave(one_frame_of_pcm());
-                expect_opus_format(&mut sound.packets).await;
+                other => panic!("expected the passed unit, got {other:?}"),
             }
         }
     }

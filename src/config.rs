@@ -86,10 +86,11 @@ pub enum Subtype {
     ///
     /// The picture and the sound go together — the Mac refuses one without the
     /// other, and mutes its own output while the sound leg runs — so a session
-    /// always carries sound and the picker offers no choice of it. The two
-    /// decoders are loaded from the system when they are needed; a gateway whose
-    /// host lacks them can only pass the stream ([`Passthrough::AppleMedia`]), to
-    /// a browser that decodes it.
+    /// always carries sound and the picker offers no choice of it. The sound goes
+    /// to the browser as the Mac's own AAC-ELD, never decoded here. The picture's
+    /// decoder is loaded from the system when it is needed; a gateway whose host
+    /// lacks it can only pass the picture ([`Passthrough::AppleMedia`]), to a
+    /// browser that decodes it.
     ArdHighPerformance,
     /// [wlshare](https://github.com/andrewtheguy/wlshare), our own wlroots VNC
     /// server, spoken to as what it is: RFB 3.8 with wlshare's private extensions
@@ -317,9 +318,9 @@ pub struct RenderPlan {
     pub adaptive: bool,
     /// [`TargetConfig::render_chroma`], resolved.
     pub chroma: Chroma,
-    /// The Mac's media stream passes as it came, its HEVC rather than VP9 encoded
-    /// here and its AAC-ELD rather than Opus: [`Passthrough::AppleMedia`], chosen
-    /// at the picker. None of the fields above reach such a picture.
+    /// The Mac's picture passes as it came, its HEVC rather than VP9 encoded
+    /// here: [`Passthrough::AppleMedia`], chosen at the picker. None of the fields
+    /// above reach such a picture.
     pub apple_media: bool,
     /// An RDP host's graphics pipeline passes as it came, for the browser to
     /// compose, rather than composed here and encoded as VP9:
@@ -355,10 +356,9 @@ pub enum Passthrough {
     /// [`TargetConfig::camera`] and [`TargetConfig::microphone`] beside it have not
     /// been tried.
     RdpGraphics,
-    /// A High Performance Mac's media stream: its HEVC instead of VP9 encoded here
-    /// from decoded pictures, and its AAC-ELD instead of Opus encoded from decoded
-    /// sound. Offered by `ard-high-performance`, whose media stream is the only one
-    /// there is.
+    /// A High Performance Mac's picture: its HEVC instead of VP9 encoded here from
+    /// decoded pictures. Offered by `ard-high-performance`. The Mac's sound is not
+    /// part of the choice: its AAC-ELD is passed in every session.
     AppleMedia,
 }
 
@@ -376,7 +376,7 @@ impl Passthrough {
     pub fn stream(self) -> &'static str {
         match self {
             Self::RdpGraphics => "the host's graphics pipeline",
-            Self::AppleMedia => "the Mac's HEVC and AAC-ELD",
+            Self::AppleMedia => "the Mac's HEVC",
         }
     }
 }
@@ -485,8 +485,8 @@ pub struct NotOffered {
 pub struct Decoders {
     /// The most colour it takes, which resolves [`ChromaChoice::Auto`].
     pub chroma: Chroma,
-    /// Whether it decodes a High Performance Mac's media stream: the HEVC, Range
-    /// Extensions 4:4:4, and the AAC-ELD ([`Passthrough::AppleMedia`]).
+    /// Whether it decodes a High Performance Mac's picture: the HEVC, Range
+    /// Extensions 4:4:4 ([`Passthrough::AppleMedia`]).
     pub apple_media: bool,
     /// Whether it composes an RDP host's graphics pipeline
     /// ([`Passthrough::RdpGraphics`]): the page's compositor needs shared memory,
@@ -966,12 +966,6 @@ impl TargetConfig {
         self.media_stream() || (self.offers().audio && choices.audio)
     }
 
-    /// Whether any session on this target can carry sound, which is what the
-    /// `audio_*` dials need something to tune for.
-    pub fn carries_sound(&self) -> bool {
-        self.media_stream() || self.offers().audio
-    }
-
     /// The render dial for a reader with no browser in front of it — the TUI's
     /// target card, which describes a config file rather than a session.
     ///
@@ -1008,7 +1002,7 @@ impl TargetConfig {
     /// kilobits turned into the bits libopus speaks, and the adaptive floor
     /// present exactly when there is a walk — unless the operator turned it off.
     /// Callers gate on [`Self::sound`] — a session without sound has no plan to
-    /// resolve.
+    /// resolve, and neither has a Mac's passed sound, which no encoder touches.
     pub fn audio_plan(&self) -> AudioPlan {
         let bitrate_kbps = self.audio_bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE_KBPS);
         // The floor the walk will hold to, never above the ceiling it walks under.
@@ -1027,8 +1021,7 @@ impl TargetConfig {
 
     /// The one PCM format this target's wave buffers can be in, known before the
     /// remote has said anything: what the RDP engine asks a server to redirect
-    /// ([`crate::audio::PCM_CD_QUALITY`]), what a Mac's media stream decodes to
-    /// ([`crate::vnc_apple_media::AUDIO_FORMAT`]), or what a `wlshare` target
+    /// ([`crate::audio::PCM_CD_QUALITY`]), or what a `wlshare` target
     /// is asked to send over wlshare's audio extension
     /// ([`crate::vnc_audio::SOURCE_FORMAT`]) — the last of which this client
     /// chooses outright, since the extension leaves the format to the client. The
@@ -1039,7 +1032,6 @@ impl TargetConfig {
     pub fn audio_source_format(&self) -> PcmFormat {
         match self.protocol {
             Protocol::Rdp => crate::audio::PCM_CD_QUALITY,
-            Protocol::Vnc if self.media_stream() => crate::vnc_apple_media::AUDIO_FORMAT,
             Protocol::Vnc => crate::vnc_audio::SOURCE_FORMAT,
         }
     }
@@ -1412,17 +1404,13 @@ pub struct ConfigFile {
 }
 
 /// The `[hp_decoders]` table as written, and as resolved: the folders are
-/// absolute, so there is nothing to place. See [`crate::libav`] and
-/// [`crate::aac_eld`].
+/// absolute, so there is nothing to place. See [`crate::libav`].
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct HpDecoders {
     /// The folder holding FFmpeg's `avcodec` and `avutil` DLLs, a shared build's
     /// `bin`. Named, it is the only place FFmpeg is loaded from.
     pub ffmpeg_dir: Option<PathBuf>,
-    /// The folder holding `libfdk-aac-2.dll`. Named, it is the only place fdk-aac
-    /// is loaded from.
-    pub fdk_aac_dir: Option<PathBuf>,
 }
 
 impl HpDecoders {
@@ -1437,9 +1425,6 @@ impl HpDecoders {
         {
             if let Some(dir) = &self.ffmpeg_dir {
                 crate::libav::load_from(dir)?;
-            }
-            if let Some(dir) = &self.fdk_aac_dir {
-                crate::aac_eld::load_from(dir)?;
             }
         }
         Ok(())
@@ -1613,19 +1598,18 @@ impl ConfigFile {
                 "[hp_decoders] names folders to load the decoders from, and this build links \
                  its own. Remove the table."
             );
-            anyhow::ensure!(
-                decoders.ffmpeg_dir.is_some() || decoders.fdk_aac_dir.is_some(),
-                "[hp_decoders] names no folder — set ffmpeg_dir, fdk_aac_dir or both, or \
-                 leave the table out for the decoders found on PATH"
-            );
-            for (key, dir) in [("ffmpeg_dir", &decoders.ffmpeg_dir), ("fdk_aac_dir", &decoders.fdk_aac_dir)] {
-                // Absolute, because a DLL loaded by a relative path is looked for
-                // from wherever the gateway happened to be started.
-                anyhow::ensure!(
-                    dir.as_ref().is_none_or(|dir| dir.is_absolute()),
-                    "[hp_decoders].{key} must be the folder's whole path, drive included"
+            let Some(dir) = &decoders.ffmpeg_dir else {
+                anyhow::bail!(
+                    "[hp_decoders] names no folder — set ffmpeg_dir, or leave the table out \
+                     for the decoder found on PATH"
                 );
-            }
+            };
+            // Absolute, because a DLL loaded by a relative path is looked for
+            // from wherever the gateway happened to be started.
+            anyhow::ensure!(
+                dir.is_absolute(),
+                "[hp_decoders].ffmpeg_dir must be the folder's whole path, drive included"
+            );
         }
         for target in &config.targets {
             anyhow::ensure!(
@@ -1726,13 +1710,13 @@ impl ConfigFile {
                 target.name
             );
             // The bitrate keys and the adaptive switch tune the Opus encoder, for the
-            // sessions that take the target's sound. Sound is carried three ways:
-            // MS-RDPEA on RDP, wlshare's audio extension on a `wlshare` target
-            // ([`crate::vnc_audio`]), and High Performance's media stream on
-            // `ard-high-performance` ([`crate::vnc_apple_media`]). On `ard` and on a
-            // plain `vnc` target no session has any, so the keys could not do
+            // sessions that take the target's sound. Sound is encoded here from two
+            // sources: MS-RDPEA on RDP and wlshare's audio extension on a `wlshare`
+            // target ([`crate::vnc_audio`]). On `ard` and on a plain `vnc` target no
+            // session has any, and `ard-high-performance`'s is passed as the Mac's
+            // own AAC-ELD ([`crate::vnc_apple_media`]), so the keys could not do
             // anything there.
-            let sound = target.carries_sound();
+            let sound = target.offers().audio;
             anyhow::ensure!(
                 target.audio_bitrate.is_none() || sound,
                 "target {:?} is {kind} and sets audio_bitrate — it is the encoder's rate, \
@@ -1750,7 +1734,7 @@ impl ConfigFile {
             anyhow::ensure!(
                 target.audio_adaptive_min.is_none() || (sound && target.audio_adaptive()),
                 "target {:?} sets audio_adaptive_min beside audio_adaptive = false or on a \
-                 target without sound — the floor belongs to the adaptive walk, and without \
+                 target without sound to encode — the floor belongs to the adaptive walk, and without \
                  the walk nothing would read it",
                 target.name
             );
@@ -2755,9 +2739,9 @@ mod tests {
         }
     }
 
-    /// `[hp_decoders]` is Windows': a gateway there names the folders its decoders
-    /// are loaded from, whole paths and at least one of them. Every other gateway
-    /// refuses the table, its loader having a search of its own.
+    /// `[hp_decoders]` is Windows': a gateway there names the folder its decoder
+    /// is loaded from, a whole path. Every other gateway refuses the table, its
+    /// loader having a search of its own.
     #[test]
     fn hp_decoders_names_whole_folders_on_windows_alone() {
         let parse = |table: &str| ConfigFile::parse(&format!("{table}\n{}", minimal()));
@@ -2775,17 +2759,13 @@ mod tests {
         {
             assert_eq!(
                 parse("[hp_decoders]\nffmpeg_dir = 'C:\\ffmpeg\\bin'").unwrap().resolve().unwrap().hp_decoders,
-                HpDecoders { ffmpeg_dir: Some(PathBuf::from(r"C:\ffmpeg\bin")), fdk_aac_dir: None }
-            );
-            assert_eq!(
-                parse("[hp_decoders]\nfdk_aac_dir = 'D:/fdk'").unwrap().resolve().unwrap().hp_decoders,
-                HpDecoders { ffmpeg_dir: None, fdk_aac_dir: Some(PathBuf::from("D:/fdk")) }
+                HpDecoders { ffmpeg_dir: Some(PathBuf::from(r"C:\ffmpeg\bin")) }
             );
             for (bad, says) in [
                 ("", "names no folder"),
                 ("ffmpeg_dir = 'ffmpeg\\bin'", "[hp_decoders].ffmpeg_dir"),
-                ("ffmpeg_dir = 'C:\\ffmpeg\\bin'\nfdk_aac_dir = ''", "[hp_decoders].fdk_aac_dir"),
-                ("fdk_aac_dir = '\\fdk'", "[hp_decoders].fdk_aac_dir"),
+                ("ffmpeg_dir = '\\ffmpeg'", "[hp_decoders].ffmpeg_dir"),
+                ("fdk_aac_dir = 'C:\\fdk'", "fdk_aac_dir"),
                 ("dir = 'C:\\ffmpeg\\bin'", "dir"),
             ] {
                 let err = parse(&format!("[hp_decoders]\n{bad}")).expect_err(bad);
@@ -3368,7 +3348,7 @@ mod tests {
             "a display to resize, and no sound on Standard's virtual display either"
         );
         assert!(!target.media_stream());
-        assert!(!target.carries_sound());
+        assert!(!target.offers().audio);
         assert_eq!(target.size, Some((1600, 1000)));
         // At a kept size, the display opens at it and stays there, as High
         // Performance does.
@@ -3447,7 +3427,7 @@ mod tests {
         assert!(hp.render_plan(passed, takes).apple_media);
         assert_eq!(
             hp.render_plan(passed, takes).describe(),
-            "the Mac's HEVC and AAC-ELD, passed through"
+            "the Mac's HEVC, passed through"
         );
         assert!(!hp.render_plan(Choices::default(), takes).apple_media, "only the choice passes it");
         assert_eq!(hp.beyond(passed, takes), None);
@@ -3716,7 +3696,7 @@ mod tests {
         // A plain `vnc` target lists no audio extension.
         let plain = target("protocol = \"vnc\"");
         assert!(!plain.offers().audio);
-        assert!(!plain.carries_sound());
+        assert!(!plain.offers().audio);
         assert_eq!(
             plain.accepts(sound),
             Err(NotOffered { target: "desk".to_owned(), choice: "sound" })
@@ -3969,7 +3949,7 @@ mod tests {
             .unwrap()
             .resolve()
             .unwrap();
-        assert!(!config.targets[0].carries_sound());
+        assert!(!config.targets[0].offers().audio);
         assert!(!config.targets[0].sound(Choices { audio: true, ..Choices::default() }));
 
         for key in ["audio_bitrate = 96", "audio_adaptive = false", "audio_adaptive_min = 24"] {
@@ -3995,15 +3975,15 @@ mod tests {
         assert!(mac.media_stream());
         assert!(mac.sound(Choices::default()), "the sound leg comes with the picture");
         assert!(!mac.offers().audio, "so there is nothing to choose");
-        assert_eq!(mac.audio_source_format(), crate::vnc_apple_media::AUDIO_FORMAT);
 
-        // Its bitrate keys are the ones any target with sound takes.
-        let rated = ConfigFile::parse(&format!(
-            "[server]\n{}\n{target}audio_bitrate = 128\n",
-            site_passwd_line()
-        ))
-        .unwrap();
-        assert_eq!(rated.targets[0].audio_plan().bitrate_bps, 128_000);
+        // The sound is the Mac's own AAC-ELD, so the Opus encoder's keys have
+        // nothing to tune.
+        for key in ["audio_bitrate = 128", "audio_adaptive = false", "audio_adaptive_min = 24"] {
+            let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
+                .unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(rendered.contains(key.split(' ').next().unwrap()), "{rendered}");
+        }
     }
 
     /// The pre-negotiation format follows the engine: CD quality is what RDP is

@@ -1,24 +1,25 @@
 #!/usr/bin/env bash
 # Build the image release CI never publishes — the public image with Debian's
-# libavcodec61 and fdk-aac (libfdk-aac2t64, from non-free) installed, the High
-# Performance decoders its gateway loads at run time — and the EXPERIMENTAL
+# libavcodec61 installed, the High Performance decoder its gateway loads at run
+# time — and the EXPERIMENTAL
 # software HEVC decoder's release archive, which no release artifact holds — and
 # push it to the operator's private registry, ghcr.io/andrewtheguy/remotex-full,
 # under the tag's own name (v0.0.294).
 #
 # The tags it builds are release tags, and it builds nothing of remotex: the
 # release workflow has published the public image of the tag, and this is one
-# layer over that image's linux/amd64 half, installing the two libraries and
+# layer over that image's linux/amd64 half, installing the library and
 # placing the archive the tag's src/hevc_wasm.rs pins, downloaded from the
 # private andrewtheguy/hevc-wasm-archives through `gh` and checked against that
 # pin, in /opt/remotex/versions/<version>/share/remotex, the release tree's data
 # directory, where the gateway looks for it (src/config.rs, data_dir) and,
 # finding it, serves it: the mounted config says nothing of it.
 #
-# A tag whose gateway links the decoders rather than loading them, pins no
-# software decoder, or looks for it elsewhere, is refused.
+# A tag whose gateway links the decoder rather than loading it, still decodes
+# the Mac's sound with fdk-aac, pins no software decoder, or looks for it
+# elsewhere, is refused.
 #
-# The package must stay private: the public image leaves the decoders out, and a
+# The package must stay private: the public image leaves the decoder out, and a
 # public package is a release artifact. The first push creates it `internal` —
 # readable by the organization — and only the package's settings page on GitHub
 # can make it private; there is no API for it. This script asks ghcr whether an
@@ -55,7 +56,11 @@ esac
 commit="$(git rev-parse --verify --quiet "refs/tags/${tag}^{commit}")" \
   || { echo "this checkout has no tag ${tag}: git fetch --tags" >&2; exit 1; }
 git cat-file -e "${commit}:src/libav.rs" 2>/dev/null \
-  || { echo "${tag} links the decoders rather than loading them: there are no libraries to add to its image" >&2; exit 1; }
+  || { echo "${tag} links the decoder rather than loading it: there is no library to add to its image" >&2; exit 1; }
+if git grep -q 'libfdk-aac' "${commit}" -- src/aac_eld.rs; then
+  echo "${tag} decodes the Mac's sound with fdk-aac, which this image no longer carries: build it from that tag's own script" >&2
+  exit 1
+fi
 
 # The software decoder the tag pins, read from its source: the gateway refuses any
 # other archive.
@@ -93,9 +98,8 @@ ARG BASE
 FROM ${BASE}
 ARG VERSION
 ARG WASM_ARCHIVE
-RUN sed -i 's/^Components: main$/Components: main non-free/' /etc/apt/sources.list.d/debian.sources \
-    && apt-get update \
-    && apt-get install -y --no-install-recommends libavcodec61 libfdk-aac2t64 \
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libavcodec61 \
     && rm -rf /var/lib/apt/lists/*
 COPY ${WASM_ARCHIVE} /opt/remotex/versions/${VERSION}/share/remotex/${WASM_ARCHIVE}
 CONTAINERFILE

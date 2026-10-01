@@ -15,8 +15,8 @@ if (!root) {
 // claimed from a page that cannot decode its own video is a session taken away from
 // wherever it was working. See preflight.ts. Then, with a decoder known to exist, the
 // two questions asked of it — how much colour it takes, and whether it takes a High
-// Performance Mac's HEVC and AAC-ELD — whose answers every session socket this page
-// opens carries (videoChroma.ts, appleMedia.ts). Awaited here so that nothing
+// Performance Mac's HEVC — whose answers every session socket this page opens
+// carries (videoChroma.ts, appleMedia.ts). Awaited here so that nothing
 // downstream has to wait on it or carry a path for its absence.
 if (startupPermitted(root)) {
   await Promise.all([chooseVideoChroma(), chooseAppleMedia()]);

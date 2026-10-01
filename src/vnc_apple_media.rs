@@ -13,11 +13,12 @@
 //! Performance's picture and sound").
 //!
 //! A target takes this path with `subtype = "ard-high-performance"`. Everything but
-//! the two decoders — offers, replies, SRTP, depacketizing, the receiver, and
-//! passing the stream on — is the gateway's own; the decoders are FFmpeg's
-//! libavcodec and fdk-aac, loaded from the system (`crate::libav`,
-//! `crate::aac_eld`). A gateway whose host lacks either ends the session of a
-//! browser that cannot decode the stream before it dials the Mac.
+//! the picture's decoder — offers, replies, SRTP, depacketizing, the receiver, and
+//! passing the stream on — is the gateway's own; the decoder is FFmpeg's
+//! libavcodec, loaded from the system (`crate::libav`). A gateway whose host
+//! lacks it ends a session that does not pass the picture before it dials the
+//! Mac. The sound is never decoded here: its AAC-ELD units go to every browser as
+//! they came ([`PASSED_SOUND`]).
 //!
 //! The offer is two AVConference negotiation blobs, rebuilt field by field from the
 //! ones Apple's client produced ([`audio_offer_blob`], [`video_offer_blob`]). The
@@ -66,7 +67,6 @@ use aes::cipher::{BlockCipherEncrypt as _, KeyInit as _};
 use hmac::{Hmac, Mac as _};
 use sha1::Sha1;
 
-use crate::audio::PcmFormat;
 use crate::vnc_apple;
 
 /// Encoding 1010 (`0x3f2`), `kSSVideoEncoding_AVCMediaStream`: the viewer takes its
@@ -74,17 +74,8 @@ use crate::vnc_apple;
 /// rectangles of it.
 pub const ENCODING_MEDIA_STREAM: i32 = 1010;
 
-/// What the sound leg decodes to: AAC-ELD's 48 kHz stereo as 16-bit PCM. The
-/// counterpart of [`crate::audio::PCM_CD_QUALITY`] for this source, and the format
-/// a decoded session builds its Opus encoder for.
-pub const AUDIO_FORMAT: PcmFormat = PcmFormat {
-    channels: 2,
-    sample_rate: 48_000,
-    bits_per_sample: 16,
-};
-
-/// The sound leg as a browser that decodes it is sent: the Mac's AAC-ELD units as
-/// they came, one a packet, described by the AudioSpecificConfig the Mac never
+/// The sound leg as every browser is sent it: the Mac's AAC-ELD units as they
+/// came, one a packet, described by the AudioSpecificConfig the Mac never
 /// sends ([`crate::aac_eld`]). The codec string names what the stream is; which
 /// configuration a browser's `AudioDecoder` actually decodes it under is the
 /// page's to find out (`frontend/src/appleMedia.ts`).
@@ -1994,16 +1985,6 @@ pub const STREAM_SILENCE: std::time::Duration = std::time::Duration::from_secs(4
 /// unit, which costs a keyframe: every later picture predicts from it.
 const DECODE_QUEUE: usize = 8;
 
-/// AAC-ELD units the sound's decoder thread may be behind by. A unit costs tens of
-/// microseconds to decode, so this is a ceiling rather than a working depth, and
-/// reaching it drops the newest unit: 10 ms of sound, and nothing after it
-/// depends on it.
-const SOUND_QUEUE: usize = 64;
-
-/// Access units per wave buffer handed to the bridge: two 10 ms units, one Opus
-/// packet's worth, so the encoder downstream completes a packet per buffer.
-const UNITS_PER_WAVE: usize = 2;
-
 /// The least time between two keyframe requests. The Mac answers one in tens of
 /// milliseconds; this keeps a burst of losses from asking for one per packet.
 const PLI_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
@@ -2032,7 +2013,7 @@ const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 /// gateway (`tests/hp_capture.sh`). `video.h265` is every access unit the
 /// depacketizer completes, as Annex B; `audio.eld` is every AAC-ELD unit, each
 /// behind its length as a big-endian u32. Both are written before any decoder
-/// sees them, whether the session decodes the stream or passes it on.
+/// sees them, whether the session decodes the picture or passes it on.
 ///
 /// The files are written on a thread of their own, so a slow disk never holds up
 /// the sockets the stream is read from: the receiver hands each unit over and
@@ -2212,7 +2193,6 @@ impl Receiver {
 
     async fn run(mut self) {
         let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let passed = matches!(self.pictures, Outlet::Passed(_));
         let mut onward = match &self.pictures {
             Outlet::Decoded(pictures) => {
                 let (units, decoder) = spawn_decoder(
@@ -2225,8 +2205,7 @@ impl Receiver {
             Outlet::Passed(units) => Onward::Browser(Passer::default(), units.clone()),
         };
         let keyframe_wanted = std::sync::Arc::clone(&self.keyframe_wanted);
-        let mut sound =
-            self.sound.take().map(|bridge| Sound::start(bridge, std::sync::Arc::clone(&self.failed), passed));
+        let mut sound = self.sound.take().map(Sound::start);
         let mut depacketizer = Depacketizer::default();
         let mut rtcp = tokio::time::interval(std::time::Duration::from_secs(1));
         let mut rate = tokio::time::interval(RATE_FEEDBACK);
@@ -2298,10 +2277,8 @@ impl Receiver {
                                 log::warn!("vnc: stopped dumping the media stream: {e:#}");
                                 dump = None;
                             }
-                            if let Some(sound) = sound
-                                && let Err(e) = sound.push(&header, &data[header.payload.0..header.payload.1])
-                            {
-                                break e;
+                            if let Some(sound) = sound {
+                                sound.push(&header, &data[header.payload.0..header.payload.1]);
                             }
                         }
                         (Err(SrtpError::Forged), Some(sound)) => sound.forged(),
@@ -2517,103 +2494,22 @@ fn spawn_decoder(
 }
 
 /// The sound leg on the receive task's side: authenticated, decrypted access units
-/// out to the bridge, either as they came, for a browser that decodes them, or
-/// through a decoder thread of their own, which hands the bridge PCM.
-///
-/// fdk-aac is blocking C, so it decodes on a thread of its own rather than in the
-/// receive task. The thread ends when this is dropped — which aborting the receive
-/// task does — and `stale` makes it stop at once rather than after draining its
-/// queue into a bridge the next stream may already be filling. Dropping this also withdraws the format the
-/// thread announced, since no more sound will follow it. A decoder that cannot be
-/// opened leaves why in `failed`, and the next unit ends the stream.
+/// out to the bridge as they came ([`crate::audio::AudioBridge::unit`]), for the
+/// browser to decode. With no browser listening the bridge drops them.
 struct Sound {
-    leg: SoundLeg,
     bridge: std::sync::Arc<crate::audio::AudioBridge>,
     packets: u64,
     forged: u64,
 }
 
-/// Where [`Sound`] sends each unit.
-enum SoundLeg {
-    /// The decoder thread's queue, and the flag that stops it.
-    Decoded {
-        units: std::sync::mpsc::SyncSender<Vec<u8>>,
-        stale: std::sync::Arc<std::sync::atomic::AtomicBool>,
-        /// Units dropped because the thread was [`SOUND_QUEUE`] behind.
-        overrun: u64,
-    },
-    /// The bridge, unit by unit ([`crate::audio::AudioBridge::unit`]).
-    Passed,
-}
-
 impl Sound {
-    /// `passed` is whether the stream passes to the browser, picture and sound
-    /// together; otherwise the sound is decoded here.
-    fn start(bridge: std::sync::Arc<crate::audio::AudioBridge>, failed: Failure, passed: bool) -> Self {
-        let leg = if passed { SoundLeg::Passed } else { Self::decoder(&bridge, failed) };
-        Self { leg, bridge, packets: 0, forged: 0 }
-    }
-
-    fn decoder(bridge: &std::sync::Arc<crate::audio::AudioBridge>, failed: Failure) -> SoundLeg {
-        use crate::aac_eld::{CHANNELS, EldDecoder, FRAME_SAMPLES};
-
-        let bridge = std::sync::Arc::clone(bridge);
-        let (units, inbox) = std::sync::mpsc::sync_channel::<Vec<u8>>(SOUND_QUEUE);
-        let stale = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let (thread_bridge, thread_stale) = (bridge, std::sync::Arc::clone(&stale));
-        std::thread::spawn(move || {
-            let mut decoder = match EldDecoder::new() {
-                Ok(decoder) => decoder,
-                Err(e) => return fail(&failed, e.context("no AAC-ELD decoder")),
-            };
-            // Announced only once a decoder exists: an encoder built for a stream
-            // that never produces anything would wait on it for the session.
-            thread_bridge.publish_format(AUDIO_FORMAT);
-            let wave_bytes = UNITS_PER_WAVE * FRAME_SAMPLES * CHANNELS * 2;
-            let mut pending: Vec<u8> = Vec::with_capacity(wave_bytes);
-            let (mut decoded, mut concealed, mut undecodable) = (0u64, 0u64, 0u64);
-            // The level decoded over the last second, for the debug log: the Mac
-            // sends a unit every 10 ms whether or not anything plays, so a count
-            // of units says nothing about whether there was sound.
-            let mut level = Level::default();
-            while let Ok(unit) = inbox.recv() {
-                if thread_stale.load(std::sync::atomic::Ordering::Relaxed) {
-                    break;
-                }
-                decoded += 1;
-                let from = pending.len();
-                let result = decoder.decode(&unit, &mut pending);
-                level.add(&pending[from..]);
-                match result {
-                    Ok(false) => {}
-                    Ok(true) => concealed += 1,
-                    Err(e) => {
-                        undecodable += 1;
-                        if undecodable <= 3 {
-                            log::warn!("vnc: dropped a sound unit: {e:#}");
-                        }
-                    }
-                }
-                if pending.len() >= wave_bytes {
-                    thread_bridge.wave(std::mem::take(&mut pending));
-                    pending.reserve(wave_bytes);
-                }
-                if decoded.is_multiple_of(100) {
-                    log::debug!(
-                        "vnc: {decoded} sound units decoded, {concealed} concealed, {undecodable} \
-                         undecodable; last second {}",
-                        level.take()
-                    );
-                }
-            }
-        });
-        SoundLeg::Decoded { units, stale, overrun: 0 }
+    fn start(bridge: std::sync::Arc<crate::audio::AudioBridge>) -> Self {
+        Self { bridge, packets: 0, forged: 0 }
     }
 
     /// One authenticated, decrypted RTP packet of the sound leg: one AAC-ELD
-    /// access unit, 10 ms of 48 kHz stereo. An error is a decoder that has stopped;
-    /// a passed unit cannot fail.
-    fn push(&mut self, header: &RtpHeader, unit: &[u8]) -> anyhow::Result<()> {
+    /// access unit, 10 ms of 48 kHz stereo.
+    fn push(&mut self, header: &RtpHeader, unit: &[u8]) {
         self.packets += 1;
         if self.packets == 1 {
             log::info!(
@@ -2623,22 +2519,7 @@ impl Sound {
                 header.ssrc
             );
         }
-        match &mut self.leg {
-            SoundLeg::Decoded { units, overrun, .. } => match units.try_send(unit.to_vec()) {
-                Ok(()) => {}
-                Err(std::sync::mpsc::TrySendError::Full(_)) => {
-                    *overrun += 1;
-                    if *overrun <= 3 {
-                        log::warn!("vnc: the AAC-ELD decoder is {SOUND_QUEUE} units behind; dropping one");
-                    }
-                }
-                Err(std::sync::mpsc::TrySendError::Disconnected(_)) => {
-                    anyhow::bail!("the AAC-ELD decoder stopped")
-                }
-            },
-            SoundLeg::Passed => self.bridge.unit(unit.to_vec()),
-        }
-        Ok(())
+        self.bridge.unit(unit.to_vec());
     }
 
     fn forged(&mut self) {
@@ -2646,44 +2527,6 @@ impl Sound {
         if self.forged <= 3 {
             log::warn!("vnc: dropped a sound packet whose SRTP tag did not match");
         }
-    }
-}
-
-/// Peak and RMS of 16-bit PCM, accumulated until taken.
-#[derive(Default)]
-struct Level {
-    peak: u16,
-    squares: f64,
-    samples: u64,
-}
-
-impl Level {
-    fn add(&mut self, pcm: &[u8]) {
-        for sample in pcm.as_chunks::<2>().0.iter().map(|s| i16::from_le_bytes(*s)) {
-            self.peak = self.peak.max(sample.unsigned_abs());
-            self.squares += f64::from(sample) * f64::from(sample);
-            self.samples += 1;
-        }
-    }
-
-    /// The level so far, as dBFS, and a fresh start.
-    fn take(&mut self) -> String {
-        let dbfs = |value: f64| {
-            if value > 0.0 { format!("{:.1} dBFS", 20.0 * (value / 32768.0).log10()) } else { "silence".to_owned() }
-        };
-        let rms = if self.samples == 0 { 0.0 } else { (self.squares / self.samples as f64).sqrt() };
-        let text = format!("peak {}, rms {}", dbfs(f64::from(self.peak)), dbfs(rms));
-        *self = Self::default();
-        text
-    }
-}
-
-impl Drop for Sound {
-    fn drop(&mut self) {
-        if let SoundLeg::Decoded { stale, .. } = &self.leg {
-            stale.store(true, std::sync::atomic::Ordering::Relaxed);
-        }
-        self.bridge.clear_format();
     }
 }
 

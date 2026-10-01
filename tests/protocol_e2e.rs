@@ -1213,8 +1213,8 @@ fn mac_target(port: u16) -> TargetConfig {
 }
 
 /// What a fake-Mac session is started with: the window sizing the virtual display,
-/// and the stream passed to the browser [`connect_mac_ws`] stands in for, so the
-/// session needs no decoder and a host without FFmpeg or fdk-aac drives it too;
+/// and the picture passed to the browser [`connect_mac_ws`] stands in for, so the
+/// session needs no decoder and a host without FFmpeg drives it too;
 /// the fake names no ports for the stream anyway.
 const MAC_CHOICES: &str = r#"{"size":"window","passthrough":true}"#;
 

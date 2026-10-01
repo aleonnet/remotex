@@ -8,8 +8,8 @@
 //! ([`crate::session::SessionManager`]). The URL also names what only this browser
 //! knows about itself — its screen (`w`/`h`/`scale`/`fit`, the same values `connect`
 //! carries) and, required, what it can take: the most colour its `VideoDecoder`
-//! decodes, whether it decodes a High Performance Mac's picture and sound, HEVC and
-//! AAC-ELD, and whether it composes an RDP host's graphics pipeline — so an attach
+//! decodes, whether it decodes a High Performance Mac's picture, its HEVC, and
+//! whether it composes an RDP host's graphics pipeline — so an attach
 //! that finds a target whose engine a claim change ended can reconnect it for *this*
 //! browser rather than for the previous one, or tell it the session was started
 //! with a passthrough it cannot take. The three are required because that happens
@@ -755,10 +755,10 @@ pub struct SessionParams {
     /// resolve an unset `render_chroma` against, and the upgrade is refused at the
     /// door rather than answered with a guess.
     chroma: Chroma,
-    /// Whether this browser decodes a High Performance Mac's media stream — its
-    /// `VideoDecoder` the HEVC and its `AudioDecoder` the AAC-ELD — asked once at
-    /// page load like [`Self::chroma`] and required for the same reason: a session
-    /// that passes the stream is served only to a browser that said yes.
+    /// Whether this browser decodes a High Performance Mac's picture, its HEVC —
+    /// asked once at page load like [`Self::chroma`] and required for the same
+    /// reason: a session that passes the picture is served only to a browser that
+    /// said yes.
     apple_media: bool,
     /// Whether this browser composes an RDP host's graphics pipeline: a
     /// cross-origin isolated page with shared memory for the compositor's threads

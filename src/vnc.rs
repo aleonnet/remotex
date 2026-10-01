@@ -1522,13 +1522,13 @@ pub async fn run(
     sink.finish().await;
 }
 
-/// Load the two decoders a High Performance Mac's stream needs to become VP9 and
-/// Opus, or say which the host lacks. What `/api/targets` reports for the picker
-/// and what a session without the passthrough needs before it dials the Mac. A
-/// failure is not remembered, so a library installed while the gateway runs is
-/// found by the next call.
+/// Load the decoder a High Performance Mac's picture needs to become VP9, or say
+/// that the host lacks it. What `/api/targets` reports for the picker and what a
+/// session without the passthrough needs before it dials the Mac. A failure is
+/// not remembered, so a library installed while the gateway runs is found by the
+/// next call.
 pub fn apple_decoders() -> anyhow::Result<()> {
-    crate::libav::load().and_then(|()| crate::aac_eld::load())
+    crate::libav::load()
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1543,21 +1543,20 @@ async fn session(
     microphone: Option<Arc<crate::mic::MicBridge>>,
     sink: &VideoSink,
 ) {
-    // A gateway whose host lacks the decoders' libraries can only pass the Mac's
-    // stream. The picker says so before Start; a session started without the
+    // A gateway whose host lacks the decoder's library can only pass the Mac's
+    // picture. The picker says so before Start; a session started without the
     // passthrough all the same is told here, naming the library, before the Mac
     // is dialled rather than after its offer.
     if config.media_stream()
         && !plan.apple_media
         && let Err(e) = apple_decoders()
     {
-        warn!("vnc: refusing a session that does not pass the Mac's stream: {e:#}");
+        warn!("vnc: refusing a session that does not pass the Mac's picture: {e:#}");
         let _ = sink
             .msg(ServerMsg::Error {
                 message: format!(
-                    "This remotex cannot decode the Mac's HEVC and AAC-ELD to send VP9 and \
-                     Opus, so the Mac's stream can only be passed through, to a browser that \
-                     decodes it: {e:#}"
+                    "This remotex cannot decode the Mac's HEVC to send VP9, so the Mac's \
+                     picture can only be passed through, to a browser that decodes it: {e:#}"
                 ),
             })
             .await;

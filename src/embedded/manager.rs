@@ -774,7 +774,10 @@ fn describe_offers(target: &TargetConfig) -> String {
 /// Kilobits because the config speaks kilobits, and the codec named the way
 /// `ServerMsg::AudioFormat` names it.
 fn describe_audio(target: &TargetConfig) -> String {
-    if !target.carries_sound() {
+    if target.media_stream() {
+        return "the Mac's AAC-ELD, passed through".to_owned();
+    }
+    if !target.offers().audio {
         return "none".to_owned();
     }
     let plan = target.audio_plan();
