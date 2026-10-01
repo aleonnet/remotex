@@ -141,10 +141,14 @@ export function readRemoteClipboard(): string {
   ).replace(/\r?\n$/, "");
 }
 
-// What a spec starts its session with: the options ticked under the target at the
+// What a spec starts its session with: the options chosen under the target at the
 // picker before Start. Each defaults to off, and every row the target shows is set
 // to what is asked rather than left as found, so a run does not depend on what an
 // earlier one left remembered in the browser.
+//
+// `resize` is the desktop following this window. Off, the session takes the size
+// the target keeps where the picker offers one; a target with no size configured
+// follows the window whatever is asked, since that is the one size it has here.
 export interface StartChoices {
   resize?: boolean;
   sound?: boolean;
@@ -202,6 +206,9 @@ export async function logInAndConnectTo(
   await landOn(page, target, false, search, choices);
 }
 
+// The size that follows this browser's window, as the picker names it.
+export const FOLLOWS_WINDOW = /This window's size/;
+
 // Open `target` at the picker, set its options to `choices` and press Start.
 //
 // The target's button opens it rather than connecting, and says whether it is open:
@@ -220,8 +227,16 @@ async function startTarget(
     await row.click();
   }
   const item = page.getByRole("listitem").filter({ has: row });
+  // The size is a pair of radio buttons where the target offers two, the kept size
+  // first, and one stated line otherwise.
+  const follows = item.getByRole("radio", { name: FOLLOWS_WINDOW });
+  if ((await follows.count()) > 0) {
+    const size = choices.resize ? follows : item.getByRole("radio").first();
+    await size.check({ timeout: LEAVE_TIMEOUT_MS });
+  } else if (choices.resize) {
+    await expect(item).toContainText(FOLLOWS_WINDOW);
+  }
   const options: [RegExp, boolean][] = [
-    [/^Resize with this window/, choices.resize ?? false],
     [/^Sound/, choices.sound ?? false],
     [/^Pass /, choices.passthrough ?? false],
   ];

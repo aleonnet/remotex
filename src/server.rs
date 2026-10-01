@@ -637,6 +637,12 @@ struct TargetInfo {
     port: u16,
     /// Whether the picker offers the window driving the desktop's size.
     resize: bool,
+    /// The size the operator configured, in points, `null` where there is none.
+    size: Option<Points>,
+    /// The size a session keeps where none is configured, in points. `null` on a
+    /// target no session states a size for: a Mac sharing its physical displays.
+    #[serde(rename = "defaultSize")]
+    default_size: Option<Points>,
     /// Whether the picker offers the remote's sound as a choice.
     audio: bool,
     /// The stream the picker offers to pass untouched, `null` where the target
@@ -648,6 +654,19 @@ struct TargetInfo {
     /// cannot take the stream cannot start the target.
     #[serde(rename = "passthroughOnly")]
     passthrough_only: bool,
+}
+
+/// A desktop size in points, as the picker shows it before Start.
+#[derive(Serialize)]
+struct Points {
+    w: u16,
+    h: u16,
+}
+
+impl From<(u16, u16)> for Points {
+    fn from((w, h): (u16, u16)) -> Self {
+        Self { w, h }
+    }
 }
 
 impl TargetInfo {
@@ -662,6 +681,8 @@ impl TargetInfo {
             host: target.host.clone(),
             port: target.port,
             resize: offers.resize,
+            size: target.size.map(Points::from),
+            default_size: target.sized().then(|| crate::config::DEFAULT_SIZE.into()),
             audio: offers.audio,
             passthrough: offers.passthrough,
             passthrough_only: target.media_stream() && !apple_decoders,
@@ -1019,8 +1040,7 @@ mod tests {
                 password: String::new(),
                 vnc_password: String::new(),
                 domain: None,
-                width: Some(1280),
-                height: Some(800),
+                size: Some((1280, 800)),
                 egfx: None,
                 clipboard: false,
                 camera: false,
@@ -1262,8 +1282,7 @@ mod tests {
             password: String::new(),
             vnc_password: String::new(),
             domain: None,
-            width: Some(640),
-            height: Some(480),
+            size: Some((640, 480)),
             egfx: None,
             clipboard: false,
             camera: false,
@@ -1397,7 +1416,7 @@ mod tests {
         let text = format!(
             "[server]\nsite_passwd = \"{passwd}\"\n\n{}{}{}",
             target("mac", "protocol = \"vnc\"\nsubtype = \"ard\"", "192.0.2.10"),
-            target("win", "protocol = \"rdp\"", "192.0.2.11"),
+            target("win", "protocol = \"rdp\"\nsize = \"1920x1080\"", "192.0.2.11"),
             target("fast", "protocol = \"vnc\"\nsubtype = \"ard-high-performance\"", "192.0.2.10"),
         );
         let targets = crate::config::ConfigFile::parse(&text).expect("the targets parse").targets;
@@ -1406,19 +1425,22 @@ mod tests {
             serde_json::to_string(&TargetInfo::of(target, apple_decoders)).unwrap()
         };
 
-        // Standard mode offers nothing: physical displays, no sound, no stream.
+        // Standard mode offers nothing: physical displays, which no session
+        // sizes, no sound, no stream.
         assert_eq!(
             entry("mac", true),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"audio":false,"passthrough":null,"passthroughOnly":false}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"passthrough":null,"passthroughOnly":false}"#
         );
+        // The size the operator configured, beside the default every sized
+        // target has.
         assert_eq!(
             entry("win", true),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"audio":true,"passthrough":"rdp-graphics","passthroughOnly":false}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"passthrough":"rdp-graphics","passthroughOnly":false}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
         // stream is, and is the only way in on a host without its decoders.
         let fast = entry("fast", true);
-        assert!(fast.ends_with(r#""resize":true,"audio":false,"passthrough":"apple-media","passthroughOnly":false}"#), "{fast}");
+        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"passthrough":"apple-media","passthroughOnly":false}"#), "{fast}");
         assert!(entry("fast", false).ends_with(r#""passthroughOnly":true}"#));
         // Which says nothing about a target with no such stream.
         assert!(entry("win", false).ends_with(r#""passthroughOnly":false}"#));

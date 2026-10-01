@@ -1,7 +1,7 @@
 # HiDPI over standard RFB
 
 Why a VNC server read over standard RFB is shown at 1x whatever scale its
-desktop renders at, and the one wayvnc rule that makes a resize come back
+desktop renders at, and the one wayvnc rule that makes a size request come back
 *prohibited*. Standard RFB is what a `vnc` target with no `subtype` speaks.
 Measured against Debian 13's stock packages — wayvnc 0.9.1 on neatvnc 0.9.1
 (server name `WayVNC`), serving a `HEADLESS-1` output of sway 1.10.1 on wlroots
@@ -55,26 +55,29 @@ it is shown at the wrong size. For a wlroots desktop that should be shown at its
 scale, run wlshare and name it with `subtype = "wlshare"`.
 
 The consequence on a sway output at `scale 2` behind a plain target is that it is
-*worse* than at `scale 1`: in a session started with resize the window asks for
-its 1728×883 points as 1728×883 pixels, sway makes that an 864×441 logical
-desktop, and the browser stretches it back up. Half the workspace, still soft.
+*worse* than at `scale 1`: the session asks once for the size it keeps, 1440×900
+points unless the target's `size` says otherwise, as 1440×900 pixels, sway makes
+that a 720×450 logical desktop, and the browser shows its pixels at 1x. Half the
+workspace, still soft on a 2x screen.
 Run the output wayvnc captures at `scale 1` for a plain target. Applying that is
 live and keeps every window — `swaymsg output HEADLESS-1 scale 1` over the IPC
 socket, which a headless sway started by a user service leaves at
 `/run/user/<uid>/sway-ipc.*.sock` — so there is no reason to re-render the sway
 config and restart the service for it.
 
-Without a browser, the probe drives the resize path and prints the size and scale
-each `resize` announces:
+Without a browser, the probe starts the session and prints the size and scale
+each `resize` announces, the server's own first and then the one it was asked
+for:
 
 ```sh
 uv run --with websockets --with requests tests/ws_probe.py \
-  --port <gateway port> --target sway --user <user> \
-  --resize --viewport 1728x883 --viewport-after-resize
+  --port <gateway port> --target sway --user <user>
 ```
 
-`--viewport-after-resize` is needed on a plain target, which never sends the
-display list the probe's viewport requests otherwise wait for.
+A plain target follows no window: the picker does not offer it one, because
+whether a server takes a size is known only once it is dialled. So the one
+`SetDesktopSize` of a session is its kept size, sent when the server declares
+support.
 
 ## wayvnc grants the layout to one client
 
@@ -82,8 +85,8 @@ The finding that looked like a regression and was not. wayvnc's resize callback
 (`on_client_resize` in its `main.c`) remembers the **first client that resized**
 as its *master layout client* and returns false for every other client until
 that one disconnects. neatvnc turns the false into `ExtendedDesktopSize`
-status 1, *prohibited*. So a browser on one gateway that has resized — the
-installed release beside a development build, say — makes every resize from a
+status 1, *prohibited*. So a session on one gateway whose size was granted — the
+installed release beside a development build, say — makes the size request of a
 second gateway against the same wayvnc come back prohibited, and the second
 desktop simply stays its size. The bytes on the wire are identical; only the
 order of arrival differs. The fix is to disconnect the other client, not to debug
@@ -104,5 +107,5 @@ A granted resize therefore looks like a status 4 reply immediately followed by a
 coincidence. Run with `RUST_LOG=remotex=debug` to see the `ExtendedDesktopSize`
 rects and the *holding … until the server declares SetDesktopSize support* line
 that precedes the first request on every connection — wayvnc declares support with
-its first framebuffer update, about a second after connect, and a viewport report
-sent before that is replayed on it.
+its first framebuffer update, about a second after connect, and the size the
+session keeps, held until then, is sent on it.

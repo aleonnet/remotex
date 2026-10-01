@@ -7,6 +7,8 @@
 // `/ws`, the audio format on `/ws/audio`, and remote start/stop decisions on the
 // camera and microphone sockets.
 
+import type { Choices } from "./targetChoices.ts";
+
 // "back" and "forward" are the side buttons of a five-button mouse. No engine
 // acts on them today — RDP and VNC drop them for want of anywhere to put them.
 export type MouseButton = "left" | "middle" | "right" | "back" | "forward";
@@ -48,7 +50,6 @@ export type ClientMsg =
   // Requested desktop size in points (CSS pixels). Engines apply their own policy.
   | { type: "viewport"; w: number; h: number }
   // Restore the target-defined default size; distinct from sending no request.
-  | { type: "defaultSize" }
   // The screen this browser window is on: its full resolution in CSS pixels
   // (`screen.width`/`screen.height`) and its density in hundredths
   // (`devicePixelRatio * 100`, so 100 for a 1x screen and 200 for a Retina
@@ -58,21 +59,21 @@ export type ClientMsg =
   // matter at session-open, where `connect` carries the same shape.
   // `fit` marks the pinch-zoom client (CAN_PINCH_ZOOM), which presents the
   // desktop scaled to fit rather than at 100%: its screen is then no opening
-  // size, and a target with no pinned size opens at the gateway's default
-  // for it. It does not affect canvas layout.
+  // size, and a session of its that follows the window opens at the gateway's
+  // default. It does not affect canvas layout.
   | { type: "hostDisplay"; w: number; h: number; scale: number; fit: boolean }
   // Session control (handled by the server's session slot, not an engine):
   // start a target from the post-login picker, or tear the session down and
-  // switch back to it. The connect names this window's screen so a target
-  // with no pinned config size opens at its full resolution — by the time a
+  // switch back to it. The connect names this window's screen so a session
+  // that follows the window opens at its full resolution — by the time a
   // hostDisplay message could arrive, the opening size has already been
-  // asked of the remote. `choices` is what was ticked under the target before
+  // asked of the remote. `choices` is what was chosen under the target before
   // Start, held for the life of the session (targetChoices.ts).
   | {
       type: "connect";
       target: string;
       display: { w: number; h: number; scale: number; fit: boolean };
-      choices: { resize: boolean; audio: boolean; passthrough: boolean };
+      choices: Choices;
     }
   | { type: "disconnect" }
   // Clipboard bridge. The backend owns the clipboard data: "clipboard" puts

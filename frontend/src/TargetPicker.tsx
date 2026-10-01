@@ -12,15 +12,18 @@ import {
   type TargetInfo,
   targetOptions,
 } from "./targetChoices.ts";
+import { sizeFollows } from "./useRemoteDesktop.ts";
 
 // The post-login target picker: the state where the user is authenticated and
 // holds the session slot, but no connection has started yet (see
 // useRemoteDesktop's "picker" mode). It lists the `[[targets]]` profiles from
 // GET /api/targets. Picking one opens it rather than connecting: what the
-// session is started with — resize, sound, a passthrough — is chosen under it,
+// session is started with — its size, sound, a passthrough — is chosen under it,
 // and Start is what connects (targetChoices.ts has the rules for which options
-// a target shows and which are greyed). Every target starts closed, a gateway's
-// only one included, so starting a session is the same two steps everywhere.
+// a target shows and which are greyed). The size the desktop will have is shown
+// there before Start, as a choice where there are two. Every target starts
+// closed, a gateway's only one included, so starting a session is the same two
+// steps everywhere.
 //
 // `connect` sends the Start over the live socket with the choices; `sound` tells
 // it the session will carry the remote's sound, so the click is spent on an audio
@@ -49,7 +52,7 @@ export default function TargetPicker({
   const [loadError, setLoadError] = useState<string | null>(null);
   // The one target whose options are showing, by name.
   const [openTarget, setOpenTarget] = useState<string | null>(null);
-  // What was ticked under each target the last time, in this browser. It
+  // What was chosen under each target the last time, in this browser. It
   // replaces the one sound checkbox the picker used to have: the choice is each
   // target's, and it is made where the target is.
   const [remembered, setRemembered] = useState(readRememberedChoices);
@@ -101,10 +104,12 @@ export default function TargetPicker({
   }
 
   // What this browser can take, asked once at load (main.tsx) and stated on its
-  // session socket too: the gateway refuses what this greys.
+  // session socket too: the gateway refuses what this greys. And what of it a
+  // desktop can follow, which decides the sizes a target offers here.
   const abilities = {
     appleMedia: decodesAppleMedia(),
     rdpGraphics: composesRdpGraphics(),
+    follows: sizeFollows(),
   };
 
   return (
@@ -153,6 +158,49 @@ export default function TargetPicker({
                 </button>
                 {open && (
                   <div className="picker-options" id={optionsId}>
+                    {/* The size the desktop will have: a choice where the
+                        target offers two here, and stated where it has one. */}
+                    {options.sizes.length > 1 ? (
+                      <fieldset className="picker-size">
+                        <legend>Size</legend>
+                        {options.sizes.map((size) => (
+                          <label key={size.value} className="picker-option">
+                            <input
+                              type="radio"
+                              name={`picker-size-${t.name}`}
+                              checked={options.choices.size === size.value}
+                              disabled={pendingTarget !== null}
+                              onChange={() =>
+                                setRemembered((was) =>
+                                  rememberChoice(
+                                    was,
+                                    t.name,
+                                    "size",
+                                    size.value,
+                                  ),
+                                )
+                              }
+                            />
+                            <span className="picker-option-text">
+                              <span>{size.label}</span>
+                              <span className="picker-option-note">
+                                {size.note}
+                              </span>
+                            </span>
+                          </label>
+                        ))}
+                      </fieldset>
+                    ) : (
+                      <p className="picker-size">
+                        <span className="picker-size-heading">Size</span>
+                        <span className="picker-option-text">
+                          <span>{options.sizes[0].label}</span>
+                          <span className="picker-option-note">
+                            {options.sizes[0].note}
+                          </span>
+                        </span>
+                      </p>
+                    )}
                     {/* Only what the target's type offers has a row; one that
                         cannot be had here is greyed and says why. */}
                     {options.rows.map((row) => (

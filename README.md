@@ -9,14 +9,17 @@ picture; redirected camera and microphone media each use their own socket too.
 The main reason this exists is the client: it is a browser, so anything with one
 reaches every target — RDP, VNC and Macs alike — with nothing to install per
 platform and nothing that has to exist for your OS. Picking a target at the
-picker opens it: whether the window drives the desktop's size, whether the
-remote's sound is taken and whether the remote's own stream is passed through are
-chosen under it, and Start connects with them. In a session started with resize,
-the window drives the remote's size, so the desktop is renegotiated at the size
-asked for rather than scaled on the client; `vnc`, plain or wlshare, a High
-Performance Mac and `rdp` can all be handed the window. On RDP a resize is a
-graphics reset of the default graphics pipeline, so a target with `egfx = false`
-does not offer it.
+picker opens it: the size the desktop will have, whether the remote's sound is
+taken and whether the remote's own stream is passed through are chosen under it,
+and Start connects with them. The size is shown before Start. It is either one
+the desktop keeps — the target's `size = "1920x1080"`, or 1440×900 where it sets
+none — or the window's: in a session started with resize the window drives the
+remote's size, so the desktop is renegotiated at the size asked for rather than
+scaled on the client. A wlshare server, a Mac's virtual display and `rdp` can be
+handed the window, by a desktop browser or a tablet; a phone is offered the kept
+sizes instead. On RDP a resize is a graphics reset of the default graphics
+pipeline, so a target with `egfx = false` keeps its size, and so does a plain
+`vnc` target, which is asked for its size once.
 Not every server is served alike: see [Supported servers](#supported-servers)
 for the tiers they are ranked in.
 
@@ -268,9 +271,9 @@ asks the Mac for ZRLE rectangles from the start, although High Performance steps
 over them undecoded and never displays them.
 
 High Performance (`ard-high-performance`) takes the same credentials and the same
-encrypted protocol revision. It requests one virtual display at the
-pinned `width` and `height` when both are set, or at the full resolution and
-density of the client's screen otherwise. Once connected, it disables the remote
+encrypted protocol revision. It requests one virtual display at the size the
+session keeps, or at the full resolution of the client's screen where the window
+drives it, and at the density of the client's screen either way. Once connected, it disables the remote
 Mac's physical displays and puts all of the remote Mac's windows on that virtual
 display. Apple's official macOS Screen Sharing client can instead choose up to
 two virtual displays. It takes the picture and sound Apple's own viewer takes:
@@ -304,7 +307,7 @@ Every Apple subtype supports the native Apple pasteboard when `clipboard =
 true`. In a session started with resize, the window continuously drives High
 Performance's virtual display, using Apple's
 dynamic-resolution feature to replace its mode from client viewport reports.
-Resize is chosen before the session starts and holds for it: there is no
+The size is chosen before the session starts and holds for it: there is no
 auto-resize toggle or one-shot remote-resize button in the session. The local
 app-window sizing control described above does not change that. The descriptor's
 fixed 3840×2160 backing ceiling permits successive arbitrary sizes within that
@@ -324,9 +327,9 @@ See [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 A plain `vnc` target has no way to learn that its pixels are HiDPI — standard RFB
 carries sizes in pixels and nothing else, and a plain target lists no extension
 to it — so it is shown at 1x, one CSS pixel per framebuffer pixel, and the
-window's points go to the server as pixels, whatever server it reaches.
+size it is asked for goes to the server as pixels, whatever server it reaches.
 See [`docs/standard-rfb-hidpi.md`](docs/standard-rfb-hidpi.md) for what that means
-on a sway output at scale 2 and why a second client's resize can come back
+on a sway output at scale 2 and why a second client's size request can come back
 prohibited. Density over VNC is a wlshare extension, listed for a target with
 `subtype = "wlshare"` and no other: wlshare reports its output's scale, the
 gateway labels the framebuffer with it, and the browser's density is declared

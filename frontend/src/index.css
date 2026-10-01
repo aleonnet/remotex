@@ -553,6 +553,30 @@ body {
   padding: 0.7rem 0.9rem 0.8rem 2.4rem;
 }
 
+/* The size a session will have: one line where the target has one here, radio
+   buttons where it offers two. */
+.picker-size {
+  display: flex;
+  flex-direction: column;
+  gap: 0.45rem;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  font-size: 0.85rem;
+  color: #c9d1d9;
+}
+
+.picker-size legend,
+.picker-size-heading {
+  padding: 0;
+  color: #8b949e;
+  font-size: 0.78rem;
+}
+
+.picker-size legend {
+  margin-bottom: 0.45rem;
+}
+
 .picker-option {
   display: flex;
   align-items: flex-start;

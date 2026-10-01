@@ -417,7 +417,7 @@ impl Selected {
             name: target.name.clone(),
             protocol: target.protocol.name(),
             subtype: target.subtype.map(Subtype::name),
-            resize: choices.resize,
+            resize: choices.resize(),
             clipboard: target.clipboard,
             audio: target.sound(*choices),
             passthrough: plan.passthrough().map(Passthrough::name),
@@ -1702,7 +1702,7 @@ mod tests {
 
 
     use super::*;
-    use crate::config::{Chroma, ChromaChoice};
+    use crate::config::{Chroma, ChromaChoice, Sizing};
     use crate::audio::PCM_CD_QUALITY;
     use crate::protocol::UNSCALED;
 
@@ -1717,11 +1717,11 @@ mod tests {
     );
 
     /// A session started with nothing but the window driving the size.
-    const RESIZE: Choices = Choices { resize: true, audio: false, passthrough: false };
+    const RESIZE: Choices = Choices { size: Sizing::Window, audio: false, passthrough: false };
     /// A session started with nothing but the remote's sound.
-    const SOUND: Choices = Choices { resize: false, audio: true, passthrough: false };
+    const SOUND: Choices = Choices { size: Sizing::Target, audio: true, passthrough: false };
     /// A session started with nothing but the target's passthrough.
-    const PASSED: Choices = Choices { resize: false, audio: false, passthrough: true };
+    const PASSED: Choices = Choices { size: Sizing::Target, audio: false, passthrough: true };
 
     /// What the connected status carries: the target's capabilities and what the
     /// session was started with. One struct rather than positional bools, and the
@@ -1752,7 +1752,8 @@ mod tests {
 
         /// What a session with this metadata is started with.
         const fn choices(self) -> Choices {
-            Choices { resize: self.resize, audio: self.audio, passthrough: false }
+            let size = if self.resize { Sizing::Window } else { Sizing::Target };
+            Choices { size, audio: self.audio, passthrough: false }
         }
 
         const fn camera(mut self) -> Self {
@@ -1799,8 +1800,7 @@ mod tests {
             password: String::new(),
             vnc_password: String::new(),
             domain: None,
-            width: Some(1),
-            height: Some(1),
+            size: Some((1, 1)),
             egfx: None,
             clipboard: meta.clipboard,
             camera: meta.camera,
@@ -1848,7 +1848,12 @@ mod tests {
             // carry each of the target's capability flags verbatim. The first two
             // and the fourth are named for what the tests start them with.
             fake_target_with("rdp-resize", Meta::of(Protocol::Rdp)),
-            fake_target_with("vnc-resize", Meta::of(Protocol::Vnc)),
+            // The VNC target a window can drive is wlshare: a plain one keeps
+            // its size.
+            TargetConfig {
+                subtype: Some(Subtype::Wlshare),
+                ..fake_target_with("vnc-resize", Meta::of(Protocol::Vnc))
+            },
             fake_target_with("vnc-clip", Meta::of(Protocol::Vnc).clipboard()),
             fake_target_with("rdp-audio", Meta::of(Protocol::Rdp)),
             fake_target_with("rdp-camera", Meta::of(Protocol::Rdp).camera()),
@@ -1905,9 +1910,9 @@ mod tests {
             AttachEvent::Msg(ServerMsg::Connected {
                 name: got,
                 protocol: got_protocol,
-                // The fake targets are all plain RDP and plain VNC, so there is no
-                // subtype to report either. `config.rs` owns what the Apple ones mean.
-                subtype: None,
+                // `config.rs` owns what a subtype means; the one fake with one is
+                // the wlshare target a window can drive.
+                subtype: _,
                 resize: got_resize,
                 clipboard: got_clipboard,
                 audio: got_audio,
@@ -1996,8 +2001,8 @@ mod tests {
 
     /// The client screen named on connect reaches the engine spawn intact:
     /// [`TargetConfig::opening_size`] reads it before any handshake, so a
-    /// screen dropped on this path would open every unpinned session at the
-    /// built-in default with nothing anywhere saying why.
+    /// screen dropped on this path would open every session that follows its
+    /// window at the built-in default with nothing anywhere saying why.
     #[tokio::test]
     async fn connect_hands_the_spawner_the_clients_screen() {
         let (hook_tx, hook_rx) = std_mpsc::channel();
@@ -2413,7 +2418,7 @@ mod tests {
             },
         );
         let mgr = Arc::new(SessionManager::with_spawner(vec![mac_target("mac")], spawner));
-        let started = Choices { resize: true, audio: false, passthrough: true };
+        let started = Choices { size: Sizing::Window, audio: false, passthrough: true };
 
         let token_a = mgr.claim(false, None).unwrap();
         let mut att_a = mgr.attach(&token_a, None, TAKES).await.unwrap();

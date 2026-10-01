@@ -13,7 +13,9 @@ This is a manual probe for display selection and dynamic-resolution behavior. St
         --viewport 1366x768 --viewport 1920x1080
 
 ``--resize``, ``--sound`` and ``--passthrough`` are what the picker's Start would
-carry: the session is started with each one named, and with none otherwise.
+carry: the session is started with each one named, and with none otherwise. Without
+``--resize`` the desktop is kept at the target's size: its configured one, or the
+default.
 
 Use ``--burst`` to send every requested viewport without waiting for the preceding
 resize response.
@@ -122,7 +124,7 @@ async def main() -> int:
         "--resize",
         action="store_true",
         help="start the session with the window driving the desktop's size, which is "
-        "what makes it act on --viewport",
+        "what makes it act on --viewport; a plain vnc target does not offer it",
     )
     parser.add_argument(
         "--sound",
@@ -300,7 +302,11 @@ async def main() -> int:
         f"ws://127.0.0.1:{args.port}/ws?session={token}&chroma=444"
         f"&apple_media={apple_media}&rdp_graphics={rdp_graphics}"
     )
-    choices = {"resize": args.resize, "audio": args.sound, "passthrough": args.passthrough}
+    choices = {
+        "size": "window" if args.resize else "target",
+        "audio": args.sound,
+        "passthrough": args.passthrough,
+    }
     # No cap on a message, as a browser has none: a keyframe of a whole desktop is
     # one batch, which a 2x screen can put past the library's 1 MiB default.
     async with websockets.connect(

@@ -38,8 +38,8 @@ browser rather than re-encoding them — see
 session started with its passthrough is not decoded here either: the host's
 graphics pipeline is passed on for the browser to compose, which is experimental — see
 [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
-Whether a session resizes with the window, takes the remote's sound and passes
-the remote's stream is chosen at the picker before it starts — see
+How a session's desktop is sized, whether it takes the remote's sound and whether
+it passes the remote's stream are chosen at the picker before it starts — see
 [What a session is started with](#what-a-session-is-started-with). Remote audio is encoded as
 Opus, save that passed AAC-ELD, and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
@@ -99,9 +99,11 @@ area and points here; read the area's section before changing what it covers.
   owning browser's reattach to the same target resumes an engine. Preserve the
   takeover and fresh-session behavior in
   [Session lifecycle](#session-lifecycle).
-- Resize, sound and passthrough are chosen under the target at the picker and
+- Size, sound and passthrough are chosen under the target at the picker and
   carried by `connect`; they are not config keys, and the gateway holds the
-  session to them. Which of the three a target shows is its type's to say
+  session to them. The size a session will have is shown before Start: a size
+  the desktop keeps, the target's `size` or the default, or the window's.
+  Which of the three a target shows is its type's to say
   (`TargetConfig::offers`): one it does not offer has no row and is refused in a
   `connect`, and one it offers that cannot be had is greyed with the reason. Do
   not add a config key that makes one of these choices, a session-time control
@@ -136,8 +138,10 @@ area and points here; read the area's section before changing what it covers.
   extend it to another engine, view or density.
 - `ClientMsg::Viewport` is in CSS points. `ServerMsg::Resize.scale` is remote
   pixel density, not a fit factor. A session started with resize has the window
-  continuously driving the remote size; the choice is made once, at the picker,
-  so do not add a resize toggle to the session. Density is the wire's word
+  continuously driving the remote size, and any other keeps the size it opened
+  at; the choice is made once, at the picker, so do not add a resize toggle to
+  the session, and do not offer the window to a plain `vnc` target, whose answer
+  to a size is not known before it is dialled. Density is the wire's word
   alone, and a plain `vnc` target, or a `wlshare` one whose density request goes
   unanswered, is presented at 1x: do not add a client-side density control, and never label a framebuffer with a density the
   server has not confirmed. Read
@@ -407,8 +411,8 @@ video_quality / render_chroma / render_adaptive, and the session's choices
 ```
 
 Every size an engine asks a remote for is held under the stream's picture ceiling
-(`video::fit_ceiling`: a long side of 3840 and a short side of 2400), and a pinned
-`width`/`height` past it is refused at config load. A remote the gateway cannot
+(`video::fit_ceiling`: a long side of 3840 and a short side of 2400), and a
+configured `size` past it is refused at config load. A remote the gateway cannot
 size can still answer past it; what happens then is
 [past the ceiling](#past-the-ceiling).
 
@@ -1182,29 +1186,56 @@ full-repaint request instead of a reconnect.
 ### What a session is started with
 
 Three things about a session are chosen by whoever starts it, before it starts:
-whether the window drives the desktop's size, whether the remote's sound is
-taken, and whether the remote's own stream is passed through. Picking a target at
-the picker opens it, its options show under it with a Start button, and Start
-sends `connect` with the choices (`Choices` in `src/config.rs`). None of them is
-a config key.
+how the desktop is sized, whether the remote's sound is taken, and whether the
+remote's own stream is passed through. Picking a target at the picker opens it,
+its options show under it with a Start button, and Start sends `connect` with the
+choices (`Choices` in `src/config.rs`). None of them is a config key.
 
 Which options a target shows is its type's to say, from `TargetConfig::offers`,
 and `GET /api/targets` carries it:
 
-| Target | Resize | Sound | Passthrough |
+| Target | Window drives the size | Sound | Passthrough |
 |---|---|---|---|
-| `rdp` | shown | shown | shown: the graphics pipeline, experimental |
-| `vnc` | shown | hidden | hidden |
-| `vnc`, `wlshare` | shown | shown | hidden: its VP9 is the subtype's picture |
-| `vnc`, `ard` | hidden | hidden | hidden |
-| `vnc`, `ard` with `virtual_display` | shown | hidden | hidden |
-| `vnc`, `ard-high-performance` | shown | hidden: always carried | shown: the Mac's media stream |
+| `rdp` | yes | shown | shown: the graphics pipeline, experimental |
+| `vnc` | no | hidden | hidden |
+| `vnc`, `wlshare` | yes | shown | hidden: its VP9 is the subtype's picture |
+| `vnc`, `ard` | no | hidden | hidden |
+| `vnc`, `ard` with `virtual_display` | yes | hidden | hidden |
+| `vnc`, `ard-high-performance` | yes | hidden: always carried | shown: the Mac's media stream |
 
+- **The size is shown before Start.** A desktop is sized one of three ways
+  (`Sizing` in `src/config.rs`): kept at the target's size, which is its
+  `size = "1920x1080"` or the default 1440×900 where it sets none; kept at the
+  default on a target that configures another; or driven by the client's window,
+  which is what *started with resize* means throughout and what `connected`
+  reports as `resize`. Which of them the picker shows depends on the target and
+  on the client (`sizeOptions` in `frontend/src/targetChoices.ts`):
+
+  | Target | Desktop browser or tablet | Phone |
+  |---|---|---|
+  | the window cannot drive it | the target's size | the target's size |
+  | the window can, and a `size` is set | the target's size, or the window | the target's size, or the default |
+  | the window can, and no `size` is set | the window | the default |
+
+  One size is stated; two are a choice, the configured one first, so a size the
+  operator set is the size until somebody chooses another. A phone is offered no
+  window, because a portrait screen that small is no desktop's shape. A tablet's
+  window is its screen: it asks once, in landscape, and rotating does not ask
+  again. A plain `vnc` target is not offered the window either: whether its
+  server takes a size is known only once it is dialled, which is too late for a
+  picker, so it is asked once for the size it keeps and the picker says a server
+  that takes none keeps its own. A Mac sharing its physical displays is shown at
+  their size and takes no `size` key. A Mac's virtual display takes one of at
+  most 1920×1080: it opens at the client's density under a 3840×2160 ceiling of
+  pixels, so a larger size would be shrunk for a Retina client after the picker
+  had stated it, and is refused at parse instead. A `connect` always names its
+  size: one without `choices.size` is refused, since the gateway picks no size
+  on a browser's behalf.
 - **Not offered is not shown.** An option the target type does not have has no
   row. High Performance's sound is such a one: the Mac refuses the picture
   without it, so there is nothing to choose, and the session's Mute is what a
   person has. An `rdp` target with `egfx = false` has no pipeline, so neither
-  resize nor the pipeline's row. A `connect` that names a choice the target does
+  the window nor the pipeline's row. A `connect` that names a choice the target does
   not offer is refused with an `error`, and the slot stays as it was.
 - **Offered but unavailable is greyed, with the reason.** A passthrough is
   greyed wherever the browser cannot take it: one that decodes neither the Mac's
@@ -1224,10 +1255,11 @@ and `GET /api/targets` carries it:
   audio context, so a session started with sound comes up playing; in Safari and
   on iOS a reload has no gesture, and comes back muted. A mute is the tab's, for
   its session, and survives a reload.
-- **The browser remembers.** What was ticked under a target is kept in the
+- **The browser remembers.** What was chosen under a target is kept in the
   browser's local storage per target, and is how the target opens next time.
-  Everything starts unticked: a pinned size stays the size and no remote's sound
-  plays until somebody asks. A greyed row is not remembered.
+  Until then a configured size is the size and no remote's sound plays. A greyed
+  row is not remembered, and a remembered size the target does not offer this
+  client is not sent.
 - **A session is held to its choices.** The slot keeps them beside the selected
   target (`Selected` in `src/session.rs`). `connected` reports them: `resize`,
   `audio` and `passthrough`. A reattach resumes the session and a takeover
@@ -1274,7 +1306,8 @@ one. Both appear on the client's session card, which
 (`mediaLabel.ts`).
 
 `GET /api/targets` carries `subtype` too, beside the options each target offers
-(`resize`, `audio`, `passthrough` and `passthroughOnly`), so the picker names it one step
+(`resize`, `audio`, `passthrough` and `passthroughOnly`) and the sizes it keeps
+(`size`, the configured one, and `defaultSize`), so the picker names it one step
 earlier — the difference between two Macs in that list is a choice being made,
 not something to discover after connecting. The row uses the config spelling
 alone (`VNC · ard · 192.0.2.10:5900`); the card, which describes one target and
@@ -1635,45 +1668,44 @@ continuously and on every engine alike: an engine that has it applies every
 engine's own density — an engine without it drops them all, and the client sends
 them exactly when `connected` said `resize` — on every window change, with no
 toggle and no manual button in the session. Standard `ard` does not offer
-resize, because it shares physical displays.
+resize, because it shares physical displays, and a plain `vnc` target does not,
+because its server's answer is not known before it is dialled.
 
-The opening size is one rule for every engine that can ask for one: the pinned
-`width`/`height` when the config sets both, else the full resolution of the
-client's own screen — carried in the `connect` message so it exists before the
-engine's handshake — else `DEFAULT_SIZE`, 1440×900 points. That default is
-sized for what an unasked-for session costs at 2x: a HiDPI client renders it at
-twice the points, so 1920×1080 would mean capturing, scaling and encoding 4K
-every frame, where 1440×900 comes to 2880×1800. An operator who wants the larger
-desk pins `width`/`height`. A mobile `HostDisplay::fit` client has no screen
-suitable for laying out a desktop, so it uses the pinned size or that default
-while its density still counts. See
-`TargetConfig::opening_size`; `width` and `height` remain options because whether
-the operator specified them is meaningful.
+The opening size is one rule for every engine that can ask for one
+(`TargetConfig::opening_size`). A session that keeps its size opens at it: the
+target's `size`, else `DEFAULT_SIZE`, 1440×900 points, or that default on a
+target whose configured size a phone declined. A session started with resize
+opens at the full resolution of the client's own screen — carried in the
+`connect` message so it exists before the engine's handshake — and the configured
+size is not used. The default is sized for what an unasked-for session costs at
+2x: a HiDPI client renders it at twice the points, so 1920×1080 would mean
+capturing, scaling and encoding 4K every frame, where 1440×900 comes to
+2880×1800. An operator who wants the larger desk configures a `size`. A mobile
+`HostDisplay::fit` client has no screen suitable for laying out a desktop: a
+tablet that starts a session with resize opens it at the default and then asks
+once for its screen in landscape, and a phone is never offered resize.
 
-A pin is spent whether or not the session resizes, because the two answer
-different questions: the pin is the size the session *opens* at, and resize is
-whether the browser window drives it afterwards. RDP connects at the pin, High
-Performance builds its virtual display at it, and a plain or `wlshare` target asks
-for it with a single `SetDesktopSize` as soon as the server declares support — seeded into the
-same held-request slot a viewport report uses, so it goes out on the first
-`ExtendedDesktopSize` rect and no earlier. A pinned target started without resize
-stays at the pin on all three. Started with it, RDP and High Performance open at the pin
-and then follow the window, because they state a size at connect and no report
-can precede that; a plain or `wlshare` target cannot state one until the server
-declares support,
-by which time the browser — which reports its window as soon as `connected`
-reaches it — has superseded the held pin with the size it actually wants, so the
-session opens at the window and the pin is left answering a later default-size
-request. That supersede is the same rule any stale hold gets: a replay must never
-ask for a desktop the window has already left. Standard `ard` is the only engine
-with nothing to spend a pin on, and there `width`/`height` only answer a later
-default-size request.
+A kept size is stated the way each engine states one. RDP connects at it, a Mac's
+virtual display is created at it, and a plain or `wlshare` target asks for it
+with a single `SetDesktopSize` as soon as the server declares support — seeded
+into the same held-request slot a viewport report uses, so it goes out on the
+first `ExtendedDesktopSize` rect and no earlier. A server that never declares
+support, or refuses the request, keeps its own size. Standard `ard` is the only
+engine with no size to state, and `size` is refused on it at config load.
+
+What a kept size says about density follows each vendor's own client on a Mac.
+An RDP session at a kept size states no scale factor, so the host keeps its own
+scaling, which is how Microsoft's client behaves with "Optimize for Retina
+displays" unchecked; only a session started with resize renders at the client's
+density.
+A High Performance Mac opens its virtual display at the client screen's density
+whatever names the points, which is how Apple's Screen Sharing opens one.
 
 What is engine-specific is the mechanism:
 
 | Engine | Started with resize |
 |---|---|
-| Plain VNC | applies a requested size, on servers accepting SetDesktopSize |
+| Plain VNC | not offered: it is asked once for the size it keeps |
 | wlshare | applies a requested size, and the client's reported display density |
 | Apple Standard VNC | not offered: it shares physical displays |
 | Apple High Performance VNC | applies dynamic-resolution sizes within its fixed 3840×2160 backing ceiling |
@@ -1685,7 +1717,7 @@ layout sizes and the sizes a plain or `wlshare` target asks for all pass through
 `video::fit_ceiling`; High Performance separately keeps its native 3840×2160
 backing ceiling. This changes what the remote is asked to render, not how the
 browser scales it: a 5K window receives at most a 3840×2400 desktop at 100%, with
-the remainder bare. A pinned size already
+the remainder bare. A configured size already
 over the ceiling at 1x is rejected during config parsing; a physical or
 non-resizable remote may still answer past it because the gateway cannot ask it
 for a smaller desktop: a VNC one [holds the session](#past-the-ceiling) without a
@@ -1921,8 +1953,9 @@ offered either: their encoding lists are measured exact, and adding to one costs
 the display layout.
 
 The client advertises DesktopSize and ExtendedDesktopSize on every RFB 3.8
-target, so a server can always say its size changed; the session's resize decides only
-whether the window asks it to change, with `SetDesktopSize`. Their clipboard uses Extended Clipboard when the server
+target, so a server can always say its size changed; the session's sizing decides
+what asks it to change with `SetDesktopSize`: the size it keeps, once, or the
+window on a `wlshare` target started with resize. Their clipboard uses Extended Clipboard when the server
 advertises it and falls back to Latin-1 `ServerCutText` otherwise. Both Apple
 subtypes negotiate Apple's display metadata and native pasteboard instead, and ask
 for ZRLE in their first `SetEncodings`.
@@ -1976,8 +2009,8 @@ its resizing, with Standard's ZRLE picture, no media stream offered and no sound
 Apple's viewer never offers that combination; it was tested on macOS 26 only.)
 The gateway sends
 `SetDisplayConfiguration` (`0x1d`) during setup, with one mode built from the
-pinned `width` and `height` when both are set, or from the connecting client's
-screen resolution otherwise, at that screen's density. The mode sits under the
+size the session keeps, or from the connecting client's screen resolution in a
+session started with resize, at that screen's density either way. The mode sits under the
 native descriptor's fixed 3840×2160 backing ceiling. Once connected, the remote
 Mac's physical displays are disabled and all of its windows are placed on that
 virtual display. Apple's

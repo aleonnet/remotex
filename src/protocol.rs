@@ -86,8 +86,9 @@ pub struct HostDisplay {
     /// with pinch zoom on top — the one client that does (`CAN_PINCH_ZOOM` in
     /// `frontend/src/useRemoteDesktop.ts`). Its screen's resolution is then
     /// not an opening size: the desktop is not shown at 100% and a phone's
-    /// 430×932 points is no desktop to lay windows out on, so such a client
-    /// opens a target with no pinned size at [`crate::config::DEFAULT_SIZE`]
+    /// 430×932 points is no desktop to lay windows out on, so a session of
+    /// such a client that follows the window opens at
+    /// [`crate::config::DEFAULT_SIZE`]
     /// ([`crate::config::TargetConfig::opening_size`]). Its density still
     /// counts. Absent on the wire reads as a pointer client.
     #[serde(default)]
@@ -255,15 +256,12 @@ pub enum ClientMsg {
     /// pixels: a client that had to multiply by the scale in
     /// [`ServerMsg::Resize`] first would have nothing to multiply by right after
     /// a (re)connect, and a report in pixels at a scale the engine had already
-    /// moved past asked for half a desktop. Applied by any engine the target
-    /// started with resize, and dropped by every other. A desktop client
+    /// moved past asked for half a desktop. Applied by an engine whose session
+    /// follows the window, and dropped by every other. A desktop client
     /// sends one when it connects and on every window change after
     /// [`ServerMsg::Connected`] says `resize`; the backend simply applies each
     /// valid report it receives.
     Viewport { w: u16, h: u16 },
-    /// Restore the engine's configured or created default size. This carries no
-    /// dimensions so a pinch-zoom client need not invent a desktop shape.
-    DefaultSize,
     /// The screen this client's window is on: its full resolution in points
     /// (`w`/`h`, CSS pixels) and its density in hundredths — 100 for a 1x
     /// screen, 200 for a Retina one. Sent on connect and again whenever the
@@ -307,22 +305,21 @@ pub enum ClientMsg {
     ///
     /// `display` is the client's screen as [`ClientMsg::HostDisplay`] would
     /// report it, carried here so it exists *before* the engine's handshake:
-    /// a target with no configured `width`/`height` opens at this screen's
-    /// full resolution, and by the time a `hostDisplay` message could arrive
+    /// a session that follows the window opens at this screen's full
+    /// resolution, and by the time a `hostDisplay` message could arrive
     /// the opening size has already been asked of the remote (for a High
     /// Performance Mac it has already shaped the window layout). Optional so
     /// a probe with no screen can still connect.
     ///
-    /// `choices` is what was ticked under the target before Start: whether the
-    /// window drives the desktop's size, whether the remote's sound is taken, and
-    /// whether the target's own stream is passed. They hold for the life of the
-    /// session ([`crate::config::Choices`]); a connect that names none starts
-    /// with none.
+    /// `choices` is what was chosen under the target before Start: how the
+    /// desktop is sized, whether the remote's sound is taken, and whether the
+    /// target's own stream is passed. They hold for the life of the
+    /// session ([`crate::config::Choices`]). A connect without them, or without
+    /// their size, is refused: the gateway picks no size on a browser's behalf.
     Connect {
         target: String,
         #[serde(default)]
         display: Option<HostDisplay>,
-        #[serde(default)]
         choices: crate::config::Choices,
     },
     /// Tear the current session's engine down and return to the picker
@@ -1491,12 +1488,6 @@ mod tests {
         // Viewport dimensions beyond the protocol's u16 range are rejected at
         // the deserialization boundary, not clamped.
         assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"viewport","w":70000,"h":1}"#).is_err());
-        // The sizeless request beside it, which carries no dimensions at all:
-        // what "default" means is the far side's to say.
-        assert!(matches!(
-            serde_json::from_str::<ClientMsg>(r#"{"type":"defaultSize"}"#).unwrap(),
-            ClientMsg::DefaultSize
-        ));
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(r#"{"type":"refresh"}"#).unwrap(),
             ClientMsg::Refresh
@@ -1518,28 +1509,32 @@ mod tests {
         // A connect names the screen it is made from, and a probe without one
         // still connects.
         match serde_json::from_str::<ClientMsg>(
-            r#"{"type":"connect","target":"mac","display":{"w":2560,"h":1440,"scale":100}}"#,
+            r#"{"type":"connect","target":"mac","display":{"w":2560,"h":1440,"scale":100},"choices":{"size":"target"}}"#,
         )
         .unwrap()
         {
             ClientMsg::Connect { target, display, choices } => {
                 assert_eq!(target, "mac");
                 assert_eq!(display, Some(HostDisplay { w: 2560, h: 1440, scale: 100, fit: false }));
-                assert_eq!(choices, crate::config::Choices::default(), "none named, none made");
+                assert_eq!(choices, crate::config::Choices::default(), "sound and passthrough only where named");
             }
             other => panic!("unexpected: {other:?}"),
         }
-        // What was ticked under the target rides the same message, each choice
-        // false unless it is named, and one this gateway does not know is refused
-        // rather than dropped.
+        // What was chosen under the target rides the same message, sound and
+        // passthrough false unless named, and a choice this gateway does not know
+        // is refused rather than dropped.
         match serde_json::from_str::<ClientMsg>(
-            r#"{"type":"connect","target":"mac","choices":{"resize":true,"passthrough":true}}"#,
+            r#"{"type":"connect","target":"mac","choices":{"size":"window","passthrough":true}}"#,
         )
         .unwrap()
         {
             ClientMsg::Connect { choices, .. } => assert_eq!(
                 choices,
-                crate::config::Choices { resize: true, audio: false, passthrough: true }
+                crate::config::Choices {
+                    size: crate::config::Sizing::Window,
+                    audio: false,
+                    passthrough: true
+                }
             ),
             other => panic!("unexpected: {other:?}"),
         }
@@ -1550,13 +1545,24 @@ mod tests {
             .is_err()
         );
         assert!(matches!(
-            serde_json::from_str::<ClientMsg>(r#"{"type":"connect","target":"mac"}"#).unwrap(),
+            serde_json::from_str::<ClientMsg>(
+                r#"{"type":"connect","target":"mac","choices":{"size":"default"}}"#
+            )
+            .unwrap(),
             ClientMsg::Connect { display: None, .. }
         ));
+        // The size is the browser's to name: no connect is given one it did not ask for.
+        for unsized_connect in [
+            r#"{"type":"connect","target":"mac"}"#,
+            r#"{"type":"connect","target":"mac","choices":{}}"#,
+            r#"{"type":"connect","target":"mac","choices":{"audio":true}}"#,
+        ] {
+            assert!(serde_json::from_str::<ClientMsg>(unsized_connect).is_err(), "{unsized_connect}");
+        }
         // A pinch-zoom client says so beside its screen; a client that says
         // nothing is a pointer client.
         match serde_json::from_str::<ClientMsg>(
-            r#"{"type":"connect","target":"mac","display":{"w":430,"h":932,"scale":300,"fit":true}}"#,
+            r#"{"type":"connect","target":"mac","display":{"w":430,"h":932,"scale":300,"fit":true},"choices":{"size":"target"}}"#,
         )
         .unwrap()
         {

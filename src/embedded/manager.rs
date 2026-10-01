@@ -704,16 +704,7 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
     }
     lines.push(spec("sign-in", &credentials.join(", ")));
 
-    lines.push(spec(
-        "opens at",
-        &match target.pinned_size() {
-            Some((w, h)) => format!("{w}×{h} points, pinned"),
-            None => format!(
-                "the client screen's own size, or {}×{} when it names none",
-                DEFAULT_SIZE.0, DEFAULT_SIZE.1
-            ),
-        },
-    ));
+    lines.push(spec("size", &describe_size(target)));
     lines.push(spec("picker", &describe_offers(target)));
 
     if target.protocol == Protocol::Rdp {
@@ -741,6 +732,21 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
     ));
     lines.push(spec("render", &target.render_summary()));
     lines
+}
+
+/// The size a session on this target has: the one it keeps, and the window where
+/// the picker offers following it.
+fn describe_size(target: &TargetConfig) -> String {
+    if !target.sized() {
+        return "the Mac's displays as they are".to_owned();
+    }
+    let (w, h) = DEFAULT_SIZE;
+    match (target.size, target.offers().resize) {
+        (Some((w, h)), true) => format!("{w}×{h} points, or the client's window"),
+        (Some((w, h)), false) => format!("{w}×{h} points"),
+        (None, true) => format!("the client's window, or {w}×{h} points on a phone"),
+        (None, false) => format!("{w}×{h} points, the default"),
+    }
 }
 
 /// What whoever starts a session on this target chooses at the picker, which is

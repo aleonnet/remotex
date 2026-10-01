@@ -78,10 +78,9 @@ pub enum Subtype {
     ///
     /// High Performance Screen Sharing uses a virtual display rather than the
     /// Mac's physical displays. This gateway requests one virtual display at the
-    /// pinned [`TargetConfig::width`] and [`TargetConfig::height`] when both are
-    /// set, or at the connecting client's screen resolution otherwise. Apple's
-    /// native pasteboard payloads are carried inside the encrypted record
-    /// transport when `clipboard` is enabled. In a session started with resize,
+    /// session's opening size ([`TargetConfig::opening_size`]). Apple's native
+    /// pasteboard payloads are carried inside the encrypted record transport
+    /// when `clipboard` is enabled. In a session that follows the window,
     /// viewport reports replace the virtual display's one advertised mode and the
     /// Mac answers with its new layout.
     ///
@@ -386,7 +385,7 @@ impl Passthrough {
 /// [`TargetConfig::offers`]. One that is not offered has no row there.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Offers {
-    /// Whether the window can drive the desktop's size.
+    /// Whether the window can drive the desktop's size ([`Sizing::Window`]).
     pub resize: bool,
     /// Whether the remote's sound is a choice. False both where there is none to
     /// take and where it is always carried, as on `ard-high-performance`.
@@ -400,28 +399,14 @@ pub struct Offers {
 /// the slot keeps them beside the target, and a takeover reconnects with them.
 ///
 /// Each is refused on a target that does not offer it
-/// ([`TargetConfig::accepts`]). A connect that names none starts with none.
+/// ([`TargetConfig::accepts`]). The size is always named, since which one a
+/// session has is the browser's to say and never this end's to assume; sound and
+/// passthrough are taken only where they are named.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Choices {
-    /// Hand the desktop's size to the client's window. A desktop client reports
-    /// every window change while this is on; there is no client-side mode or
-    /// manual resize command beside it.
-    ///
-    /// On RDP this also turns on density matching, because there a density *is* a
-    /// resize: the Display Control channel this negotiates is the only way to tell
-    /// a live session to render at 200%, so a Retina client gets twice the pixels
-    /// and a UI drawn twice as large. Off, an RDP session ignores the client's
-    /// density entirely. An RDP resize is the graphics pipeline's, so a target with
-    /// `egfx = false` does not offer it.
-    ///
-    /// On a virtual display — `ard-high-performance`, or `ard` with
-    /// [`TargetConfig::virtual_display`] — the setup descriptor always enables the
-    /// Mac's dynamic geometry; this decides only whether the window keeps driving
-    /// it after the open. Standard `ard` without one does not offer it, because it
-    /// exposes physical displays.
-    #[serde(default)]
-    pub resize: bool,
+    /// How the desktop is sized.
+    pub size: Sizing,
     /// Take the remote's sound. RDP negotiates it at connect (MS-RDPEA); a
     /// `wlshare` target lists wlshare's audio extension, FLAC on the RFB connection
     /// ([`crate::vnc_audio`]). Without it neither is asked, so the host keeps
@@ -432,6 +417,54 @@ pub struct Choices {
     /// Pass the target's [`Passthrough`].
     #[serde(default)]
     pub passthrough: bool,
+}
+
+impl Choices {
+    /// Whether the client's window drives the desktop's size.
+    pub fn resize(self) -> bool {
+        self.size == Sizing::Window
+    }
+}
+
+/// How a session's desktop is sized: at a size it keeps, or by the client's
+/// window. The picker shows the size a session will have before Start.
+///
+/// Which are offered depends on the target and on the client. A target the
+/// window cannot drive ([`Offers::resize`]) has [`Self::Target`] alone. One it
+/// can drive offers a client with a window to follow, a desktop browser or a
+/// tablet, [`Self::Window`], and beside it [`Self::Target`] where the operator
+/// configured a size; it offers a phone, whose window is no desktop's shape,
+/// [`Self::Target`] and, where a size is configured, [`Self::BuiltIn`].
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sizing {
+    /// The target's size, kept for the session: its configured
+    /// [`TargetConfig::size`], or [`DEFAULT_SIZE`] where it has none.
+    #[default]
+    Target,
+    /// [`DEFAULT_SIZE`], kept for the session, on a target that configures
+    /// another.
+    #[serde(rename = "default")]
+    BuiltIn,
+    /// The client's window drives the size, and the configured one is not used. A
+    /// desktop client reports every window change; a tablet asks once for its
+    /// screen. There is no client-side mode or manual resize command beside it.
+    ///
+    /// On RDP this also turns on density matching, because there a density *is* a
+    /// resize: the Display Control channel this negotiates is the only way to tell
+    /// a live session to render at 200%, so a Retina client gets twice the pixels
+    /// and a UI drawn twice as large. At a kept size an RDP session ignores the
+    /// client's density entirely. An RDP resize is the graphics pipeline's, so a
+    /// target with `egfx = false` does not offer it.
+    ///
+    /// On a virtual display — `ard-high-performance`, or `ard` with
+    /// [`TargetConfig::virtual_display`] — the setup descriptor always enables the
+    /// Mac's dynamic geometry; this decides only whether the window keeps driving
+    /// it after the open. Standard `ard` without one does not offer it, because it
+    /// exposes physical displays. Neither does a plain `vnc` target: whether its
+    /// server accepts a size is known only after it is dialled, which is too late
+    /// for a picker to offer it.
+    Window,
 }
 
 /// A choice made for a target whose type does not offer it.
@@ -589,41 +622,26 @@ pub struct TargetConfig {
     /// nowhere to send it.
     #[serde(default)]
     pub domain: Option<String>,
-    /// Pinned desktop width, in points. Optional, and *specified* means
-    /// something: a target with a pinned size opens at it, while one without
-    /// opens at the full resolution of the client's own screen — see
-    /// [`Self::opening_size`]. Both keys come as a pair or not at all
-    /// ([`ConfigFile::parse`]). Also the answer to
-    /// [`crate::protocol::ClientMsg::DefaultSize`], a client with no
-    /// desktop-shaped window of its own asking for whatever size this end
-    /// considers right.
+    /// The size the desktop is kept at, in points, written as width by height:
+    /// `size = "1920x1080"`. Optional: a target without one keeps
+    /// [`DEFAULT_SIZE`] instead. A session that follows the client's window
+    /// ([`Sizing::Window`]) does not use it — see [`Self::opening_size`].
     ///
-    /// How the pin is spent depends on the engine, because a pin is an opening
-    /// size and each has its own way of stating one: RDP connects at it, High
-    /// Performance creates its virtual display at it, and a generic VNC server
+    /// How a kept size is stated depends on the engine: RDP connects at it, a
+    /// Mac's virtual display is created at it, and a plain or wlshare VNC server
     /// is asked for it with one `SetDesktopSize`, as soon as it declares support
-    /// (`Flags::pinned` in src/vnc.rs). Independent of [`Choices::resize`], which
-    /// governs whether the *window* drives the size afterwards: without it the
-    /// session stays at the pin, and with it RDP and High Performance open at
-    /// the pin and then follow the browser, because both state a size at connect
-    /// and no report can precede that. Generic VNC cannot state one until the
-    /// server declares support, by which time a resizing browser has already
-    /// reported its window and superseded the pin, so such a session opens at
-    /// the window and the pin is left answering `DefaultSize`. Standard `ard` is
-    /// the exception with nothing to spend a pin on — it exposes the Mac's
-    /// physical displays, which this gateway never resizes — and there the keys
-    /// only answer a later default-size request; with [`Self::virtual_display`]
-    /// it opens its virtual display at the pin, as High Performance does.
+    /// (`Flags::kept` in src/vnc.rs) — a server that never does, or refuses,
+    /// keeps its own. Standard `ard` shares the Mac's physical displays, which
+    /// this gateway never resizes, so the key is refused there
+    /// ([`ConfigFile::parse`]); with [`Self::virtual_display`] it sizes the
+    /// virtual display, as on High Performance.
     ///
     /// Points rather than pixels, because the density can move underneath it:
-    /// an RDP connect happens at 1x and a Retina client then asks for twice
-    /// the pixels, and `DefaultSize` has to keep meaning the same desktop
-    /// rather than half of one. See `Density` in src/rdp.rs.
-    #[serde(default)]
-    pub width: Option<u16>,
-    /// Pinned desktop height, in points. See [`Self::width`].
-    #[serde(default)]
-    pub height: Option<u16>,
+    /// a High Performance Mac opens at the client's density whatever the size,
+    /// and a size has to keep meaning the same desktop rather than half of one.
+    /// See `Density` in src/rdp.rs.
+    #[serde(default, deserialize_with = "size")]
+    pub size: Option<(u16, u16)>,
     /// UNOFFICIAL. Open Standard mode (`subtype = "ard"`) on one virtual display
     /// instead of the Mac's physical displays: the `SetDisplayConfiguration` High
     /// Performance sends, with Standard's ZRLE picture and no media stream. The
@@ -781,35 +799,60 @@ pub const DEFAULT_AUDIO_BITRATE_KBPS: u32 = 96;
 /// the whole point of giving bitrate up.
 pub const DEFAULT_AUDIO_ADAPTIVE_MIN_KBPS: u32 = 32;
 
+/// Read [`TargetConfig::size`]: a width by a height, as in `"1920x1080"`.
+fn size<'de, D>(deserializer: D) -> Result<Option<(u16, u16)>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let written = String::deserialize(deserializer)?;
+    written
+        .split_once('x')
+        .and_then(|(w, h)| Some((w.parse().ok()?, h.parse().ok()?)))
+        .map(Some)
+        .ok_or_else(|| {
+            serde::de::Error::custom(format!(
+                "size {written:?} is not a width by a height, as in \"1920x1080\""
+            ))
+        })
+}
+
+/// A configured size as the config file writes it, for a refusal.
+fn size_text(size: Option<(u16, u16)>) -> String {
+    size.map_or_else(String::new, |(w, h)| format!("{w}x{h}"))
+}
+
 impl TargetConfig {
-    /// The size a session opens at, in points: the explicitly configured
-    /// `width`/`height` when the operator pinned one, else the full resolution
-    /// of the client's own screen (named in
-    /// [`crate::protocol::ClientMsg::Connect`]), else [`DEFAULT_SIZE`]. One
-    /// rule for every engine that can ask for an opening size, so none of them
-    /// branches on its own.
+    /// The size a session started with `sizing` opens at, in points. One rule
+    /// for every engine that can ask for an opening size, so none of them
+    /// branches on its own. A kept size is also the size the session stays at.
     ///
-    /// A client that fits the desktop to its viewport and pinch-zooms
-    /// ([`HostDisplay::fit`]) has a screen but not one to open at: it is the
-    /// one client not showing the desktop at 100%, and its screen is a phone's
-    /// or a tablet's. It takes the pinned size or the default, and its density
-    /// still counts, elsewhere.
-    pub fn opening_size(&self, display: Option<HostDisplay>) -> (u16, u16) {
-        self.pinned_size()
-            .or(display.filter(|d| !d.fit).map(|d| (d.w, d.h)))
-            .unwrap_or(DEFAULT_SIZE)
+    /// A session that follows the window opens at the full resolution of the
+    /// client's own screen (named in [`crate::protocol::ClientMsg::Connect`]),
+    /// which the window then replaces. A client that fits the desktop to its
+    /// viewport and pinch-zooms ([`HostDisplay::fit`]) has a screen but not one
+    /// to open at: it is the one client not showing the desktop at 100%, and
+    /// its screen is a tablet's, to be asked for in landscape once the session
+    /// is up. It opens at the default, as does a client that named no screen.
+    pub fn opening_size(&self, sizing: Sizing, display: Option<HostDisplay>) -> (u16, u16) {
+        match sizing {
+            Sizing::Target => self.kept_size(),
+            Sizing::BuiltIn => DEFAULT_SIZE,
+            Sizing::Window => {
+                display.filter(|d| !d.fit).map_or(DEFAULT_SIZE, |d| (d.w, d.h))
+            }
+        }
     }
 
-    /// The explicitly configured size, when the operator pinned one. Parse
-    /// guarantees the keys come as a pair.
-    pub fn pinned_size(&self) -> Option<(u16, u16)> {
-        self.width.zip(self.height)
+    /// The size this target's desktop is kept at where the window does not
+    /// drive it: the configured [`Self::size`], or [`DEFAULT_SIZE`].
+    pub fn kept_size(&self) -> (u16, u16) {
+        self.size.unwrap_or(DEFAULT_SIZE)
     }
 
-    /// What [`crate::protocol::ClientMsg::DefaultSize`] restores: the pinned
-    /// size, or the same default a sizeless session would have opened at.
-    pub fn default_size(&self) -> (u16, u16) {
-        self.pinned_size().unwrap_or(DEFAULT_SIZE)
+    /// Whether a session states this target's size at all. Standard `ard` on
+    /// the Mac's physical displays does not: it shows them as they are.
+    pub fn sized(&self) -> bool {
+        !self.apple() || self.has_virtual_display()
     }
 
     /// RDP's graphics pipeline switch, on unless the operator turned it off.
@@ -864,8 +907,9 @@ impl TargetConfig {
                 audio: true,
                 passthrough: self.egfx().then_some(Passthrough::RdpGraphics),
             },
-            // Read as any VNC server, which carries no sound.
-            (Protocol::Vnc, None) => Offers { resize: true, audio: false, passthrough: None },
+            // Read as any VNC server, which carries no sound, and whose answer
+            // to a size is not known until it is dialled.
+            (Protocol::Vnc, None) => Offers { resize: false, audio: false, passthrough: None },
             // Its VP9 is the subtype's picture and not a choice.
             (Protocol::Vnc, Some(Subtype::Wlshare)) => {
                 Offers { resize: true, audio: true, passthrough: None }
@@ -888,7 +932,13 @@ impl TargetConfig {
     pub fn accepts(&self, choices: Choices) -> Result<(), NotOffered> {
         let offers = self.offers();
         let refused = [
-            ("resize", choices.resize && !offers.resize),
+            ("resize", choices.resize() && !offers.resize),
+            // The default beside a configured size is a phone's alternative to
+            // following a window, so it goes with a size and a window to follow.
+            (
+                "the default size",
+                choices.size == Sizing::BuiltIn && !(offers.resize && self.size.is_some()),
+            ),
             ("sound", choices.audio && !offers.audio),
             ("a passthrough", choices.passthrough && offers.passthrough.is_none()),
         ];
@@ -1036,11 +1086,11 @@ impl TargetConfig {
 /// session nobody asked to be that large. 1440×900 is 2880×1800 at 2x,
 /// five-eighths of the pixels, and the shape a working surface prefers besides.
 ///
-/// It is also what a phone or tablet gets: a touch client asks for this rather
-/// than its own screen, which is portrait and far too small to be a desktop
-/// (`sendMobileSize` in `frontend/src/useRemoteDesktop.ts`). An operator who
-/// wants the larger desk pins `width`/`height` and pays for it deliberately,
-/// up to the ceiling a video stream encodes within
+/// It is also what a phone gets: its own screen is portrait and far too small
+/// to be a desktop, so the picker offers it no window to follow
+/// (`sizeFollows` in `frontend/src/useRemoteDesktop.ts`). An operator who
+/// wants the larger desk configures a `size` and pays for it deliberately, up
+/// to the ceiling a video stream encodes within
 /// ([`crate::video::MAX_LONG_SIDE`]).
 pub const DEFAULT_SIZE: (u16, u16) = (1440, 900);
 
@@ -1596,44 +1646,53 @@ impl ConfigFile {
             );
         }
         for target in &config.targets {
-            // A pinned size is a pair. One key alone is not half a pin — it is a
-            // config that would silently open at a size the operator half-chose.
+            // A size of nothing is not a size: a zero axis would ask every engine
+            // for a desktop that cannot exist.
             anyhow::ensure!(
-                target.width.is_some() == target.height.is_some(),
-                "target {:?} sets {} without {} — a pinned size needs both, and leaving both \
-                 out opens the session at the client screen's own resolution",
-                target.name,
-                if target.width.is_some() { "width" } else { "height" },
-                if target.width.is_some() { "height" } else { "width" }
-            );
-            // And a pin of nothing is not a pin: a zero axis would ask every
-            // engine for a desktop that cannot exist.
-            anyhow::ensure!(
-                target.pinned_size().is_none_or(|(w, h)| w > 0 && h > 0),
-                "target {:?} pins a {:?}×{:?} size, but width and height must both be \
+                target.size.is_none_or(|(w, h)| w > 0 && h > 0),
+                "target {:?} sets a {} size, but its width and height must both be \
                  greater than zero",
                 target.name,
-                target.width,
-                target.height
+                size_text(target.size)
             );
-            // A pinned size is asked for as pixels at 1x, so the one oversize the
-            // video stream refuses that check-config *can* see is a pin already
-            // past the picture ceiling: at runtime the engines hold a screen under
-            // it, but holding a pin would open at a size the operator did not
-            // choose. (A pin under the ceiling at 1x may still land over it on a
-            // 2x screen; that one is held, like a screen.)
+            // A configured size is asked for as pixels at 1x, so the one oversize
+            // the video stream refuses that check-config *can* see is a size
+            // already past the picture ceiling: at runtime the engines hold a
+            // screen under it, but holding a configured size would open at one
+            // the operator did not choose. (A size under the ceiling at 1x may
+            // still land over it on a 2x screen; that one is held, like a screen.)
             anyhow::ensure!(
-                target.pinned_size().is_none_or(|(w, h)| {
+                target.size.is_none_or(|(w, h)| {
                     crate::video::within_ceiling((u32::from(w), u32::from(h)))
                 }),
-                "target {:?} pins a {:?}×{:?} size, but the video stream encodes at most a \
-                 long side of {} and a short side of {} — pin a smaller size, or leave the \
-                 pin out",
+                "target {:?} sets a {} size, but the video stream encodes at most a \
+                 long side of {} and a short side of {} — set a smaller size, or leave \
+                 the key out",
                 target.name,
-                target.width,
-                target.height,
+                size_text(target.size),
                 crate::video::MAX_LONG_SIDE,
                 crate::video::MAX_SHORT_SIDE
+            );
+            // Standard mode shows the Mac's physical displays as they are, so a
+            // size there is one no session would ever state.
+            anyhow::ensure!(
+                target.size.is_none() || target.sized(),
+                "target {:?} sets size on subtype \"ard\", which shares the Mac's physical \
+                 displays and never sizes them. Remove the key, or set virtual_display = true.",
+                target.name
+            );
+            // A virtual display opens at the client's density under a ceiling of
+            // pixels, so a size past the ceiling's points at 2x would be shrunk for
+            // a Retina client after the picker had stated it.
+            let (most_w, most_h) = crate::vnc_apple::POINTS_AT_ANY_DENSITY;
+            anyhow::ensure!(
+                !target.has_virtual_display()
+                    || target.size.is_none_or(|(w, h)| w <= most_w && h <= most_h),
+                "target {:?} sets a {} size, but a Mac's virtual display holds at most \
+                 {most_w}x{most_h} on a Retina client, which opens it at 2x — set a size \
+                 within that, or leave the key out",
+                target.name,
+                size_text(target.size)
             );
             // The graphics pipeline is RDP's alone: EGFX is an RDP channel, so on a
             // VNC target the key could only be a belief about the wrong protocol,
@@ -2329,8 +2388,8 @@ mod tests {
         assert_eq!(t.name, "one");
         assert_eq!(t.protocol, Protocol::Rdp);
         assert_eq!((t.host.as_str(), t.port), ("192.0.2.10", 3389));
-        assert_eq!(t.pinned_size(), None, "an unpinned size follows the client's screen");
-        assert_eq!(t.default_size(), DEFAULT_SIZE);
+        assert_eq!(t.size, None, "no size is configured");
+        assert_eq!(t.kept_size(), DEFAULT_SIZE);
         assert_eq!((t.username.as_str(), t.password.as_str(), t.domain.as_deref()), ("u", "p", None));
         assert!(t.egfx(), "the graphics pipeline is on unless turned off");
         assert!(!t.clipboard, "the clipboard bridge is opt-in");
@@ -2850,8 +2909,7 @@ mod tests {
             username = "Administrator"
             password = "hunter2"
             domain = "CORP"
-            width = 1920
-            height = 1080
+            size = "1920x1080"
 
             [[targets]]
             name = "other"
@@ -2868,7 +2926,7 @@ mod tests {
         let win = &config.targets[0];
         assert_eq!(win.name, "win");
         assert_eq!(win.domain.as_deref(), Some("CORP"));
-        assert_eq!(win.pinned_size(), Some((1920, 1080)));
+        assert_eq!(win.size, Some((1920, 1080)));
         let other = &config.targets[1];
         assert_eq!(other.name, "other");
         assert_eq!(other.protocol, Protocol::Vnc);
@@ -3299,7 +3357,7 @@ mod tests {
         assert!(!plain.has_virtual_display());
         assert!(!plain.media_stream(), "no stream, and no sound, on either");
 
-        let target = &ard("virtual_display = true\nwidth = 1600\nheight = 1000")
+        let target = &ard("virtual_display = true\nsize = \"1600x1000\"")
             .unwrap()
             .targets[0];
         assert_eq!(target.subtype, Some(Subtype::Ard), "still Standard mode");
@@ -3311,9 +3369,9 @@ mod tests {
         );
         assert!(!target.media_stream());
         assert!(!target.carries_sound());
-        assert_eq!(target.pinned_size(), Some((1600, 1000)));
-        // Without resize, the display opens at the pin or the client's screen and
-        // stays there, as High Performance does.
+        assert_eq!(target.size, Some((1600, 1000)));
+        // At a kept size, the display opens at it and stays there, as High
+        // Performance does.
         assert!(ard("virtual_display = true").unwrap().targets[0].has_virtual_display());
 
         // The key says nothing on High Performance, and nothing else has a virtual
@@ -3337,8 +3395,8 @@ mod tests {
     }
 
     /// The high-performance subtype carries the same account credentials and native
-    /// Apple pasteboard as plain `ard`, and requests a virtual display at
-    /// width/height.
+    /// Apple pasteboard as plain `ard`, and requests a virtual display at the
+    /// configured size.
     #[test]
     fn the_high_performance_subtype_accepts_clipboard_and_offers_resize() {
         let hp = |extra: &str| {
@@ -3347,11 +3405,11 @@ mod tests {
             )))
         };
 
-        let target = &hp("width = 1600\nheight = 1000\nclipboard = true")
+        let target = &hp("size = \"1600x1000\"\nclipboard = true")
             .unwrap()
             .targets[0];
         assert_eq!(target.subtype, Some(Subtype::ArdHighPerformance));
-        assert_eq!(target.pinned_size(), Some((1600, 1000)));
+        assert_eq!(target.size, Some((1600, 1000)));
         assert!(target.offers().resize);
         assert!(target.clipboard);
         // The name is what a config file writes, hyphens and all — the enum is
@@ -3412,7 +3470,7 @@ mod tests {
             Err(NotOffered { target: "mac".to_owned(), choice: "a passthrough" })
         );
         assert_eq!(
-            standard.accepts(Choices { resize: true, ..Choices::default() }),
+            standard.accepts(Choices { size: Sizing::Window, ..Choices::default() }),
             Err(NotOffered { target: "mac".to_owned(), choice: "resize" })
         );
 
@@ -3423,59 +3481,133 @@ mod tests {
         }
     }
 
-    /// The opening size resolves the same way for every engine: a pinned size
-    /// beats the client's screen, the screen beats the built-in default, and a
-    /// single width without its height is refused rather than half-obeyed.
+    /// The opening size resolves the same way for every engine: a kept size is
+    /// the configured one or the default, and only a session that follows the
+    /// window opens at the client's screen.
     #[test]
-    fn the_opening_size_prefers_pinned_then_screen_then_default() {
+    fn the_opening_size_is_the_kept_size_or_the_clients_screen() {
         let screen = HostDisplay { w: 1728, h: 1117, scale: 200, fit: false };
-
-        let pinned = &ConfigFile::parse(&vnc_toml("width = 1600\nheight = 1000")).unwrap().targets[0];
-        assert_eq!(pinned.opening_size(Some(screen)), (1600, 1000));
-        assert_eq!(pinned.default_size(), (1600, 1000));
-
-        let free = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
-        assert_eq!(free.opening_size(Some(screen)), (1728, 1117));
-        assert_eq!(free.opening_size(None), DEFAULT_SIZE);
-        assert_eq!(free.default_size(), DEFAULT_SIZE);
-
-        // A pinch-zoom client's screen is not an opening size: the pinned size
-        // still wins, and without one it opens at the default rather than at a
-        // phone's shape.
         let phone = HostDisplay { w: 430, h: 932, scale: 300, fit: true };
-        assert_eq!(pinned.opening_size(Some(phone)), (1600, 1000));
-        assert_eq!(free.opening_size(Some(phone)), DEFAULT_SIZE);
 
-        let err = ConfigFile::parse(&vnc_toml("width = 1600")).unwrap_err();
-        assert!(
-            format!("{err:#}").contains("sets width without height"),
-            "{err:#}"
-        );
-    }
+        let sized = &ConfigFile::parse(&vnc_toml("size = \"1600x1000\"")).unwrap().targets[0];
+        assert_eq!(sized.kept_size(), (1600, 1000));
+        let unsized_ = &ConfigFile::parse(&vnc_toml("")).unwrap().targets[0];
+        assert_eq!(unsized_.kept_size(), DEFAULT_SIZE);
 
-    /// The one oversize check-config can see: a pin the video stream would refuse
-    /// at 1x.
-    #[test]
-    fn a_pinned_size_over_the_video_ceiling_is_refused() {
-        let err = ConfigFile::parse(&rdp_toml("width = 5120\nheight = 2880"))
-            .expect_err("a 5K pin parsed");
-        assert!(format!("{err:#}").contains("3840"), "{err:#}");
-        for pin in ["width = 3840\nheight = 2400", "width = 2400\nheight = 3840"] {
-            ConfigFile::parse(&rdp_toml(pin))
-                .expect("a 4K pin, either way up, is a picture the stream takes");
+        for display in [Some(screen), Some(phone), None] {
+            // The target's size, whatever screen the client has.
+            assert_eq!(sized.opening_size(Sizing::Target, display), (1600, 1000));
+            assert_eq!(unsized_.opening_size(Sizing::Target, display), DEFAULT_SIZE);
+            // The default, though the target configures another.
+            assert_eq!(sized.opening_size(Sizing::BuiltIn, display), DEFAULT_SIZE);
+        }
+
+        // Following the window, the configured size is not used: the session opens
+        // at the client's screen. A pinch-zoom client's screen is not an opening
+        // size, and neither is no screen at all.
+        for target in [sized, unsized_] {
+            assert_eq!(target.opening_size(Sizing::Window, Some(screen)), (1728, 1117));
+            assert_eq!(target.opening_size(Sizing::Window, Some(phone)), DEFAULT_SIZE);
+            assert_eq!(target.opening_size(Sizing::Window, None), DEFAULT_SIZE);
         }
     }
 
-    /// A zero axis is refused on every target alike — a High Performance
-    /// virtual display was merely the first place it was caught misbehaving.
+    /// One key, a width by a height. The two keys it replaced are no longer keys.
     #[test]
-    fn a_pinned_size_requires_nonzero_dimensions() {
-        for dimensions in ["width = 0\nheight = 1000", "width = 1600\nheight = 0"] {
+    fn a_size_is_written_as_a_width_by_a_height() {
+        for wrong in ["1600", "1600x", "x1000", "1600 x 1000", "1600X1000", "1600x1000x2", "70000x1000"] {
+            let err = ConfigFile::parse(&vnc_toml(&format!("size = \"{wrong}\""))).unwrap_err();
+            assert!(format!("{err:#}").contains("is not a width by a height"), "{wrong}: {err:#}");
+        }
+        for key in ["width = 1600", "height = 1000", "size = 1600"] {
+            ConfigFile::parse(&vnc_toml(key)).expect_err(key);
+        }
+    }
+
+    /// A virtual display opens at the client's density, so the picker's size is
+    /// one a 2x client's display can hold.
+    #[test]
+    fn a_size_a_retina_client_would_shrink_is_refused_on_a_virtual_display() {
+        let hp = "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n";
+        let virt = "subtype = \"ard\"\nvirtual_display = true\nusername = \"andrew\"\npassword = \"h\"\n";
+        for mac in [hp, virt] {
+            ConfigFile::parse(&vnc_toml(&format!("{mac}size = \"1920x1080\""))).expect("the most it holds at 2x");
+            for over in ["2560x1440", "1921x1080", "1920x1200"] {
+                let err = ConfigFile::parse(&vnc_toml(&format!("{mac}size = \"{over}\""))).unwrap_err();
+                assert!(format!("{err:#}").contains("at most 1920x1080"), "{err:#}");
+            }
+        }
+        ConfigFile::parse(&vnc_toml("size = \"2560x1440\"")).expect("no ceiling of points elsewhere");
+    }
+
+    /// Standard mode shows the Mac's physical displays as they are, so a size there
+    /// would never be stated.
+    #[test]
+    fn a_size_is_refused_on_a_mac_sharing_its_physical_displays() {
+        let ard = "subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\n";
+        let standard = &ConfigFile::parse(&vnc_toml(ard)).unwrap().targets[0];
+        assert!(!standard.sized());
+        let err = ConfigFile::parse(&vnc_toml(&format!("{ard}size = \"1600x1000\""))).unwrap_err();
+        assert!(format!("{err:#}").contains("never sizes them"), "{err:#}");
+        let virtual_display =
+            &ConfigFile::parse(&vnc_toml(&format!("{ard}virtual_display = true\nsize = \"1600x1000\"")))
+                .unwrap()
+                .targets[0];
+        assert!(virtual_display.sized());
+    }
+
+    /// Which sizings a target takes: following a window where the window can drive
+    /// it, and the default beside a configured size only there.
+    #[test]
+    fn a_sizing_is_refused_where_the_target_does_not_offer_it() {
+        let window = Choices { size: Sizing::Window, ..Choices::default() };
+        let built_in = Choices { size: Sizing::BuiltIn, ..Choices::default() };
+        let refused = |choice| Err(NotOffered { target: "mac".to_owned(), choice });
+
+        // A plain target is asked for a size once and never follows a window.
+        let plain = &ConfigFile::parse(&vnc_toml("size = \"1600x1000\"")).unwrap().targets[0];
+        assert!(!plain.offers().resize);
+        assert_eq!(plain.accepts(Choices::default()), Ok(()));
+        assert_eq!(plain.accepts(window), refused("resize"));
+        assert_eq!(plain.accepts(built_in), refused("the default size"));
+
+        let wlshare = |extra: &str| {
+            ConfigFile::parse(&vnc_toml(&format!("subtype = \"wlshare\"\n{extra}"))).unwrap().targets.remove(0)
+        };
+        let sized = wlshare("size = \"1600x1000\"");
+        for choices in [Choices::default(), window, built_in] {
+            assert_eq!(sized.accepts(choices), Ok(()));
+        }
+        // With no size configured, the target's size already is the default.
+        let unsized_ = wlshare("");
+        assert_eq!(unsized_.accepts(window), Ok(()));
+        assert_eq!(unsized_.accepts(built_in), refused("the default size"));
+    }
+
+    /// The one oversize check-config can see: a size the video stream would refuse
+    /// at 1x.
+    #[test]
+    fn a_size_over_the_video_ceiling_is_refused() {
+        let err = ConfigFile::parse(&rdp_toml("size = \"5120x2880\""))
+            .expect_err("a 5K size parsed");
+        assert!(format!("{err:#}").contains("3840"), "{err:#}");
+        for size in ["size = \"3840x2400\"", "size = \"2400x3840\""] {
+            ConfigFile::parse(&rdp_toml(size))
+                .expect("a 4K size, either way up, is a picture the stream takes");
+        }
+    }
+
+    /// A zero axis is refused on every target that takes a size alike — a High
+    /// Performance virtual display was merely the first place it was caught
+    /// misbehaving.
+    #[test]
+    fn a_size_requires_nonzero_dimensions() {
+        for size in ["size = \"0x1000\"", "size = \"1600x0\""] {
             let apple = APPLE_SUBTYPES.iter().map(|subtype| {
                 format!("subtype = \"{subtype}\"\nusername = \"andrew\"\npassword = \"h\"\n")
             });
             for subtype in std::iter::once(String::new()).chain(apple) {
-                let err = ConfigFile::parse(&vnc_toml(&format!("{subtype}{dimensions}")))
+                let err = ConfigFile::parse(&vnc_toml(&format!("{subtype}{size}")))
                     .unwrap_err();
                 assert!(
                     format!("{err:#}").contains("width and height must both be greater than zero"),
@@ -3822,7 +3954,7 @@ mod tests {
             Err(NotOffered { target: "win".to_owned(), choice: "a passthrough" })
         );
         assert_eq!(
-            bitmap.accepts(Choices { resize: true, ..Choices::default() }),
+            bitmap.accepts(Choices { size: Sizing::Window, ..Choices::default() }),
             Err(NotOffered { target: "win".to_owned(), choice: "resize" })
         );
     }

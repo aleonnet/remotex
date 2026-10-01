@@ -1183,8 +1183,7 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         password: "s3cr3t-should-not-leak".to_owned(),
         vnc_password: String::new(),
         domain: None,
-        width: Some(1280),
-        height: Some(800),
+        size: Some((1280, 800)),
         egfx: None,
         clipboard,
         camera: false,
@@ -1206,9 +1205,8 @@ fn mac_target(port: u16) -> TargetConfig {
         subtype: Some(remotex::config::Subtype::ArdHighPerformance),
         username: MAC_USER.to_owned(),
         password: MAC_PASSWORD.to_owned(),
-        // Unpinned: the virtual display opens at the screen the connect names.
-        width: None,
-        height: None,
+        // No size: the virtual display opens at the screen the connect names.
+        size: None,
         clipboard: true,
         ..target(Protocol::Vnc, port)
     }
@@ -1218,10 +1216,10 @@ fn mac_target(port: u16) -> TargetConfig {
 /// and the stream passed to the browser [`connect_mac_ws`] stands in for, so the
 /// session needs no decoder and a host without FFmpeg or fdk-aac drives it too;
 /// the fake names no ports for the stream anyway.
-const MAC_CHOICES: &str = r#"{"resize":true,"passthrough":true}"#;
+const MAC_CHOICES: &str = r#"{"size":"window","passthrough":true}"#;
 
 /// A session started with nothing but the window sizing the desktop.
-const RESIZE: &str = r#"{"resize":true}"#;
+const RESIZE: &str = r#"{"size":"window"}"#;
 
 /// The session socket of a fake-Mac test: a browser that takes the Mac's stream.
 async fn connect_mac_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
@@ -1613,12 +1611,18 @@ async fn expect_no_picture(ws: &mut Ws) {
 }
 
 /// Started with resize, the window sizes the desktop and nothing is held: a server
-/// that answers past the ceiling ends the session with the stream's refusal.
+/// that answers past the ceiling ends the session with the stream's refusal. A
+/// `wlshare` target, since a plain one never follows a window; the fake ignores
+/// the listing and is encoded here.
 #[tokio::test]
 async fn an_oversize_vnc_desktop_under_resize_is_refused() {
     let (w, h) = (3842, 2);
     let vnc_port = spawn_fake_vnc_sized(w, h).await;
-    let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
+    let addr = spawn_app(TargetConfig {
+        subtype: Some(remotex::config::Subtype::Wlshare),
+        ..target(Protocol::Vnc, vnc_port)
+    })
+    .await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;
@@ -2199,7 +2203,7 @@ async fn standard_speaks_apples_revision_on_the_physical_screen() {
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}},"choices":{{"size":"target"}}}}"#
     )))
     .await
     .unwrap();

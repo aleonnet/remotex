@@ -2026,8 +2026,7 @@ mod tests {
             password: String::new(),
             vnc_password: String::new(),
             domain: None,
-            width: Some(1),
-            height: Some(1),
+            size: Some((1, 1)),
             egfx: None,
             clipboard: false,
             camera: false,
@@ -2077,7 +2076,7 @@ mod tests {
             .await
             .unwrap();
         client
-            .send(ClientFrame::text(r#"{"type":"connect","target":"fake"}"#))
+            .send(ClientFrame::text(r#"{"type":"connect","target":"fake","choices":{"size":"target"}}"#))
             .await
             .unwrap();
         let (mut input_rx, _frame_tx) = engine_rx.recv().await.unwrap();
@@ -2111,7 +2110,7 @@ mod tests {
         let records = throughput.close_timeframe(crate::throughput::unix_now());
         let received: u64 = records.iter().map(|record| record.received_bytes).sum();
         let texts = [
-            r#"{"type":"connect","target":"fake"}"#,
+            r#"{"type":"connect","target":"fake","choices":{"size":"target"}}"#,
             r#"{"type":"paintAck","sequence":1,"queuedMs":7,"drawMs":11}"#,
             r#"{"type":"refresh"}"#,
         ];
@@ -2170,7 +2169,7 @@ mod tests {
             .await
             .unwrap();
         client
-            .send(ClientFrame::text(r#"{"type":"connect","target":"fake"}"#))
+            .send(ClientFrame::text(r#"{"type":"connect","target":"fake","choices":{"size":"target"}}"#))
             .await
             .unwrap();
         let (_input_rx, frame_tx) = engine_rx.recv().await.unwrap();
@@ -2275,7 +2274,7 @@ mod tests {
             .await
             .unwrap();
         client
-            .send(ClientFrame::text(r#"{"type":"connect","target":"fake"}"#))
+            .send(ClientFrame::text(r#"{"type":"connect","target":"fake","choices":{"size":"target"}}"#))
             .await
             .unwrap();
         let (input_rx, _frame_tx) = engine_rx.recv().await.unwrap();
@@ -2358,7 +2357,7 @@ mod tests {
             .await
             .unwrap();
         client
-            .send(ClientFrame::text(r#"{"type":"connect","target":"fake"}"#))
+            .send(ClientFrame::text(r#"{"type":"connect","target":"fake","choices":{"size":"target"}}"#))
             .await
             .unwrap();
         let (input_rx, _frame_tx) = engine_rx.recv().await.unwrap();

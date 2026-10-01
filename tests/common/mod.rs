@@ -331,13 +331,14 @@ pub async fn connect_mic_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
 /// Pick a target from the picker over an attached WebSocket, starting its
 /// engine. A fresh attach lands on the picker (no engine); the browser sends
 /// this `connect` to begin a session. Reattach/takeover to a running engine
-/// need no connect — the slot announces `connected` on its own.
+/// need no connect — the slot announces `connected` on its own. The size is
+/// the one the target keeps, with no sound and no passthrough.
 #[allow(dead_code)]
 pub async fn connect_target(ws: &mut Ws, target: &str) {
     use futures_util::SinkExt as _;
     use tokio_tungstenite::tungstenite::Message;
 
-    ws.send(Message::text(format!(r#"{{"type":"connect","target":"{target}"}}"#)))
+    ws.send(Message::text(format!(r#"{{"type":"connect","target":"{target}","choices":{{"size":"target"}}}}"#)))
         .await
         .unwrap();
 }

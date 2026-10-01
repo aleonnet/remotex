@@ -34,10 +34,8 @@ use tokio_tungstenite::tungstenite::Message;
 const DESKTOP_W: u32 = 1024;
 const DESKTOP_H: u32 = 768;
 
-/// The target's pinned size, which the session opens at and a `defaultSize`
-/// request resolves to. Deliberately none of the other geometries this test sees — not the server's
-/// own 1024x768 and not the 800x600 the viewport asks for — so an assertion on it
-/// cannot pass by accident.
+/// The target's configured size, which the session is kept at. Deliberately not
+/// the server's own 1024x768, so an assertion on it cannot pass by accident.
 const DEFAULT_W: u32 = 1280;
 const DEFAULT_H: u32 = 800;
 
@@ -88,11 +86,9 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             password: String::new(),
             vnc_password: "secret42".to_owned(),
             domain: None,
-            // The pinned size: asked for once the server declares SetDesktopSize
-            // support, after it has announced its own, and the size a
-            // `defaultSize` request resolves to.
-            width: Some(DEFAULT_W as u16),
-            height: Some(DEFAULT_H as u16),
+            // The configured size: asked for once the server declares
+            // SetDesktopSize support, after it has announced its own.
+            size: Some((DEFAULT_W as u16, DEFAULT_H as u16)),
             egfx: None,
             clipboard: true,          // exercise the clipboard bridge
             camera: false,
@@ -187,7 +183,7 @@ fn check_cursor_msg(text: &str) {
 
 #[tokio::test]
 #[ignore = "requires Docker or Podman"]
-async fn vnc_session_streams_the_full_desktop_and_resizes() {
+async fn vnc_session_streams_the_full_desktop_at_its_configured_size() {
     common::init_logging();
     let runtime = common::container_runtime();
     let (_container, vnc_port) =
@@ -199,8 +195,8 @@ async fn vnc_session_streams_the_full_desktop_and_resizes() {
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
     // The fresh attach lands on the picker; pick the target to start the engine.
-    // Started with resize, to exercise the dynamic resize path.
-    common::connect_target_with(&mut ws, "tigervnc-dummy", r#"{"resize":true}"#).await;
+    // A plain target never follows a window: it is asked once for its size.
+    common::connect_target(&mut ws, "tigervnc-dummy").await;
 
     let mut got_resize = false;
     let mut pinned = false;
@@ -219,15 +215,16 @@ async fn vnc_session_streams_the_full_desktop_and_resizes() {
                     );
                     if text.contains(r#""type":"resize""#) {
                         if got_resize {
-                            // The pin, asked for on the server's declaration of
-                            // SetDesktopSize support; its repaint starts afresh.
-                            assert_resize(&text, DEFAULT_W, DEFAULT_H, "the pinned size");
+                            // The configured size, asked for on the server's
+                            // declaration of SetDesktopSize support; its repaint
+                            // starts afresh.
+                            assert_resize(&text, DEFAULT_W, DEFAULT_H, "the configured size");
                             pinned = true;
                             painted = false;
                         } else {
                             assert!(!painted, "resize arrived after frames");
                             // The first size announced must be the VNC server's
-                            // actual desktop, before the pin is asked for.
+                            // actual desktop, before its size is asked for.
                             assert_resize(&text, DESKTOP_W, DESKTOP_H, "the VNC server's own desktop");
                             got_resize = true;
                         }
@@ -241,7 +238,7 @@ async fn vnc_session_streams_the_full_desktop_and_resizes() {
                     assert!(got_resize, "a frame arrived before resize");
                     let (w, h) = if pinned { (DEFAULT_W, DEFAULT_H) } else { (DESKTOP_W, DESKTOP_H) };
                     painted |= check_unit_frame(&frame, w, h);
-                    // The desktop at the pinned size must start a stream of its
+                    // The desktop at the configured size must start a stream of its
                     // own; once its keyframe has arrived, the raw->video path is
                     // proven. The Cursor pseudo-encoding rides the opening
                     // update, so wait for the pointer shape too.
@@ -252,102 +249,17 @@ async fn vnc_session_streams_the_full_desktop_and_resizes() {
                 _ => {}
             }
         }
-        panic!("websocket closed without a keyframe at the pinned size");
+        panic!("websocket closed without a keyframe at the configured size");
     })
     .await
     .expect("timed out waiting for the full-desktop paint and pointer shape");
     let cursor =
         cursor.expect("Xtigervnc must report its pointer once the Cursor encoding is advertised");
 
-    // Dynamic resize: report a smaller browser viewport. Xtigervnc
-    // accepts SetDesktopSize, so the engine must announce the new geometry to
-    // the browser and follow with a full repaint at that size.
-    const VIEWPORT_W: u32 = 800;
-    const VIEWPORT_H: u32 = 600;
-    ws.send(Message::Text(
-        format!(r#"{{"type":"viewport","w":{VIEWPORT_W},"h":{VIEWPORT_H}}}"#).into(),
-    ))
-    .await
-    .unwrap();
-
-    let mut resized = false;
-    tokio::time::timeout(Duration::from_secs(60), async {
-        while let Some(msg) = ws.next().await {
-            match msg.expect("websocket receive") {
-                Message::Text(text) => {
-                    assert!(
-                        !text.contains(r#""type":"error""#),
-                        "session failed: {text}"
-                    );
-                    if text.contains(r#""type":"resize""#) {
-                        assert_resize(&text, VIEWPORT_W, VIEWPORT_H, "the viewport's size");
-                        resized = true;
-                    }
-                }
-                Message::Binary(frame) => {
-                    // Updates for the old geometry may still be in flight
-                    // until the resize announcement; everything after it must
-                    // fit the new desktop.
-                    if !resized {
-                        continue;
-                    }
-                    if check_unit_frame(&frame, VIEWPORT_W, VIEWPORT_H) {
-                        return;
-                    }
-                }
-                _ => {}
-            }
-        }
-        panic!("websocket closed without a keyframe at the resized size");
-    })
-    .await
-    .expect("timed out waiting for the resize + repaint");
-
-    // The sizeless request, which is what a client with no desktop-shaped window
-    // of its own sends: the engine supplies the target's configured size rather
-    // than the client naming one. Asserted here because this is the only place the
-    // resolution can be checked against a real server — a unit test can only prove
-    // which number was passed, not that the server accepted it and the browser was
-    // told the truth about what it landed on.
-    ws.send(Message::Text(r#"{"type":"defaultSize"}"#.into()))
-        .await
-        .unwrap();
-
-    let mut restored = false;
-    tokio::time::timeout(Duration::from_secs(60), async {
-        while let Some(msg) = ws.next().await {
-            match msg.expect("websocket receive") {
-                Message::Text(text) => {
-                    assert!(
-                        !text.contains(r#""type":"error""#),
-                        "session failed: {text}"
-                    );
-                    if text.contains(r#""type":"resize""#) {
-                        assert_resize(&text, DEFAULT_W, DEFAULT_H, "defaultSize must resolve to the target's configured size");
-                        restored = true;
-                    }
-                }
-                Message::Binary(frame) => {
-                    if !restored {
-                        continue;
-                    }
-                    if check_unit_frame(&frame, DEFAULT_W, DEFAULT_H) {
-                        return;
-                    }
-                }
-                _ => {}
-            }
-        }
-        panic!("websocket closed without a keyframe at the restored size");
-    })
-    .await
-    .expect("timed out waiting for the defaultSize resize + repaint");
-
     // Detach/reattach: drop the browser, reclaim the slot with the
     // same token, and reattach. The still-running engine must re-announce the
-    // geometry the session is *now* at — the configured size the request above
-    // restored, not the viewport before it — and repaint the full desktop through
-    // a real server.
+    // geometry the session is *now* at — the configured size, not the server's
+    // own before it — and repaint the full desktop through a real server.
     ws.close(None).await.unwrap();
     drop(ws);
 

@@ -477,9 +477,10 @@ densities, since composing them is too much for a browser to draw. See
 ### The High Performance virtual display
 
 High Performance hides the Mac's physical screens and moves every window to a
-virtual display. Remotex creates one, at the pinned `width`/`height` or else at
-the full size of the browser's screen and at that screen's density, as Apple's
-client does. The window layout macOS produces depends on that opening size:
+virtual display. Remotex creates one at the size the session keeps, the target's
+`size` or the default, or in a session started with resize at the full size of
+the browser's screen, and at that screen's density either way, as Apple's client
+does. The window layout macOS produces depends on that opening size:
 windows squeezed onto a small opening display do not spread out again when it
 grows. In a session started with resize, each viewport report asks for a new
 size, and the next layout confirms it. Everything in this section and the next holds as well
