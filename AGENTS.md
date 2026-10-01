@@ -31,8 +31,8 @@ belong in the linked documentation.
   when it reaches what that test checks. Mark a test that waits seconds that way.
 - After frontend JS/TS changes, run the Biome checks in `frontend/`.
 - Before browser QA of a frontend change, rebuild the gateway and say so: the
-  bundle is compiled into the binary. For source-based iteration, use
-  `REMOTEX_DEV_BACKEND=<port> bun run dev`.
+  bundle is compiled into the binary, and the gateway is the only thing that
+  serves it. Do not put a dev server in front of it.
 - After Playwright changes, run `bun run typecheck` in `tests/playwright/`.
 - Put temporary files and test configuration under `tmp/`. Always run local
   Python through `uv` (GitHub Actions excluded).

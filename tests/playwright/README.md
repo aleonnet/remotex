@@ -102,21 +102,20 @@ The runner itself needs no separate step: every `bun run` script here installs t
 pinned dependencies first if `node_modules` is missing, which it is in a fresh
 clone.
 
-Start the gateway and Vite proxy from the repository root in separate terminals:
+Start the gateway from the repository root. It serves the page the specs open,
+the bundle compiled into it, so a frontend change is in a run only after the
+gateway is rebuilt:
 
 ```sh
 cargo run -- serve --config tmp/test_config.toml
 ```
 
-```sh
-cd frontend
-REMOTEX_DEV_BACKEND=52675 bun run dev -- --host 127.0.0.1
-```
-
-Then provide the local test login and SSH destination for the Mac target:
+Then provide the gateway's address, the local test login and the SSH destination
+for the Mac target:
 
 ```sh
 cd tests/playwright
+REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:<port>/' \
 REMOTEX_PLAYWRIGHT_USERNAME='<username>' \
 REMOTEX_PLAYWRIGHT_PASSWORD='<password>' \
 REMOTEX_PLAYWRIGHT_TARGET='mac' \
@@ -225,8 +224,9 @@ cd tests/playwright
 bun run typecheck
 ```
 
-The defaults are `http://127.0.0.1:5173/` and target `mac`. Override the URL
-with `REMOTEX_PLAYWRIGHT_BASE_URL` when the dev server uses another address.
+The defaults are `http://127.0.0.1:52380/`, the gateway's built-in port, and
+target `mac`. Override the URL with `REMOTEX_PLAYWRIGHT_BASE_URL` when the
+gateway's config names another port.
 Each test is skipped with a list of missing variables when its live-Mac
 configuration is absent. They always run headless with one worker, and share the
 single session slot, which is why they are sequential by configuration rather
