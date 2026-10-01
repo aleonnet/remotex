@@ -2027,7 +2027,7 @@ async fn rfb38_preface(
 ) -> anyhow::Result<Connected> {
     uplink.send(&set_pixel_format()).await?;
     let passthrough = if config.wlshare() {
-        let audio = choices.audio.then(|| config.lossless());
+        let audio = config.sound(choices).then(|| config.lossless(choices));
         let encodings = wlshare_encoding_list(config.clipboard, audio, config.camera, config.microphone);
         let lists = Listing::new(encodings, plan);
         let listed = if lists_wlshare_vp9((server.width, server.height)) { &lists.vp9 } else { &lists.plain };
@@ -2154,7 +2154,7 @@ fn rfb38_encoding_list(clipboard: bool) -> Vec<i32> {
 
 /// What a `wlshare` target lists: the generic list, and after it wlshare's own
 /// extensions. A plain target lists none of them, whatever server answers it.
-/// `audio` is `Some` on a target that asked for sound, and says whether that
+/// `audio` is `Some` in a session started with sound, and says whether that
 /// sound is lossless.
 fn wlshare_encoding_list(clipboard: bool, audio: Option<bool>, camera: bool, microphone: bool) -> Vec<i32> {
     let mut encodings = rfb38_encoding_list(clipboard);
@@ -2164,9 +2164,9 @@ fn wlshare_encoding_list(clipboard: bool, audio: Option<bool>, camera: bool, mic
         // not speak it says nothing and the session runs in silence. See
         // [`crate::vnc_audio`].
         encodings.push(vnc_audio::ENCODING);
-        // And as Opus, which the browser decodes as it came, unless the target
-        // sends its sound lossless: wlshare's FLAC is what a list without this
-        // asks for.
+        // And as Opus, which the browser decodes as it came, unless the session
+        // was started with its sound lossless: wlshare's FLAC is what a list
+        // without this asks for.
         if !lossless {
             encodings.push(vnc_audio::ENCODING_OPUS);
         }

@@ -132,7 +132,7 @@ opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libop
 # them straight to a WebCodecs decoder — so an Ogg dependency would buy framing
 # that is already there. `OpusHead` is still sent, built by desktop-opus,
 # because a decoder needs it wherever it arrives from.
-# FLAC, for an RDP target with `audio_format = "flac"`, whose PCM is coded
+# FLAC, for an RDP session started with its sound lossless, whose PCM is coded
 # lossless here (src/audio.rs). `desktop-flac` is the one place libFLAC is spoken
 # to, for wlshare's encoder and for the one here, its own repository pinned at a
 # release tag by both. It links nothing: it loads the shared library at run

@@ -39,7 +39,7 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     size: null,
     defaultSize: DEFAULT_SIZE,
     audio: false,
-    audioUnavailable: false,
+    losslessUnavailable: false,
     passthrough: null,
     passthroughOnly: false,
     ...offers,
@@ -62,6 +62,11 @@ const SIZED = { w: 1920, h: 1080 };
 
 function keys(rows: { key: string }[]): string[] {
   return rows.map((row) => row.key);
+}
+
+/** What a target's sound can be taken as, in the order shown. */
+function sounds(options: { sounds: { value: string }[] }): string[] {
+  return options.sounds.map((sound) => sound.value);
 }
 
 /** The sizes a target offers a client, as `[value, label]`. */
@@ -125,29 +130,28 @@ test("a Mac sharing its physical displays is shown at their size", () => {
 });
 
 test("only what the target's type offers has a row", () => {
-  assert.deepEqual(keys(targetOptions(RDP, undefined, ABLE).rows), [
-    "audio",
-    "passthrough",
-  ]);
+  const rdp = targetOptions(RDP, undefined, ABLE);
+  assert.deepEqual(keys(rdp.rows), ["passthrough"]);
+  assert.deepEqual(sounds(rdp), ["off", "opus", "flac"]);
   // A plain VNC server has nothing to choose.
-  assert.deepEqual(targetOptions(target({}), undefined, ABLE).rows, []);
-  // wlshare's VP9 is the subtype's picture, not a choice.
-  assert.deepEqual(
-    keys(
-      targetOptions(
-        target({ subtype: "wlshare", resize: true, audio: true }),
-        undefined,
-        ABLE,
-      ).rows,
-    ),
-    ["audio"],
+  const plain = targetOptions(target({}), undefined, ABLE);
+  assert.deepEqual(plain.rows, []);
+  assert.deepEqual(plain.sounds, []);
+  // wlshare's VP9 is the subtype's picture, not a choice. Its sound is.
+  const wlshare = targetOptions(
+    target({ subtype: "wlshare", resize: true, audio: true }),
+    undefined,
+    ABLE,
   );
+  assert.deepEqual(wlshare.rows, []);
+  assert.deepEqual(sounds(wlshare), ["off", "opus", "flac"]);
   // Standard Screen Sharing on the Mac's physical displays offers nothing.
   const standard = targetOptions(target({ subtype: "ard" }), undefined, ABLE);
   assert.deepEqual(standard.rows, []);
+  assert.deepEqual(standard.sounds, []);
   assert.deepEqual(standard.choices, {
     size: "target",
-    audio: false,
+    audio: "off",
     passthrough: false,
   });
   assert.equal(standard.blocked, null);
@@ -157,22 +161,27 @@ test("nothing is ticked until somebody ticks it", () => {
   const options = targetOptions(RDP, undefined, ABLE);
   assert.deepEqual(options.choices, {
     size: "window",
-    audio: false,
+    audio: "off",
     passthrough: false,
   });
   assert.equal(options.sound, false);
   assert.ok(options.rows.every((row) => !row.checked && !row.disabled));
+  assert.ok(options.sounds.every((sound) => !sound.disabled));
 });
 
 test("what was chosen last time is what Start sends", () => {
   const sized = { ...RDP, size: SIZED };
-  const options = targetOptions(sized, { size: "window", audio: true }, ABLE);
+  const options = targetOptions(sized, { size: "window", audio: "opus" }, ABLE);
   assert.deepEqual(options.choices, {
     size: "window",
-    audio: true,
+    audio: "opus",
     passthrough: false,
   });
   assert.equal(options.sound, true);
+  // The format is part of the choice.
+  const lossless = targetOptions(sized, { audio: "flac" }, ABLE);
+  assert.equal(lossless.choices.audio, "flac");
+  assert.equal(lossless.sound, true);
   // A choice remembered for something the target does not offer here is not
   // sent: a phone has no window, and a plain server neither that nor sound.
   assert.equal(
@@ -181,20 +190,24 @@ test("what was chosen last time is what Start sends", () => {
   );
   const plain = targetOptions(
     target({}),
-    { size: "window", audio: true, passthrough: true },
+    { size: "window", audio: "opus", passthrough: true },
     ABLE,
   );
   assert.deepEqual(plain.choices, {
     size: "target",
-    audio: false,
+    audio: "off",
     passthrough: false,
   });
+  // Nor is something this page never wrote there.
+  const stale = targetOptions(RDP, { audio: true as never }, ABLE);
+  assert.equal(stale.choices.audio, "off");
 });
 
 test("High Performance's sound has no row and is always carried", () => {
   const options = targetOptions(HIGH_PERFORMANCE, undefined, ABLE);
   assert.deepEqual(keys(options.rows), ["passthrough"]);
-  assert.equal(options.choices.audio, false);
+  assert.deepEqual(options.sounds, []);
+  assert.equal(options.choices.audio, "off");
   assert.equal(options.sound, true);
 });
 
@@ -215,23 +228,33 @@ test("a passthrough this browser cannot take is greyed, with the reason", () => 
   }
 });
 
-test("a sound the gateway cannot decode is greyed, with the reason", () => {
-  const wlshare = target({ subtype: "wlshare", resize: true, audio: true });
-  const without = { ...wlshare, audioUnavailable: true };
-  // Chosen last time, on a gateway that could decode it.
-  const options = targetOptions(without, { audio: true }, ABLE);
-  const row = options.rows.find((r) => r.key === "audio");
-  assert.ok(row);
-  assert.equal(row.disabled, true);
-  assert.equal(row.checked, false);
-  assert.match(row.note, /libFLAC/);
-  assert.equal(options.choices.audio, false);
+test("a lossless sound the gateway cannot code is greyed, with the reason", () => {
+  const without = { ...RDP, losslessUnavailable: true };
+  // Chosen last time, on a gateway that could code it.
+  const options = targetOptions(without, { audio: "flac" }, ABLE);
+  const lossless = options.sounds.find((sound) => sound.value === "flac");
+  assert.ok(lossless);
+  assert.equal(lossless.disabled, true);
+  assert.match(lossless.note, /libFLAC/);
+  assert.equal(options.choices.audio, "off");
   assert.equal(options.sound, false);
   assert.equal(options.blocked, null, "the target still starts, without sound");
+  // Opus is coded by the gateway itself, and is still a choice.
+  assert.equal(
+    options.sounds.find((sound) => sound.value === "opus")?.disabled,
+    false,
+  );
+  assert.equal(
+    targetOptions(without, { audio: "opus" }, ABLE).choices.audio,
+    "opus",
+  );
 
-  const able = targetOptions(wlshare, { audio: true }, ABLE);
-  assert.equal(able.rows.find((r) => r.key === "audio")?.disabled, false);
-  assert.equal(able.choices.audio, true);
+  const able = targetOptions(RDP, { audio: "flac" }, ABLE);
+  assert.equal(
+    able.sounds.find((sound) => sound.value === "flac")?.disabled,
+    false,
+  );
+  assert.equal(able.choices.audio, "flac");
 });
 
 test("a gateway that cannot decode the Mac's picture can only pass it", () => {
@@ -280,12 +303,12 @@ beforeEach(() => {
 
 test("choices are remembered per target", () => {
   assert.deepEqual(readRememberedChoices(), {});
-  let remembered = rememberChoice({}, "win", "audio", true);
+  let remembered = rememberChoice({}, "win", "audio", "flac");
   remembered = rememberChoice(remembered, "win", "size", "window");
   remembered = rememberChoice(remembered, "mac", "passthrough", true);
-  remembered = rememberChoice(remembered, "win", "audio", false);
+  remembered = rememberChoice(remembered, "win", "audio", "off");
   const expected = {
-    win: { audio: false, size: "window" },
+    win: { audio: "off", size: "window" },
     mac: { passthrough: true },
   };
   assert.deepEqual(remembered, expected);

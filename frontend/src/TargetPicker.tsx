@@ -187,7 +187,7 @@ export default function TargetPicker({
                     {/* The size the desktop will have: a choice where the
                         target offers two here, and stated where it has one. */}
                     {options.sizes.length > 1 ? (
-                      <fieldset className="picker-size">
+                      <fieldset className="picker-choice">
                         <legend>Size</legend>
                         {options.sizes.map((size) => (
                           <label key={size.value} className="picker-option">
@@ -217,8 +217,8 @@ export default function TargetPicker({
                         ))}
                       </fieldset>
                     ) : (
-                      <p className="picker-size">
-                        <span className="picker-size-heading">Size</span>
+                      <p className="picker-choice">
+                        <span className="picker-choice-heading">Size</span>
                         <span className="picker-option-text">
                           <span>{options.sizes[0].label}</span>
                           <span className="picker-option-note">
@@ -226,6 +226,44 @@ export default function TargetPicker({
                           </span>
                         </span>
                       </p>
+                    )}
+                    {/* The remote's sound, where the target offers it: off, or
+                        the format it is sent as. */}
+                    {options.sounds.length > 0 && (
+                      <fieldset className="picker-choice">
+                        <legend>Sound</legend>
+                        {options.sounds.map((sound) => (
+                          <label
+                            key={sound.value}
+                            className={`picker-option${sound.disabled ? " picker-option-unavailable" : ""}`}
+                          >
+                            <input
+                              type="radio"
+                              name={`picker-sound-${t.name}`}
+                              checked={options.choices.audio === sound.value}
+                              disabled={
+                                sound.disabled || pendingTarget !== null
+                              }
+                              onChange={() =>
+                                setRemembered((was) =>
+                                  rememberChoice(
+                                    was,
+                                    t.name,
+                                    "audio",
+                                    sound.value,
+                                  ),
+                                )
+                              }
+                            />
+                            <span className="picker-option-text">
+                              <span>{sound.label}</span>
+                              <span className="picker-option-note">
+                                {sound.note}
+                              </span>
+                            </span>
+                          </label>
+                        ))}
+                      </fieldset>
                     )}
                     {/* Only what the target's type offers has a row; one that
                         cannot be had here is greyed and says why. */}

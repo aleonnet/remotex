@@ -554,9 +554,9 @@ body {
   padding: 0.7rem 0.9rem 0.8rem 2.4rem;
 }
 
-/* The size a session will have: one line where the target has one here, radio
-   buttons where it offers two. */
-.picker-size {
+/* A choice among several: the size a session will have, one line where the
+   target has one here and radio buttons where it offers two, and its sound. */
+.picker-choice {
   display: flex;
   flex-direction: column;
   gap: 0.45rem;
@@ -567,14 +567,14 @@ body {
   color: #c9d1d9;
 }
 
-.picker-size legend,
-.picker-size-heading {
+.picker-choice legend,
+.picker-choice-heading {
   padding: 0;
   color: #8b949e;
   font-size: 0.78rem;
 }
 
-.picker-size legend {
+.picker-choice legend {
   margin-bottom: 0.45rem;
 }
 

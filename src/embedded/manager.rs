@@ -770,9 +770,10 @@ fn describe_offers(target: &TargetConfig) -> String {
     }
 }
 
-/// A target's audio as it will sound on the wire, in a session that takes it.
-/// Kilobits because the config speaks kilobits, and the codec named the way
-/// `ServerMsg::AudioFormat` names it.
+/// A target's audio as it will sound on the wire, in a session that takes it as
+/// Opus. Kilobits because the config speaks kilobits, and the codec named the way
+/// `ServerMsg::AudioFormat` names it. Lossless is the picker's other format and
+/// has no key to describe.
 fn describe_audio(target: &TargetConfig) -> String {
     if target.media_stream() {
         return "the Mac's AAC-ELD, passed through".to_owned();
@@ -784,10 +785,10 @@ fn describe_audio(target: &TargetConfig) -> String {
     let ceiling = plan.bitrate_bps / 1000;
     match plan.adaptive_floor_bps {
         Some(floor) if floor < plan.bitrate_bps => {
-            format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s", floor / 1000)
+            format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s, or flac", floor / 1000)
         }
         // A walk clamped to its ceiling, or none: the rate is the rate.
-        Some(_) | None => format!("opus at {ceiling} kbit/s"),
+        Some(_) | None => format!("opus at {ceiling} kbit/s, or flac"),
     }
 }
 

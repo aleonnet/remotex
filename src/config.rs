@@ -270,20 +270,6 @@ pub enum ChromaChoice {
     Full,
 }
 
-/// What a target's sound is sent to the browser as: [`TargetConfig::audio_format`].
-#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum AudioFormat {
-    /// At the rate the audio keys hold: an RDP host's PCM encoded here, or
-    /// wlshare's own Opus packets, coded there at that rate, passed as they came.
-    #[default]
-    Opus,
-    /// EXPERIMENTAL. Lossless: wlshare's own FLAC frames passed as they came, or
-    /// an RDP host's PCM coded as FLAC here, decoded by the page's WebAssembly
-    /// module either way.
-    Flac,
-}
-
 /// A target's audio keys as the encoder consumes them, resolved by
 /// [`TargetConfig::audio_plan`]. In bits per second because that is libopus's
 /// unit; the config speaks kbit/s because a person does.
@@ -421,13 +407,14 @@ pub struct Offers {
 pub struct Choices {
     /// How the desktop is sized.
     pub size: Sizing,
-    /// Take the remote's sound. RDP negotiates it at connect (MS-RDPEA); a
-    /// `wlshare` target lists wlshare's audio extension, Opus or FLAC on the RFB
-    /// connection ([`crate::vnc_audio`]). Without it neither is asked, so the host keeps
+    /// Whether the remote's sound is taken, and what it is sent to the browser
+    /// as. RDP negotiates it at connect (MS-RDPEA); a `wlshare` target lists
+    /// wlshare's audio extension, Opus or FLAC on the RFB connection
+    /// ([`crate::vnc_audio`]). At [`Sound::Off`] neither is asked, so the host keeps
     /// playing where it did. Packets are sent only while the attached browser
     /// subscribes, which is what its Mute and Unmute change.
     #[serde(default)]
-    pub audio: bool,
+    pub audio: Sound,
     /// Pass the target's [`Passthrough`].
     #[serde(default)]
     pub passthrough: bool,
@@ -438,6 +425,25 @@ impl Choices {
     pub fn resize(self) -> bool {
         self.size == Sizing::Window
     }
+}
+
+/// Whether a session takes the remote's sound, and what that sound is sent to the
+/// browser as: [`Choices::audio`], on a target that offers it ([`Offers::audio`]).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Sound {
+    /// The remote is asked for none.
+    #[default]
+    Off,
+    /// At the rate the audio keys hold: an RDP host's PCM encoded here, or
+    /// wlshare's own Opus packets, coded there at that rate, passed as they came.
+    Opus,
+    /// EXPERIMENTAL. Lossless: wlshare's own FLAC frames passed as they came, or
+    /// an RDP host's PCM coded as FLAC here by libFLAC, decoded by the page's
+    /// WebAssembly module either way. The uncompressed rate less a third or so,
+    /// about a megabit a second of music, with no walk under it: for a link with
+    /// room.
+    Flac,
 }
 
 /// How a session's desktop is sized: at a size it keeps, or by the client's
@@ -727,20 +733,6 @@ pub struct TargetConfig {
     /// records in, so there is no codec or quality key beside this one.
     #[serde(default)]
     pub microphone: bool,
-    /// EXPERIMENTAL. What this target's sound is sent to the browser as; `None`
-    /// reads as [`AudioFormat::Opus`]. `"flac"` sends it lossless: an `rdp`
-    /// target's PCM is coded as FLAC here, by libFLAC, and the page decodes it
-    /// in its WebAssembly module. A `wlshare` target's sound is wlshare's own
-    /// either way, coded there in the format this key names and passed as it
-    /// came, so the gateway codes none of it.
-    ///
-    /// A key rather than a choice at the picker while it is experimental. It is
-    /// the uncompressed rate less a third or so, about a megabit a second of
-    /// music, with no walk under it: for a link with room. Refused on a target
-    /// with no sound to choose, which includes `ard-high-performance`, whose
-    /// sound is the Mac's own AAC-ELD.
-    #[serde(default)]
-    pub audio_format: Option<AudioFormat>,
     /// The Opus bitrate this target's sound holds on a link that can carry it,
     /// in kbit/s (6–510); `None` reads as [`DEFAULT_AUDIO_BITRATE_KBPS`].
     ///
@@ -969,7 +961,7 @@ impl TargetConfig {
                 "the default size",
                 choices.size == Sizing::BuiltIn && !(offers.resize && self.size.is_some()),
             ),
-            ("sound", choices.audio && !offers.audio),
+            ("sound", choices.audio != Sound::Off && !offers.audio),
             ("a passthrough", choices.passthrough && offers.passthrough.is_none()),
         ];
         match refused.into_iter().find(|(_, refused)| *refused) {
@@ -993,7 +985,7 @@ impl TargetConfig {
     /// it was chosen, and always on `ard-high-performance`, whose media stream
     /// brings it ([`crate::vnc_apple_media`]).
     pub fn sound(&self, choices: Choices) -> bool {
-        self.media_stream() || (self.offers().audio && choices.audio)
+        self.media_stream() || (self.offers().audio && choices.audio != Sound::Off)
     }
 
     /// The render dial for a reader with no browser in front of it — the TUI's
@@ -1021,17 +1013,22 @@ impl TargetConfig {
         self.render_plan(Choices::default(), decoders).card(slot)
     }
 
-    /// Whether this target's sound is sent lossless, as FLAC:
-    /// [`Self::audio_format`].
-    pub fn lossless(&self) -> bool {
-        self.audio_format == Some(AudioFormat::Flac)
+    /// Whether a session started with `choices` is sent this target's sound
+    /// lossless, as FLAC ([`Sound::Flac`]).
+    pub fn lossless(&self, choices: Choices) -> bool {
+        self.offers().audio && choices.audio == Sound::Flac
     }
 
-    /// Whether a session with this target's sound needs libFLAC on this host: to
-    /// code an RDP host's PCM as FLAC. wlshare's sound is passed, Opus or FLAC,
-    /// and needs none.
-    pub fn needs_libflac(&self) -> bool {
-        self.protocol == Protocol::Rdp && self.lossless()
+    /// Whether this target's lossless sound is coded here, which takes libFLAC on
+    /// this host: an RDP host's PCM. wlshare's sound is passed, Opus or FLAC, and
+    /// needs none.
+    pub fn codes_flac(&self) -> bool {
+        self.protocol == Protocol::Rdp
+    }
+
+    /// Whether a session started with `choices` needs libFLAC on this host.
+    pub fn needs_libflac(&self, choices: Choices) -> bool {
+        self.codes_flac() && self.lossless(choices)
     }
 
     /// Whether the Opus bitrate walks with the link — on unless the operator
@@ -1760,23 +1757,6 @@ impl ConfigFile {
             // own AAC-ELD ([`crate::vnc_apple_media`]), so the keys could not do
             // anything there.
             let sound = target.offers().audio;
-            anyhow::ensure!(
-                target.audio_format.is_none() || sound,
-                "target {:?} is {kind} and sets audio_format — it is what the sound of an \
-                 rdp or a wlshare target is sent to the browser as, and no session there has \
-                 sound to choose a format for. Remove the key.",
-                target.name
-            );
-            anyhow::ensure!(
-                !target.lossless()
-                    || (target.audio_bitrate.is_none()
-                        && target.audio_adaptive.is_none()
-                        && target.audio_adaptive_min.is_none()),
-                "target {:?} sets audio_format = \"flac\" beside audio_bitrate, audio_adaptive \
-                 or audio_adaptive_min — those tune the Opus encoder, and FLAC is lossless, \
-                 with no rate to set or walk. Remove them.",
-                target.name
-            );
             anyhow::ensure!(
                 target.audio_bitrate.is_none() || sound,
                 "target {:?} is {kind} and sets audio_bitrate — it is the encoder's rate, \
@@ -3509,7 +3489,7 @@ mod tests {
         assert!(!hp.offers().audio);
         assert!(hp.sound(Choices::default()));
         assert_eq!(
-            hp.accepts(Choices { audio: true, ..Choices::default() }),
+            hp.accepts(Choices { audio: Sound::Opus, ..Choices::default() }),
             Err(NotOffered { target: "mac".to_owned(), choice: "sound" })
         );
 
@@ -3761,7 +3741,7 @@ mod tests {
             .targets
             .remove(0)
         };
-        let sound = Choices { audio: true, ..Choices::default() };
+        let sound = Choices { audio: Sound::Opus, ..Choices::default() };
 
         // A plain `vnc` target lists no audio extension.
         let plain = target("protocol = \"vnc\"");
@@ -4020,7 +4000,7 @@ mod tests {
             .resolve()
             .unwrap();
         assert!(!config.targets[0].offers().audio);
-        assert!(!config.targets[0].sound(Choices { audio: true, ..Choices::default() }));
+        assert!(!config.targets[0].sound(Choices { audio: Sound::Opus, ..Choices::default() }));
 
         for key in ["audio_bitrate = 96", "audio_adaptive = false", "audio_adaptive_min = 24"] {
             let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
@@ -4125,44 +4105,44 @@ mod tests {
         .resolve()
     }
 
-    /// `audio_format` is Opus unless it says FLAC, on the two targets whose sound
-    /// is a choice. Only an RDP host's PCM coded as FLAC needs libFLAC: wlshare's
-    /// sound is passed in either format. The Opus keys have nothing to tune
-    /// beside FLAC.
+    /// Lossless sound is a session's choice, on the two targets whose sound is
+    /// one, and not a key of the file. Only an RDP host's PCM coded as FLAC needs
+    /// libFLAC: wlshare's sound is passed in either format.
     #[test]
-    fn audio_format_selects_lossless_sound_where_there_is_sound_to_choose() {
-        let wlshare = |body: &str| parse_audio_target(body).map(|cfg| cfg.targets[0].clone());
-        let rdp = |body: &str| parse_target(body).map(|cfg| cfg.targets[0].clone());
+    fn lossless_sound_is_chosen_at_the_picker_where_there_is_sound_to_choose() {
+        let wlshare = parse_audio_target("").unwrap().targets[0].clone();
+        let rdp = parse_target("").unwrap().targets[0].clone();
+        let chose = |audio| Choices { audio, ..Choices::default() };
 
-        for target in [wlshare("").unwrap(), wlshare("audio_format = \"opus\"").unwrap()] {
-            assert!(!target.lossless());
-            assert!(!target.needs_libflac(), "wlshare's Opus is passed");
+        for target in [&wlshare, &rdp] {
+            for audio in [Sound::Off, Sound::Opus] {
+                assert!(!target.lossless(chose(audio)));
+                assert!(!target.needs_libflac(chose(audio)));
+            }
+            assert_eq!(target.accepts(chose(Sound::Flac)), Ok(()));
+            assert!(target.sound(chose(Sound::Flac)) && target.lossless(chose(Sound::Flac)));
         }
-        for target in [rdp("").unwrap(), rdp("audio_format = \"opus\"").unwrap()] {
-            assert!(!target.lossless());
-            assert!(!target.needs_libflac());
-        }
-        let passed = wlshare("audio_format = \"flac\"").unwrap();
-        assert!(passed.lossless() && !passed.needs_libflac(), "passed frames need no codec here");
-        let coded = rdp("audio_format = \"flac\"").unwrap();
-        assert!(coded.lossless() && coded.needs_libflac());
+        assert!(!wlshare.needs_libflac(chose(Sound::Flac)), "passed frames need no codec here");
+        assert!(rdp.needs_libflac(chose(Sound::Flac)));
 
-        assert!(rdp("audio_format = \"pcm\"").is_err(), "no third format");
-        for key in ["audio_bitrate = 96", "audio_adaptive = false", "audio_adaptive = true", "audio_adaptive_min = 24"] {
-            let err = rdp(&format!("audio_format = \"flac\"\n{key}")).unwrap_err();
-            assert!(format!("{err:#}").contains("FLAC is lossless"), "{key}: {err:#}");
-        }
+        assert!(parse_target("audio_format = \"flac\"").is_err(), "not a key of the file");
+        assert!(serde_json::from_str::<Sound>("\"pcm\"").is_err(), "no third format");
         // No sound to choose a format for: a plain vnc target, and both Macs.
         for kind in ["", "subtype = \"ard\"\nusername = \"u\"", "subtype = \"ard-high-performance\"\nusername = \"u\""] {
-            for format in ["flac", "opus"] {
-                let err = ConfigFile::parse(&format!(
-                    "[server]\n{}\n[[targets]]\nname = \"v\"\nprotocol = \"vnc\"\n{kind}\nhost = \"h\"\npassword = \"p\"\naudio_format = \"{format}\"\n",
-                    site_passwd_line()
-                ))
-                .and_then(ConfigFile::resolve)
-                .unwrap_err();
-                assert!(format!("{err:#}").contains("sets audio_format"), "{kind}: {err:#}");
-            }
+            let target = ConfigFile::parse(&format!(
+                "[server]\n{}\n[[targets]]\nname = \"v\"\nprotocol = \"vnc\"\n{kind}\nhost = \"h\"\npassword = \"p\"\n",
+                site_passwd_line()
+            ))
+            .and_then(ConfigFile::resolve)
+            .unwrap()
+            .targets
+            .remove(0);
+            assert_eq!(
+                target.accepts(chose(Sound::Flac)),
+                Err(NotOffered { target: "v".to_owned(), choice: "sound" }),
+                "{kind}"
+            );
+            assert!(!target.lossless(chose(Sound::Flac)), "{kind}");
         }
     }
 

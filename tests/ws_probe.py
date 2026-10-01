@@ -128,9 +128,13 @@ async def main() -> int:
     )
     parser.add_argument(
         "--sound",
-        action="store_true",
+        nargs="?",
+        choices=["opus", "flac"],
+        const="opus",
+        default="off",
         help="start the session with the remote's sound, on a target that offers it "
-        "as a choice (ard-high-performance always carries it)",
+        "as a choice (ard-high-performance always carries it): as Opus, or lossless "
+        "with --sound flac",
     )
     parser.add_argument(
         "--passthrough",

@@ -1,4 +1,4 @@
-# The page's decoder for a session's lossless sound (`audio_format = "flac"`), as
+# The page's decoder for a session's lossless sound, as
 # a WebAssembly module of its own: one FLAC frame in, its samples out.
 #
 # It is the page's alone. The gateway's FLAC is libFLAC, loaded at run time

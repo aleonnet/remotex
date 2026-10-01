@@ -1,6 +1,6 @@
 // The page's decoder for a session's lossless sound.
 //
-// A target with `audio_format = "flac"` is sent FLAC instead of Opus: wlshare's
+// A session started with lossless sound is sent FLAC instead of Opus: wlshare's
 // own frames passed as they came, or an RDP host's PCM coded by the gateway. A
 // packet is one FLAC frame, a stream of its own with no header in front of it,
 // which is not what a browser's WebCodecs reads. So the page decodes it itself,

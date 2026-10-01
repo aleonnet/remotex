@@ -37,7 +37,7 @@ const PICKER_TARGET = process.env.REMOTEX_PLAYWRIGHT_PICKER_TARGET;
 
 interface Choices {
   size: "target" | "default" | "window";
-  audio: boolean;
+  audio: "off" | "opus" | "flac";
   passthrough: boolean;
 }
 
@@ -90,7 +90,6 @@ async function openTarget(page: Page): Promise<Locator> {
   return page.getByRole("listitem").filter({ has: row });
 }
 
-const SOUND = /^Sound/;
 const PASSED = /^Pass the graphics pipeline through/;
 
 test.describe("the picker's options", () => {
@@ -111,7 +110,7 @@ test.describe("the picker's options", () => {
     await logInAndConnectTo(page, PICKER_TARGET ?? "", "", { resize: true });
 
     expect(seen.connects).toEqual([
-      { size: "window", audio: false, passthrough: false },
+      { size: "window", audio: "off", passthrough: false },
     ]);
     const connected = seen.statuses.at(-1);
     expect(connected).toMatchObject({
@@ -147,7 +146,12 @@ test.describe("the picker's options", () => {
     await expect(sizes.first()).toHaveAccessibleName(/^\d+×\d+/);
     await expect(sizes.first()).toBeChecked();
     await expect(item.getByRole("radio", { name: FOLLOWS_WINDOW })).not.toBeChecked();
-    await expect(item.getByRole("checkbox", { name: SOUND })).toBeChecked();
+    // Its sound is off or one of two formats, and the one chosen is the one
+    // shown.
+    const sounds = item.getByRole("group", { name: "Sound" }).getByRole("radio");
+    await expect(sounds).toHaveCount(3);
+    await expect(item.getByRole("radio", { name: /^Opus/ })).toBeChecked();
+    await expect(item.getByRole("radio", { name: /^Lossless/ })).not.toBeChecked();
     await expect(item.getByRole("checkbox", { name: PASSED })).not.toBeChecked();
     await expect(
       item.getByRole("button", { name: "Start", exact: true }),
@@ -161,7 +165,7 @@ test.describe("the picker's options", () => {
     ).toBeVisible({ timeout: 20_000 });
     const again = await openTarget(page);
     await expect(again.getByRole("radio", { name: FOLLOWS_WINDOW })).toBeChecked();
-    await expect(again.getByRole("checkbox", { name: SOUND })).toBeChecked();
+    await expect(again.getByRole("radio", { name: /^Opus/ })).toBeChecked();
   });
 
   test("a browser that takes a session over starts at the picker with its own choices", async ({

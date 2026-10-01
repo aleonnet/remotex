@@ -100,7 +100,6 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             audio_bitrate: None,
             audio_adaptive: None,
             audio_adaptive_min: None,
-            audio_format: None,
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

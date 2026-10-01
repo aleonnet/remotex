@@ -11,13 +11,13 @@
 //! listener hands them on as packets with no encoder behind them
 //! ([`AudioListener::into_passed`]).
 //!
-//! So is wlshare's sound, which wlshare codes itself as the target's
-//! `audio_format` asks: Opus ([`crate::vnc_audio::PASSED_OPUS`]) at the rate the
+//! So is wlshare's sound, which wlshare codes itself as the session was
+//! started with: Opus ([`crate::vnc_audio::PASSED_OPUS`]) at the rate the
 //! plan's walk arrives at, which the queue hands back to the engine for wlshare
 //! to be told ([`AudioBridge::ask_rate`]), or FLAC
 //! ([`crate::vnc_audio::PASSED_FLAC`]).
 //!
-//! A target with `audio_format = "flac"` is sent its sound lossless
+//! A session started with lossless sound is sent it as FLAC
 //! (EXPERIMENTAL): wlshare's FLAC frames passed, or an RDP host's PCM coded as
 //! FLAC here ([`AudioListener::into_flac`]). The page decodes either in its
 //! WebAssembly module, and there is no rate to walk.

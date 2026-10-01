@@ -1094,14 +1094,14 @@ impl SessionManager {
             // A High Performance Mac's sound is passed as it came, whichever way its
             // picture goes: the Mac's own units fill the bridge, and there is nothing
             // to encode.
-            // So is wlshare's, always: Opus packets, or FLAC frames on a target
-            // that sends its sound lossless, coded by wlshare as the VNC engine
+            // So is wlshare's, always: Opus packets, or FLAC frames in a session
+            // started with its sound lossless, coded by wlshare as the VNC engine
             // asked.
             let passed = st.selected.as_ref().and_then(|selected| {
                 if selected.target.media_stream() {
                     Some(crate::vnc_apple_media::PASSED_SOUND)
                 } else if selected.target.wlshare() {
-                    Some(crate::vnc_audio::passed(selected.target.lossless()))
+                    Some(crate::vnc_audio::passed(selected.target.lossless(selected.choices)))
                 } else {
                     None
                 }
@@ -1112,13 +1112,14 @@ impl SessionManager {
             let remote_plan = st
                 .selected
                 .as_ref()
-                .filter(|selected| selected.target.wlshare() && !selected.target.lossless())
+                .filter(|selected| selected.target.wlshare() && !selected.target.lossless(selected.choices))
                 .map(|selected| selected.target.audio_plan());
-            // An RDP host's PCM on such a target is coded as FLAC here.
-            let lossless = st.selected.as_ref().is_some_and(|selected| selected.target.lossless());
-            // The target's, not a session setting: the codec and its rate are a
-            // property of the link to this desktop, which is what the operator
-            // configured them from.
+            // An RDP host's PCM in such a session is coded as FLAC here.
+            let lossless =
+                st.selected.as_ref().is_some_and(|selected| selected.target.lossless(selected.choices));
+            // The Opus rate is the target's, not a session setting: a property of
+            // the link to this desktop, which is what the operator configured it
+            // from.
             let (plan, source_format) = st
                 .selected
                 .as_ref()
@@ -1709,7 +1710,7 @@ mod tests {
 
 
     use super::*;
-    use crate::config::{Chroma, ChromaChoice, Sizing};
+    use crate::config::{Chroma, ChromaChoice, Sizing, Sound};
     use crate::audio::PCM_CD_QUALITY;
     use crate::protocol::UNSCALED;
 
@@ -1724,11 +1725,11 @@ mod tests {
     );
 
     /// A session started with nothing but the window driving the size.
-    const RESIZE: Choices = Choices { size: Sizing::Window, audio: false, passthrough: false };
+    const RESIZE: Choices = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: false };
     /// A session started with nothing but the remote's sound.
-    const SOUND: Choices = Choices { size: Sizing::Target, audio: true, passthrough: false };
+    const SOUND: Choices = Choices { size: Sizing::Target, audio: Sound::Opus, passthrough: false };
     /// A session started with nothing but the target's passthrough.
-    const PASSED: Choices = Choices { size: Sizing::Target, audio: false, passthrough: true };
+    const PASSED: Choices = Choices { size: Sizing::Target, audio: Sound::Off, passthrough: true };
 
     /// What the connected status carries: the target's capabilities and what the
     /// session was started with. One struct rather than positional bools, and the
@@ -1760,7 +1761,7 @@ mod tests {
         /// What a session with this metadata is started with.
         const fn choices(self) -> Choices {
             let size = if self.resize { Sizing::Window } else { Sizing::Target };
-            Choices { size, audio: self.audio, passthrough: false }
+            Choices { size, audio: if self.audio { Sound::Opus } else { Sound::Off }, passthrough: false }
         }
 
         const fn camera(mut self) -> Self {
@@ -1819,7 +1820,6 @@ mod tests {
             virtual_display: false,
             audio_adaptive: None,
             audio_adaptive_min: None,
-            audio_format: None,
         }
     }
 
@@ -2379,7 +2379,7 @@ mod tests {
                 },
             );
             let mgr = Arc::new(SessionManager::with_spawner(vec![mac_target("mac")], spawner));
-            let started = Choices { size: Sizing::Window, audio: false, passthrough: true };
+            let started = Choices { size: Sizing::Window, audio: Sound::Off, passthrough: true };
 
             let token_a = mgr.claim(false, None).unwrap();
             let mut att_a = mgr.attach(&token_a, None, TAKES).await.unwrap();
@@ -3054,26 +3054,25 @@ mod tests {
         }
     }
 
-    /// wlshare's sound is always passed, and coded by wlshare as the target's
-    /// `audio_format` says: Opus behind the head the browser's decoder takes,
-    /// or FLAC. The engine's units reach the socket as they came, and arming
+    /// wlshare's sound is always passed, and coded by wlshare as the session
+    /// was started with: Opus behind the head the browser's decoder takes, or
+    /// FLAC. The engine's units reach the socket as they came, and arming
     /// the Opus one names the plan's rate for wlshare to start from.
     #[tokio::test]
-    async fn wlshares_sound_is_passed_in_the_format_the_target_names() {
-        for (format, codec) in [(None, "opus"), (Some(crate::config::AudioFormat::Flac), "flac")] {
+    async fn wlshares_sound_is_passed_in_the_format_the_session_chose() {
+        for (format, codec) in [(Sound::Opus, "opus"), (Sound::Flac, "flac")] {
             let (hook_tx, hooks) = std_mpsc::channel();
             let spawner: EngineSpawner = Box::new(
                 move |_target, _choices, _plan, _display, input_rx, frame_tx, audio, camera, _feedback| {
                     hook_tx.send((input_rx, frame_tx, audio, camera)).unwrap();
                 },
             );
-            let target =
-                TargetConfig { subtype: Some(Subtype::Wlshare), audio_format: format, ..video_target("sway") };
+            let target = TargetConfig { subtype: Some(Subtype::Wlshare), ..video_target("sway") };
             let mgr = Arc::new(SessionManager::with_spawner(vec![target], spawner));
             let token = mgr.claim(false, None).unwrap();
             let mut att = mgr.attach(&token, None, TAKES).await.unwrap();
             expect_picker(&mut att.events).await;
-            let choices = Choices { audio: true, ..Choices::default() };
+            let choices = Choices { audio: format, ..Choices::default() };
             mgr.connect(att.id, "sway", None, choices).await.unwrap();
             let (_input, _frames, audio, _camera) = hooks.try_recv().unwrap();
             let audio = audio.expect("a session with sound is given a bridge");

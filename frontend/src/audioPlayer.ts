@@ -15,9 +15,8 @@ import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
 import { type FlacDecoder, type FlacFactory, loadFlac } from "./flacDecoder.ts";
 
 /**
- * What `audioFormat` names lossless sound as: a target with
- * `audio_format = "flac"`. Each packet is one FLAC frame, decoded here rather
- * than by WebCodecs.
+ * What `audioFormat` names lossless sound as, in a session started with it.
+ * Each packet is one FLAC frame, decoded here rather than by WebCodecs.
  */
 export const FLAC_CODEC = "flac";
 
