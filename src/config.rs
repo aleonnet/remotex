@@ -187,8 +187,9 @@ pub enum Chroma {
     /// a keyframe a third larger, inter frames no larger, a third more encode
     /// time, and coloured text that is the colour it was.
     ///
-    /// The trade is the decoder. No hardware VP9 decoder takes profile 1, so this
-    /// always decodes in software — Chromium does (measured headless, 2026-09-01),
+    /// The trade is the decoder. Hardware that decodes profile 1 exists, but no
+    /// browser's hardware VP9 path takes it, so in a browser this always decodes
+    /// in software — Chromium does (measured headless, 2026-09-01),
     /// and a browser with no software VP9 at all, which is iOS and iPadOS, refuses
     /// the stream by name at `VideoDecoder.configure`, the same way it would refuse
     /// any configuration it lacks. Losing the hardware path is a smaller loss than

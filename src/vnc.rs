@@ -184,9 +184,8 @@ const MAX_WLSHARE_VP9_FRAME: u32 = 64 << 20;
 /// acknowledges nothing, and the wait its oldest batch shows grows without bound,
 /// so an unbounded hold would stop wlshare, which sends nothing until the echo,
 /// for as long as the window stays shut. The paint window's own grace for such a
-/// window, and the one wlshare's desktop client gives its own: past it the echo
-/// goes, and a client that is only slow still holds the engine where it always
-/// did, at the budget.
+/// window: past it the echo goes, and a client that is only slow still holds the
+/// engine where it always did, at the budget.
 const FENCE_HOLD_LIMIT: Duration = Duration::from_millis(500);
 /// The extension's one message type, used in both directions: the server's
 /// `OutputList` and the client's `SelectOutput`. Outside every registered RFB

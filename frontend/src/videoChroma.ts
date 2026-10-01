@@ -4,9 +4,10 @@
 // The gateway streams VP9. Profile 1 (4:4:4) is the picture worth having on a
 // desktop — a coloured glyph stem in profile 0 shares its one colour sample with
 // three background pixels and comes back at a quarter of its saturation, which no
-// quantizer recovers — but no hardware VP9 decoder takes profile 1, and a browser
-// with no software VP9 at all, which is iOS and iPadOS, refuses it by name. The
-// gateway cannot tell which it is talking to, so the browser says: `chooseVideoChroma`
+// quantizer recovers — but no browser's hardware VP9 path takes profile 1, so it
+// decodes in software, and a browser with no software VP9 at all, which is iOS and
+// iPadOS, refuses it by name. The gateway cannot tell which it is talking to, so
+// the browser says: `chooseVideoChroma`
 // asks `VideoDecoder.isConfigSupported` about one representative 4:4:4 configuration,
 // and the answer rides every session socket this page opens (`gateway.ts`), which is
 // what makes it known both when a target is picked and when a takeover reconnects the

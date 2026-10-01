@@ -30,7 +30,7 @@ MS-RDPECLIP, MS-RDPEA, MS-RDPECAM, and MS-RDPEAI live under
 EGFX is in, as [The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
 describes; what is left of it
 beyond the decoders is under
-[Source codecs](#source-codecs-not-accepted-yet)
+[H.264 in the RDP graphics pipeline](#h264-in-the-rdp-graphics-pipeline)
 rather than here, because that payoff is a transcode removed, not a control
 restored.
 
@@ -85,23 +85,6 @@ a per-target pin — the certificate's public key or its SHA-256 fingerprint in 
 target's configuration, compared against what the handshake presented — is the
 one that fits. Absent a pin, today's behavior stands.
 
-### Raising quality above the dial
-
-The stream's congestion loop can notice a backlog but never find headroom: it walks
-the dial down when the outbound queue says the link is behind and back up to the
-configured quality when it is not, and never past it. That is sound — exceeding the
-operator's setting was never a goal — but it means a link with room to spare is never
-discovered.
-
-The existing `paintAck` feedback supplies the receiver's view of *queueing*: it
-reports when a batch finished the client's ordered decode-and-draw pass, and the
-adaptive loop subtracts the link's recent floor to detect falling behind. An empty
-paint window still says only that the configured quality fits; it does not measure
-how much more would fit. Going further therefore wants richer receiver feedback —
-delivered bytes and arrival timing added to that contract, for example — plus an
-explicit upper-bound policy. It is a separate feature whose value should be argued
-from `video`'s measurements rather than assumed.
-
 ### The first keyframe on a slow link
 
 Every VP9 stream governed by the target's dial starts there, and its first
@@ -123,9 +106,8 @@ wlshare's passed stream is coded and walked there, so the gateway knows each fra
 size and whether it is a keyframe and nothing about the quality it went out at: the
 encode totals of such a session count its units, keyframes and bytes, and report no
 round coarsened and a lowest quality of 100 whatever wlshare did. Reporting it
-wants wlshare to say what it coded each frame at, which its desktop clients want
-for their own throughput readout too. It is one change to the wire, to be made
-with the desktop clients' throughput support rather than ahead of it.
+wants wlshare to say what it coded each frame at: one change to the wire, made
+in wlshare and read here.
 
 ### Apple's passed HEVC at 4K
 
@@ -168,33 +150,25 @@ before, so none can be dropped alone, and a full queue drops to the next IDR and
 asks the Mac for one, which brings the picture back as one fresh frame rather than
 a replay of the backlog.
 
-### Source codecs not accepted yet
+### H.264 in the RDP graphics pipeline
 
-Two places where a remote could hand this gateway a codec it currently refuses or
-does not advertise. Each could remove upstream bytes, but takes a new decoder and
-accepts a lossy source; neither is near-term. They are here so that "why not this
-one" has an answer rather than being rediscovered.
+The one codec a current Windows host offers that the RDP client refuses. It could
+remove upstream bytes, but takes a new decoder and accepts a lossy source, and it
+is not near-term. It is here so that "why not this one" has an answer rather than
+being rediscovered.
 
-- **RDP EGFX.** The RDP client carries the pipeline again — the channel, ZGFX,
-  the surface compositor with its caches and copies, the frame marks, and the
-  decoders a current Windows host draws with: ClearCodec with NSCodec inside it,
-  RemoteFX Progressive, planar and uncompressed ([The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
-  describes each). H.264, which a host hands the parts of the desktop that move
-  like video, is refused with `AVC_DISABLED` on purpose: a lossy video codec
-  loses detail before the gateway ever encodes the picture, and the source is to
-  stay lossless. Supporting it would add an H.264 decoder per surface to the
-  shared compositor used in both the gateway and the page. Even on a passed
-  pipeline it is not a standalone video stream: the host masks each picture by
-  rectangles and mixes it with the other codecs and drawing commands on one
-  surface. It is not taken up without the operator accepting a lossy source, as
-  the VNC entry below puts it.
-- **Tight/JPEG/H.264 VNC decode or pass-through.** A plain `vnc` target advertises
-  only the lossless standard encodings on purpose: Tight and TightPNG are vendor
-  encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to
-  decode it. Tight-family decoding, and handing a lossy source payload to the
-  browser untouched, would remove upstream bytes and a transcode — for a target
-  where the operator has already accepted lossy, the transcode is pure loss. The
-  cost is a decoder this repo would then own.
+The RDP client carries the pipeline — the channel, ZGFX, the surface compositor
+with its caches and copies, the frame marks, and the decoders a current Windows
+host draws with: ClearCodec with NSCodec inside it, RemoteFX Progressive, planar
+and uncompressed ([The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
+describes each). H.264, which a host hands the parts of the desktop that move
+like video, is refused with `AVC_DISABLED` on purpose: a lossy video codec loses
+detail before the gateway ever encodes the picture, and the source is to stay
+lossless. Supporting it would add an H.264 decoder per surface to the shared
+compositor used in both the gateway and the page. Even on a passed pipeline it is
+not a standalone video stream: the host masks each picture by rectangles and
+mixes it with the other codecs and drawing commands on one surface. It is not
+taken up without the operator accepting a lossy source.
 
 ### Two streams for Apple's All Displays
 
@@ -210,22 +184,19 @@ paint window order two chains, and how each stream starts over are the work.
 Two screens is the limit, as it is today: All Displays over three or more is held
 with the notice whatever its size.
 
-### A virtual-display remote session for sway
-
-Console-style remote control of a physical sway machine, the way Apple's High
-Performance mode and the Windows console session work: every physical display
-is folded into one resizable headless output for the length of the session, the
-gateway renders it at the browser's density, and the person at the keyboard
-takes control back through a virtual console switch. The wire half has shipped
-in wlshare, one private pseudo-encoding and one message type each way,
-documented in [`wlshare-density.md`](wlshare-density.md). What remains is
-the session daemon on the sway host, a controller speaking sway IPC beside
-wlshare. A stage 1 prototype of it was measured on macintel: stock sway
-1.10 gives the resizable headless output beside the live panel and the restore
-holds, but wayvnc 0.9.1 crashes on half the connects while the output is created
-beside it. That crash is the risk now, and stage 2 starts with its backtrace.
-
 ## Not planned
+
+### Tight, JPEG and H.264 on a plain VNC target
+
+A plain `vnc` target advertises only the lossless standard encodings: Tight and
+TightPNG are vendor encodings, JPEG and H.264 are lossy, and advertising an
+encoding is a promise to decode it. Decoding the Tight family, or handing a
+lossy payload to the browser untouched, would remove upstream bytes and a
+transcode at the cost of a decoder this repo would then own. That work is for a
+server outside the three the project prioritizes, which is reached through the
+RFB baseline and nothing more
+([Constraints](architecture.md#constraints)). A stream of its own passed
+through is what a `wlshare` target has.
 
 ### `THINCLIENT` in the graphics capability advertise
 

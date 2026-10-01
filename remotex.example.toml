@@ -555,10 +555,11 @@ password = "change-me"
 #            on a dark terminal shares its one 4:2:0 colour sample with three pixels of
 #            background and comes back at a quarter of its saturation, at any quality
 #            — measured, lossless 4:2:0 is no better than quality 100. 4:4:4 keeps it,
-#            for a keyframe about a third larger and inter frames no larger. It always
-#            decodes in software (no hardware VP9 decoder takes profile 1): Chromium
-#            does; iOS and iPadOS have no software VP9 at all and refuse it by name,
-#            and this setting sends it to them anyway.
+#            for a keyframe about a third larger and inter frames no larger. In a
+#            browser it decodes in software: hardware that decodes profile 1 exists,
+#            but no browser's hardware VP9 path takes it. Chromium decodes it; iOS and
+#            iPadOS have no software VP9 at all and refuse it by name, and this setting
+#            sends it to them anyway.
 #   "auto" — 4:4:4 where the browser's decoder takes profile 1, 4:2:0 where it says it
 #            does not. The default. The page asks its own VideoDecoder once, at load,
 #            and states the answer on its session socket.
