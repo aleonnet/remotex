@@ -1,5 +1,5 @@
 // What a session is started with: how the desktop is sized, whether the remote's
-// sound is taken, and whether the target's own stream is passed. Chosen under the
+// sound is taken and as what, and whether the target's own stream is passed. Chosen under the
 // target at the picker, before Start, and held for the life of the session —
 // `connect` carries them and the gateway keeps them beside the target
 // (src/config.rs, `Choices`).
@@ -13,10 +13,12 @@
 // - The size a session will have is always shown, and is a choice only where
 //   there are two: see `sizeOptions`.
 // - An option the target's type does not offer has no row.
-// - One it offers that cannot be had here is greyed, with the reason: a sound
-//   this gateway cannot decode, a passthrough this browser cannot take, or one
-//   that is the only way this gateway can serve the target, which is then shown
-//   ticked.
+// - One it offers that cannot be had here is greyed, with the reason: a lossless
+//   sound this gateway cannot code, a passthrough this browser cannot take, or
+//   one that is the only way this gateway can serve the target, which is then
+//   shown ticked.
+// - Sound is off, Opus or lossless where the target offers it: see
+//   `soundOptions`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
 
@@ -47,10 +49,10 @@ export interface TargetInfo {
   /** Whether the remote's sound is a choice. */
   audio: boolean;
   /**
-   * Whether this gateway cannot decode that sound: wlshare's, on a host without
-   * libFLAC.
+   * Whether this gateway cannot send that sound lossless: an RDP host's, which
+   * it codes as FLAC, on a host without libFLAC.
    */
-  audioUnavailable: boolean;
+  losslessUnavailable: boolean;
   /** The stream this target can pass, null where it has none. */
   passthrough: Passthrough | null;
   /**
@@ -74,10 +76,16 @@ export interface Points {
  */
 export type Sizing = "target" | "default" | "window";
 
+/**
+ * Whether a session takes the remote's sound, as `connect` names it, and what
+ * the sound is sent as: Opus, or lossless as FLAC.
+ */
+export type Sound = "off" | "opus" | "flac";
+
 /** What `connect` carries. */
 export interface Choices {
   size: Sizing;
-  audio: boolean;
+  audio: Sound;
   passthrough: boolean;
 }
 
@@ -102,9 +110,18 @@ export interface SizeOption {
   note: string;
 }
 
+/** One answer to whether, and as what, a target's sound is taken. */
+export interface SoundOption {
+  value: Sound;
+  label: string;
+  /** What choosing it does, or why it cannot be chosen here. */
+  note: string;
+  disabled: boolean;
+}
+
 /** One option under an open target. */
 export interface OptionRow {
-  key: "audio" | "passthrough";
+  key: "passthrough";
   label: string;
   /** What ticking it does, or why it cannot be changed here. */
   note: string;
@@ -119,6 +136,8 @@ export interface TargetOptions {
    * where there are two, and otherwise the one size the session will have.
    */
   sizes: SizeOption[];
+  /** The target's sound, as a choice: empty where it offers none. */
+  sounds: SoundOption[];
   rows: OptionRow[];
   /** What Start sends. */
   choices: Choices;
@@ -264,6 +283,39 @@ function sizeOptions(
 }
 
 /**
+ * What `target`'s sound can be taken as: nothing to choose where it offers none,
+ * and otherwise off, Opus, or lossless, which is greyed where the gateway would
+ * have to code it and cannot.
+ */
+function soundOptions(target: TargetInfo): SoundOption[] {
+  if (!target.audio) {
+    return [];
+  }
+  return [
+    {
+      value: "off",
+      label: "Off",
+      note: "The remote keeps playing where it does.",
+      disabled: false,
+    },
+    {
+      value: "opus",
+      label: "Opus",
+      note: "Compressed, at a rate that follows the link.",
+      disabled: false,
+    },
+    {
+      value: "flac",
+      label: "Lossless (experimental)",
+      note: target.losslessUnavailable
+        ? "This gateway cannot code this target's sound as FLAC. Install libFLAC on the gateway's host."
+        : "FLAC, about a megabit a second of music. For a LAN.",
+      disabled: target.losslessUnavailable,
+    },
+  ];
+}
+
+/**
  * The options under `target`, from what was `remembered` for it and what this
  * browser can do. A size the operator configured is the size until somebody
  * chooses another, and no remote's sound starts playing until somebody asks.
@@ -277,26 +329,14 @@ export function targetOptions(
   const size =
     sizes.find((option) => option.value === remembered?.size)?.value ??
     sizes[0].value;
+  const sounds = soundOptions(target);
+  // What was chosen last time, where it can still be chosen here.
+  const audio =
+    sounds.find(
+      (option) => option.value === remembered?.audio && !option.disabled,
+    )?.value ?? "off";
   const rows: OptionRow[] = [];
   let blocked: string | null = null;
-  if (target.audio) {
-    const row = { key: "audio" as const, label: "Sound" };
-    rows.push(
-      target.audioUnavailable
-        ? {
-            ...row,
-            note: "This gateway cannot carry this target's sound. Install libFLAC on the gateway's host.",
-            checked: false,
-            disabled: true,
-          }
-        : {
-            ...row,
-            note: "Take the remote's sound and play it here.",
-            checked: remembered?.audio ?? false,
-            disabled: false,
-          },
-    );
-  }
   if (target.passthrough) {
     const passed = passthroughRow(
       target.passthrough,
@@ -307,20 +347,19 @@ export function targetOptions(
     rows.push(passed.row);
     blocked = passed.blocked;
   }
-  const chosen = (key: OptionRow["key"]) =>
-    rows.find((row) => row.key === key)?.checked ?? false;
-  const choices = {
+  const choices: Choices = {
     size,
-    audio: chosen("audio"),
-    passthrough: chosen("passthrough"),
+    audio,
+    passthrough: rows.some((row) => row.checked),
   };
   return {
     sizes,
+    sounds,
     rows,
     choices,
     // High Performance's sound comes with its picture, so it has no row and is
     // always there.
-    sound: choices.audio || target.passthrough === "apple-media",
+    sound: choices.audio !== "off" || target.passthrough === "apple-media",
     blocked,
   };
 }

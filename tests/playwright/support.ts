@@ -231,20 +231,24 @@ async function startTarget(
   // first, and one stated line otherwise.
   const follows = item.getByRole("radio", { name: FOLLOWS_WINDOW });
   if ((await follows.count()) > 0) {
-    const size = choices.resize ? follows : item.getByRole("radio").first();
+    const size = choices.resize
+      ? follows
+      : item.getByRole("group", { name: "Size" }).getByRole("radio").first();
     await size.check({ timeout: LEAVE_TIMEOUT_MS });
   } else if (choices.resize) {
     await expect(item).toContainText(FOLLOWS_WINDOW);
   }
-  const options: [RegExp, boolean][] = [
-    [/^Sound/, choices.sound ?? false],
-    [/^Pass /, choices.passthrough ?? false],
-  ];
-  for (const [name, wanted] of options) {
-    const option = item.getByRole("checkbox", { name });
-    if (wanted || ((await option.count()) > 0 && (await option.isEnabled()))) {
-      await option.setChecked(wanted, { timeout: LEAVE_TIMEOUT_MS });
-    }
+  // Sound is off or a format, where the target offers it: asked for, it is Opus.
+  const sound = item.getByRole("group", { name: "Sound" });
+  if (choices.sound || (await sound.count()) > 0) {
+    await sound
+      .getByRole("radio", { name: choices.sound ? /^Opus/ : /^Off/ })
+      .check({ timeout: LEAVE_TIMEOUT_MS });
+  }
+  const passed = item.getByRole("checkbox", { name: /^Pass / });
+  const wanted = choices.passthrough ?? false;
+  if (wanted || ((await passed.count()) > 0 && (await passed.isEnabled()))) {
+    await passed.setChecked(wanted, { timeout: LEAVE_TIMEOUT_MS });
   }
   await item.getByRole("button", { name: "Start", exact: true }).click();
 }

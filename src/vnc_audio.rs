@@ -4,11 +4,11 @@
 //! The extension is private to wlshare, and this is the client it is for:
 //!
 //! - The client lists the pseudo-encoding [`ENCODING`] (`WLSF`) in
-//!   `SetEncodings`, as this engine does on every `wlshare` target that asked
-//!   for audio, and beside it [`ENCODING_OPUS`] (`WLOP`) unless the target's
-//!   sound is lossless: wlshare codes the sound as FLAC for a list without it
-//!   and as Opus for one with. The codec is this client's to choose, from the
-//!   target's `audio_format`, and nothing in wlshare's configuration.
+//!   `SetEncodings`, as this engine does in every `wlshare` session started
+//!   with sound, and beside it [`ENCODING_OPUS`] (`WLOP`) unless that sound is
+//!   lossless: wlshare codes the sound as FLAC for a list without it and as
+//!   Opus for one with. The codec is this client's to choose, from what was
+//!   chosen at the picker, and nothing in wlshare's configuration.
 //! - A server that speaks it announces so with an **empty pseudo-rectangle** of
 //!   [`ENCODING`] inside a `FramebufferUpdate` — the only announcement there
 //!   is, the same shape ExtendedDesktopSize uses. A server that does not speak
@@ -35,7 +35,7 @@
 //! decoder takes, so it goes to the bridge as it came ([`PASSED_OPUS`]), made by
 //! the encoder this gateway codes an RDP host's sound with (`desktop-opus`), at
 //! the rate the target's audio keys and their walk arrive at. A FLAC frame goes
-//! the same way on a target with `audio_format = "flac"` (EXPERIMENTAL), for
+//! the same way in a session started with lossless sound (EXPERIMENTAL), for
 //! the page's own decoder ([`PASSED_FLAC`]). Neither stream's header is sent by
 //! wlshare: everything in one follows from the format this client set and the
 //! extension's one rule, that every frame is [`BLOCK_FRAMES`] frames of it.
@@ -226,8 +226,8 @@ pub fn frame_length(header: [u8; FRAME_HEADER_LEN]) -> u32 {
     u32::from_be_bytes([header[3], header[4], header[5], header[6]])
 }
 
-/// A FLAC stream's frames as the browser is told of them
-/// (`audio_format = "flac"`): [`SOURCE_FORMAT`] in blocks of [`BLOCK_FRAMES`],
+/// A lossless session's FLAC frames as the browser is told of them:
+/// [`SOURCE_FORMAT`] in blocks of [`BLOCK_FRAMES`],
 /// with no head, since each frame states its own shape and the page's decoder
 /// holds it to this one.
 pub const PASSED_FLAC: crate::audio::PassedFormat = crate::audio::PassedFormat {
@@ -251,8 +251,8 @@ pub const PASSED_OPUS: crate::audio::PassedFormat = crate::audio::PassedFormat {
     head: b"OpusHead\x01\x02\x38\x01\x80\xbb\x00\x00\x00\x00\x00",
 };
 
-/// What a target's sound is passed to the browser as: wlshare's Opus, or its
-/// FLAC on one that sends its sound lossless.
+/// What a session's sound is passed to the browser as: wlshare's Opus, or its
+/// FLAC in one started with its sound lossless.
 pub fn passed(lossless: bool) -> crate::audio::PassedFormat {
     if lossless { PASSED_FLAC } else { PASSED_OPUS }
 }

@@ -167,10 +167,10 @@ pub async fn run(
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = VideoSink::new("rdp", frame_tx, plan, feedback, Oversize::Refuse);
-    // A target that sends its sound as FLAC codes the host's PCM with libFLAC.
-    // The picker says so before Start where the host lacks it; a session started
-    // with sound all the same is told here, before the host is dialled.
-    if config.needs_libflac()
+    // A session started with its sound lossless codes the host's PCM with
+    // libFLAC. The picker says so before Start where this host lacks it; a session
+    // started with it all the same is told here, before the host is dialled.
+    if config.needs_libflac(choices)
         && audio.is_some()
         && let Err(e) = crate::audio::load_libflac()
     {

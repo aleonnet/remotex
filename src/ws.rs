@@ -2038,7 +2038,6 @@ mod tests {
             audio_bitrate: None,
             audio_adaptive: None,
             audio_adaptive_min: None,
-            audio_format: None,
         }
     }
 
@@ -2397,7 +2396,7 @@ mod tests {
             att.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))
         ));
-        let sound = crate::config::Choices { audio: true, ..Default::default() };
+        let sound = crate::config::Choices { audio: crate::config::Sound::Opus, ..Default::default() };
         sessions.connect(att.id, "fake", None, sound).await.unwrap();
         let (input_rx, _frame_tx, bridge) = engine_rx.recv().await.unwrap();
         let bridge = bridge.expect("a session with sound is given a bridge");

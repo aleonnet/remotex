@@ -219,12 +219,20 @@ site_passwd = ""
 # fixed 3840×2160 backing ceiling. An "rdp" desktop is resized through its
 # graphics pipeline, so `egfx = false` leaves it at the size it keeps.
 #
-# Sound takes the remote's sound. An "rdp" target negotiates sound redirection
-# (MS-RDPEA) when it connects, as 44100 Hz 16-bit stereo PCM, and a Windows host
-# sends nothing on the channel until something plays. A "wlshare" target lists
-# wlshare's audio extension. Started without it, neither is asked, and the host
-# keeps playing where it did. A plain "vnc" target carries no sound, and neither
-# does "ard": Standard mode leaves the Mac's sound output alone, playing on the
+# Sound takes the remote's sound, as Opus or lossless. An "rdp" target negotiates
+# sound redirection (MS-RDPEA) when it connects, as 44100 Hz 16-bit stereo PCM,
+# and a Windows host sends nothing on the channel until something plays. A
+# "wlshare" target lists wlshare's audio extension. Started with it off, neither
+# is asked, and the host keeps playing where it did.
+#
+# Opus is sent at the rates the audio keys below hold. Lossless (EXPERIMENTAL) is
+# FLAC, which the page decodes in a WebAssembly module of its own: a "wlshare"
+# target's sound is coded by wlshare in whichever format was chosen and passed to
+# the browser as it came, so the gateway codes none of it, and an "rdp" target's
+# PCM is coded here, as FLAC by libFLAC. Music is roughly a megabit a second,
+# with no adaptive walk: for a link with room.
+#
+# A plain "vnc" target carries no sound, and neither does "ard": Standard mode leaves the Mac's sound output alone, playing on the
 # Mac or to whatever AirPlay receiver it picks. An "ard-high-performance" session
 # always carries sound, which the Mac sends beside its picture, so there is
 # nothing to choose. In the session, the floating menu's Mute and Unmute change
@@ -321,7 +329,7 @@ password = "change-me"
 # its fetches and data inside the encrypted record transport.
 #clipboard = false
 
-# The remote's sound, in a session that carries it, is sent as Opus in 20 ms
+# The remote's sound, in a session started with it as Opus, is sent in 20 ms
 # packets. The channel has to be negotiated when the connection is made, so such
 # a session asks the server to redirect from the moment it connects and throws
 # the sound away while nobody is listening. Nothing about it depends on how the
@@ -353,18 +361,6 @@ password = "change-me"
 # `audio_bitrate`; the default one is held to `audio_bitrate` where that sits
 # lower. Refused beside `audio_adaptive = false`.
 #audio_adaptive_min = 32
-
-# EXPERIMENTAL. Send this target's sound lossless, as FLAC, instead of Opus.
-# A "wlshare" target's sound is coded by wlshare in whichever format this names
-# and passed to the browser as it came — Opus at the rates above, which the
-# gateway tells it, or FLAC — so the gateway codes none of it; an "rdp" target's
-# PCM is coded here, as FLAC by libFLAC. The page decodes FLAC in a WebAssembly
-# module of its own.
-# Music is roughly a megabit a second, with no adaptive walk: for a link with
-# room. Refused on a target with no sound to choose a format for — a plain
-# "vnc" one and both Macs — and beside the three Opus keys above, which it
-# leaves nothing to tune. The default is "opus".
-#audio_format = "flac"
 
 # Camera redirection: offer the remote a virtual webcam whose frames are this
 # browser's, over MS-RDPECAM on "rdp" — or, on a "wlshare" target, over

@@ -83,7 +83,7 @@ The frontend's
 build compiles two WebAssembly modules: one from the gateway's graphics crate
 (`frontend/wasm/egfx` around
 `crates/remotex-rdp-graphics`, the page's compositor for a passed RDP pipeline),
-and the page's FLAC decoder for a lossless target's sound (`frontend/wasm/flac`),
+and the page's FLAC decoder for a session's lossless sound (`frontend/wasm/flac`),
 which the stable toolchain builds. So wherever the frontend is built — `bun run build`, or a
 Cargo build without `REMOTEX_PREBUILT_FRONTEND` — the compositor's module is built by the nightly
 toolchain `frontend/wasm/egfx/rust-toolchain.toml` pins, which its threads need and
@@ -151,7 +151,7 @@ elsewhere the operator installs it, as
 [High Performance decoder](../docs/high-performance-decoder.md) says for each
 platform.
 
-An `rdp` target with `audio_format = "flac"` has its sound coded by libFLAC,
+An `rdp` session started with lossless sound has it coded by libFLAC,
 which [desktop-flac](https://github.com/andrewtheguy/desktop-flac) loads at run
 time and nothing links (`src/audio.rs`); wlshare's sound is passed as wlshare
 coded it and needs none. Every artifact brings it, FLAC 1.5's or

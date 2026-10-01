@@ -1,7 +1,7 @@
 //! The page's decoder for a session's lossless sound: one FLAC frame in, its
 //! samples out.
 //!
-//! A target with `audio_format = "flac"` sends the browser FLAC instead of Opus:
+//! A session started with lossless sound is sent FLAC instead of Opus:
 //! wlshare's own frames passed as they came, or an RDP host's PCM coded by the
 //! gateway with libFLAC. Either way a packet on the audio socket is one FLAC
 //! frame, a stream of its own one block long (`desktop-flac` makes them so), and

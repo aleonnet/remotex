@@ -1098,7 +1098,7 @@ pub enum ServerMsg {
     /// ([`crate::vnc_apple_media::PASSED_SOUND`]): `mp4a.40.39`, AAC-ELD, with its
     /// AudioSpecificConfig in `head`.
     ///
-    /// A target with `audio_format = "flac"` says `flac` with an empty `head`:
+    /// A session started with its sound lossless says `flac` with an empty `head`:
     /// each packet is one FLAC frame at the source's own rate, which the page
     /// decodes itself ([`crate::audio::FLAC_CODEC`]).
     ///
@@ -1527,7 +1527,7 @@ mod tests {
             }
             other => panic!("unexpected: {other:?}"),
         }
-        // What was chosen under the target rides the same message, sound and
+        // What was chosen under the target rides the same message, sound off and
         // passthrough false unless named, and a choice this gateway does not know
         // is refused rather than dropped.
         match serde_json::from_str::<ClientMsg>(
@@ -1539,7 +1539,7 @@ mod tests {
                 choices,
                 crate::config::Choices {
                     size: crate::config::Sizing::Window,
-                    audio: false,
+                    audio: crate::config::Sound::Off,
                     passthrough: true
                 }
             ),

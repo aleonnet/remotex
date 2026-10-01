@@ -671,11 +671,11 @@ struct TargetInfo {
     default_size: Option<Points>,
     /// Whether the picker offers the remote's sound as a choice.
     audio: bool,
-    /// Whether this gateway cannot carry that sound: an RDP host's as FLAC, which needs libFLAC
-    /// ([`crate::config::TargetConfig::needs_libflac`]) on a host without it.
-    /// The picker then shows the choice greyed.
-    #[serde(rename = "audioUnavailable")]
-    audio_unavailable: bool,
+    /// Whether this gateway cannot send that sound lossless: an RDP host's, coded
+    /// as FLAC here ([`crate::config::TargetConfig::codes_flac`]), on a host
+    /// without libFLAC. The picker then shows that format greyed.
+    #[serde(rename = "losslessUnavailable")]
+    lossless_unavailable: bool,
     /// The stream the picker offers to pass untouched, `null` where the target
     /// has none.
     passthrough: Option<crate::config::Passthrough>,
@@ -715,7 +715,7 @@ impl TargetInfo {
             size: target.size.map(Points::from),
             default_size: target.sized().then(|| crate::config::DEFAULT_SIZE.into()),
             audio: offers.audio,
-            audio_unavailable: offers.audio && target.needs_libflac() && !libflac,
+            lossless_unavailable: offers.audio && target.codes_flac() && !libflac,
             passthrough: offers.passthrough,
             passthrough_only: target.media_stream() && !apple_decoders,
         }
@@ -735,8 +735,8 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
     let targets = &state.config.targets;
     let apple_decoders = !targets.iter().any(crate::config::TargetConfig::media_stream)
         || crate::vnc::apple_decoders().is_ok();
-    let libflac =
-        !targets.iter().any(crate::config::TargetConfig::needs_libflac) || crate::audio::load_libflac().is_ok();
+    let libflac = !targets.iter().any(|target| target.offers().audio && target.codes_flac())
+        || crate::audio::load_libflac().is_ok();
     Json(targets.iter().map(|target| TargetInfo::of(target, apple_decoders, libflac)).collect())
 }
 
@@ -1087,7 +1087,6 @@ mod tests {
                 audio_bitrate: None,
                 audio_adaptive: None,
                 audio_adaptive_min: None,
-                audio_format: None,
             }],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(
@@ -1330,7 +1329,6 @@ mod tests {
             audio_bitrate: None,
             audio_adaptive: None,
             audio_adaptive_min: None,
-            audio_format: None,
         };
 
         // The scripted engine: announce a desktop size so the SPA leaves its
@@ -1426,7 +1424,7 @@ mod tests {
 
         // println! rather than log: this is the test's whole user interface.
         println!("\n  Open  http://{addr}/   (admin / hunter2)");
-        println!("  Open \"test-tone\", tick Sound and Start. 440 Hz for 5s, quiet for 5s.");
+        println!("  Open \"test-tone\", choose Opus under Sound and Start. 440 Hz for 5s, quiet for 5s.");
         println!("  The tone must arrive on its own, go away, and come back, untouched,");
         println!("  and ☰ → Mute and Unmute must stop and start it.");
         println!("  Serving Opus through WebCodecs. A line under the button instead");
@@ -1455,9 +1453,7 @@ mod tests {
             target("mac", "protocol = \"vnc\"\nsubtype = \"ard\"", "192.0.2.10"),
             target("win", "protocol = \"rdp\"\nsize = \"1920x1080\"", "192.0.2.11"),
             target("fast", "protocol = \"vnc\"\nsubtype = \"ard-high-performance\"", "192.0.2.10"),
-        ) + &target("sway", "protocol = \"vnc\"\nsubtype = \"wlshare\"", "192.0.2.12")
-            + &target("sway-flac", "protocol = \"vnc\"\nsubtype = \"wlshare\"\naudio_format = \"flac\"", "192.0.2.12")
-            + &target("win-flac", "protocol = \"rdp\"\naudio_format = \"flac\"", "192.0.2.11");
+        ) + &target("sway", "protocol = \"vnc\"\nsubtype = \"wlshare\"", "192.0.2.12");
         let targets = crate::config::ConfigFile::parse(&text).expect("the targets parse").targets;
         let entry_on = |name: &str, apple_decoders, libflac| {
             let target = targets.iter().find(|t| t.name == name).unwrap();
@@ -1469,32 +1465,31 @@ mod tests {
         // sizes, no sound, no stream.
         assert_eq!(
             entry("mac", true),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"audioUnavailable":false,"passthrough":null,"passthroughOnly":false}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"losslessUnavailable":false,"passthrough":null,"passthroughOnly":false}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
             entry("win", true),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"audioUnavailable":false,"passthrough":"rdp-graphics","passthroughOnly":false}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"losslessUnavailable":false,"passthrough":"rdp-graphics","passthroughOnly":false}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
         // stream is, and is the only way in on a host without its decoders.
         let fast = entry("fast", true);
-        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"audioUnavailable":false,"passthrough":"apple-media","passthroughOnly":false}"#), "{fast}");
+        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"losslessUnavailable":false,"passthrough":"apple-media","passthroughOnly":false}"#), "{fast}");
         assert!(entry("fast", false).ends_with(r#""passthroughOnly":true}"#));
         // Which says nothing about a target with no such stream.
         assert!(entry("win", false).ends_with(r#""passthroughOnly":false}"#));
         // wlshare's sound is offered and passed as wlshare coded it, Opus or
-        // FLAC, so no library this host lacks makes it unavailable; nor is an
-        // RDP host's sound coded as Opus.
-        assert!(entry_on("sway", true, true).contains(r#""audio":true,"audioUnavailable":false,"#));
-        assert!(entry_on("sway", true, false).contains(r#""audio":true,"audioUnavailable":false,"#));
-        assert!(entry_on("win", true, false).contains(r#""audio":true,"audioUnavailable":false,"#));
+        // FLAC, so no library this host lacks makes its lossless unavailable.
+        assert!(entry_on("sway", true, true).contains(r#""audio":true,"losslessUnavailable":false,"#));
+        assert!(entry_on("sway", true, false).contains(r#""audio":true,"losslessUnavailable":false,"#));
         // An RDP host's PCM sent as FLAC is coded with libFLAC, and is the one
         // sound that needs it.
-        assert!(entry_on("sway-flac", true, false).contains(r#""audio":true,"audioUnavailable":false,"#));
-        assert!(entry_on("win-flac", true, false).contains(r#""audio":true,"audioUnavailable":true,"#));
-        assert!(entry_on("win-flac", true, true).contains(r#""audio":true,"audioUnavailable":false,"#));
+        assert!(entry_on("win", true, false).contains(r#""audio":true,"losslessUnavailable":true,"#));
+        assert!(entry_on("win", true, true).contains(r#""audio":true,"losslessUnavailable":false,"#));
+        // A target with no sound to choose says nothing of it.
+        assert!(entry_on("mac", true, false).contains(r#""audio":false,"losslessUnavailable":false,"#));
     }
 
     /// The exact `/api/config` body. Pinned because the login screen reads the

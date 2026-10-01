@@ -36,16 +36,17 @@ username = "me"
 password = "…"
 ```
 
-`audio_format`, `audio_bitrate`, `audio_adaptive` and `audio_adaptive_min` mean
-on this target what they mean on an `rdp` one, with wlshare's encoder in place
-of the gateway's: Opus at `audio_bitrate`, walked down toward the floor while
-the browser's link is behind, unless `audio_format = "flac"` (EXPERIMENTAL)
-asks for the sound lossless. The format is the gateway's to ask for on the
-wire; wlshare has no key for it.
+`audio_bitrate`, `audio_adaptive` and `audio_adaptive_min` mean on this target
+what they mean on an `rdp` one, with wlshare's encoder in place of the
+gateway's: Opus at `audio_bitrate`, walked down toward the floor while the
+browser's link is behind. They tune a session started with its sound as Opus;
+one started with it lossless (EXPERIMENTAL) is sent FLAC, which has no rate. The
+format is chosen at the picker and is the gateway's to ask for on the wire;
+wlshare has no key for it, and neither has the target.
 
-`subtype = "wlshare"` says the server is wlshare, and Sound, ticked under the
-target at the picker before Start, is what makes the gateway list the extension
-to it. A session started without it lists none, and the desktop keeps playing on
+`subtype = "wlshare"` says the server is wlshare, and Sound, chosen under the
+target at the picker before Start as Opus or lossless, is what makes the gateway
+list the extension to it. A session started with it off lists none, and the desktop keeps playing on
 the host. The choice is offered on a `wlshare` target and on no other `vnc`
 target: a plain one is read through the
 RFB baseline, which carries no sound, `ard` carries none either, and
@@ -69,8 +70,8 @@ extension's message type for everything else.
   ignores it, as RFB requires. QEMU's own pseudo-encoding, `-259`, is not
   listed: what it promises is raw samples.
 - **Pseudo-encoding** `0x574c4f50`, `WLOP`, listed beside the first: the sound
-  as Opus in place of FLAC. The gateway lists it unless the target sets
-  `audio_format = "flac"`. It rides `SetEncodings`, as the VP9 stream's choices
+  as Opus in place of FLAC. The gateway lists it unless the session was started
+  with its sound lossless. It rides `SetEncodings`, as the VP9 stream's choices
   do, so the stream that begins is already the one asked for.
 - **Message type** `255` with **submessage** `1`, the QEMU extensions' shared
   type, for the client's set-format, enable and disable and the server's begin
@@ -170,7 +171,7 @@ the gateway asks for a signed one, so nothing flips. Decoded samples are
 interleaved, little-endian, and bit for bit what wlshare captured.
 
 Opus is the one lossy step on the way to the browser, made once, by wlshare, and
-a target with `audio_format = "flac"` (EXPERIMENTAL) has none
+a session started with lossless sound (EXPERIMENTAL) has none
 ([Lossless sound](architecture.md#lossless-sound)). As FLAC, music and speech
 cost about two-thirds of their 1.5 Mbit/s PCM rate or less on the RFB
 connection and on the browser's, and a desktop playing nothing, whose capture
