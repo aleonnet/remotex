@@ -15,7 +15,7 @@ belong in the linked documentation.
   of them is welcome, and when work for them competes with work for other
   servers, they come first. Other RDP and VNC servers remain supported through
   each protocol's baseline.
-- Because wlshare is ours, what generic VNC lacks can be added to it as an
+- Because wlshare is ours, what RFB lacks can be added to it as an
   extension a `wlshare` target lists, as density, outputs, audio, camera,
   microphone and its VP9 stream were. A plain `vnc` target lists none of them and
   reads any server, wlshare included, through the RFB baseline.
@@ -53,7 +53,9 @@ area's section before changing what it covers:
   WebAssembly module; the pinned HEVC decoder archive as the one file read at run
   time; no fallback browser paths.
 - [Sessions](docs/architecture.md#sessions): one active session per gateway,
-  with takeover, and a fresh engine for every `connect`.
+  with takeover, and a fresh engine for every `connect`; resize, sound and
+  passthrough chosen at the picker, not in the config, and held for the
+  session's life.
 - [Input and display](docs/architecture.md#input-and-display): the two touch
   layers, the display picker as the remote's, presentation at 100%, density as
   the wire's word, and the Apple mosaic as the one rescale.

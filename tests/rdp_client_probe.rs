@@ -30,7 +30,7 @@
 //!
 //! ## The pipeline, passed
 //!
-//! A target with `egfx_passthrough` has the session hand the pipeline's commands on
+//! A session started with the pipeline passed hands the pipeline's commands on
 //! instead of composing them, and the browser composes them. [`pass_the_pipeline`]
 //! is that arrangement without the browser: a session that passes, and the same
 //! compositor fed what it passed. It asserts that the host keeps drawing — which it
@@ -980,8 +980,8 @@ async fn stream_camera() {
 
 /// The pipeline, passed: a session that hands its commands on rather than composing
 /// them, and a compositor fed those commands in its place — which is the browser's
-/// part on a target with `egfx_passthrough`. The host must keep drawing, which it
-/// does only while its frames are acknowledged, the picture composed from what was
+/// part in a session started with the pipeline passed. The host must keep drawing,
+/// which it does only while its frames are acknowledged, the picture composed from what was
 /// passed must be a desktop, and a resize must reach the compositor as the reset it
 /// is.
 async fn pass_the_pipeline() {

@@ -31,7 +31,7 @@ layer.
 
 `ard-high-performance` is High Performance as Apple's viewer has it. Decoding its
 stream needs FFmpeg and fdk-aac on the gateway's host; without them the gateway
-runs it only with `media_passthrough`, for browsers that decode the stream.
+runs it only with the stream passed through, for browsers that decode it.
 
 **Unofficial:** `virtual_display = true` on an `ard` target keeps that row's
 picture and sound — ZRLE, none — and takes the display from the other: the same
@@ -115,7 +115,7 @@ encoder move between them. The viewer exposes no switch for it. See
   [Liveness](#the-stream)).
 
 Remotex matches the split, on the same handshake: `ard` shares the physical
-displays, refuses `resize` and never creates a virtual display, and
+displays, offers no resize and never creates a virtual display, and
 `ard-high-performance` creates exactly one, the "1 Virtual Display" choice, and
 never selects a physical screen or sends `SetServerScaling`. It departs in two
 places, and a third unofficially — `ard` with `virtual_display = true` creates
@@ -410,8 +410,8 @@ screen's own pixels or the union of all of them. On the measured Mac these were:
 
 ### Server-side scaling in Standard mode
 
-Standard shares physical displays at a fixed size: it requires `resize = false`
-and never sends a viewport size. It does honour a scale.
+Standard shares physical displays at a fixed size: it offers no resize and
+never sends a viewport size. It does honour a scale.
 
 **`SetServerScaling`** is ten bytes: `0x08`, a reserved zero, then a factor in
 (0, 1] as a big-endian `f64`. The Mac renders the framebuffer at that factor
@@ -466,7 +466,7 @@ This is the one place the browser rescales remote pixels (see
 
 At factor 1.0 the combined framebuffer is the screens' native pixels side by side,
 and it is often past what a video stream encodes: a 2x screen beside a 1x one
-measured 5376×2287. Standard never resizes (`resize = false`), so the gateway
+measured 5376×2287. Standard never resizes, so the gateway
 cannot ask for less. Such a view has no picture: the session stays up, and the
 page offers the Mac's screens instead, since one screen is a smaller desktop.
 Choosing one within the ceiling returns the session to video at the next layout.
@@ -481,8 +481,8 @@ virtual display. Remotex creates one, at the pinned `width`/`height` or else at
 the full size of the browser's screen and at that screen's density, as Apple's
 client does. The window layout macOS produces depends on that opening size:
 windows squeezed onto a small opening display do not spread out again when it
-grows. With `resize = true`, each viewport report asks for a new size, and the
-next layout confirms it. Everything in this section and the next holds as well
+grows. In a session started with resize, each viewport report asks for a new
+size, and the next layout confirms it. Everything in this section and the next holds as well
 for the unofficial `virtual_display = true` under `ard`, which sends the same
 messages; on macOS 26 the Mac answered them the same way with no media stream
 offered, and that is the only macOS it was tried on.
@@ -514,9 +514,9 @@ A backing size twice the logical one makes a 2x display.
 - **Ask for 1x or 2x only.** The Mac does not round a fractional ratio. 1.5x and
   1.25x modes produced 2x displays of fewer points, with zoomed text and a Dock
   shrunk to fit.
-- **The first descriptor is always dynamic,** even with `resize = false`, so a
-  reconnect re-enables the Mac's Dynamic resolution setting. `resize` controls only
-  whether remotex acts on later viewport reports.
+- **The first descriptor is always dynamic,** even in a session started without
+  resize, so a reconnect re-enables the Mac's Dynamic resolution setting. Resize
+  controls only whether remotex acts on later viewport reports.
 - **The display outlives its session briefly.** A reconnect within a few seconds
   finds it still there with the same id; after about 45 seconds the Mac is back on
   its physical display. The new session's own layout arrives either way.
@@ -868,8 +868,9 @@ ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
 sound, and one that stops (see [Liveness](#the-stream)).
 
 Remotex decodes the picture and encodes it as VP9, and the sound as Opus, unless
-the target sets `media_passthrough` and the browser decodes the Mac's HEVC and
-AAC-ELD: then each access unit goes to the browser as it came, described by the
+the session was started with the stream passed through, which the picker offers
+a browser that decodes the Mac's HEVC and AAC-ELD: then each access unit goes to
+the browser as it came, described by the
 stream's own sequence parameter set, each sound unit goes on `/ws/audio` as it
 came, described by the AudioSpecificConfig below. A PLI is its repaint. Either
 way ZRLE's rectangles are stepped over undecoded and never shown: the browser
@@ -944,8 +945,8 @@ offer is refused (`unable to create audio config`, error type 2), and one with a
 empty video offer (`unable to create video config`, the same type). While the
 audio leg runs, the Mac mutes its own sound output: the daemon's log shows the
 output device muted as the stream starts, and the Mac's speakers were measured
-silent. So an `ard-high-performance` target always carries sound and takes no
-`audio` key. The stream takes over the Mac's sound, AirPlay included. Standard
+silent. So an `ard-high-performance` session always carries sound and the
+picker offers no choice of it. The stream takes over the Mac's sound, AirPlay included. Standard
 mode never touches the sound output, so a Mac there plays to its speakers or to
 an AirPlay receiver outside remotex as usual; in a High Performance session it
 plays nothing to one, which was confirmed on a physical Mac.
@@ -1128,8 +1129,8 @@ link to a physical Mac has not been observed.
   - **A published description** reads field 4 as a bitrate the Mac picks a tier
     from. It is not one.
 - **Decoder.** The gateway decodes AAC-ELD itself (`src/aac_eld.rs`) for a
-  browser it sends Opus, and passes it as it came, under `media_passthrough`, to one
-  that decodes it. Browsers can decode it.
+  session it sends Opus, and passes it as it came in a session started with the
+  stream passed through. Browsers can decode it.
   Chrome 154's WebCodecs on macOS decoded all 3450 units of a capture, but only as
   `mp4a.40.2` with the AudioSpecificConfig above as the description; it refused
   `mp4a.40.39` as an unknown codec name. Safari 26.6 refuses `mp4a.40.39` too,

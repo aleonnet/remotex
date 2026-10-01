@@ -6,8 +6,8 @@ browser the way an RDP one does. Standard RFB carries pixels and a clipboard and
 nothing else; this is wlshare's private audio extension, which carries the sound
 as lossless FLAC and borrows its control messages from the QEMU Audio extension
 `rfbproto` registers. It is announced the way the density extension is
-([`wlshare-density.md`](wlshare-density.md)): a `wlshare` target with
-`audio = true` lists a pseudo-encoding, and wlshare announces that it speaks it
+([`wlshare-density.md`](wlshare-density.md)): a `wlshare` session started with
+sound lists a pseudo-encoding, and wlshare announces that it speaks it
 before anything is turned on.
 
 Measured 2026-09-09 on `workstation-wsl`, a headless sway with one `HEADLESS-1`
@@ -31,12 +31,13 @@ host = "127.0.0.1"
 port = 5900
 username = "me"
 password = "…"
-audio = true
 ```
 
-`subtype = "wlshare"` says the server is wlshare, and `audio = true` is what
-makes the gateway list the extension to it. The key is accepted on a `wlshare`
-target and refused on every other `vnc` target: a plain one is read through the
+`subtype = "wlshare"` says the server is wlshare, and Sound, ticked under the
+target at the picker before Start, is what makes the gateway list the extension
+to it. A session started without it lists none, and the desktop keeps playing on
+the host. The choice is offered on a `wlshare` target and on no other `vnc`
+target: a plain one is read through the
 RFB baseline, which carries no sound, `ard` carries none either, and
 `ard-high-performance` takes its sound from the media stream. A `wlshare`
 target pointed at a server that is not wlshare, or at a wlshare with its own
@@ -219,7 +220,8 @@ With a 6-second 440/660 Hz stereo tone playing into the default sink through
 192 frames, 192 packets,   576 bytes     silence:   3 bytes a packet
 ```
 
-And the control, wayvnc on another host with `audio = true` asked of it:
+And the control, wayvnc on another host, reached as a `wlshare` target and asked
+for sound:
 
 ```
 vnc: the server carries no audio; the session runs without sound

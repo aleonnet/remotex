@@ -12,7 +12,7 @@ What a host draws with is a crate of its own, `crates/remotex-rdp-graphics`: the
 graphics pipeline's PDUs and bulk compression, the codecs, the compositor and the
 framebuffer. It is this client's all the same — `rdp_client` names the framebuffer
 and that part of the wire as its own — and is apart because the page runs it too,
-built to WebAssembly, for a target with `egfx_passthrough`. It holds no
+built to WebAssembly, for a session started with the pipeline passed. It holds no
 connection or clock, so it builds for `wasm32-unknown-unknown`, and the one thing
 it does on threads is decode a Progressive region's tiles, side by side on rayon's
 pool: the gateway's is the process's, and the page's is workers it starts. The files
@@ -95,11 +95,11 @@ a session that has gone out of scope has really stopped.
 
 ## Static virtual channels
 
-Each is asked for by a key: `drdynvc` for `resize = true`, `egfx = true`,
-`camera = true`, or `microphone = true`, which is the transport Display Control,
+Each is asked for by what the session needs: `drdynvc` for a session started with
+resize, `egfx = true`, `camera = true`, or `microphone = true`, which is the transport Display Control,
 the graphics pipeline, the camera's two channels, and the microphone's channel
 ride on; `cliprdr` for
-`clipboard = true`, and `rdpsnd` with `rdpdr` for `audio = true` — see
+`clipboard = true`, and `rdpsnd` with `rdpdr` for a session started with sound — see
 [Sound](#sound-ms-rdpea). A session that wants none asks for no channel at all.
 
 `SC_NET` numbers the channels in the order `CS_NET` named them and says nothing
@@ -202,7 +202,7 @@ and commands it carried when it ends, at `info`.
 
 **Experimental**, for the reason
 [RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)
-gives. `Connect::pass_graphics` — a target's `egfx_passthrough` — has the session hand the
+gives. `Connect::pass_graphics` — a session started with the passthrough — has the session hand the
 pipeline's commands to its caller instead of composing them. The channel is
 still this client's: the capability exchange and the bulk compression are as
 above, since the history is the connection's, and so is writing each frame's
@@ -246,8 +246,8 @@ With `egfx = false` the pipeline is not advertised, so the server draws with bit
 updates, decoded by the planar bitmap codec (`proto/planar.rs`). The client
 announces no drawing orders either, so the path is bitmaps throughout. The desktop
 keeps its opening size: a resize is the pipeline's graphics reset, Display Control is
-not taken without it, and `resize = true` beside `egfx = false` is refused at config
-parse. Every server that is not Windows takes this path whatever the key.
+not taken without it, and a target with `egfx = false` offers no resize at the
+picker. Every server that is not Windows takes this path whatever the key.
 
 That is a deliberate narrowing, not an oversight. MS-RDPEDISP 1.3 has a server
 without the pipeline answer a monitor layout with a Deactivation-Reactivation
@@ -299,7 +299,7 @@ already where the mouse is, and nothing here can move a hardware pointer.
 
 ## Resize and density
 
-With `resize = true`, the Display Control Virtual Channel applies explicit
+In a session started with resize, the Display Control Virtual Channel applies explicit
 desktop-size requests, and also matches the client's display density: a monitor
 layout carries `DesktopScaleFactor` beside the geometry, so a Retina client gets
 twice the pixels with the host's UI drawn at 200% rather than the same UI
@@ -514,8 +514,8 @@ automatically inspect what the remote application heard.
 
 ## Sound (MS-RDPEA)
 
-`audio = true` asks for two more static channels, `rdpsnd` and `rdpdr`, and leaves
-`INFO_NOAUDIOPLAYBACK` out of the Client Info PDU. The key absent or false sets the
+A session started with sound asks for two more static channels, `rdpsnd` and `rdpdr`, and leaves
+`INFO_NOAUDIOPLAYBACK` out of the Client Info PDU. One started without it sets the
 flag and names neither channel, so the host's own audio settings are not touched
 and the session has no audio device to redirect. That is the whole of the choice:
 redirect, or leave alone.

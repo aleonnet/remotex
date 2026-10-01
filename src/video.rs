@@ -240,8 +240,8 @@ pub fn check_picture((w, h): (u16, u16)) -> anyhow::Result<()> {
         "a video stream will not encode a {w}x{h} picture: one is refused with a long \
          side over {MAX_LONG_SIDE} or a short side over {MAX_SHORT_SIDE}. Only the \
          remote knows its own size, so check-config cannot catch this — give this \
-         target a remote that can be asked for a smaller desktop: with resize = true \
-         the gateway holds every size it asks for under this ceiling"
+         target a remote that can be asked for a smaller desktop: in a session started \
+         with resize the gateway holds every size it asks for under this ceiling"
     );
     Ok(())
 }

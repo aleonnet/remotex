@@ -635,24 +635,53 @@ struct TargetInfo {
     subtype: Option<&'static str>,
     host: String,
     port: u16,
+    /// Whether the picker offers the window driving the desktop's size.
+    resize: bool,
+    /// Whether the picker offers the remote's sound as a choice.
+    audio: bool,
+    /// The stream the picker offers to pass untouched, `null` where the target
+    /// has none.
+    passthrough: Option<crate::config::Passthrough>,
+    /// Whether passing that stream is the only way this gateway can serve the
+    /// target: a High Performance Mac on a host without the libraries that decode
+    /// its stream. The picker then shows the choice made, and a browser that
+    /// cannot take the stream cannot start the target.
+    #[serde(rename = "passthroughOnly")]
+    passthrough_only: bool,
 }
 
-/// The list of target profiles the browser may pick from the post-login picker.
-/// Non-secret info only — credentials never leave the server.
+impl TargetInfo {
+    /// `apple_decoders` is whether this gateway's host can decode a Mac's media
+    /// stream.
+    fn of(target: &crate::config::TargetConfig, apple_decoders: bool) -> Self {
+        let offers = target.offers();
+        Self {
+            name: target.name.clone(),
+            protocol: target.protocol.name(),
+            subtype: target.subtype.map(crate::config::Subtype::name),
+            host: target.host.clone(),
+            port: target.port,
+            resize: offers.resize,
+            audio: offers.audio,
+            passthrough: offers.passthrough,
+            passthrough_only: target.media_stream() && !apple_decoders,
+        }
+    }
+}
+
+/// The list of target profiles the browser may pick from the post-login picker,
+/// each with the choices its type offers there. Non-secret info only — credentials
+/// never leave the server.
+///
+/// The Mac's decoders are looked for here, where a High Performance target is
+/// listed, so the picker can say before Start what the engine would otherwise say
+/// after it. Asked on every listing rather than remembered: a library installed
+/// while the gateway runs is found by the next one.
 async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>> {
-    let targets = state
-        .config
-        .targets
-        .iter()
-        .map(|t| TargetInfo {
-            name: t.name.clone(),
-            protocol: t.protocol.name(),
-            subtype: t.subtype.map(crate::config::Subtype::name),
-            host: t.host.clone(),
-            port: t.port,
-        })
-        .collect();
-    Json(targets)
+    let targets = &state.config.targets;
+    let apple_decoders = !targets.iter().any(crate::config::TargetConfig::media_stream)
+        || crate::vnc::apple_decoders().is_ok();
+    Json(targets.iter().map(|target| TargetInfo::of(target, apple_decoders)).collect())
 }
 
 #[derive(Deserialize)]
@@ -768,8 +797,9 @@ struct ClaimResponse {
 }
 
 /// Claim the single session slot. Returns the token the WebSocket
-/// must present as `/ws?session=<token>&chroma=420|444&apple_media=true|false`; 409 while another
-/// browser is attached (retry with `force` to take over). The media sockets
+/// must present as
+/// `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false`;
+/// 409 while another browser is attached (retry with `force` to take over). The media sockets
 /// present the token alone — `chroma`, the most colour this browser's video
 /// decoder takes, is the session socket's and is required there
 /// ([`crate::ws`]).
@@ -991,18 +1021,13 @@ mod tests {
                 domain: None,
                 width: Some(1280),
                 height: Some(800),
-                resize: false,
                 egfx: None,
                 clipboard: false,
-                audio_key: None,
-                audio: false,
                 camera: false,
                 microphone: false,
                 video_quality: None,
                 render_chroma: None,
                 render_adaptive: None,
-                media_passthrough: false,
-                egfx_passthrough: false,
                 virtual_display: false,
                 audio_bitrate: None,
                 audio_adaptive: None,
@@ -1239,18 +1264,13 @@ mod tests {
             domain: None,
             width: Some(640),
             height: Some(480),
-            resize: false,
             egfx: None,
             clipboard: false,
-            audio_key: None,
-            audio: true,
             camera: false,
             microphone: false,
             video_quality: None,
             render_chroma: None,
             render_adaptive: None,
-            media_passthrough: false,
-            egfx_passthrough: false,
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,
@@ -1261,11 +1281,11 @@ mod tests {
         // "waiting for the remote desktop" overlay and shows the floating menu,
         // then feed the bridge in real time. A plain thread rather than a task
         // because everything it touches is synchronous, and it holds both channel
-        // ends so the session layer sees a live engine.
+        // ends so the session layer sees a live engine. A session started without
+        // sound is given no bridge, and is the same desktop with nothing to play.
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![target.clone()],
-            |_target, input_rx, frame_tx, audio, _camera| {
-                let audio: Arc<AudioBridge> = audio.expect("the target opted into audio");
+            |_target, _choices, input_rx, frame_tx, audio: Option<Arc<AudioBridge>>, _camera| {
                 std::thread::spawn(move || {
                     let mut input_rx = input_rx;
                     let size = ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED };
@@ -1289,14 +1309,14 @@ mod tests {
                         if left_in_phase == 0 {
                             playing = !playing;
                             left_in_phase = 250;
-                            if playing {
-                                audio.publish_format(PCM_CD_QUALITY);
-                            } else {
-                                audio.clear_format();
+                            match &audio {
+                                Some(audio) if playing => audio.publish_format(PCM_CD_QUALITY),
+                                Some(audio) => audio.clear_format(),
+                                None => {}
                             }
                         }
                         left_in_phase -= 1;
-                        if playing {
+                        if let Some(audio) = audio.as_ref().filter(|_| playing) {
                             audio.wave(tone(&mut phase));
                         }
                         // Answer `Refresh` by re-announcing the size, which is what
@@ -1350,45 +1370,58 @@ mod tests {
 
         // println! rather than log: this is the test's whole user interface.
         println!("\n  Open  http://{addr}/   (admin / hunter2)");
-        println!("  Pick \"test-tone\", then ☰ → Unmute. 440 Hz for 5s, quiet for 5s.");
-        println!("  Press it during a quiet phase and then close the drawer: the tone");
-        println!("  must arrive on its own, go away, and come back, untouched.");
+        println!("  Open \"test-tone\", tick Sound and Start. 440 Hz for 5s, quiet for 5s.");
+        println!("  The tone must arrive on its own, go away, and come back, untouched,");
+        println!("  and ☰ → Mute and Unmute must stop and start it.");
         println!("  Serving Opus through WebCodecs. A line under the button instead");
         println!("  means this browser has no decoder for it.");
-        // A real `audio = true` RDP target separately covers server negotiation.
+        // A real RDP target started with sound separately covers server negotiation.
         println!("  Ctrl-C when done; this waits 15 minutes.\n");
         std::io::stdout().flush().unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(900)).await;
     }
 
     /// The exact `/api/targets` entry. Pinned because the picker reads every key
-    /// of it, and because `subtype` is `null` far more often than it is set — a
-    /// field that were *absent* on those targets is one the client has to test for
-    /// two ways.
+    /// of it, and because `subtype` and `passthrough` are `null` far more often
+    /// than they are set — a field that were *absent* on those targets is one the
+    /// client has to test for two ways.
     #[test]
-    fn a_target_entry_names_its_subtype_or_says_it_has_none() {
-        let mac = serde_json::to_string(&TargetInfo {
-            name: "mac".to_owned(),
-            protocol: "vnc",
-            subtype: Some("ard"),
-            host: "192.0.2.10".to_owned(),
-            port: 5900,
-        })
-        .unwrap();
-        assert_eq!(
-            mac,
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900}"#
+    fn a_target_entry_names_its_subtype_and_what_its_type_offers() {
+        let passwd = crate::auth::generate("admin", "hunter2", 4).unwrap();
+        let target = |name: &str, kind: &str, host: &str| {
+            format!(
+                "[[targets]]\nname = \"{name}\"\n{kind}\nhost = \"{host}\"\n\
+                 username = \"u\"\npassword = \"p\"\n\n"
+            )
+        };
+        let text = format!(
+            "[server]\nsite_passwd = \"{passwd}\"\n\n{}{}{}",
+            target("mac", "protocol = \"vnc\"\nsubtype = \"ard\"", "192.0.2.10"),
+            target("win", "protocol = \"rdp\"", "192.0.2.11"),
+            target("fast", "protocol = \"vnc\"\nsubtype = \"ard-high-performance\"", "192.0.2.10"),
         );
+        let targets = crate::config::ConfigFile::parse(&text).expect("the targets parse").targets;
+        let entry = |name: &str, apple_decoders| {
+            let target = targets.iter().find(|t| t.name == name).unwrap();
+            serde_json::to_string(&TargetInfo::of(target, apple_decoders)).unwrap()
+        };
 
-        let win = serde_json::to_string(&TargetInfo {
-            name: "win".to_owned(),
-            protocol: "rdp",
-            subtype: None,
-            host: "192.0.2.11".to_owned(),
-            port: 3389,
-        })
-        .unwrap();
-        assert!(win.contains(r#""subtype":null"#), "{win}");
+        // Standard mode offers nothing: physical displays, no sound, no stream.
+        assert_eq!(
+            entry("mac", true),
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"audio":false,"passthrough":null,"passthroughOnly":false}"#
+        );
+        assert_eq!(
+            entry("win", true),
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"audio":true,"passthrough":"rdp-graphics","passthroughOnly":false}"#
+        );
+        // High Performance's sound is always carried, so it is not offered. Its
+        // stream is, and is the only way in on a host without its decoders.
+        let fast = entry("fast", true);
+        assert!(fast.ends_with(r#""resize":true,"audio":false,"passthrough":"apple-media","passthroughOnly":false}"#), "{fast}");
+        assert!(entry("fast", false).ends_with(r#""passthroughOnly":true}"#));
+        // Which says nothing about a target with no such stream.
+        assert!(entry("win", false).ends_with(r#""passthroughOnly":false}"#));
     }
 
     /// The exact `/api/config` body. Pinned because the login screen reads the

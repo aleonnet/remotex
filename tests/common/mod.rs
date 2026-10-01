@@ -252,7 +252,8 @@ pub async fn connect_ws_as(addr: SocketAddr, token: &str, cookie: &str, chroma: 
 }
 
 /// [`connect_ws_as`] stating too whether this browser decodes a High Performance
-/// Mac's stream, which a `media_passthrough` target passes it.
+/// Mac's stream, which a session started with it passed is served to no other. It
+/// composes an RDP host's graphics pipeline either way.
 #[allow(dead_code)]
 pub async fn connect_ws_stating(
     addr: SocketAddr,
@@ -263,7 +264,9 @@ pub async fn connect_ws_stating(
 ) -> Ws {
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
-    let mut request = format!("ws://{addr}/ws?session={token}&chroma={chroma}&apple_media={apple_media}")
+    let mut request = format!(
+        "ws://{addr}/ws?session={token}&chroma={chroma}&apple_media={apple_media}&rdp_graphics=true"
+    )
         .into_client_request()
         .unwrap();
     request
@@ -337,6 +340,20 @@ pub async fn connect_target(ws: &mut Ws, target: &str) {
     ws.send(Message::text(format!(r#"{{"type":"connect","target":"{target}"}}"#)))
         .await
         .unwrap();
+}
+
+/// [`connect_target`] with what the picker's Start would carry: `choices` is the
+/// JSON object of the choices ticked under the target, each false unless named.
+#[allow(dead_code)]
+pub async fn connect_target_with(ws: &mut Ws, target: &str, choices: &str) {
+    use futures_util::SinkExt as _;
+    use tokio_tungstenite::tungstenite::Message;
+
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"{target}","choices":{choices}}}"#
+    )))
+    .await
+    .unwrap();
 }
 
 /// Locate a *working* container runtime. These tests are ignored by default, so

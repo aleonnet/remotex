@@ -8,71 +8,6 @@ is the only place they can be read in context.
 
 ## Planned
 
-### Resize, sound and passthrough chosen at the picker
-
-Whether the window drives the desktop's size, whether the remote's sound is
-taken, and whether the remote's own stream is passed are an operator's keys
-today: `resize`, `audio`, `media_passthrough` and `egfx_passthrough`. The plan
-is to make them the choice of whoever starts the session, made before it starts,
-and to remove the four keys.
-
-Picking a target opens it instead of connecting. Its options appear under it
-with a Start button, and Start is what connects, carrying the choices in
-`connect`. They hold for the life of the session. The browser remembers them per
-target in its local storage, which replaces the one "Play the remote's sound, if
-compatible" checkbox the picker has now.
-
-Which options a target shows is its type's to say:
-
-| Target | Resize | Sound | Passthrough |
-|---|---|---|---|
-| `rdp` | shown | shown | shown: the graphics pipeline, experimental |
-| `vnc` | shown | hidden | hidden |
-| `vnc`, `wlshare` | shown | shown | hidden: its VP9 is the subtype's picture |
-| `vnc`, `ard` | hidden | hidden | hidden |
-| `vnc`, `ard` with `virtual_display` | shown | hidden | hidden |
-| `vnc`, `ard-high-performance` | shown | hidden: always carried | shown: the Mac's media stream |
-
-- **Not offered is not shown.** An option the target type does not have has no
-  row. High Performance's sound is such a one: the Mac refuses the picture
-  without it, so there is nothing to choose, and the session's Mute is what a
-  person has. An `rdp` target with `egfx = false` has no pipeline, so neither
-  resize nor the pipeline's row.
-- **Offered but unavailable is greyed, with the reason.** A passthrough is
-  greyed before the session starts wherever the gateway or the browser cannot do
-  it: a browser that decodes neither the Mac's HEVC nor its AAC-ELD, one that
-  cannot load the pipeline's compositor (no WebGL 2, or a page that is not
-  cross-origin isolated), a gateway with no HEVC decoder archive to serve a
-  browser that needs it. A gateway whose host lacks FFmpeg or fdk-aac cannot
-  decode a Mac's stream at all: there the stream can only be passed, and where
-  the browser cannot take it either the target cannot start, which Start says
-  before the Mac is dialled rather than the engine after.
-- **The choice reaches the remote.** A session started without sound asks for
-  none: RDP names no sound channel and a `wlshare` target lists no audio
-  extension, so the host keeps playing where it did. The session's audio button
-  only ever opened and closed the browser's subscription, which is why it now
-  reads Mute and Unmute. Start's click is the gesture a browser needs for an
-  audio context; in Safari and on iOS a reload has none, and comes back muted.
-- **A session is held to its choices.** A reattach resumes it and a takeover
-  reconnects its target with the choices the first browser made. A browser that
-  cannot do what the session was started with, a passed stream it cannot decode
-  or a compositor it cannot load, is not served a rebuilt engine or a decoder
-  error: the desktop stays covered, as it is while a High Performance display
-  resizes, with the reason and the menu's End session, which returns it to the
-  picker to choose again.
-
-Done ahead of it: `subtype = "wlshare"`, so the picker can tell a wlshare target
-from a plain one before connecting, and the two labels, Mute / Unmute and End
-session. What remains is the picker itself and what carries it. `/api/targets`
-has to say which options a target has and whether the gateway can decode a Mac's
-stream, which today it learns only when a session needs the decoders. `connect`
-carries the choices, the session slot keeps them beside its target, and
-`connected` reports the passthrough in force. The `audio_*` dials, refused today
-on a target without `audio`, need a rule that does not read a removed key. The
-[Constraints](architecture.md#constraints) that say there is no client resize
-toggle, that the key alone selects the pipeline, and that the browser's two
-answers select a stream and never refuse one are rewritten with it.
-
 ### What the RDP client does not carry yet
 
 The client carries the desktop, the pointer, keyboard, mouse, resize, the
@@ -95,7 +30,7 @@ MS-RDPECLIP, MS-RDPEA, MS-RDPECAM, and MS-RDPEAI live under
 EGFX is in, as [The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
 describes; what is left of it
 beyond the decoders is under
-[Source codecs](#source-codecs-not-accepted-yet)
+[H.264 in the RDP graphics pipeline](#h264-in-the-rdp-graphics-pipeline)
 rather than here, because that payoff is a transcode removed, not a control
 restored.
 
@@ -150,23 +85,6 @@ a per-target pin — the certificate's public key or its SHA-256 fingerprint in 
 target's configuration, compared against what the handshake presented — is the
 one that fits. Absent a pin, today's behavior stands.
 
-### Raising quality above the dial
-
-The stream's congestion loop can notice a backlog but never find headroom: it walks
-the dial down when the outbound queue says the link is behind and back up to the
-configured quality when it is not, and never past it. That is sound — exceeding the
-operator's setting was never a goal — but it means a link with room to spare is never
-discovered.
-
-The existing `paintAck` feedback supplies the receiver's view of *queueing*: it
-reports when a batch finished the client's ordered decode-and-draw pass, and the
-adaptive loop subtracts the link's recent floor to detect falling behind. An empty
-paint window still says only that the configured quality fits; it does not measure
-how much more would fit. Going further therefore wants richer receiver feedback —
-delivered bytes and arrival timing added to that contract, for example — plus an
-explicit upper-bound policy. It is a separate feature whose value should be argued
-from `video`'s measurements rather than assumed.
-
 ### The first keyframe on a slow link
 
 Every VP9 stream governed by the target's dial starts there, and its first
@@ -188,9 +106,8 @@ wlshare's passed stream is coded and walked there, so the gateway knows each fra
 size and whether it is a keyframe and nothing about the quality it went out at: the
 encode totals of such a session count its units, keyframes and bytes, and report no
 round coarsened and a lowest quality of 100 whatever wlshare did. Reporting it
-wants wlshare to say what it coded each frame at, which its desktop clients want
-for their own throughput readout too. It is one change to the wire, to be made
-with the desktop clients' throughput support rather than ahead of it.
+wants wlshare to say what it coded each frame at: one change to the wire, made
+in wlshare and read here.
 
 ### Apple's passed HEVC at 4K
 
@@ -226,40 +143,32 @@ carry the stream.
 None of it has been measured at 4K.
 
 A slow link is not a passed stream's to answer. A browser on one is served by a
-target without `media_passthrough`, whose VP9 the adaptive walk lowers; a passed
+session started without the passthrough, whose VP9 the adaptive walk lowers; a passed
 session is not switched to VP9 for it. A brief stall stays what it is: the Mac's
 units predict from every one
 before, so none can be dropped alone, and a full queue drops to the next IDR and
 asks the Mac for one, which brings the picture back as one fresh frame rather than
 a replay of the backlog.
 
-### Source codecs not accepted yet
+### H.264 in the RDP graphics pipeline
 
-Two places where a remote could hand this gateway a codec it currently refuses or
-does not advertise. Each could remove upstream bytes, but takes a new decoder and
-accepts a lossy source; neither is near-term. They are here so that "why not this
-one" has an answer rather than being rediscovered.
+The one codec a current Windows host offers that the RDP client refuses. It could
+remove upstream bytes, but takes a new decoder and accepts a lossy source, and it
+is not near-term. It is here so that "why not this one" has an answer rather than
+being rediscovered.
 
-- **RDP EGFX.** The RDP client carries the pipeline again — the channel, ZGFX,
-  the surface compositor with its caches and copies, the frame marks, and the
-  decoders a current Windows host draws with: ClearCodec with NSCodec inside it,
-  RemoteFX Progressive, planar and uncompressed ([The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
-  describes each). H.264, which a host hands the parts of the desktop that move
-  like video, is refused with `AVC_DISABLED` on purpose: a lossy video codec
-  loses detail before the gateway ever encodes the picture, and the source is to
-  stay lossless. Supporting it would add an H.264 decoder per surface to the
-  shared compositor used in both the gateway and the page. Even on a passed
-  pipeline it is not a standalone video stream: the host masks each picture by
-  rectangles and mixes it with the other codecs and drawing commands on one
-  surface. It is not taken up without the operator accepting a lossy source, as
-  the VNC entry below puts it.
-- **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
-  the lossless standard encodings on purpose: Tight and TightPNG are vendor
-  encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to
-  decode it. Tight-family decoding, and handing a lossy source payload to the
-  browser untouched, would remove upstream bytes and a transcode — for a target
-  where the operator has already accepted lossy, the transcode is pure loss. The
-  cost is a decoder this repo would then own.
+The RDP client carries the pipeline — the channel, ZGFX, the surface compositor
+with its caches and copies, the frame marks, and the decoders a current Windows
+host draws with: ClearCodec with NSCodec inside it, RemoteFX Progressive, planar
+and uncompressed ([The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
+describes each). H.264, which a host hands the parts of the desktop that move
+like video, is refused with `AVC_DISABLED` on purpose: a lossy video codec loses
+detail before the gateway ever encodes the picture, and the source is to stay
+lossless. Supporting it would add an H.264 decoder per surface to the shared
+compositor used in both the gateway and the page. Even on a passed pipeline it is
+not a standalone video stream: the host masks each picture by rectangles and
+mixes it with the other codecs and drawing commands on one surface. It is not
+taken up without the operator accepting a lossy source.
 
 ### Two streams for Apple's All Displays
 
@@ -275,22 +184,19 @@ paint window order two chains, and how each stream starts over are the work.
 Two screens is the limit, as it is today: All Displays over three or more is held
 with the notice whatever its size.
 
-### A virtual-display remote session for sway
-
-Console-style remote control of a physical sway machine, the way Apple's High
-Performance mode and the Windows console session work: every physical display
-is folded into one resizable headless output for the length of the session, the
-gateway renders it at the browser's density, and the person at the keyboard
-takes control back through a virtual console switch. The wire half has shipped
-in wlshare, one private pseudo-encoding and one message type each way,
-documented in [`wlshare-density.md`](wlshare-density.md). What remains is
-the session daemon on the sway host, a controller speaking sway IPC beside
-wlshare. A stage 1 prototype of it was measured on macintel: stock sway
-1.10 gives the resizable headless output beside the live panel and the restore
-holds, but wayvnc 0.9.1 crashes on half the connects while the output is created
-beside it. That crash is the risk now, and stage 2 starts with its backtrace.
-
 ## Not planned
+
+### Tight, JPEG and H.264 on a plain VNC target
+
+A plain `vnc` target advertises only the lossless standard encodings: Tight and
+TightPNG are vendor encodings, JPEG and H.264 are lossy, and advertising an
+encoding is a promise to decode it. Decoding the Tight family, or handing a
+lossy payload to the browser untouched, would remove upstream bytes and a
+transcode at the cost of a decoder this repo would then own. That work is for a
+server outside the three the project prioritizes, which is reached through the
+RFB baseline and nothing more
+([Constraints](architecture.md#constraints)). A stream of its own passed
+through is what a `wlshare` target has.
 
 ### `THINCLIENT` in the graphics capability advertise
 

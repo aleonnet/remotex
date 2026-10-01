@@ -46,8 +46,8 @@ clipboard.
   suggests a Windows host restarts the sequence after a resize. If it does, this
   client refuses up to 255 ClearCodec rectangles after every resize or density
   change, each a warning naming "a ClearCodec sequence number", until the counters
-  realign. Run the probe with `egfx = true` and `resize = true` and read the log
-  after the resize step:
+  realign. Run the probe with the pipeline on, which is when it resizes, and read
+  the log after the resize step:
 
   ```sh
   REMOTEX_UAT_TARGET=<rdp target> cargo test --test rdp_client_probe -- --ignored --nocapture --test-threads 1

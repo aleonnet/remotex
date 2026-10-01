@@ -16,17 +16,17 @@ const OPUS = {
   packetFrames: 960,
 };
 
-test("a target with no sound says so rather than offering nothing", () => {
+test("a session without sound says so rather than offering nothing", () => {
   assert.equal(
     audioLabel({ available: false, enabled: false, error: null, stream: null }),
-    "Not offered by this target",
+    "None in this session",
   );
 });
 
-test("an available stream nobody asked for is distinguished from one that failed", () => {
+test("a muted session is distinguished from one whose sound failed", () => {
   assert.equal(
     audioLabel({ available: true, enabled: false, error: null, stream: null }),
-    "Available, not playing",
+    "Muted",
   );
   // The one state here that is wrong rather than off.
   assert.equal(

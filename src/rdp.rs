@@ -30,7 +30,7 @@ use tokio::sync::mpsc;
 use tokio::time::{Duration, Instant};
 
 use crate::audio::{AudioBridge, PcmFormat};
-use crate::config::{RenderPlan, TargetConfig};
+use crate::config::{Choices, RenderPlan, TargetConfig};
 use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16};
 use crate::keymap;
@@ -140,7 +140,7 @@ fn connect_budget() -> Duration {
 /// would put the browser back on the picker with nothing to explain why. The body has
 /// several early returns; this has one exit, and [`VideoSink::finish`] is on it.
 ///
-/// `audio` is `Some` exactly for a target that opted in: the RDP client then asks the
+/// `audio` is `Some` exactly for a session started with sound: the RDP client then asks the
 /// host to redirect its sound and hands every buffer to the bridge from its own
 /// thread — see [`Sound`] — so the pictures' event queue below never carries a sample.
 ///
@@ -153,10 +153,11 @@ fn connect_budget() -> Duration {
 /// rectangles coarser rather than the queue longer: while it is full the client
 /// folds overlapping paint and collapses past a cap before anything is queued, and
 /// every other event waits for room — see `EVENT_QUEUE` in the client.
-// Eight handoffs matching the engine spawner's surface; see `session::spawn_engine`.
+// Nine handoffs matching the engine spawner's surface; see `session::spawn_engine`.
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: TargetConfig,
+    choices: Choices,
     plan: RenderPlan,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
@@ -166,7 +167,7 @@ pub async fn run(
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = VideoSink::new("rdp", frame_tx, plan, feedback, Oversize::Refuse);
-    session(config, plan.rdp_graphics, display, input_rx, audio, uplinks, &sink).await;
+    session(config, choices.resize, plan.rdp_graphics, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }
 
@@ -194,8 +195,10 @@ impl AudioSink for Sound {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn session(
     config: TargetConfig,
+    resize: bool,
     pass_graphics: bool,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
@@ -203,9 +206,9 @@ async fn session(
     uplinks: Uplinks,
     sink: &VideoSink,
 ) {
-    let opening = opening_layout(&config, display);
+    let opening = opening_layout(&config, resize, display);
     let (session, mut events) =
-        Session::start(connect_config(&config, opening, pass_graphics, audio, &uplinks));
+        Session::start(connect_config(&config, resize, opening, pass_graphics, audio, &uplinks));
     // The feeds exist from here, so the camera and mic sockets' traffic has somewhere to
     // go before the desktop does: a plug made while the host is still connecting waits in
     // the session's queue for the enumeration channel.
@@ -246,7 +249,7 @@ async fn session(
         &session,
         events,
         Flags {
-            resize: config.resize,
+            resize,
             pass_graphics,
             clipboard: config.clipboard,
             default_size: config.default_size(),
@@ -343,12 +346,12 @@ async fn await_desktop(
 /// size. Opened at the final layout, the logon — or the reconnection of a session
 /// left at another size — is drawn at it from the start.
 ///
-/// 1x without `resize`, where a density is not this end's to change: the target
-/// then keeps its size and scaling as the operator set them.
-fn opening_layout(config: &TargetConfig, display: Option<HostDisplay>) -> Layout {
+/// 1x in a session started without resize, where a density is not this end's to
+/// change: the target then keeps its size and scaling as the operator set them.
+fn opening_layout(config: &TargetConfig, resize: bool, display: Option<HostDisplay>) -> Layout {
     let (width, height) = config.opening_size(display);
     let density = display
-        .filter(|_| config.resize)
+        .filter(|_| resize)
         .map_or(Density::One, |screen| Density::from_host(screen.scale));
     Layout { w: u32::from(width), h: u32::from(height), density: Density::One }
         .at_density(density)
@@ -358,6 +361,7 @@ fn opening_layout(config: &TargetConfig, display: Option<HostDisplay>) -> Layout
 /// Everything the RDP client needs to open this target's session.
 fn connect_config(
     config: &TargetConfig,
+    resize: bool,
     opening: Layout,
     pass_graphics: bool,
     audio: Option<Arc<AudioBridge>>,
@@ -371,11 +375,11 @@ fn connect_config(
         domain: config.domain.clone(),
         width: opening.w,
         height: opening.h,
-        // Stated only on a target whose density is this end's to set, where 1x is
+        // Stated only in a session whose density is this end's to set, where 1x is
         // a statement too: a session left at 2x reconnects at 100%. Without
-        // `resize` the host keeps whatever scaling it was configured with.
-        scale_percent: if config.resize { opening.density.percent() } else { 0 },
-        resize: config.resize,
+        // resize the host keeps whatever scaling it was configured with.
+        scale_percent: if resize { opening.density.percent() } else { 0 },
+        resize,
         egfx: config.egfx(),
         pass_graphics,
         clipboard: config.clipboard,
@@ -2344,27 +2348,26 @@ mod tests {
     /// A session opens at the layout it will stay at: a phone's 3x screen is the
     /// default size at 2x from the handshake, not a 1x desktop waiting for a
     /// Display Control layout that a Windows host applies in two visible steps.
-    /// Without `resize` the density is not this end's, and it opens at 1x.
+    /// Without resize the density is not this end's, and it opens at 1x.
     #[test]
     fn a_session_opens_at_the_clients_density_when_it_may_set_one() {
         let phone = HostDisplay { w: 430, h: 932, scale: 300, fit: true };
         let (w, h) = crate::config::DEFAULT_SIZE;
         let (w, h) = (u32::from(w), u32::from(h));
 
-        let resizable = rdp_target("resize = true");
+        let target = rdp_target("");
         assert_eq!(
-            opening_layout(&resizable, Some(phone)),
+            opening_layout(&target, true, Some(phone)),
             Layout { w: w * 2, h: h * 2, density: Density::Two }
         );
         let retina = HostDisplay { w: 1728, h: 1117, scale: 200, fit: false };
         assert_eq!(
-            opening_layout(&resizable, Some(retina)),
+            opening_layout(&target, true, Some(retina)),
             Layout { w: 3456, h: 2234, density: Density::Two }
         );
-        assert_eq!(opening_layout(&resizable, None), Layout { w, h, density: Density::One });
+        assert_eq!(opening_layout(&target, true, None), Layout { w, h, density: Density::One });
 
-        let fixed = rdp_target("");
-        assert_eq!(opening_layout(&fixed, Some(phone)), Layout { w, h, density: Density::One });
+        assert_eq!(opening_layout(&target, false, Some(phone)), Layout { w, h, density: Density::One });
     }
 
     #[test]

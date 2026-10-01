@@ -55,12 +55,15 @@ fn connect() -> (Session, Receiver<Event>) {
     let name = std::env::var(TARGET_ENV)
         .unwrap_or_else(|_| panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml"));
     let target = common::uat_target(&name);
+    // Everything the picker offers for the target, chosen.
+    let offers = target.offers();
     println!(
         "rdp_damage_probe: {name} ({}:{}) at {}x{}, resize {} clipboard {} audio {}",
-        target.host, target.port, SIZE.0, SIZE.1, target.resize, target.clipboard, target.audio
+        target.host, target.port, SIZE.0, SIZE.1, offers.resize, target.clipboard, offers.audio
     );
-    // The session the gateway would open for this target, so the host draws for the
-    // same client: the channels it names change what the host sends.
+    // The session the gateway would open for this target started that way, so the
+    // host draws for the same client: the channels it names change what the host
+    // sends.
     let (session, events) = Session::start(Connect {
         host: target.host.clone(),
         port: target.port,
@@ -70,11 +73,11 @@ fn connect() -> (Session, Receiver<Event>) {
         width: SIZE.0,
         height: SIZE.1,
         scale_percent: 0,
-        resize: target.resize,
+        resize: offers.resize,
         egfx: target.egfx(),
         pass_graphics: false,
         clipboard: target.clipboard,
-        audio: target.audio.then(|| Box::new(Silence) as Box<dyn AudioSink>),
+        audio: offers.audio.then(|| Box::new(Silence) as Box<dyn AudioSink>),
         // A camera draws nothing, and one the browser never plugs costs the host a
         // channel and nothing else.
         camera: None,

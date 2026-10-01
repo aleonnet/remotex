@@ -82,8 +82,8 @@
 #max_records = 10080
 
 # EXPERIMENTAL: the page's software HEVC decoder, for a browser whose own
-# VideoDecoder refuses a High Performance Mac's 4:4:4 picture under
-# media_passthrough — Chrome on a GPU without HEVC Range Extensions, for one. It is
+# VideoDecoder refuses a High Performance Mac's 4:4:4 picture passed through
+# — Chrome on a GPU without HEVC Range Extensions, for one. It is
 # libavcodec compiled to WebAssembly, and no remotex build holds it: download the
 # release this gateway pins from the private andrewtheguy/hevc-wasm-archives,
 #
@@ -187,6 +187,48 @@ site_passwd = ""
 # Target profiles (at least one required). Each needs a unique name. Every
 # profile is served; the browser picks one from a picker after login (there is
 # no --target selector).
+#
+# Three things about a session are not keys here. Whoever starts it chooses them
+# at the picker: picking a target opens it, its options show under it, and Start
+# connects with what is ticked. They hold for the life of the session — a browser
+# that takes it over gets it as it was started — and the browser remembers them
+# per target for the next time. Which a target shows is its type's to say:
+#
+#   target                           resize   sound            passthrough
+#   rdp                              shown    shown            shown (experimental)
+#   vnc                              shown    —                —
+#   vnc, wlshare                     shown    shown            —
+#   vnc, ard                         —        —                —
+#   vnc, ard with virtual_display    shown    —                —
+#   vnc, ard-high-performance        shown    always carried   shown
+#
+# Resize hands the remote desktop's size to the client's window, which then
+# reports every window change. Plain VNC needs a server that accepts
+# SetDesktopSize — the TigerVNC family. Standard Apple `ard` shares physical
+# displays, so it has no resize unless the unofficial `virtual_display = true`
+# below puts it on a virtual one. Apple `ard-high-performance` uses Apple's
+# dynamic-resolution feature to replace its one virtual display's configuration
+# with arbitrary viewport sizes within its fixed 3840×2160 backing ceiling. An
+# "rdp" desktop is resized through its graphics pipeline, so `egfx = false` takes
+# the option away. Started without it, the desktop keeps its opening size.
+#
+# Sound takes the remote's sound. An "rdp" target negotiates sound redirection
+# (MS-RDPEA) when it connects, as 44100 Hz 16-bit stereo PCM, and a Windows host
+# sends nothing on the channel until something plays. A "wlshare" target lists
+# wlshare's audio extension. Started without it, neither is asked, and the host
+# keeps playing where it did. A plain "vnc" target carries no sound, and neither
+# does "ard": Standard mode leaves the Mac's sound output alone, playing on the
+# Mac or to whatever AirPlay receiver it picks. An "ard-high-performance" session
+# always carries sound, which the Mac sends beside its picture, so there is
+# nothing to choose. In the session, the floating menu's Mute and Unmute change
+# only whether this browser is listening.
+#
+# Passthrough sends the remote's own stream to the browser as it came, for a LAN:
+# an "rdp" host's graphics pipeline for the page to compose, or an
+# "ard-high-performance" Mac's HEVC and AAC-ELD. Each is described with its
+# target below. The choice is greyed where the browser cannot take the stream,
+# and a browser that cannot take a session somebody else started with it is shown
+# why and offered End session, not a different session.
 [[targets]]
 name = "example"
 protocol = "rdp"           # required: "rdp" or "vnc"
@@ -211,67 +253,52 @@ password = "change-me"
 # Optional pinned opening size. Set both keys or neither.
 #
 # RDP connects at the pinned size, "ard-high-performance" creates its virtual
-# display at it, and a generic VNC server is asked for it once, as soon as it
+# display at it, and a plain or wlshare VNC server is asked for it once, as soon as it
 # declares SetDesktopSize support. With neither key, RDP and a High Performance
 # Mac instead open at the full resolution of the connecting client's own screen,
 # falling back to 1440×900 only when the client supplies no screen; an unpinned
-# generic VNC server is asked for no size at all and keeps its own.
+# plain or wlshare VNC server is asked for no size at all and keeps its own.
 #
-# This is independent of `resize` below, which decides only whether the browser
-# window drives the size afterwards. Pinned alone stays at the pin. Pinned with
-# `resize = true` opens at the pin and then follows the window on RDP and a
-# High Performance Mac, which name a size at connect; a generic VNC server is asked only
-# for the window, because the browser reports it before the server can declare
-# SetDesktopSize support and the newer size supersedes the pin. `subtype = "ard"`
-# is the exception — it exposes the Mac's physical displays, which this gateway
-# never resizes, so there these keys only answer a later default-size request.
+# This is independent of the session's resize, which decides only whether the
+# browser window drives the size afterwards. Pinned and started without resize
+# stays at the pin. Pinned and started with it opens at the pin and then follows
+# the window on RDP and a High Performance Mac, which name a size at connect; a
+# plain or wlshare VNC server is asked only for the window, because the browser reports it
+# before the server can declare SetDesktopSize support and the newer size
+# supersedes the pin. `subtype = "ard"` is the exception — it exposes the Mac's
+# physical displays, which this gateway never resizes, so there these keys only
+# answer a later default-size request.
 #
-# These are points, not backing pixels. RDP opens at 1x and, with `resize`, a
-# Retina client then asks for twice the pixels. A High Performance Mac opens at
-# the connecting client's density even when its point size is pinned.
+# These are points, not backing pixels. RDP opens at 1x and, in a session started
+# with resize, a Retina client then asks for twice the pixels. A High Performance
+# Mac opens at the connecting client's density even when its point size is pinned.
 #width = 1920
 #height = 1080
-
-# Dynamic resize (opt-in): hand the remote desktop's size to the client's window.
-# The client reports every window change while connected. There is no client-side
-# resize toggle, one-shot "Resize to window" button or remembered preference: this
-# one target setting is the policy.
-#
-# One narrowing that is not the client's to make either: generic VNC needs a
-# server that accepts SetDesktopSize — the TigerVNC family — and Standard Apple
-# `ard` refuses resize outright because it shares physical displays — unless the
-# unofficial `virtual_display = true` below puts it on a virtual one. Apple
-# `ard-high-performance` uses Apple's dynamic-resolution feature to replace its
-# one virtual display's configuration with arbitrary viewport sizes within its
-# fixed 3840×2160 backing ceiling.
-#
-# Without it — and by default — the desktop keeps its opening size, and resize
-# messages are ignored.
-#resize = false
 
 # RDP graphics pipeline (MS-RDPEGFX), on by default. On, a Windows host draws the
 # desktop through the pipeline's surfaces and marks every frame, and each resize
 # is a graphics reset, cheap enough for the window to drive continuously. Off, the
-# host draws with bitmap updates and the desktop keeps its opening size —
-# `resize = true` is refused beside `egfx = false`; that is the escape hatch for a
-# host whose pipeline the decoders cannot paint. RDP only, and refused on VNC even when set to false.
-#egfx = true
-
-# Pass the RDP host's graphics pipeline to the browser, which composes it, rather
-# than composing the desktop here and encoding it as VP9. For a LAN: what the host
-# draws with is sent as it is, with no quality walk behind it, so the video keys
-# further down reach nothing of it. It takes the encoding and the decoding off the
-# gateway — a few percent of a core are left, whatever the desktop is doing — and
-# puts the decoding on the browser, where a desktop in ordinary use is light and a
-# full-screen video is about as much as one browser thread composes. A page that
-# reloads or reconnects is logged on to the host's session again rather than
-# resumed, since the host draws against what its client already holds. RDP only,
-# and refused beside `egfx = false`.
+# host draws with bitmap updates and the desktop keeps its opening size — the
+# picker then offers neither resize nor the pipeline's passthrough; that is the
+# escape hatch for a host whose pipeline the decoders cannot paint. RDP only, and
+# refused on VNC even when set to false.
+#
+# With the pipeline on, the picker offers passing it to the browser, which
+# composes it, rather than composing the desktop here and encoding it as VP9. For
+# a LAN: what the host draws with is sent as it is, with no quality walk behind
+# it, so the video keys further down reach nothing of it. It takes the encoding
+# and the decoding off the gateway — a few percent of a core are left, whatever
+# the desktop is doing — and puts the decoding on the browser, where a desktop in
+# ordinary use is light and a full-screen video is about as much as one browser
+# thread composes. A page that reloads or reconnects is logged on to the host's
+# session again rather than resumed, since the host draws against what its client
+# already holds. The page needs WebGL 2 and to be cross-origin isolated, which
+# every gateway makes it and a proxy that drops the two headers undoes.
 # EXPERIMENTAL. The compositor is the gateway's own and is tested as it is there,
 # and what is passed is checked against a real host, in a headless browser and by
-# hand. That is one Windows 11 host, with `audio` and `clipboard` beside the key;
+# hand. That is one Windows 11 host, with sound and `clipboard` beside it;
 # `camera` and `microphone` beside it have not been tried.
-#egfx_passthrough = false
+#egfx = true
 
 # Clipboard bridge (opt-in): shares this target's clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
@@ -290,36 +317,20 @@ password = "change-me"
 # its fetches and data inside the encrypted record transport.
 #clipboard = false
 
-# Remote audio: carry this target's sound when the client asks for it, with the
-# floating menu's Audio button. An "rdp" target negotiates sound redirection
-# (MS-RDPEA) when it connects, as 44100 Hz 16-bit stereo PCM; without the key the
-# host's own audio settings are left untouched and the session has no audio device.
-# A Windows host sends nothing on the channel until something plays. A "wlshare"
-# target lists wlshare's audio extension. A plain "vnc" target carries no sound
-# and is refused the key, and so is every Apple subtype.
-# An "ard-high-performance" target always carries sound, which the Mac sends
-# beside its picture — EXPERIMENTAL. An "ard" target carries none: Standard mode
-# leaves the Mac's sound output alone, playing on the Mac or to whatever AirPlay
-# receiver it picks.
+# The remote's sound, in a session that carries it, is sent as Opus in 20 ms
+# packets. The channel has to be negotiated when the connection is made, so such
+# a session asks the server to redirect from the moment it connects and throws
+# the sound away while nobody is listening. Nothing about it depends on how the
+# page is reached: the client refuses to start at all without a secure context
+# and a pair of WebCodecs decoders.
 #
-# The channel has to be negotiated when the connection is made, so an audio
-# target asks the server to redirect from the moment it connects and throws the
-# sound away while nobody is listening.
-#
-# Nothing here depends on how the page is reached: the client refuses to start at
-# all without a secure context and a pair of WebCodecs decoders, so by the time a
-# target is picked, sound works wherever the target carries it — an "rdp" target,
-# a "wlshare" target, or an "ard-high-performance" Mac.
-#
-# Off leaves the remote's sound where it is.
-#audio = false
-
-# The sound is carried as Opus in 20 ms packets. This is its bitrate on a link
-# that can carry it, in kbit/s, 6–510. The default is 96: well clear of where
-# stereo Opus starts to be audibly lossy. Like `video_quality` it is a ceiling,
-# not a promise — and an average, not a packet size: Opus is variable-rate, so
-# silence costs a few bytes a packet and music about this. Valid only with
-# `audio = true` above; setting it without audio is refused rather than ignored.
+# This is its bitrate on a link that can carry it, in kbit/s, 6–510. The default
+# is 96: well clear of where stereo Opus starts to be audibly lossy. Like
+# `video_quality` it is a ceiling, not a promise — and an average, not a packet
+# size: Opus is variable-rate, so silence costs a few bytes a packet and music
+# about this. Valid on a target whose sessions can carry sound — "rdp",
+# "wlshare" and "ard-high-performance" — and refused rather than ignored on one
+# that has none.
 #audio_bitrate = 96
 
 # Let that bitrate follow the audio socket's own backpressure — on by default,
@@ -327,7 +338,7 @@ password = "change-me"
 # `audio_adaptive_min`, sustained clear sends walk it back up to `audio_bitrate`,
 # and silence is shed while the link is behind so old sound does not accumulate.
 # `false` holds `audio_bitrate` whatever the link does. Either value is refused
-# without `audio = true`.
+# on a target without sound.
 #audio_adaptive = true
 
 # Floor for that walk in kbit/s, default 32: degraded, but continuous, which is
@@ -386,7 +397,8 @@ password = "change-me"
 # `subtype = "wlshare"`, which makes the gateway list wlshare's extensions: its own
 # VP9 stream, passed to the browser untouched; its pixel density, so a `scale 2`
 # output is shown at 2x and a resizing window is asked for in points × scale; its
-# output list; and, with the keys above, sound, the camera and the microphone.
+# output list; its sound, in a session started with it; and, with the keys above,
+# the camera and the microphone.
 # Without the subtype the same server is a plain target, read as any VNC server
 # is. With a username and password, wlshare checks the account it runs as through
 # PAM over RSA-AES, encrypting the session; a password_file on the server is its
@@ -398,7 +410,6 @@ password = "change-me"
 # host = "127.0.0.1"
 # username = "me"
 # password = "that-account's-password"
-# resize = true
 
 # A Mac uses its built-in Screen Sharing service through this same path, with no
 # additional software — say so with a subtype, and give it an *account* rather than
@@ -406,12 +417,11 @@ password = "change-me"
 # Mac who is connecting, and macOS answers a viewer that names nobody by creating a
 # new login window on a virtual display instead of sharing its screen. So every
 # Apple subtype requires username and password (that account's) and takes no
-# vnc_password. Resize is where they part: `ard` is refused outright — a config
-# setting it does not load — because it shares the Mac's physical displays, while
-# "ard-high-performance" takes it for the one virtual display it makes, as the
-# example below does; the unofficial `virtual_display = true` gives `ard` that
-# display too. A third-party VNC server that happens to run on a
-# Mac is not this: it is a plain "vnc" target.
+# vnc_password. Resize is where they part: `ard` offers none, because it shares
+# the Mac's physical displays, while "ard-high-performance" offers it for the one
+# virtual display it makes; the unofficial `virtual_display = true` gives `ard`
+# that display too. A third-party VNC server that happens to run on a Mac is not
+# this: it is a plain "vnc" target.
 #
 # Both speak the protocol revision Apple's own viewer answers every Mac with, and
 # nothing in it is documented by Apple: the revision, its record layer and its
@@ -432,8 +442,9 @@ password = "change-me"
 # UNOFFICIAL: `virtual_display = true` opens that same Standard session on one
 # virtual display instead of the Mac's physical ones. The display is High
 # Performance's — created at the pinned `width`/`height` or the client's screen,
-# at its density, the physical displays disabled meanwhile, and with `resize =
-# true` replaced from every viewport report — and everything else is `ard`'s:
+# at its density, the physical displays disabled meanwhile, and in a session
+# started with resize replaced from every viewport report — and everything else
+# is `ard`'s:
 # the ZRLE picture, the native pasteboard, no sound, no media stream offered and
 # no decoders needed, so it runs in every build. Apple's own viewer never offers
 # a virtual display without the media stream, so nothing but remotex has
@@ -449,7 +460,6 @@ password = "change-me"
 # username = "andrew"
 # password = "the-account-password"
 # clipboard = true
-# resize = true
 
 # `subtype = "ard-high-performance"` is High Performance as Apple's own viewer has
 # it. Its virtual display handling and its media stream were reverse engineered
@@ -460,8 +470,9 @@ password = "change-me"
 # of the client's screen otherwise, at that screen's density. Once connected, the
 # Mac's physical displays are disabled and all of its windows are placed on this
 # virtual display. Apple's official macOS Screen Sharing client can choose up to
-# two virtual displays; remotex requests one. With `resize = true`, viewport
-# reports continuously replace the virtual display's mode as the window changes.
+# two virtual displays; remotex requests one. In a session started with resize,
+# viewport reports continuously replace the virtual display's mode as the window
+# changes.
 # Apple's display-count and fixed-resolution-preset controls are not implemented.
 # `clipboard = true` enables the native Apple pasteboard in both directions.
 #
@@ -476,18 +487,19 @@ password = "change-me"
 # the stream is offered.
 #
 # The picture and the sound go together: the Mac refuses one without the other,
-# and mutes its own speakers while it streams. So the target always carries
-# sound and takes no `audio` key, and an AirPlay speaker the Mac plays to hears
-# nothing.
+# and mutes its own speakers while it streams. So a session always carries
+# sound and the picker has no choice of it, and an AirPlay speaker the Mac plays
+# to hears nothing.
 #
 # EXPERIMENTAL. Decoding the stream here takes the host's FFmpeg (libavcodec 60 to
 # 63) and Fraunhofer's fdk-aac, whose licence is not OSI-approved, which the
-# gateway loads when a session needs them. docs/high-performance-decoders.md says
-# how to install them on Linux, macOS and Windows. Without them a session still
-# passes the stream under `media_passthrough = true`, and refuses a browser that
-# cannot decode it. See docs/apple-vnc-889.md, "The media stream".
+# gateway loads when they are needed. docs/high-performance-decoders.md says
+# how to install them on Linux, macOS and Windows. Without them the stream can
+# only be passed: the picker shows the passthrough as already chosen, and a
+# browser that cannot decode the stream cannot start the target, which Start
+# says. See docs/apple-vnc-889.md, "The media stream".
 #
-# `media_passthrough = true` sends the Mac's stream to a browser that decodes it, as
+# The passthrough, chosen at the picker, sends the Mac's stream to the browser as
 # the Mac sent it, for a LAN of 100 Mbit/s or more: its HEVC rather than VP9 encoded
 # here from decoded pictures, and its AAC-ELD rather than Opus. Every picture the
 # Mac sends goes, up to 30 a second, at the Mac's own quality. Its ZRLE rectangles
@@ -497,10 +509,10 @@ password = "change-me"
 # by the Mac's own rate controller, from the delay this gateway reports as Apple's
 # viewer does, which ends at the gateway: the browser's link does not slow it. High
 # Performance has no Adaptive/Full choice, and the video keys below reach only the
-# whole VP9 picture sent to a browser that cannot take the stream. Chrome
+# whole VP9 picture of a session started without the passthrough. Chrome
 # and Safari, desktop and mobile, were measured decoding both halves where the GPU
-# decodes HEVC 4:4:4; Firefox decodes neither. Every other browser is sent VP9 and
-# Opus as without the key, by a build with the decoders.
+# decodes HEVC 4:4:4; Firefox decodes neither. For a browser that decodes neither
+# the choice is greyed, and its sessions are sent VP9 and Opus.
 # [[targets]]
 # name = "mac-high-performance"
 # protocol = "vnc"
@@ -509,13 +521,11 @@ password = "change-me"
 # username = "andrew"
 # password = "the-account-password"
 # clipboard = true
-# resize = true
-# media_passthrough = true
 
 # How this target's VP9 stream is configured. The gateway applies the plan when it
 # encodes a desktop, and wlshare applies the same plan to the VP9 it makes and the
 # gateway passes through. A passed Mac media stream or RDP graphics pipeline keeps
-# the remote's own quality; when that path is not selected or available, the VP9
+# the remote's own quality; in a session started without the passthrough, the VP9
 # plan applies. Every key below is per target, so it belongs
 # *inside* a [[targets]] table and not in a section of their own — uncommented here
 # they would attach to whichever [[targets]] block precedes them, which is the
@@ -545,10 +555,11 @@ password = "change-me"
 #            on a dark terminal shares its one 4:2:0 colour sample with three pixels of
 #            background and comes back at a quarter of its saturation, at any quality
 #            — measured, lossless 4:2:0 is no better than quality 100. 4:4:4 keeps it,
-#            for a keyframe about a third larger and inter frames no larger. It always
-#            decodes in software (no hardware VP9 decoder takes profile 1): Chromium
-#            does; iOS and iPadOS have no software VP9 at all and refuse it by name,
-#            and this setting sends it to them anyway.
+#            for a keyframe about a third larger and inter frames no larger. In a
+#            browser it decodes in software: hardware that decodes profile 1 exists,
+#            but no browser's hardware VP9 path takes it. Chromium decodes it; iOS and
+#            iPadOS have no software VP9 at all and refuse it by name, and this setting
+#            sends it to them anyway.
 #   "auto" — 4:4:4 where the browser's decoder takes profile 1, 4:2:0 where it says it
 #            does not. The default. The page asks its own VideoDecoder once, at load,
 #            and states the answer on its session socket.

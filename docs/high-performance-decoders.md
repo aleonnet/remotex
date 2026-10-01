@@ -219,11 +219,12 @@ vnc: refusing a browser that does not decode the Mac's stream: the AAC-ELD decod
 
 ## Without the decoders
 
-A gateway without them still serves an `ard-high-performance` target that sets
-`media_passthrough = true`, to a browser that decodes the Mac's stream itself:
-Chrome and Safari do, Firefox does not. The HEVC and AAC-ELD go to that browser
-as the Mac sent them, and nothing is decoded on the gateway. A browser that
-cannot decode them is refused before the gateway dials the Mac.
+A gateway without them still serves an `ard-high-performance` target, with the
+stream passed through, to a browser that decodes the Mac's stream itself: Chrome
+and Safari do, Firefox does not. The picker shows the passthrough as already
+chosen there. The HEVC and AAC-ELD go to that browser as the Mac sent them, and
+nothing is decoded on the gateway. For a browser that cannot decode them the
+target's Start is greyed, with the reason, so the Mac is never dialled.
 
 See [The media stream](apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound)
 for what the stream carries, and

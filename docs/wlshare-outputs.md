@@ -33,7 +33,6 @@ host = "127.0.0.1"
 port = 5900
 username = "me"
 password = "…"
-resize = true
 ```
 
 The gateway lists the pseudo-encoding in a `wlshare` target's `SetEncodings`,
@@ -137,19 +136,19 @@ before the wire.
   the canvas rather than with what was clicked.
 - **Density follows the switch.** The browser's density was declared to the
   output left behind, so the gateway declares it again when a list says the
-  shared output moved — on a `resize = true` target, the only kind that declares
-  one at all — and wlshare answers with an `OutputScale` as it always does:
+  shared output moved — in a session started with resize, the only kind that
+  declares one at all — and wlshare answers with an `OutputScale` as it always does:
   applying it on a headless output, and reporting the output as it is on a
   monitor whose mode belongs to the person in front of it. The declaration
   carries the window in pixels, even when the scale is the one already
   reported: the output arrives at its own size, not the window's, and takes the
   window's in the same configuration. A switch that lands while a
   declaration is still out waits for that one's answer, as a density change does.
-- **The size is announced whatever `resize` says.** A switch to a differently
+- **The size is announced whether or not the session resizes.** A switch to a differently
   sized output is an `ExtendedDesktopSize` rectangle, and a server with nothing
   negotiated to send one in has no choice but to close the connection. So both
-  size pseudo-encodings are listed on every `vnc` target; `resize` decides only
-  whether the window asks for sizes of its own.
+  size pseudo-encodings are listed on every `vnc` target; the session's resize
+  decides only whether the window asks for sizes of its own.
 - **An emptied list is still a list.** A browser attaching after the compositor
   lost its last output is told the list is empty rather than left with the menu
   it had.

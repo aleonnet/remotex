@@ -1,62 +1,58 @@
 import { useEffect, useState } from "react";
 import { AppVersion } from "./AppVersion.tsx";
-import { AUDIO_NEEDS_GESTURE } from "./audioPlayer.ts";
+import { decodesAppleMedia } from "./appleMedia.ts";
 import { connectionShortLabel } from "./connectionLabel.ts";
 import { gatewayFetch } from "./gateway.ts";
+import { composesRdpGraphics } from "./rdpGraphics.ts";
 import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
+import {
+  type Choices,
+  readRememberedChoices,
+  rememberChoice,
+  type TargetInfo,
+  targetOptions,
+} from "./targetChoices.ts";
 
 // The post-login target picker: the state where the user is authenticated and
 // holds the session slot, but no connection has started yet (see
 // useRemoteDesktop's "picker" mode). It lists the `[[targets]]` profiles from
-// GET /api/targets and starts a session against the one the user picks.
+// GET /api/targets. Picking one opens it rather than connecting: what the
+// session is started with — resize, sound, a passthrough — is chosen under it,
+// and Start is what connects (targetChoices.ts has the rules for which options
+// a target shows and which are greyed). Every target starts closed, a gateway's
+// only one included, so starting a session is the same two steps everywhere.
 //
-// `connect` sends the pick over the live socket; `pendingTarget` is the profile
-// a pick is waiting on (buttons lock until the server answers). `connectError`
-// carries a failed connect's message so it shows here rather than on a
-// dead-end screen. `onLogout` ends the web login; `onUnauthorized` fires if the
-// target list itself comes back 401 (the login expired).
-
-interface TargetInfo {
-  name: string;
-  protocol: string;
-  // The target's `subtype` where it has one, null otherwise. Shown because four
-  // entries in this list can say `vnc` and mean a plain server, a wlshare one, a
-  // Mac sharing its physical displays, and a Mac on one virtual display it will
-  // disable them for —
-  // which is a difference somebody is choosing between here, not discovering after
-  // connecting. See connectionLabel.ts.
-  subtype: string | null;
-  host: string;
-  port: number;
-}
+// `connect` sends the Start over the live socket with the choices; `sound` tells
+// it the session will carry the remote's sound, so the click is spent on an audio
+// context. `pendingTarget` is the profile a Start is waiting on (buttons lock
+// until the server answers). `connectError` carries a failed connect's message so
+// it shows here rather than on a dead-end screen. `onLogout` ends the web login;
+// `onUnauthorized` fires if the target list itself comes back 401 (the login
+// expired).
 
 export default function TargetPicker({
   branding,
   connect,
   pendingTarget,
   connectError,
-  audioByDefault,
-  onAudioByDefaultChange,
   onLogout,
   onUnauthorized,
 }: {
   branding: string;
-  connect: (name: string) => void;
+  connect: (name: string, choices: Choices, sound: boolean) => void;
   pendingTarget: string | null;
   connectError: string | null;
-  // The remembered default, shown here as the one place it can be set before a
-  // target is picked — and the same value the desktop menu's live control
-  // edits. "… if compatible" is deliberately not a per-target check: the
-  // picker never learns a target's capabilities (GET /api/targets carries none),
-  // so this is an intent, applied on connect only where `connected` reports the
-  // target can honour it.
-  audioByDefault: boolean;
-  onAudioByDefaultChange: (enabled: boolean) => void;
   onLogout: () => void;
   onUnauthorized: () => void;
 }) {
   const [targets, setTargets] = useState<TargetInfo[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // The one target whose options are showing, by name.
+  const [openTarget, setOpenTarget] = useState<string | null>(null);
+  // What was ticked under each target the last time, in this browser. It
+  // replaces the one sound checkbox the picker used to have: the choice is each
+  // target's, and it is made where the target is.
+  const [remembered, setRemembered] = useState(readRememberedChoices);
   // Offered only on a gateway with `[meter].enabled`; the view replaces the list while open.
   const throughputAvailable = useThroughputAvailable();
   const [showThroughput, setShowThroughput] = useState(false);
@@ -104,6 +100,13 @@ export default function TargetPicker({
     );
   }
 
+  // What this browser can take, asked once at load (main.tsx) and stated on its
+  // session socket too: the gateway refuses what this greys.
+  const abilities = {
+    appleMedia: decodesAppleMedia(),
+    rdpGraphics: composesRdpGraphics(),
+  };
+
   return (
     <div className="picker-screen">
       <div className="picker-panel">
@@ -120,45 +123,85 @@ export default function TargetPicker({
         <ul className="picker-list">
           {targets?.map((t) => {
             const connecting = pendingTarget === t.name;
+            const open = openTarget === t.name;
+            const options = targetOptions(t, remembered[t.name], abilities);
+            const optionsId = `picker-options-${t.name}`;
             return (
               <li key={t.name}>
                 <button
                   type="button"
                   className="picker-target"
-                  onClick={() => connect(t.name)}
+                  aria-expanded={open}
+                  aria-controls={optionsId}
+                  onClick={() => setOpenTarget(open ? null : t.name)}
                   disabled={pendingTarget !== null}
                 >
-                  <span className="picker-target-name">{t.name}</span>
-                  <span className="picker-target-meta">
-                    {connecting
-                      ? "Connecting…"
-                      : [
-                          connectionShortLabel(t.protocol, t.subtype),
-                          `${t.host}:${t.port}`,
-                        ].join(" · ")}
+                  <span className="picker-chevron" aria-hidden="true">
+                    {open ? "∨" : "›"}
+                  </span>
+                  <span className="picker-target-text">
+                    <span className="picker-target-name">{t.name}</span>
+                    <span className="picker-target-meta">
+                      {connecting
+                        ? "Connecting…"
+                        : [
+                            connectionShortLabel(t.protocol, t.subtype),
+                            `${t.host}:${t.port}`,
+                          ].join(" · ")}
+                    </span>
                   </span>
                 </button>
+                {open && (
+                  <div className="picker-options" id={optionsId}>
+                    {/* Only what the target's type offers has a row; one that
+                        cannot be had here is greyed and says why. */}
+                    {options.rows.map((row) => (
+                      <label
+                        key={row.key}
+                        className={`picker-option${row.disabled ? " picker-option-unavailable" : ""}`}
+                      >
+                        <input
+                          type="checkbox"
+                          checked={row.checked}
+                          disabled={row.disabled || pendingTarget !== null}
+                          onChange={(e) =>
+                            setRemembered((was) =>
+                              rememberChoice(
+                                was,
+                                t.name,
+                                row.key,
+                                e.target.checked,
+                              ),
+                            )
+                          }
+                        />
+                        <span className="picker-option-text">
+                          <span>{row.label}</span>
+                          <span className="picker-option-note">{row.note}</span>
+                        </span>
+                      </label>
+                    ))}
+                    {options.blocked && (
+                      <p className="picker-error">{options.blocked}</p>
+                    )}
+                    <button
+                      type="button"
+                      className="picker-start"
+                      onClick={() =>
+                        connect(t.name, options.choices, options.sound)
+                      }
+                      disabled={
+                        pendingTarget !== null || options.blocked !== null
+                      }
+                    >
+                      {connecting ? "Connecting…" : "Start"}
+                    </button>
+                  </div>
+                )}
               </li>
             );
           })}
         </ul>
-        {/* The remembered default, applied to whatever is picked above only
-            where the target supports it — hence "if compatible", a fixed caption
-            rather than a per-target check the picker has no way to make. Absent
-            where every AudioContext needs a click of its own: sound there is the
-            Audio toggle after each connect and reload, never a default. */}
-        {!AUDIO_NEEDS_GESTURE && (
-          <div className="picker-defaults">
-            <label className="picker-default">
-              <input
-                type="checkbox"
-                checked={audioByDefault}
-                onChange={(e) => onAudioByDefaultChange(e.target.checked)}
-              />
-              <span>Play the remote's sound, if compatible</span>
-            </label>
-          </div>
-        )}
         {throughputAvailable && (
           <button
             type="button"

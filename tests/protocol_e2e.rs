@@ -1185,18 +1185,13 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         domain: None,
         width: Some(1280),
         height: Some(800),
-        resize: false,
         egfx: None,
         clipboard,
-        audio_key: None,
-        audio: false,
         camera: false,
         microphone: false,
         video_quality: None,
         render_chroma: None,
         render_adaptive: None,
-        media_passthrough: false,
-        egfx_passthrough: false,
         virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,
@@ -1205,24 +1200,28 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
 }
 
 /// A target for the fake Mac: the high-performance subtype, with the account the
-/// fake Mac checks the credentials against. It passes the stream, to the browser
-/// [`connect_mac_ws`] stands in for, so the session needs no decoder and a host
-/// without FFmpeg or fdk-aac drives it too; the fake names no ports for the
-/// stream anyway.
+/// fake Mac checks the credentials against.
 fn mac_target(port: u16) -> TargetConfig {
     TargetConfig {
         subtype: Some(remotex::config::Subtype::ArdHighPerformance),
-        media_passthrough: true,
         username: MAC_USER.to_owned(),
         password: MAC_PASSWORD.to_owned(),
         // Unpinned: the virtual display opens at the screen the connect names.
         width: None,
         height: None,
-        resize: true,
         clipboard: true,
         ..target(Protocol::Vnc, port)
     }
 }
+
+/// What a fake-Mac session is started with: the window sizing the virtual display,
+/// and the stream passed to the browser [`connect_mac_ws`] stands in for, so the
+/// session needs no decoder and a host without FFmpeg or fdk-aac drives it too;
+/// the fake names no ports for the stream anyway.
+const MAC_CHOICES: &str = r#"{"resize":true,"passthrough":true}"#;
+
+/// A session started with nothing but the window sizing the desktop.
+const RESIZE: &str = r#"{"resize":true}"#;
 
 /// The session socket of a fake-Mac test: a browser that takes the Mac's stream.
 async fn connect_mac_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
@@ -1613,17 +1612,17 @@ async fn expect_no_picture(ws: &mut Ws) {
     assert!(quiet.is_err());
 }
 
-/// With `resize` the window sizes the desktop and nothing is held: a server that
-/// answers past the ceiling ends the session with the stream's refusal.
+/// Started with resize, the window sizes the desktop and nothing is held: a server
+/// that answers past the ceiling ends the session with the stream's refusal.
 #[tokio::test]
 async fn an_oversize_vnc_desktop_under_resize_is_refused() {
     let (w, h) = (3842, 2);
     let vnc_port = spawn_fake_vnc_sized(w, h).await;
-    let addr = spawn_app(TargetConfig { resize: true, ..target(Protocol::Vnc, vnc_port) }).await;
+    let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;
-    common::connect_target(&mut ws, "test-target").await;
+    common::connect_target_with(&mut ws, "test-target", RESIZE).await;
     let error = expect_error(&mut ws).await;
     assert!(error.contains("will not encode a 3842x2 picture"), "unexpected error: {error}");
 }
@@ -1994,7 +1993,7 @@ async fn high_performance_refuses_a_mac_without_a_virtual_display() {
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_mac_ws(addr, &token, &cookie).await;
-    common::connect_target(&mut ws, "test-target").await;
+    common::connect_target_with(&mut ws, "test-target", MAC_CHOICES).await;
 
     let error = expect_error(&mut ws).await;
     assert!(error.contains("does not offer High Performance"), "{error}");
@@ -2020,7 +2019,7 @@ async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_mac_ws(addr, &token, &cookie).await;
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}},"choices":{MAC_CHOICES}}}"#
     )))
     .await
     .unwrap();
@@ -2049,7 +2048,7 @@ async fn high_performance_ends_when_the_offer_brings_no_picture() {
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_mac_ws(addr, &token, &cookie).await;
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}},"choices":{MAC_CHOICES}}}"#
     )))
     .await
     .unwrap();
@@ -2090,8 +2089,6 @@ async fn standard_on_a_virtual_display_resizes_it_and_offers_no_stream() {
         spawn_fake_mac_with(MAC_COMMANDS, MacStream::Refuse).await;
     let addr = spawn_app(TargetConfig {
         subtype: Some(remotex::config::Subtype::Ard),
-        media_passthrough: false,
-        egfx_passthrough: false,
         virtual_display: true,
         ..mac_target(mac_port)
     })
@@ -2100,7 +2097,7 @@ async fn standard_on_a_virtual_display_resizes_it_and_offers_no_stream() {
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}},"choices":{RESIZE}}}"#
     )))
     .await
     .unwrap();
@@ -2169,8 +2166,6 @@ async fn standard_refuses_a_virtual_display_the_mac_does_not_offer() {
         spawn_fake_mac_with(commands, MacStream::Refuse).await;
     let addr = spawn_app(TargetConfig {
         subtype: Some(remotex::config::Subtype::Ard),
-        media_passthrough: false,
-        egfx_passthrough: false,
         virtual_display: true,
         ..mac_target(mac_port)
     })
@@ -2178,7 +2173,7 @@ async fn standard_refuses_a_virtual_display_the_mac_does_not_offer() {
     let cookie = common::login(addr).await;
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;
-    common::connect_target(&mut ws, "test-target").await;
+    common::connect_target_with(&mut ws, "test-target", RESIZE).await;
 
     let error = expect_error(&mut ws).await;
     assert!(error.contains("without virtual_display"), "{error}");
@@ -2197,9 +2192,6 @@ async fn standard_speaks_apples_revision_on_the_physical_screen() {
     let (mac_port, mut requests, _actions, fake_mac) = spawn_fake_mac().await;
     let addr = spawn_app(TargetConfig {
         subtype: Some(remotex::config::Subtype::Ard),
-        media_passthrough: false,
-        egfx_passthrough: false,
-        resize: false,
         ..mac_target(mac_port)
     })
     .await;
@@ -2265,7 +2257,7 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     // The connect names the client's screen, the way the SPA does. With no
     // pinned config size, that screen's full resolution is the opening mode.
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}},"choices":{MAC_CHOICES}}}"#
     )))
     .await
     .unwrap();
@@ -2430,7 +2422,7 @@ async fn high_performance_opens_a_retina_client_at_its_screens_density() {
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_mac_ws(addr, &token, &cookie).await;
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":200}}}}"#
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":200}},"choices":{MAC_CHOICES}}}"#
     )))
     .await
     .unwrap();
