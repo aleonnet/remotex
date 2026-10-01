@@ -203,7 +203,7 @@ site_passwd = ""
 #   vnc, ard-high-performance        shown    always carried   shown
 #
 # Resize hands the remote desktop's size to the client's window, which then
-# reports every window change. Generic VNC needs a server that accepts
+# reports every window change. Plain VNC needs a server that accepts
 # SetDesktopSize — the TigerVNC family. Standard Apple `ard` shares physical
 # displays, so it has no resize unless the unofficial `virtual_display = true`
 # below puts it on a virtual one. Apple `ard-high-performance` uses Apple's
@@ -253,17 +253,17 @@ password = "change-me"
 # Optional pinned opening size. Set both keys or neither.
 #
 # RDP connects at the pinned size, "ard-high-performance" creates its virtual
-# display at it, and a generic VNC server is asked for it once, as soon as it
+# display at it, and a plain or wlshare VNC server is asked for it once, as soon as it
 # declares SetDesktopSize support. With neither key, RDP and a High Performance
 # Mac instead open at the full resolution of the connecting client's own screen,
 # falling back to 1440×900 only when the client supplies no screen; an unpinned
-# generic VNC server is asked for no size at all and keeps its own.
+# plain or wlshare VNC server is asked for no size at all and keeps its own.
 #
 # This is independent of the session's resize, which decides only whether the
 # browser window drives the size afterwards. Pinned and started without resize
 # stays at the pin. Pinned and started with it opens at the pin and then follows
 # the window on RDP and a High Performance Mac, which name a size at connect; a
-# generic VNC server is asked only for the window, because the browser reports it
+# plain or wlshare VNC server is asked only for the window, because the browser reports it
 # before the server can declare SetDesktopSize support and the newer size
 # supersedes the pin. `subtype = "ard"` is the exception — it exposes the Mac's
 # physical displays, which this gateway never resizes, so there these keys only

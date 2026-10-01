@@ -188,8 +188,8 @@ one" has an answer rather than being rediscovered.
   rectangles and mixes it with the other codecs and drawing commands on one
   surface. It is not taken up without the operator accepting a lossy source, as
   the VNC entry below puts it.
-- **Tight/JPEG/H.264 VNC decode or pass-through.** Generic `vnc` advertises only
-  the lossless standard encodings on purpose: Tight and TightPNG are vendor
+- **Tight/JPEG/H.264 VNC decode or pass-through.** A plain `vnc` target advertises
+  only the lossless standard encodings on purpose: Tight and TightPNG are vendor
   encodings, JPEG and H.264 are lossy, and advertising an encoding is a promise to
   decode it. Tight-family decoding, and handing a lossy source payload to the
   browser untouched, would remove upstream bytes and a transcode — for a target

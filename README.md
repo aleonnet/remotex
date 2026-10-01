@@ -96,8 +96,8 @@ competes.
 server for wlroots-based Wayland desktops, is the ideal. It codes the desktop as
 VP9 itself, at the quality and chroma the target asks for, and walks that quality
 by the browser's link, so the gateway passes its stream through untouched and
-the session still adapts to a slow link. Because wlshare is ours, what generic
-VNC lacks is added to it as an extension: pixel density, switching outputs,
+the session still adapts to a slow link. Because wlshare is ours, what RFB
+lacks is added to it as an extension: pixel density, switching outputs,
 sound, and the browser's camera and microphone. It is a `vnc` target with
 `subtype = "wlshare"`, which is what makes the gateway list those extensions and
 ask for the stream.
@@ -321,16 +321,18 @@ against macOS 26 only, and a macOS update is free to break it while leaving the
 two official modes alone.
 See [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
-A plain VNC server has no way to say its pixels are HiDPI — standard RFB carries
-sizes in pixels and nothing else — so those targets are shown at 1x, one CSS
-pixel per framebuffer pixel, and the window's points go to the server as pixels.
-See [`docs/generic-vnc-hidpi.md`](docs/generic-vnc-hidpi.md) for what that means
+A plain `vnc` target has no way to learn that its pixels are HiDPI — standard RFB
+carries sizes in pixels and nothing else, and a plain target lists no extension
+to it — so it is shown at 1x, one CSS pixel per framebuffer pixel, and the
+window's points go to the server as pixels, whatever server it reaches.
+See [`docs/standard-rfb-hidpi.md`](docs/standard-rfb-hidpi.md) for what that means
 on a sway output at scale 2 and why a second client's resize can come back
-prohibited. The one exception is a `wlshare` target, which is asked for its
-density: wlshare reports its output's scale, the gateway labels the framebuffer
-with it, and the browser's density is declared back to the server together with
-the window in points × that density, so the output changes mode and scale at
-once. See [`docs/wlshare-density.md`](docs/wlshare-density.md).
+prohibited. Density over VNC is a wlshare extension, listed for a target with
+`subtype = "wlshare"` and no other: wlshare reports its output's scale, the
+gateway labels the framebuffer with it, and the browser's density is declared
+back to the server together with the window in points × that density, so the
+output changes mode and scale at once. See
+[`docs/wlshare-density.md`](docs/wlshare-density.md).
 
 Sound is chosen at the picker on an `rdp` target and on a `wlshare` one. On
 wlshare it comes through wlshare's audio extension: the gateway lists its

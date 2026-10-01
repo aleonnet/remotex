@@ -248,7 +248,7 @@ async def main() -> int:
         "--viewport-after-resize",
         action="store_true",
         help="send the first --viewport after the first resize instead of after the "
-        "display list, which a generic VNC server never sends",
+        "display list, which a plain VNC server never sends",
     )
     parser.add_argument(
         "--viewport-gap",

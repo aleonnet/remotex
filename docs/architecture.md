@@ -142,7 +142,7 @@ area and points here; read the area's section before changing what it covers.
   unanswered, is presented at 1x: do not add a client-side density control, and never label a framebuffer with a density the
   server has not confirmed. Read
   [Display geometry](#display-geometry),
-  [HiDPI over generic VNC](generic-vnc-hidpi.md) and
+  [HiDPI over standard RFB](standard-rfb-hidpi.md) and
   [Pixel density over VNC with wlshare](wlshare-density.md) before
   changing geometry.
 - Read [Apple RFB 003.889, as measured](apple-vnc-889.md) before changing
@@ -495,15 +495,15 @@ trip that pins the difference, through the archive's own decoder.
 A desktop past the picture ceiling is one a video stream will not encode
 (`video::check_picture`). The gateway sizes every desktop it asks for under it, so
 only a remote it cannot size gets there: a Mac in Standard mode on All Displays —
-5376×2287 over a 2x screen beside a 1x one, measured — or a generic VNC server
-whose desktop is simply that large.
+5376×2287 over a 2x screen beside a 1x one, measured — or a plain or wlshare VNC
+server whose desktop is simply that large.
 
 Such a desktop has no picture. `Oversize` in `src/encode.rs` is the source's side
 of it, fixed when the engine starts:
 
 | Source | `Oversize` | Past the ceiling |
 |---|---|---|
-| VNC (generic, Apple Standard) started without resize | `Hold` | the session stays up without a picture |
+| VNC (plain, wlshare, Apple Standard) started without resize | `Hold` | the session stays up without a picture |
 | VNC started with resize, Apple High Performance, RDP | `Refuse` | the session ends: "a video stream will not encode a W×H picture" |
 
 Resize refuses because it is the gateway sizing the remote: every size it asks
@@ -1653,13 +1653,14 @@ the operator specified them is meaningful.
 A pin is spent whether or not the session resizes, because the two answer
 different questions: the pin is the size the session *opens* at, and resize is
 whether the browser window drives it afterwards. RDP connects at the pin, High
-Performance builds its virtual display at it, and generic VNC asks for it with a
-single `SetDesktopSize` as soon as the server declares support — seeded into the
+Performance builds its virtual display at it, and a plain or `wlshare` target asks
+for it with a single `SetDesktopSize` as soon as the server declares support — seeded into the
 same held-request slot a viewport report uses, so it goes out on the first
 `ExtendedDesktopSize` rect and no earlier. A pinned target started without resize
 stays at the pin on all three. Started with it, RDP and High Performance open at the pin
 and then follow the window, because they state a size at connect and no report
-can precede that; generic VNC cannot state one until the server declares support,
+can precede that; a plain or `wlshare` target cannot state one until the server
+declares support,
 by which time the browser — which reports its window as soon as `connected`
 reaches it — has superseded the held pin with the size it actually wants, so the
 session opens at the window and the pin is left answering a later default-size
@@ -1672,14 +1673,15 @@ What is engine-specific is the mechanism:
 
 | Engine | Started with resize |
 |---|---|
-| Generic VNC | applies a requested size, on servers accepting SetDesktopSize |
+| Plain VNC | applies a requested size, on servers accepting SetDesktopSize |
+| wlshare | applies a requested size, and the client's reported display density |
 | Apple Standard VNC | not offered: it shares physical displays |
 | Apple High Performance VNC | applies dynamic-resolution sizes within its fixed 3840×2160 backing ceiling |
 | RDP | applies a requested size, and the client's reported display density |
 
 Every desktop is also held under the gateway's 3840-pixel long
 side by 2400-pixel short side ceiling at the negotiated density. RDP opening and
-layout sizes and generic VNC `SetDesktopSize` requests all pass through
+layout sizes and the sizes a plain or `wlshare` target asks for all pass through
 `video::fit_ceiling`; High Performance separately keeps its native 3840×2160
 backing ceiling. This changes what the remote is asked to render, not how the
 browser scales it: a 5K window receives at most a 3840×2400 desktop at 100%, with
@@ -1711,23 +1713,26 @@ browser that reattaches mid-resize is told again. No other engine sends
 and its density. Mid-session only the density is acted on, and only in a
 session started with resize: RDP quantizes it to 1x or 2x at a midpoint (and opens at it, from the
 screen `connect` names), a High Performance virtual
-display re-renders the same points at it; the resulting density travels back as
-the `scale` on `resize`, and clients present the framebuffer at `pixels / scale`.
-Other engines ignore the message. Generic VNC, whose wire carries no density, is
-presented at 1x and takes no density from the client; see
-[HiDPI over generic VNC](generic-vnc-hidpi.md). wlshare is the one generic
-server that reports a scale, over a private extension a `wlshare` target asks
-for: the label follows its reports and the client's density is declared to it,
-never applied by the gateway itself; see
-[Pixel density over VNC with wlshare](wlshare-density.md).
+display re-renders the same points at it, and a `wlshare` target declares it to
+the server over wlshare's density extension, which sets its output's scale; the
+resulting density travels back as the `scale` on `resize`, and clients present
+the framebuffer at `pixels / scale`. On `wlshare` the label follows the server's
+reports and is never applied by the gateway itself; see
+[Pixel density over VNC with wlshare](wlshare-density.md). Apple Standard on
+the Mac's physical displays reconfigures none of them and asks the Mac to scale
+what it sends instead. A plain
+`vnc` target lists no extension to RFB, so its wire carries no density whatever
+server it reaches: it is presented at 1x and takes no density from the client;
+see [HiDPI over standard RFB](standard-rfb-hidpi.md).
 
 A client shows the display picker exactly when the target sends it a
 `ServerMsg::Displays`, and hides it otherwise. The VNC engine sends one on both
 Apple subtypes and on a `wlshare` target: it parses an `AppleDisplayLayout`, or
 wlshare's `OutputList`, into a `displays` message and acts on a `selectDisplay`
 by asking that remote for that screen. RDP exposes a single framebuffer spanning
-every remote screen and has nothing to enumerate, and so does any other generic
-VNC server, so neither sends the message and the picker stays hidden there.
+every remote screen and has nothing to enumerate, and a plain `vnc` target reads
+its server the same way, so neither sends the message and the picker stays hidden
+there.
 
 Where the list is sent, the checkmark moves only when the remote comes back naming
 the screen it is now sending — never on the click. On a Mac the engine prepends an
@@ -1744,7 +1749,8 @@ layer injects it after attaching to an existing engine.
 Clipboard support is a per-target opt-in available on all engines. The backend
 holds the latest remote value and its observed change time:
 
-- generic VNC forwards and buffers `ServerCutText` or Extended Clipboard data;
+- plain and wlshare VNC forward and buffer `ServerCutText` or Extended Clipboard
+  data;
 - both Apple VNC subtypes read and write the Mac's native compressed pasteboard;
   while a fetch is pending, the normal framebuffer cycle finishes its one
   outstanding response and pauses before requesting another, leaving the ordered
@@ -1845,8 +1851,12 @@ negotiating one, and use the same shadow and encoder path as RDP. `src/vnc_encod
 decodes whichever encoding a server picks into the packed RGB888 the shadow and the
 mirror take, so nothing above it knows which was chosen.
 
-**RFB 3.8** is used by generic `vnc`: a plain target, and a `wlshare` one, which
-adds wlshare's extensions to the same dialect. It supports None, classic VNC
+**RFB 3.8** is the dialect of a plain target and of a `wlshare` one. The dialect
+and the baseline below are what the two share. A `wlshare` target is a subtype
+the way `ard-high-performance` is: its picture is the server's own stream passed
+through, and its density, display list, sound, camera and microphone come from
+extensions only that server speaks, where a plain target has the baseline alone.
+The dialect supports None, classic VNC
 authentication and RealVNC's RSA-AES security types (5 and 129), plus the
 Cursor pseudo-encoding and Cursor With Alpha — the same shape
 with its alpha, so a shadow and antialiased edges survive where Cursor's 1-bit
@@ -1871,7 +1881,8 @@ is the only end that knows what the host keyboard is. The
 server also drops pointer and key input during the first seconds of a session;
 `tests/ws_probe.py --key` waits eight seconds before injecting for that reason.
 
-Generic `vnc` advertises the standard lossless encodings in preference order —
+A plain target and a `wlshare` one advertise the standard lossless encodings in
+preference order —
 CopyRect, ZRLE, zlib, Hextile, RRE, Raw — and a server encodes with the first it
 supports, so a modern one settles on ZRLE and uses CopyRect for scrolls and window
 moves. Tight, TightPNG, JPEG and H.264 are deliberately absent: vendor or lossy,
@@ -1892,7 +1903,8 @@ a run of FLAC frames in message `0xE4`, and QEMU's end. A server that never
 announces leaves the session silent rather than failing it. See
 [`wlshare-audio.md`](wlshare-audio.md).
 
-Generic `vnc` also advertises **ContinuousUpdates** and **Fence**, which go
+Plain and `wlshare` targets also advertise **ContinuousUpdates** and **Fence**,
+which go
 together. A server that supports the first answers the `SetEncodings` carrying it
 with an `EndOfContinuousUpdates` message — the only way it is ever announced — and
 the client then asks for the whole desktop and stops polling: updates arrive as
@@ -1908,9 +1920,9 @@ it says nothing and the polling loop never stops. The Apple subtypes are not
 offered either: their encoding lists are measured exact, and adding to one costs
 the display layout.
 
-The client advertises DesktopSize and ExtendedDesktopSize on every generic
+The client advertises DesktopSize and ExtendedDesktopSize on every RFB 3.8
 target, so a server can always say its size changed; the session's resize decides only
-whether the window asks it to change, with `SetDesktopSize`. Generic VNC clipboard support uses Extended Clipboard when the server
+whether the window asks it to change, with `SetDesktopSize`. Their clipboard uses Extended Clipboard when the server
 advertises it and falls back to Latin-1 `ServerCutText` otherwise. Both Apple
 subtypes negotiate Apple's display metadata and native pasteboard instead, and ask
 for ZRLE in their first `SetEncodings`.
@@ -2359,7 +2371,7 @@ engine exchanges with its remote is a different link and is not counted.
 
 Unit tests cover protocol parsing, configuration, authentication, key mapping,
 audio, and engine helpers. Tests under `tests/` exercise HTTP/WebSocket session
-flow and protocol engines. Containerized dummy servers cover generic VNC and
+flow and protocol engines. Containerized dummy servers cover plain VNC and
 wlshare; RDP end-to-end probes borrow a real Windows host.
 
 Stable headless browser tests under

@@ -6,7 +6,7 @@ rather than half a desktop stretched up — and how the browser's own density
 becomes that scale, so a 2x browser gets a 2x desktop with nothing to configure,
 as it does over RDP.
 Standard RFB carries pixels and nothing else
-([`generic-vnc-hidpi.md`](generic-vnc-hidpi.md)); this is one private extension
+([`standard-rfb-hidpi.md`](standard-rfb-hidpi.md)); this is one private extension
 on top of it, in the shape Apple's display layout already gives the gateway: the
 *server* reports the density, and the label the browser sees is the wire's word.
 The browser's density is only ever a request to the server, never a label.
@@ -42,7 +42,7 @@ pseudo-encoding in its `SetEncodings`, after everything that decides pixels and
 immediately before the output-list request, so it never weighs on encoding
 preference. wlshare answers it before its first framebuffer update. A target
 that says wlshare and reaches some other server gets pixels with no report
-before them, which settle the request as unanswered: the desktop is generic RFB
+before them, which settle the request as unanswered: the desktop is plain RFB
 at 1x from there, and a report that arrives after all is still taken, since the
 label is the wire's word. A plain `vnc` target is not asked, whatever server it
 reaches, and is 1x; nor are the Apple subtypes, since a Mac reports its

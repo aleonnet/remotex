@@ -15,7 +15,7 @@ belong in the linked documentation.
   of them is welcome, and when work for them competes with work for other
   servers, they come first. Other RDP and VNC servers remain supported through
   each protocol's baseline.
-- Because wlshare is ours, what generic VNC lacks can be added to it as an
+- Because wlshare is ours, what RFB lacks can be added to it as an
   extension a `wlshare` target lists, as density, outputs, audio, camera,
   microphone and its VP9 stream were. A plain `vnc` target lists none of them and
   reads any server, wlshare included, through the RFB baseline.
