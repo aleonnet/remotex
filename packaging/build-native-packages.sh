@@ -89,8 +89,9 @@ if [ "$os" = macos ]; then
   command -v cmake >/dev/null 2>&1 || { echo "cmake is required, to build libFLAC" >&2; exit 1; }
   payload="$stage/payload"
   mkdir -p "$payload/usr/local/bin" "$payload/usr/local/share/doc/remotex" "$payload/usr/local/lib/remotex"
-  cp "$release/bin/remotex" "$payload/usr/local/bin/remotex"
-  cp "$release/share/doc/remotex/"* "$payload/usr/local/share/doc/remotex/"
+  # -X: without the extended attributes, which pkgbuild would archive (below).
+  cp -X "$release/bin/remotex" "$payload/usr/local/bin/remotex"
+  cp -X "$release/share/doc/remotex/"* "$payload/usr/local/share/doc/remotex/"
 
   # libFLAC, in a folder of the package's own (`carried_libflac` in
   # src/config.rs), so it neither replaces nor is replaced by a FLAC the operator
@@ -112,7 +113,7 @@ if [ "$os" = macos ]; then
     || { cat "$stage/flac-build.log" >&2; echo "libFLAC did not build" >&2; exit 1; }
   flac_dylib="$payload/usr/local/lib/remotex/libFLAC.14.dylib"
   # -L: the versioned name is a link to the file.
-  cp -L "$stage/flac-build/src/libFLAC/libFLAC.14.dylib" "$flac_dylib"
+  cp -LX "$stage/flac-build/src/libFLAC/libFLAC.14.dylib" "$flac_dylib"
   # After its own name, everything it links must be the system's.
   if otool -L "$flac_dylib" | tail -n +3 | grep -v '^[[:space:]]*/usr/lib/'; then
     echo "the built libFLAC links a library macOS does not have" >&2
@@ -127,6 +128,14 @@ if [ "$os" = macos ]; then
     "$output"
 
   pkgutil --payload-files "$output" > "$stage/pkg-contents"
+  # pkgbuild archives a file's extended attributes as a `._` entry beside it, and
+  # the receipt then lists paths the uninstaller refuses. macOS stamps
+  # com.apple.provenance, which nothing clears, on what a shell started from some
+  # apps writes; a build over ssh or on a CI runner has none.
+  if grep -E '(^|/)\._' "$stage/pkg-contents" >&2; then
+    echo "the payload's files carry extended attributes; build from a shell that does not stamp them" >&2
+    exit 1
+  fi
   grep -qx './usr/local/bin/remotex' "$stage/pkg-contents"
   grep -qx './usr/local/lib/remotex/libFLAC.14.dylib' "$stage/pkg-contents"
   for doc in remotex.example.toml LICENSE; do
