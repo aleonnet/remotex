@@ -245,19 +245,6 @@ export type ControlMsg =
       // are already applied.
       render: string;
     }
-  // A session this browser cannot be served: it was started with a passthrough
-  // this one said it cannot take (`passthrough`, as on `connected`). The gateway
-  // runs no engine for it and rebuilds none with other choices, so the desktop is
-  // covered with the reason, and End session returns to the picker to choose
-  // again. A browser that can take the stream takes the session over as it was
-  // started.
-  | {
-      type: "unserved";
-      name: string;
-      protocol: string;
-      subtype: string | null;
-      passthrough: string;
-    }
   // How to play the audio frames that follow, sent once when audio is enabled and
   // always before the first packet — a decoder configured afterwards has already
   // thrown away the audio it was meant to decode.

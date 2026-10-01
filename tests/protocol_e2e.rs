@@ -1511,7 +1511,7 @@ async fn continuous_updates_carry_an_unasked_copyrect_to_the_browser() {
 }
 
 #[tokio::test]
-async fn takeover_evicts_the_attached_browser_and_reconnects_the_target_for_the_new_one() {
+async fn takeover_evicts_the_attached_browser_and_lands_the_new_one_on_the_picker() {
     let vnc_port = spawn_fake_vnc().await;
     let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
     let cookie = common::login(addr).await;
@@ -1528,18 +1528,22 @@ async fn takeover_evicts_the_attached_browser_and_reconnects_the_target_for_the_
     let (status, _) = common::post_session(addr, &cookie, "{}").await;
     assert_eq!(status, 409, "a live attachment must block a plain claim");
     // …and A's own token reclaims without force (the reconnect path).
-    let (status, _) =
+    let (status, body) =
         common::post_session(addr, &cookie, &format!(r#"{{"sessionId":"{token_a}"}}"#)).await;
     assert_eq!(status, 200, "the holder reclaims with its token");
-    // That reclaim evicted A's socket; reattach A to a fresh one.
+    let token_a = serde_json::from_str::<serde_json::Value>(&body).unwrap()["sessionId"]
+        .as_str()
+        .unwrap()
+        .to_owned();
+    // That reclaim evicted A's socket; reattach A to a fresh one, which resumes
+    // the session.
     assert_eq!(expect_close(&mut ws_a).await, Some(4001));
-    let token_a = common::claim_session(addr, &cookie).await; // nothing attached now
     let mut ws_a = connect_ws(addr, &token_a, &cookie).await;
     expect_resize(&mut ws_a, FAKE_DESKTOP, FAKE_DESKTOP).await;
 
-    // B takes over with force: A is evicted with 4001, A's token dies, and B's
-    // attach reconnects the still-selected target — a fresh engine session
-    // opened for B's screen — and paints the desktop with no picker in between.
+    // B takes over with force: A is evicted with 4001, A's token dies, and the
+    // session A started ends with it. B's attach lands on the picker, and the
+    // target it picks there is a session of its own.
     let (status, body) = common::post_session(addr, &cookie, r#"{"force":true}"#).await;
     assert_eq!(status, 200, "force takeover must succeed: {body}");
     let token_b = serde_json::from_str::<serde_json::Value>(&body).unwrap()["sessionId"]
@@ -1552,6 +1556,7 @@ async fn takeover_evicts_the_attached_browser_and_reconnects_the_target_for_the_
     assert_eq!(expect_close(&mut ws_stale).await, Some(4000));
 
     let mut ws_b = connect_ws(addr, &token_b, &cookie).await;
+    common::connect_target(&mut ws_b, "test-target").await;
     expect_resize(&mut ws_b, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_frame(&mut ws_b).await;
 }

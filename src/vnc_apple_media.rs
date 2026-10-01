@@ -1778,7 +1778,7 @@ impl MediaStream {
     }
 
     /// Ask the Mac for an IDR, with a PLI on the picture's leg: a passed stream's
-    /// browser has to start over, after a reattach, a takeover or its own decoder's
+    /// browser has to start over, after a reattach or its own decoder's
     /// failure. The Mac answers within tens of milliseconds. A decoded stream asks
     /// nothing: its repaint is [`Self::latest`].
     pub fn want_keyframe(&self) {

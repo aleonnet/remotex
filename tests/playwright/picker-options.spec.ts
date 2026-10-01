@@ -70,7 +70,7 @@ function watchSession(page: Page): Session {
         return;
       }
       const message: Record<string, unknown> = JSON.parse(payload);
-      if (message.type === "connected" || message.type === "unserved") {
+      if (message.type === "connected") {
         seen.statuses.push(message);
       }
     });
@@ -164,7 +164,7 @@ test.describe("the picker's options", () => {
     await expect(again.getByRole("checkbox", { name: SOUND })).toBeChecked();
   });
 
-  test("a browser that cannot take the session's passthrough is covered, not served", async ({
+  test("a browser that takes a session over starts at the picker with its own choices", async ({
     page,
     browser,
   }) => {
@@ -190,25 +190,13 @@ test.describe("the picker's options", () => {
       const second = watchSession(other);
       await logIn(other);
 
-      // It is told why, and is given neither the session nor one rebuilt without
-      // the passthrough.
-      const cover = other.getByRole("alert");
-      await expect(cover).toContainText("This session cannot be shown here");
-      await expect(cover).toContainText("graphics pipeline passed through");
-      expect(second.statuses).toEqual([
-        expect.objectContaining({
-          type: "unserved",
-          name: PICKER_TARGET,
-          passthrough: "rdp-graphics",
-        }),
-      ]);
-
-      // Its End session returns it to the picker, where the choice it cannot take
-      // is greyed, with the reason, and the target still starts without it.
-      await cover.getByRole("button", { name: "End session" }).click();
+      // It is given neither the session nor one rebuilt without the passthrough:
+      // it lands on the picker, where the choice it cannot take is greyed, with
+      // the reason, and the target still starts without it.
       await expect(
         other.getByRole("heading", { name: "Pick a target" }),
       ).toBeVisible();
+      expect(second.statuses).toEqual([]);
       const item = await openTarget(other);
       const passed = item.getByRole("checkbox", { name: PASSED });
       await expect(passed).toBeDisabled();
@@ -222,7 +210,7 @@ test.describe("the picker's options", () => {
     }
 
     // The slot goes back to the page the cleanup knows, which the second browser
-    // evicted: it lands on the picker, since that browser ended the session.
+    // evicted: it lands on the picker, since the takeover ended the session.
     await page.getByRole("button", { name: "Take it back" }).click();
     await expect(
       page.getByRole("heading", { name: "Pick a target" }),

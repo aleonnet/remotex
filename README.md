@@ -100,6 +100,20 @@ wlshare, our own. They are ranked in tiers. Design, testing and optimization
 start from the first tier, and a higher tier comes first when work for two
 competes.
 
+All three keep the desktop when a viewer leaves: a Windows host holds a
+disconnected session for the next logon, and a Mac's or a wlshare desktop goes on
+running with nobody watching. So what a browser continues is the desktop, not
+the gateway's session to it. The same browser coming back from a reload or a
+dropped connection resumes where it was. A different browser taking over, a
+phone picking up what a desktop started, say, ends that session and starts at
+the picker, where it chooses a size, sound and passthrough it can take; starting
+the target there returns it to the same desktop, with its windows as they were
+left.
+
+All three also send the pointer apart from the picture, as its own shape. The
+browser wears it on its own pointer, so it moves with the hand rather than a
+network round trip behind it, and it is never drawn into the desktop's image.
+
 #### Tier 1: wlshare on Linux
 
 [wlshare](https://github.com/andrewtheguy/wlshare), this project's own VNC

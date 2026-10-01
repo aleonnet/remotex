@@ -396,7 +396,7 @@ pub struct Offers {
 
 /// What whoever started a session chose under its target at the picker, carried by
 /// [`crate::protocol::ClientMsg::Connect`]. They hold for the life of the session:
-/// the slot keeps them beside the target, and a takeover reconnects with them.
+/// the slot keeps them beside the target, and no other browser is given them.
 ///
 /// Each is refused on a target that does not offer it
 /// ([`TargetConfig::accepts`]). The size is always named, since which one a

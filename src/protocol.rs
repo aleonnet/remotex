@@ -1003,19 +1003,6 @@ pub enum ServerMsg {
         /// looking at the screen generally does not have.
         render: String,
     },
-    /// A session this browser cannot be served: it was started, here or by the
-    /// browser this one took over from, with a passthrough this one cannot take
-    /// (`passthrough`, by [`crate::config::Passthrough::name`]). No engine runs
-    /// for it and none is rebuilt with other choices. The session stays selected,
-    /// so the client covers the desktop with the reason and its End session
-    /// ([`ClientMsg::Disconnect`]) returns to the picker to choose again, while a
-    /// browser that can take the stream takes the session over as it was started.
-    Unserved {
-        name: String,
-        protocol: &'static str,
-        subtype: Option<&'static str>,
-        passthrough: &'static str,
-    },
     /// The remote's displays and which one is being shared, whenever either
     /// changes. Pushed, never requested: a client holds no display state of its
     /// own, so a checkmark follows `active` and a selection that failed leaves
@@ -1215,12 +1202,6 @@ enum ControlMsg<'a> {
         microphone: bool,
         render: &'a str,
     },
-    Unserved {
-        name: &'a str,
-        protocol: &'a str,
-        subtype: Option<&'a str>,
-        passthrough: &'a str,
-    },
     RemoteOs { macos: bool },
     TouchReady,
     Resizing { active: bool },
@@ -1344,9 +1325,6 @@ impl ServerMsg {
                 microphone: *microphone,
                 render,
             }),
-            ServerMsg::Unserved { name, protocol, subtype, passthrough } => {
-                control(&ControlMsg::Unserved { name, protocol, subtype: *subtype, passthrough })
-            }
             ServerMsg::CameraStart {
                 width,
                 height,
@@ -1760,22 +1738,6 @@ mod tests {
                 r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 4:4:4 · adaptive"}"#
             ),
             None => panic!("connected must be a text frame"),
-        }
-        // A session held for a browser that can take it: what it is, and which
-        // stream this browser could not.
-        match (ServerMsg::Unserved {
-            name: "mac".to_owned(),
-            protocol: "vnc",
-            subtype: Some("ard-high-performance"),
-            passthrough: "apple-media",
-        })
-        .text_frame()
-        {
-            Some(json) => assert_eq!(
-                json,
-                r#"{"type":"unserved","name":"mac","protocol":"vnc","subtype":"ard-high-performance","passthrough":"apple-media"}"#
-            ),
-            None => panic!("unserved must be a text frame"),
         }
         // A subtype-less target: null rather than absent, because RDP has no subtype
         // and a key that comes and goes is one a client has to test for two ways.

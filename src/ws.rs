@@ -748,8 +748,8 @@ pub struct SessionParams {
     fit: Option<bool>,
     /// The most colour this browser's `VideoDecoder` takes — VP9 profile 1 or only
     /// profile 0 — asked of it once at page load and stated here, because the socket
-    /// is the one thing that is open both when it picks a target and when a takeover
-    /// reconnects the selected one for it.
+    /// is the one thing that is open both when it picks a target and when its reattach
+    /// has to start the selected one over.
     ///
     /// Required. A socket that does not say is a client this gateway has nothing to
     /// resolve an unset `render_chroma` against, and the upgrade is refused at the

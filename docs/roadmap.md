@@ -217,6 +217,6 @@ to be lifted.
 There is one active session slot: one active session per gateway instance,
 permanently. A new browser takes over and evicts the previous holder
 (`src/session.rs`), which a client offers with a Take over button — the same
-shape as Windows Remote Desktop. A reconnect, a target switch and a browser
-takeover all reclaim the slot in silence: they are the same session coming back,
-whatever else has changed.
+shape as Windows Remote Desktop. A reconnect and a target switch reclaim the
+slot in silence: they are the same browser coming back. A takeover ends the
+session it found and starts at the picker.

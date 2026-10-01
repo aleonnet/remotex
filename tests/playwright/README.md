@@ -62,9 +62,9 @@ tone harness in `src/server.rs` supplies audio without a remote.
 `picker-options.spec.ts` is what a session is started with: that Start sends
 the choices made under the target and `connected` reports them back, that a
 target opens to the size it will have and the options its type offers and the
-browser remembers what was chosen, and that a second browser which cannot take the session's passthrough is
-told `unserved` and covered, with End session returning it to a picker where that
-choice is greyed. It needs an `rdp` target that configures a `size`, the one type
+browser remembers what was chosen, and that a second browser taking the session
+over is given none of it: it lands on a picker where a passthrough it cannot take
+is greyed. It needs an `rdp` target that configures a `size`, the one type
 that offers all three choices, and the tone harness is one.
 
 `clipboard.spec.ts` is the live-Mac regression for the web clipboard panel. It

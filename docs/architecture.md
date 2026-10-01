@@ -95,9 +95,10 @@ area and points here; read the area's section before changing what it covers.
 
 - One gateway has one active session slot; concurrent, shared and multiple
   sessions are out of scope. A new client may force a takeover and evict the
-  previous holder. Every `connect` starts from scratch after the previous engine exits; only the
-  owning browser's reattach to the same target resumes an engine. Preserve the
-  takeover and fresh-session behavior in
+  previous holder, which ends the session: a browser never inherits one it did
+  not start, and lands on the picker. Every `connect` starts from scratch after
+  the previous engine exits; only the owning browser's reattach to the same
+  target resumes an engine. Preserve the takeover and fresh-session behavior in
   [Session lifecycle](#session-lifecycle).
 - Size, sound and passthrough are chosen under the target at the picker and
   carried by `connect`; they are not config keys, and the gateway holds the
@@ -108,10 +109,11 @@ area and points here; read the area's section before changing what it covers.
   `connect`, and one it offers that cannot be had is greyed with the reason. Do
   not add a config key that makes one of these choices, a session-time control
   that changes one, or a default the gateway applies for a browser that named
-  none. A takeover reconnects the target with the choices it was started with,
-  and a browser that cannot take the session's passthrough is told `unserved`
-  and covered: do not rebuild the session with other choices for it, and do not
-  send it a stream to fail in its decoder. See
+  none. Choices are made by the browser that will see them: a takeover lands on
+  the picker, and so does the owner coming back unable to take the session's
+  passthrough. Do not hand a browser a session with choices it did not make,
+  rebuild one with other choices for it, or send it a stream to fail in its
+  decoder. See
   [What a session is started with](#what-a-session-is-started-with).
 
 ### Input and display
@@ -439,7 +441,7 @@ Five rules hold the stream up, and each is a rule somewhere:
   itself inside the encoder. `VIDEO_FRAME_INTERVAL` caps it at one access unit per
   33 ms; damage in between accumulates in the mirror and rides the next one, which
   is cheaper than coding the same movement four times over. A forced keyframe skips
-  the cap, because a repaint, reattach, takeover or resize is a client with nothing
+  the cap, because a repaint, reattach or resize is a client with nothing
   on screen. And because a deferral leaves pixels the shadow has already promised,
   `VideoSink::due_at` tells the engines when to come back for them whether or not
   more damage arrives — RDP in a `select!` arm beside its layout retry, VNC raced
@@ -562,7 +564,7 @@ sends.
   wlshare ignores an encoding it does not know where a message it does not know
   ends the connection, and because they ride the list that names the encoding, so
   wlshare's first frame is already the plan's. The plan is fixed for an engine, and
-  a takeover by a browser that resolves otherwise rebuilds the engine
+  a reload that resolves otherwise rebuilds the engine
   ([choosing a chroma](#choosing-a-chroma)), so a session never changes carriage or
   chroma mid-stream. wlshare announces nothing: it sends the encoding in place of
   ZRLE.
@@ -576,8 +578,8 @@ sends.
   of `QUEUE_BUDGET` and go out in order with the messages around them. The mirror,
   the rounds, the interval, the quality walk and the settle do not run: wlshare
   paces, codes, walks and settles its stream itself.
-- **A restart waits for a keyframe.** A reattach, a takeover and a resize reset the
-  render as always. On a reattach or a takeover the full update the engine asks for
+- **A restart waits for a keyframe.** A reattach and a resize reset the
+  render as always. On a reattach the full update the engine asks for
   is what makes wlshare send a keyframe; after a resize it asks for none, because
   wlshare starts the stream at the new size with one, and a full request would have
   it send a second that no shadow is there to skip. Until the keyframe arrives the
@@ -711,8 +713,8 @@ Three controls with similar names therefore remain separate:
   across eight threads, 44 on one.
   `render_plan` sets `apple_media` for a target with the key and a browser that said
   yes; any other browser is sent VP9 exactly as without the key. The plan
-  is fixed for an engine, and a takeover by a browser that answers otherwise
-  rebuilds it, as a different chroma does.
+  is fixed for an engine: a reload that no longer decodes the stream ends the
+  session and lands on the picker ([Session lifecycle](#session-lifecycle)).
 - **What passes** (`VideoSink::pass_hevc`). The receiver reassembles access units as
   it always does, and hands them to the read loop in order rather than to the
   decoder thread. Each goes out as Annex B, a keyframe where it holds an IRAP
@@ -723,7 +725,7 @@ Three controls with similar names therefore remain separate:
   take their share of `QUEUE_BUDGET` like any access unit. Every picture the Mac
   sends goes out, up to the virtual display's 30 a second. The offer and the rate
   reports are a decoded session's: the quality is what that session receives.
-- **A restart is an IDR from the Mac.** A reattach, a takeover and the browser's
+- **A restart is an IDR from the Mac.** A reattach and the browser's
   own decoder failing each reset the render, and the gateway asks the Mac for an
   IDR with a PLI, which it answers within tens of milliseconds; until the IDR
   arrives the units still predicted from the old picture are dropped. A unit the
@@ -905,13 +907,13 @@ would announce (`frontend/src/videoChroma.ts`), and states the answer as
 against it; nothing else reads it.
 
 The answer rides the socket URL rather than a message because of *when* it is
-needed: a takeover reconnects a still-selected target at attach
-([session lifecycle](#session-lifecycle)), before the new browser has sent
-anything, and that engine must be built for the browser that took over rather than
-the one that left. It is held on the attachment (`ClientSlot`) and read by both
-engine starts — including the one reattachment that would otherwise resume a
-running engine, which compares the plan the returning browser resolves to against
-the plan that is running and rebuilds when they differ.
+needed: a reattach decides at attach
+([session lifecycle](#session-lifecycle)), before the browser has sent
+anything, whether the running engine is still one that browser can be given. It
+is held on the attachment (`ClientSlot`) and read by both engine starts —
+including the one reattachment that would otherwise resume a running engine,
+which compares the plan the returning browser resolves to against the plan that
+is running and rebuilds when they differ.
 
 This is **selection, never refusal**, which is the distinction the removed probe
 lacked. Only a definite `supported === false` gives up the colour; a "yes", an
@@ -1154,8 +1156,8 @@ Authentication and desktop ownership are separate:
    and a page whose own differs, a tab left open across an upgrade, opens no
    session and lists no target: it says both versions and offers a reload.
 3. `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false`
-   attaches to the slot and reports the target picker, the current connected
-   target, or a session this browser cannot be served. `chroma`, `apple_media`
+   attaches to the slot and reports the target picker or the current connected
+   target. `chroma`, `apple_media`
    and `rdp_graphics` are required: the most colour this browser's video decoder
    takes, whether it decodes a High Performance Mac's HEVC, and
    whether it composes an RDP host's graphics pipeline; see
@@ -1181,17 +1183,23 @@ different answer is rebuilt rather than resumed, because the stream that is
 running is one that browser has just said it cannot decode. An engine passing an
 RDP host's graphics pipeline is never resumed: the page that comes back holds
 none of what the host draws against
-([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)). Opening size, density, display
-selection, and connection state do not carry into any other session.
+([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)),
+so it is started over with the choices it was started with. And an owner that
+comes back unable to take the session's passthrough has nothing to resume or
+restart: the session ends, and it lands on the picker with the reason. Opening
+size, density, display selection, and connection state do not carry into any
+other session.
 
-Any claim by a different browser — a forced takeover, or a plain claim while
-nobody is attached — closes the previous WebSocket and its engine but
-preserves the selected target and the choices it was started with: the new
-claimant's attach reconnects that target for its own screen and chroma (both
-named on the `/ws` URL), so a desktop opened for one display never carries its
-size, density, or colour over to a different device.
-Only the owner reclaiming its token resumes the running engine, with a
-full-repaint request instead of a reconnect.
+A claim by a different browser ends the session: the previous WebSocket, its
+engine and the selected target with its choices. That is a forced takeover, or a
+second browser arriving during the first one's reattach grace, when nothing is
+attached to refuse it and so no takeover is asked. Its attach lands on the
+picker, where it starts the target with its own choices, for its own screen and
+decoders: a session started on one device never carries its size, density,
+colour or passthrough over to another. The remote keeps its own session, so
+picking the target again logs back on to the same desktop. Only the owner
+reclaiming its token resumes the running engine, with a full-repaint request
+instead of a reconnect.
 
 ### What a session is started with
 
@@ -1270,17 +1278,14 @@ and `GET /api/targets` carries it:
   Until then a configured size is the size and no remote's sound plays. A greyed
   row is not remembered, and a remembered size the target does not offer this
   client is not sent.
-- **A session is held to its choices.** The slot keeps them beside the selected
-  target (`Selected` in `src/session.rs`). `connected` reports them: `resize`,
-  `audio` and `passthrough`. A reattach resumes the session and a takeover
-  reconnects its target with the choices the first browser made. A browser that
-  cannot take the session's passthrough is sent `unserved`, naming it, instead
-  of `connected`: no engine is rebuilt with other choices, and none runs for a
-  browser that cannot show it. The page covers the desktop with the reason and
-  offers End session, there and in the menu, which returns it to the picker to
-  start the target again. The session stays selected meanwhile, so a browser
-  that can take the stream takes it over as it was started, and it lapses with
-  the reattach grace once nobody is attached.
+- **A session is held to its choices, and to the browser that made them.** The
+  slot keeps them beside the selected target (`Selected` in `src/session.rs`).
+  `connected` reports them: `resize`, `audio` and `passthrough`. A reattach
+  resumes the session, or starts it over, with them. No other browser is given
+  them: a takeover ends the session and lands on the picker, where that browser
+  is offered what it can take and remembers what it chose. The owner coming back
+  unable to take the session's passthrough lands there too, behind an `error`
+  that says which stream: no engine is rebuilt with other choices.
 
 Login tokens are held in memory with sliding expiry and delivered through an
 `HttpOnly`, `SameSite=Strict` cookie. The cookie is marked `Secure` when
@@ -1301,8 +1306,7 @@ connected state, desktop size, display selection, cursor shape, clipboard,
 audio format, and errors. The `connected` message says what the session was
 started with — `resize`, `audio` and `passthrough` — and includes the
 `clipboard`, `camera`, and `microphone` capability flags, so clients
-expose only supported controls. `unserved` stands in for it where the browser
-cannot take the session's passthrough.
+expose only supported controls.
 
 It also carries two things a client cannot work out and nothing else reveals:
 `render`, the resolved render dial, and `subtype`, the target's `wlshare`, `ard`
