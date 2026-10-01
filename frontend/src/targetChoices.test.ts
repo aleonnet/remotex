@@ -152,6 +152,25 @@ test("a gateway that cannot decode the Mac's stream can only pass it", () => {
   assert.match(unable.blocked ?? "", /cannot decode the Mac's stream/);
 });
 
+test("an RDP host's pipeline is never the only way, whatever the entry says", () => {
+  // Every gateway composes the pipeline itself, so the flag means nothing here
+  // and none of the Mac's wording reaches an RDP target.
+  const flagged = { ...RDP, passthroughOnly: true };
+  const able = targetOptions(flagged, { passthrough: false }, ABLE);
+  const row = able.rows.find((r) => r.key === "passthrough");
+  assert.ok(row);
+  assert.equal(row.checked, false);
+  assert.equal(row.disabled, false, "still a choice");
+  assert.equal(able.blocked, null);
+
+  const unable = targetOptions(flagged, undefined, UNABLE);
+  assert.equal(unable.blocked, null, "the target still starts, encoded");
+  assert.match(
+    unable.rows.find((r) => r.key === "passthrough")?.note ?? "",
+    /cannot compose/,
+  );
+});
+
 const storage = new Map<string, string>();
 beforeEach(() => {
   storage.clear();

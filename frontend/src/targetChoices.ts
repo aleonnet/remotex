@@ -38,7 +38,11 @@ export interface TargetInfo {
   audio: boolean;
   /** The stream this target can pass, null where it has none. */
   passthrough: Passthrough | null;
-  /** Whether passing it is the only way this gateway can serve the target. */
+  /**
+   * Whether passing it is the only way this gateway can serve the target: a High
+   * Performance Mac on a host that cannot decode its stream. Never an RDP host,
+   * whose pipeline every gateway composes itself.
+   */
   passthroughOnly: boolean;
 }
 
@@ -78,18 +82,31 @@ export interface TargetOptions {
 
 const PASSTHROUGH: Record<
   Passthrough,
-  { label: string; note: string; cannot: string }
+  {
+    label: string;
+    note: string;
+    cannot: string;
+    // What is said where the stream can only be passed, null for a stream every
+    // gateway can also encode itself.
+    only: { note: string; blocked: string } | null;
+  }
 > = {
   "rdp-graphics": {
     label: "Pass the graphics pipeline through (experimental)",
     note: "The host's drawing is composed in this browser instead of encoded as video. For a LAN.",
     cannot:
       "This browser cannot compose it: that needs WebGL 2 and a cross-origin isolated page.",
+    only: null,
   },
   "apple-media": {
     label: "Pass the Mac's stream through",
     note: "The Mac's own HEVC and AAC-ELD, instead of VP9 and Opus encoded by the gateway. For a LAN.",
     cannot: "This browser does not decode the Mac's HEVC and AAC-ELD.",
+    only: {
+      note: "This gateway cannot decode the Mac's stream, so it is always passed.",
+      blocked:
+        "This gateway cannot decode the Mac's stream, and this browser cannot take it passed through. Use a browser that decodes it, or install FFmpeg and fdk-aac on the gateway's host.",
+    },
   },
 };
 
@@ -97,6 +114,44 @@ function takes(abilities: Abilities, passthrough: Passthrough): boolean {
   return passthrough === "apple-media"
     ? abilities.appleMedia
     : abilities.rdpGraphics;
+}
+
+/**
+ * The passthrough row of a target that has a stream to pass, and why the target
+ * cannot start here where that stream is the only way and this browser cannot
+ * take it.
+ */
+function passthroughRow(
+  passthrough: Passthrough,
+  passthroughOnly: boolean,
+  remembered: boolean | undefined,
+  abilities: Abilities,
+): { row: OptionRow; blocked: string | null } {
+  const words = PASSTHROUGH[passthrough];
+  const able = takes(abilities, passthrough);
+  const only = passthroughOnly ? words.only : null;
+  const row = { key: "passthrough" as const, label: words.label };
+  if (only) {
+    return {
+      row: { ...row, note: only.note, checked: true, disabled: true },
+      blocked: able ? null : only.blocked,
+    };
+  }
+  if (!able) {
+    return {
+      row: { ...row, note: words.cannot, checked: false, disabled: true },
+      blocked: null,
+    };
+  }
+  return {
+    row: {
+      ...row,
+      note: words.note,
+      checked: remembered ?? false,
+      disabled: false,
+    },
+    blocked: null,
+  };
 }
 
 /**
@@ -130,37 +185,14 @@ export function targetOptions(
     });
   }
   if (target.passthrough) {
-    const words = PASSTHROUGH[target.passthrough];
-    const able = takes(abilities, target.passthrough);
-    if (target.passthroughOnly) {
-      if (!able) {
-        blocked =
-          "This gateway cannot decode the Mac's stream, and this browser cannot take it passed through. Use a browser that decodes it, or install FFmpeg and fdk-aac on the gateway's host.";
-      }
-      rows.push({
-        key: "passthrough",
-        label: words.label,
-        note: "This gateway cannot decode the Mac's stream, so it is always passed.",
-        checked: true,
-        disabled: true,
-      });
-    } else if (!able) {
-      rows.push({
-        key: "passthrough",
-        label: words.label,
-        note: words.cannot,
-        checked: false,
-        disabled: true,
-      });
-    } else {
-      rows.push({
-        key: "passthrough",
-        label: words.label,
-        note: words.note,
-        checked: remembered?.passthrough ?? false,
-        disabled: false,
-      });
-    }
+    const passed = passthroughRow(
+      target.passthrough,
+      target.passthroughOnly,
+      remembered?.passthrough,
+      abilities,
+    );
+    rows.push(passed.row);
+    blocked = passed.blocked;
   }
   const chosen = (key: keyof Choices) =>
     rows.find((row) => row.key === key)?.checked ?? false;
