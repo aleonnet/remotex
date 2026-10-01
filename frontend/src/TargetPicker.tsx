@@ -3,6 +3,7 @@ import { AppVersion } from "./AppVersion.tsx";
 import { decodesAppleMedia } from "./appleMedia.ts";
 import { connectionShortLabel } from "./connectionLabel.ts";
 import { gatewayFetch } from "./gateway.ts";
+import { versionMismatch } from "./gatewayVersion.ts";
 import { composesRdpGraphics } from "./rdpGraphics.ts";
 import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
 import {
@@ -50,6 +51,9 @@ export default function TargetPicker({
 }) {
   const [targets, setTargets] = useState<TargetInfo[] | null>(null);
   const [loadError, setLoadError] = useState<string | null>(null);
+  // Set when the list came from a gateway of another version than this page's
+  // (gatewayVersion.ts): what to say, beside a Reload.
+  const [stale, setStale] = useState<string | null>(null);
   // The one target whose options are showing, by name.
   const [openTarget, setOpenTarget] = useState<string | null>(null);
   // What was chosen under each target the last time, in this browser. It
@@ -70,6 +74,15 @@ export default function TargetPicker({
         }
         if (!res.ok) {
           throw new Error(`HTTP ${res.status}`);
+        }
+        // Another gateway than this page's: its targets are not listed, because
+        // nothing this page would start on them is that gateway's to answer.
+        const mismatch = versionMismatch(res);
+        if (mismatch) {
+          if (!cancelled) {
+            setStale(mismatch);
+          }
+          return null;
         }
         return res.json() as Promise<TargetInfo[]>;
       })
@@ -119,7 +132,19 @@ export default function TargetPicker({
         <h1>Pick a target</h1>
         {connectError && <p className="picker-error">{connectError}</p>}
         {loadError && <p className="picker-error">{loadError}</p>}
-        {targets === null && !loadError && (
+        {stale && (
+          <>
+            <p className="picker-error">{stale}</p>
+            <button
+              type="button"
+              className="picker-start"
+              onClick={() => location.reload()}
+            >
+              Reload
+            </button>
+          </>
+        )}
+        {targets === null && !loadError && !stale && (
           <p className="picker-hint">Loading targets…</p>
         )}
         {targets?.length === 0 && (

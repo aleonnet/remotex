@@ -3,7 +3,7 @@ use std::sync::Arc;
 use axum::{
     Json, Router,
     extract::{Query, Request, State},
-    http::{HeaderMap, StatusCode, header},
+    http::{HeaderMap, HeaderName, HeaderValue, StatusCode, header},
     middleware::{self, Next},
     response::{IntoResponse, Response},
     routing::{any, get, post},
@@ -284,6 +284,9 @@ pub(crate) fn router_with_sessions(
             Router::new()
                 .route("/targets", get(targets_handler))
                 .route("/session", post(claim_handler))
+                // Both state the gateway's version, which the page holds its
+                // own against before it lists a target or opens a session.
+                .route_layer(middleware::map_response(state_version))
                 .route("/throughput", get(throughput_handler))
                 .route("/throughput/live", get(throughput_live_handler))
                 .route_layer(require_auth.clone()),
@@ -447,6 +450,22 @@ async fn require_auth(State(state): State<AppState>, req: Request, next: Next) -
         return AppError::Unauthorized.into_response();
     }
     next.run(req).await
+}
+
+/// The header an answer states this gateway's version in.
+const VERSION_HEADER: HeaderName = HeaderName::from_static("x-remotex-version");
+
+/// State this gateway's version on a response.
+///
+/// The bundle is compiled into the binary, so the two only differ in a page that
+/// outlived the gateway it was loaded from: a tab left open across an upgrade.
+/// Such a page speaks the previous release's wire, and there is no older wire to
+/// answer it in, so it is told which gateway it is talking to and reloads.
+async fn state_version(mut response: Response) -> Response {
+    response
+        .headers_mut()
+        .insert(VERSION_HEADER, HeaderValue::from_static(env!("CARGO_PKG_VERSION")));
+    response
 }
 
 /// Whether these headers carry this gateway's credential. Shared by
@@ -1460,6 +1479,40 @@ mod tests {
             json,
             r#"{"branding":"remotex","logo":false,"throughput":false}"#
         );
+    }
+
+    /// The target list and the claim both name the gateway's version, which is
+    /// what the page holds its own against.
+    #[tokio::test]
+    async fn the_target_list_and_the_claim_state_the_version() {
+        use tower::ServiceExt as _;
+
+        let app = router(router_config(None), Throughput::default(), None);
+        let request = |method: &str, uri: &str, cookie: Option<&str>, body: &'static str| {
+            let mut request = axum::http::Request::builder()
+                .method(method)
+                .uri(uri)
+                .header(header::CONTENT_TYPE, "application/json");
+            if let Some(cookie) = cookie {
+                request = request.header(header::COOKIE, cookie);
+            }
+            request.body(axum::body::Body::from(body)).unwrap()
+        };
+        let login = r#"{"username":"admin","password":"hunter2"}"#;
+        let response = app.clone().oneshot(request("POST", "/api/auth/login", None, login)).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let set_cookie = response.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap();
+        let cookie = set_cookie.split(';').next().unwrap().to_owned();
+
+        for (method, uri, body) in [("GET", "/api/targets", ""), ("POST", "/api/session", "{}")] {
+            let response = app.clone().oneshot(request(method, uri, Some(&cookie), body)).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK, "{uri}");
+            assert_eq!(
+                response.headers().get(VERSION_HEADER).unwrap(),
+                env!("CARGO_PKG_VERSION"),
+                "{uri}"
+            );
+        }
     }
 
     /// `/api/throughput` is behind the login, reads back from the gateway's clock, and is a 404

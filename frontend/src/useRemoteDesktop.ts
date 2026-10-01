@@ -18,6 +18,7 @@ import {
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 import { desktopPainterFor } from "./desktopPainter.ts";
 import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
+import { versionMismatch } from "./gatewayVersion.ts";
 import { HeldModifiers, modifierFlags } from "./heldModifiers.ts";
 import { type MicSender, startMicSender } from "./micSender.ts";
 import "./keyboardLock.ts";
@@ -89,7 +90,10 @@ export type ConnectionStatus =
   // is in flight and nothing is scheduled. Its own state because the alternative was
   // leaving "Connecting…" up over a connection that had stopped being attempted,
   // with no way out but a reload; the overlay offers Retry on this one.
-  | "failed";
+  | "failed"
+  // The gateway is another version than this page (gatewayVersion.ts). Apart from
+  // "failed" because trying again cannot change it: the overlay offers Reload.
+  | "stale";
 
 // Which post-login state the attached session is in, driven by the server's
 // `picker`/`connected` status messages: the target picker, or a live desktop.
@@ -389,16 +393,23 @@ function paintCursor(
 // one a second from now, while a 502, an answer that could not be read, or a
 // refused request are facts that stand still. Retrying the second kind is how every
 // failure came to be reported as "Reconnecting…" forever — see `scheduleRetry`.
-type ClaimFailure = { reason: string; retryable: boolean };
+//
+// `stale` marks the one failure that is this page's own: the gateway answered, as
+// another version.
+type ClaimFailure = { reason: string; retryable: boolean; stale?: true };
 
 // POST /api/session (the slot claim). A rejected fetch is the only retryable
 // outcome, and its own message says what happened far better than "network error"
 // would — including the cases that are not the network at all.
+//
+// A claim granted by a gateway of another version is a failure too, found here
+// before the token is kept or a socket opened with it: a session is not started
+// on a gateway this page was not built for.
 async function postClaim(
   force: boolean,
 ): Promise<Response | { failure: ClaimFailure }> {
   try {
-    return await gatewayFetch("/api/session", {
+    const res = await gatewayFetch("/api/session", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
@@ -406,6 +417,10 @@ async function postClaim(
         sessionId: sessionStorage.getItem(SESSION_KEY) ?? undefined,
       }),
     });
+    const mismatch = res.ok ? versionMismatch(res) : null;
+    return mismatch
+      ? { failure: { reason: mismatch, retryable: false, stale: true } }
+      : res;
   } catch (cause) {
     return {
       failure: {
@@ -1052,7 +1067,7 @@ export function useRemoteDesktop(
       // Not left as "connecting"/"reconnecting": nothing is, and saying so is the
       // whole point — the reason is shown beside a Retry button instead of under a
       // status that promises an attempt nobody is making.
-      setStatus("failed");
+      setStatus(failure.stale ? "stale" : "failed");
     };
 
     // Claim the session slot, then open the WebSocket with the token.

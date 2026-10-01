@@ -16,6 +16,7 @@ const STATUS_LABEL: Record<ConnectionStatus, string> = {
   busy: "Session in use",
   takenOver: "Session taken over",
   failed: "Cannot open the session",
+  stale: "Page out of date",
 };
 
 // The notice over a desktop with no picture, offering every display but the one
@@ -453,6 +454,15 @@ export default function RemoteDesktop({
           {status === "failed" && (
             <button type="button" className="status-action" onClick={retry}>
               Retry
+            </button>
+          )}
+          {status === "stale" && (
+            <button
+              type="button"
+              className="status-action"
+              onClick={() => location.reload()}
+            >
+              Reload
             </button>
           )}
           {status === "takenOver" && (
