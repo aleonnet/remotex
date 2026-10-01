@@ -240,10 +240,14 @@ pub fn load_from(dir: &std::path::Path) -> anyhow::Result<()> {
         prefix.push('\\');
     }
     match find(&[&prefix]) {
-        Ok(api) => {
-            API.get_or_init(|| api);
-            Ok(())
-        }
+        // One already loaded would be the one every session uses, so the named
+        // folder's is not dropped in silence for it.
+        Ok(api) => API.set(api).map_err(|_| {
+            anyhow::anyhow!(
+                "FFmpeg was already loaded when [hp_decoders].ffmpeg_dir, {}, was read",
+                dir.display()
+            )
+        }),
         Err(refused) => anyhow::bail!(
             "the HEVC decoder, FFmpeg's libavcodec, is not in [hp_decoders].ffmpeg_dir, {}: name \
              a shared FFmpeg build's bin folder ({})",

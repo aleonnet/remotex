@@ -183,12 +183,18 @@ fn api() -> anyhow::Result<&'static fdk::Api> {
 /// refused start.
 #[cfg(all(windows, not(feature = "apple-hp-media-static")))]
 pub fn load_from(dir: &std::path::Path) -> anyhow::Result<()> {
-    let file = dir.join("libfdk-aac-2.dll");
-    match find(&[&file.to_string_lossy()]) {
-        Ok(api) => {
-            API.get_or_init(|| api);
-            Ok(())
-        }
+    // In backslashes, as `libav::load_from` names its folder: Windows' loader
+    // wants them in a path.
+    let file = dir.join("libfdk-aac-2.dll").to_string_lossy().replace('/', "\\");
+    match find(&[&file]) {
+        // One already loaded would be the one every session uses, so the named
+        // folder's is not dropped in silence for it.
+        Ok(api) => API.set(api).map_err(|_| {
+            anyhow::anyhow!(
+                "fdk-aac was already loaded when [hp_decoders].fdk_aac_dir, {}, was read",
+                dir.display()
+            )
+        }),
         Err(refused) => anyhow::bail!(
             "the AAC-ELD decoder, fdk-aac, is not in [hp_decoders].fdk_aac_dir, {}: name the \
              folder that holds libfdk-aac-2.dll ({})",
