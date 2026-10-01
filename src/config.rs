@@ -2514,18 +2514,14 @@ mod tests {
             archive("[hevc_wasm]\narchive = \"decoders/hevc.tar.gz\""),
             Some(data.join("decoders/hevc.tar.gz"))
         );
-        assert_eq!(
-            archive("[hevc_wasm]\narchive = \"/opt/hevc.tar.gz\""),
-            Some(PathBuf::from("/opt/hevc.tar.gz"))
-        );
+        // A whole path where this runs: on Windows one without a drive is not.
+        let elsewhere = if cfg!(windows) { r"C:\opt\hevc.tar.gz" } else { "/opt/hevc.tar.gz" };
+        let named = format!("[hevc_wasm]\narchive = '{elsewhere}'");
+        assert_eq!(archive(&named), Some(PathBuf::from(elsewhere)));
         let released = data.join(crate::hevc_wasm::archive_name());
         std::fs::write(&released, b"").unwrap();
         assert_eq!(archive(""), Some(released), "the archive is found where the release puts it");
-        assert_eq!(
-            archive("[hevc_wasm]\narchive = \"/opt/hevc.tar.gz\""),
-            Some(PathBuf::from("/opt/hevc.tar.gz")),
-            "a named archive is the one read"
-        );
+        assert_eq!(archive(&named), Some(PathBuf::from(elsewhere)), "a named archive is the one read");
         for (bad, says) in [
             ("", "archive"),
             ("archive = \"\"", "[hevc_wasm].archive"),
