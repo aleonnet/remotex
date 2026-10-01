@@ -12,7 +12,7 @@
 
 import { APPLE_ELD_CODEC, appleEldConfig } from "./appleMedia.ts";
 import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
-import { type FlacDecoder, loadFlac } from "./flacDecoder.ts";
+import { type FlacDecoder, type FlacFactory, loadFlac } from "./flacDecoder.ts";
 
 /**
  * What `audioFormat` names lossless sound as: a target with
@@ -208,11 +208,15 @@ export interface AudioHandlers {
  * is not an `OpusHead`, a channel count nothing can play. An *unsupported codec* is
  * not a throw, because WebCodecs reports that asynchronously: it arrives at
  * `onError`. So does a FLAC stream whose module did not load.
+ *
+ * `loadFlacModule` is what fetches the FLAC decoder's module, for a test to stand
+ * in for.
  */
 export function createAudioPlayer(
   format: AudioFormat,
   context: AudioContext,
   handlers: AudioHandlers,
+  loadFlacModule: () => Promise<FlacFactory> = loadFlac,
 ): AudioPlayer {
   const packetUs = packetDurationUs(format);
   let nextAt = 0;
@@ -226,7 +230,7 @@ export function createAudioPlayer(
   // dropped, as sound that arrived before there was anything to play it.
   let flac: FlacDecoder | null = null;
   if (format.codec === FLAC_CODEC) {
-    loadFlac().then(
+    loadFlacModule().then(
       (make) => {
         if (closed) {
           return;
@@ -241,6 +245,11 @@ export function createAudioPlayer(
     );
   }
   function fail(e: unknown): void {
+    // A load that ends after this player closed has nothing to report: its
+    // handler would stop whatever stream replaced this one.
+    if (closed) {
+      return;
+    }
     console.error("audio: the FLAC decoder could not be set up", e);
     close();
     handlers.onError("This browser could not load the FLAC decoder.");

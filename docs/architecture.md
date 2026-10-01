@@ -41,7 +41,8 @@ graphics pipeline is passed on for the browser to compose, which is experimental
 How a session's desktop is sized, whether it takes the remote's sound and whether
 it passes the remote's stream are chosen at the picker before it starts — see
 [What a session is started with](#what-a-session-is-started-with). Remote audio is encoded as
-Opus, save the Mac's passed AAC-ELD, and sent on `/ws/audio`, never on the picture queue.
+Opus, save the Mac's passed AAC-ELD and a target's EXPERIMENTAL lossless FLAC
+([Lossless sound](#lossless-sound)), and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
 extension on a `wlshare` target. Its microphone uses `/ws/mic`: browser-encoded
@@ -1523,9 +1524,10 @@ that FIFO, which would deliver stale audio faithfully.
 The client owns its playback schedule. It starts at the current audio playhead
 with no added cushion and clamps accumulated lead to 300 ms, trimming the front
 of an incoming buffer instead of turning temporary jitter into lasting latency.
-The client does not decode anything itself: the stream goes to WebCodecs, so a
-codec a browser will not take surfaces as a decoder error naming it rather than
-as silence.
+The client decodes Opus and the Mac's AAC-ELD with WebCodecs and nothing of its
+own, so a codec a browser will not take surfaces as a decoder error naming it
+rather than as silence. FLAC is the one stream it decodes itself
+([Lossless sound](#lossless-sound)).
 
 #### Lossless sound
 

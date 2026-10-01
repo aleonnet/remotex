@@ -42,8 +42,7 @@ pub enum Error {
     Unsupported(Stream),
     NotAFrame(usize),
     Header,
-    /// claxon's own error, carried as its message: nothing branches on its kind.
-    Decode(String),
+    Decode(claxon::Error),
     Shape { frames: u32, channels: u32, want: Stream },
     Trailing(usize),
 }
@@ -58,11 +57,20 @@ impl fmt::Display for Error {
             Self::Header => {
                 write!(f, "a FLAC frame whose header states another rate or sample width than the stream's")
             }
-            Self::Decode(e) => write!(f, "decoding a FLAC frame: {e}"),
+            Self::Decode(_) => write!(f, "decoding a FLAC frame"),
             Self::Shape { frames, channels, want } => {
                 write!(f, "a FLAC frame of {frames} frames of {channels} channels, where {want:?} was announced")
             }
             Self::Trailing(len) => write!(f, "{len} bytes after the FLAC frame"),
+        }
+    }
+}
+
+impl std::error::Error for Error {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Decode(e) => Some(e),
+            _ => None,
         }
     }
 }
@@ -115,7 +123,7 @@ impl Decoder {
         let mut reader = FrameReader::new(Cursor::new(frame));
         let block = reader
             .read_next_or_eof(std::mem::take(&mut self.samples))
-            .map_err(|e| Error::Decode(e.to_string()))?
+            .map_err(Error::Decode)?
             .ok_or(Error::NotAFrame(frame.len()))?;
         let (frames, channels) = (block.duration(), block.channels());
         let read = reader.into_inner().position() as usize;
