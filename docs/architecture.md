@@ -22,8 +22,8 @@ axum server ── single session slot ── protocol engine
 
 Ordinary RDP and VNC source frames are decoded in the gateway and sent as one VP9
 stream of the whole desktop, at the quality and chroma the target's render plan
-resolves to. wlshare can instead code that resolved VP9
-stream itself for the gateway to pass through unchanged. A
+resolves to. wlshare, reached as `subtype = "wlshare"`, instead codes that
+resolved VP9 stream itself for the gateway to pass through unchanged. A
 VNC desktop too large for that stream, on a target that does not resize it, has no
 picture: the session stays up and the page offers the remote's displays — see
 [past the ceiling](#past-the-ceiling). A
@@ -41,7 +41,7 @@ pipeline is passed on for the browser to compose, which is experimental — see
 Opus, save that passed AAC-ELD, and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
-extension on a generic VNC target. Its microphone uses `/ws/mic`: browser-encoded
+extension on a `wlshare` target. Its microphone uses `/ws/mic`: browser-encoded
 Opus decoded to the 16-bit PCM an RDP host or wlshare records. Both redirections
 are experimental — see [Camera frames](#camera-frames) and
 [Microphone frames](#microphone-frames).
@@ -122,8 +122,9 @@ area and points here; read the area's section before changing what it covers.
 - `ClientMsg::Viewport` is in CSS points. `ServerMsg::Resize.scale` is remote
   pixel density, not a fit factor. `resize = true` means the window continuously
   drives the remote size; do not add a client resize toggle or remembered resize
-  preference. Density is the wire's word alone, and generic VNC that does not
-  answer wlshare's density extension is presented at 1x: do not add a
+  preference. Density is the wire's word alone, and a plain `vnc` target, or a
+  `wlshare` one whose density request goes unanswered, is presented at 1x: do
+  not add a
   client-side density control, and never label a framebuffer with a density the
   server has not confirmed. Read
   [Display geometry](#display-geometry),
@@ -145,7 +146,7 @@ A session's picture reaches the browser one of two ways, both ordinary:
   string or the quality walk changes in the desktop-vp9 repository and reaches
   here as a pin bump.
 - **Passed untouched**, as the remote made it, for the browser to decode or
-  compose: today wlshare's VP9 on a generic VNC target, a High Performance
+  compose: today wlshare's VP9 on a `wlshare` target, a High Performance
   Mac's HEVC under `media_passthrough`, and an RDP host's graphics pipeline
   under `egfx_passthrough`, each with its rule below. Another stream the user
   asks to pass joins them with a rule of its own; do not refuse it on this
@@ -179,14 +180,23 @@ cropped picture. Two streams for Apple's All Displays are the planned way, in
 [the roadmap](roadmap.md#two-streams-for-apples-all-displays). See
 [Past the ceiling](#past-the-ceiling).
 
-#### wlshare's VP9 on generic VNC
+#### wlshare's VP9 and the `wlshare` subtype
 
-A generic VNC target lists wlshare's VP9 encoding for every browser, with the
-plan's chroma, dial and walk as pseudo-encodings beside it, and passes its
-frames untouched; any other server ignores the listing and is encoded here
-from ZRLE. Do not transcode a passed frame, pass one from another server or at
-a chroma other than the plan's, ask wlshare for the plan with a client
-message, or add a key that selects it. See
+`subtype = "wlshare"` on a `vnc` target says the server is wlshare, and is the
+one thing that lists any of wlshare's extensions to it: its VP9 encoding, the
+density and output-list requests, and with their keys the audio, camera and
+microphone extensions. A plain `vnc` target lists none of them, whatever server
+answers: a wlshare behind one is read through the RFB baseline, ZRLE encoded
+here at 1x on the output it opened with, which is the fallback wlshare keeps for
+ordinary VNC clients. Do not list a wlshare extension on a plain target, or
+detect wlshare on one.
+
+A `wlshare` target lists the VP9 encoding for every browser, with the plan's
+chroma, dial and walk as pseudo-encodings beside it, and passes its frames
+untouched; the stream is the subtype's picture, with no key beside it. A server
+that ignores the listing is encoded here from ZRLE. Do not transcode a passed
+frame, pass one at a chroma other than the plan's, ask wlshare for the plan with
+a client message, or add a key that selects the stream. See
 [wlshare's stream, passed through](#wlshares-stream-passed-through).
 
 #### Remote audio
@@ -197,11 +207,12 @@ message, or add a key that selects it. See
   no codec key, and do not add another encoder or another passthrough. Preserve
   claim-bound eviction and the source-format/resampling boundaries in
   [Audio frames](#audio-frames).
-- Generic VNC audio is wlshare's audio extension (FLAC frames, with the QEMU
-  Audio extension's control messages): `audio = true` makes the gateway ask, and
-  a server that never announces it leaves the session silent rather than failing
-  it. Do not take raw PCM from the RFB connection, add a second codec to it, or
-  add a configuration key naming the server. See
+- VNC audio is wlshare's audio extension (FLAC frames, with the QEMU Audio
+  extension's control messages), on a `wlshare` target: `audio = true` makes the
+  gateway list it, and a server that never announces it leaves the session
+  silent rather than failing it. A plain `vnc` target carries no sound and is
+  refused the key. Do not take raw PCM from the RFB connection or add a second
+  codec to it. See
   [Desktop audio over VNC with wlshare](wlshare-audio.md).
 - `ard` carries no sound and takes no `audio` key: the Mac's sound keeps playing
   where the Mac sends it. Do not add an AirPlay receiver or any other sound path
@@ -269,12 +280,12 @@ experimental wherever it is named to an operator. See
 #### Camera and microphone
 
 - Browser camera redirection is MS-RDPECAM on RDP and wlshare's camera extension
-  on generic VNC, H.264-only, and never transcoded by the gateway. It uses its own
+  on a `wlshare` target, H.264-only, and never transcoded by the gateway. It uses its own
   `/ws/camera` socket, is explicit per session, and is bound to both claim and
   engine. See [Camera frames](#camera-frames) and
   [The browser's camera over VNC with wlshare](wlshare-camera.md).
 - Browser microphone redirection is MS-RDPEAI on RDP and wlshare's microphone
-  extension on generic VNC: low-bitrate mono Opus from the browser, decoded here
+  extension on a `wlshare` target: low-bitrate mono Opus from the browser, decoded here
   to the 16-bit PCM the host records in. It uses its own `/ws/mic` socket under
   the camera socket's rules (explicit per session, refused with `4002` when the
   target carries no microphone, closed with the engine) and is never put on the
@@ -494,13 +505,14 @@ clients and for this gateway: every update one rectangle over the whole desktop,
 would encode from the same pixels — coded by the same `desktop-vp9` crate at the
 same speed, screen tuning and dial, 8-bit at either chroma, BT.601 at studio swing
 declared in its keyframes, so the two are one stream by construction — so on a
-generic VNC target the gateway lists it for every browser, tells wlshare what the
+`wlshare` target the gateway lists it for every browser, tells wlshare what the
 plan resolved to, and each frame goes to the browser as it came: no ZRLE on either
-side, and no encode here. Any server that is not wlshare ignores the listing and
-sends what it always did, which is encoded here.
+side, and no encode here. A plain target never lists it, so the same server sends
+it ZRLE, which is encoded here, as is what any server that ignores the listing
+sends.
 
 - **Listed for every browser, with the plan beside it.** The encoding goes at
-  the head of a generic server's `SetEncodings` for a desktop within the ceiling,
+  the head of a `wlshare` target's `SetEncodings` for a desktop within the ceiling,
   and next to it, as pseudo-encodings the way Tight's quality levels ride the same
   list, what wlshare is to code: `WLQ` plus the target's `video_quality` as the
   ceiling wlshare's walk never goes above, `WLS0` for a plan whose chroma resolved
@@ -1144,13 +1156,13 @@ audio format, and errors. The `connected` message includes `resize`,
 expose only supported controls.
 
 It also carries two things a client cannot work out and nothing else reveals:
-`render`, the resolved render dial, and `subtype`, the target's `ard` or
-`ard-high-performance` where it has one. The
-last is there because `protocol` is not an answer on VNC — a plain server and a
-Mac on either subtype all say `vnc`, and they differ in whether resize is
-offered, where the picture and sound come from, and whether the path beneath is
-the reverse-engineered one (a display list is no longer the difference: wlshare sends
-one over a plain `vnc` target). Both appear on the client's session card, which
+`render`, the resolved render dial, and `subtype`, the target's `wlshare`, `ard`
+or `ard-high-performance` where it has one. The
+last is there because `protocol` is not an answer on VNC — a plain server, a
+wlshare one and a Mac on either subtype all say `vnc`, and they differ in whether
+resize is offered, where the picture and sound come from, whether there is a
+display list or a density, and whether the path beneath is the reverse-engineered
+one. Both appear on the client's session card, which
 `frontend/src/connectionLabel.ts` words, beside the video decoder's configuration
 (`mediaLabel.ts`).
 
@@ -1234,9 +1246,9 @@ differs from the last unit's is a stream that started over, preceded by a fresh
 
 ### Audio frames
 
-Remote audio is opt-in — `audio = true` on an `rdp` or a plain `vnc` target,
+Remote audio is opt-in — `audio = true` on an `rdp` or a `wlshare` target,
 and always on for `ard-high-performance`, whose sound comes with its picture;
-`ard` carries none — and it has a socket of its own. **Opening
+`ard` and a plain `vnc` target carry none — and it has a socket of its own. **Opening
 `/ws/audio?session=<token>` is the subscription** — there is no message that turns
 sound on, and closing the socket is the only way to stop.
 
@@ -1348,15 +1360,15 @@ the target has no audio bridge and takes no `audio` key. Standard mode never
 touches the Mac's sound output either, which keeps playing where the Mac sends it
 — its speakers, or an AirPlay receiver outside remotex.
 
-An audio-enabled **generic VNC** engine has no channel to negotiate either. It
-lists wlshare's audio pseudo-encoding, and a server that speaks it announces so
+An audio-enabled **`wlshare`** target has no channel to negotiate either. It
+lists wlshare's audio pseudo-encoding, and wlshare announces that it speaks it
 with an empty rectangle, at which point the gateway names the format it wants —
 48 kHz, 16-bit stereo, little-endian, which is Opus's own rate — and turns the
 stream on; the sound then
 arrives as FLAC frames on the RFB connection itself, and each is decoded into
 exactly the samples wlshare captured, in the format the queue takes. A server
-that announces nothing gives a desktop and no sound, which is the whole of the
-failure mode: asking costs such a session nothing. The extension is wlshare's
+that announces nothing, because it is not wlshare or has its own switch off,
+gives a desktop and no sound, which is the whole of the failure mode. The extension is wlshare's
 own, its control messages borrowed from `rfbproto`'s QEMU Audio extension — see
 [`wlshare-audio.md`](wlshare-audio.md).
 
@@ -1378,8 +1390,9 @@ and took samples, not the pixels the host displays. The displayed picture is
 verified by hand against a Windows host, and a change here needs a hand check.
 
 The browser's camera goes the other way, on a third socket, to an RDP target or a
-generic VNC target that opted in with `camera = true` (refused on both Apple
-subtypes at parse time: Screen Sharing has nowhere to put a camera). **Opening
+`wlshare` target that opted in with `camera = true` (refused on a plain `vnc`
+target and on both Apple subtypes at parse time: neither has anywhere to put a
+camera). **Opening
 `/ws/camera?session=<token>` is the enable** — explicit, per session, and never a
 remembered preference, unlike audio's "sound by default". Its refusals add one
 code to the family: 401 before the upgrade, 4000 for a stale token, 4001 on
@@ -1437,7 +1450,7 @@ How the client negotiates the version, announces the device, answers the host's
 queries and meters samples against the host's requests is in
 [The RDP client](rdp-client.md#camera-ms-rdpecam).
 
-On a generic VNC target the camera goes to wlshare instead, over its private
+On a `wlshare` target the camera goes to wlshare instead, over its private
 camera extension, and wlshare makes it a PipeWire camera on the wlroots desktop.
 `src/vnc_camera.rs` asks for the extension beside the density and outputs
 requests, holds the browser's plug until wlshare says it takes a camera, and
@@ -1450,9 +1463,9 @@ without the RDSH role. See
 #### Microphone frames
 
 **Experimental**, under the same testing boundary as the camera. The browser's
-microphone goes the other way on the fourth socket, to an RDP target or generic
-VNC target that opted in with `microphone = true`; both Apple subtypes refuse the
-key. Opening `/ws/mic?session=<token>` is the enable. It has the camera socket's
+microphone goes the other way on the fourth socket, to an RDP target or a
+`wlshare` target that opted in with `microphone = true`; a plain `vnc` target and
+both Apple subtypes refuse the key. Opening `/ws/mic?session=<token>` is the enable. It has the camera socket's
 authentication, 4000/4001/4002 close codes, claim-and-engine binding, and
 per-session lifetime, so an engine end, takeover, or ordinary socket close stops
 the feed and the next session starts with the microphone off.
@@ -1481,7 +1494,7 @@ host under `REMOTEX_UAT_MICROPHONE=1` and feeds a tone while the host's Recordin
 panel holds the device open. See
 [The RDP client](rdp-client.md#microphone-ms-rdpeai).
 
-On a generic VNC target, `src/vnc_mic.rs` asks for wlshare's microphone
+On a `wlshare` target, `src/vnc_mic.rs` asks for wlshare's microphone
 extension, plugs the microphone when the socket attaches and unplugs it when the
 socket closes, relays wlshare's start and stop as the bridge's open and close,
 and sends the bridge's decoded PCM between them. See
@@ -1592,14 +1605,14 @@ the `scale` on `resize`, and clients present the framebuffer at `pixels / scale`
 Other engines ignore the message. Generic VNC, whose wire carries no density, is
 presented at 1x and takes no density from the client; see
 [HiDPI over generic VNC](generic-vnc-hidpi.md). wlshare is the one generic
-server that reports a scale, over a private extension every generic session asks
-for and discovers by the answer: the label follows its reports and the client's
-density is declared to it, never applied by the gateway itself; see
+server that reports a scale, over a private extension a `wlshare` target asks
+for: the label follows its reports and the client's density is declared to it,
+never applied by the gateway itself; see
 [Pixel density over VNC with wlshare](wlshare-density.md).
 
 A client shows the display picker exactly when the target sends it a
 `ServerMsg::Displays`, and hides it otherwise. The VNC engine sends one on both
-Apple subtypes and against wlshare: it parses an `AppleDisplayLayout`, or
+Apple subtypes and on a `wlshare` target: it parses an `AppleDisplayLayout`, or
 wlshare's `OutputList`, into a `displays` message and acts on a `selectDisplay`
 by asking that remote for that screen. RDP exposes a single framebuffer spanning
 every remote screen and has nothing to enumerate, and so does any other generic
@@ -1720,7 +1733,8 @@ negotiating one, and use the same shadow and encoder path as RDP. `src/vnc_encod
 decodes whichever encoding a server picks into the packed RGB888 the shadow and the
 mirror take, so nothing above it knows which was chosen.
 
-**RFB 3.8** is used by generic `vnc`. It supports None, classic VNC
+**RFB 3.8** is used by generic `vnc`: a plain target, and a `wlshare` one, which
+adds wlshare's extensions to the same dialect. It supports None, classic VNC
 authentication and RealVNC's RSA-AES security types (5 and 129), plus the
 Cursor pseudo-encoding and Cursor With Alpha — the same shape
 with its alpha, so a shadow and antialiased edges survive where Cursor's 1-bit
@@ -1755,12 +1769,15 @@ shadow — the VNC link still carries no pixels for a scroll — and a source th
 shadow does not know costs one non-incremental repaint rather than an invented
 picture.
 
-Generic `vnc` asked for `audio` also advertises wlshare's **audio**
-pseudo-encoding (`WLSF`). `src/vnc_audio.rs` is that wire: the server announces
+A `wlshare` target also lists wlshare's own encodings after those: its VP9
+stream at their head for a desktop within the ceiling, the density and
+output-list requests at their tail, and between them the **audio**, camera and
+microphone pseudo-encodings where the target asked for them. A plain target lists
+none of these. `src/vnc_audio.rs` is the audio wire (`WLSF`): the server announces
 support with an empty rectangle of the encoding, the client answers with the
 QEMU Audio extension's set-format and enable, and the server sends QEMU's begin,
-a run of FLAC frames in message `0xE4`, and QEMU's end. Discovery works the way the density extension's does, and a server that
-never announces leaves the session silent rather than failing it. See
+a run of FLAC frames in message `0xE4`, and QEMU's end. A server that never
+announces leaves the session silent rather than failing it. See
 [`wlshare-audio.md`](wlshare-audio.md).
 
 Generic `vnc` also advertises **ContinuousUpdates** and **Fence**, which go

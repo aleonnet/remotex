@@ -1,14 +1,14 @@
 # The browser's camera over VNC with wlshare
 
 How the browser's camera reaches a wlroots-based Wayland desktop behind wlshare,
-on the RFB connection the session already has, so a `vnc` target can take a
+on the RFB connection the session already has, so a `wlshare` target can take a
 camera the way an RDP one does over MS-RDPECAM. RFB carries nothing from a client
 but input and a clipboard, and no registered extension carries video that way, so
 this is one of wlshare's private extensions, in the shape of the density and outputs
 ones ([`wlshare-density.md`](wlshare-density.md),
-[`wlshare-outputs.md`](wlshare-outputs.md)). It is discovered rather than
-configured: the client lists a pseudo-encoding, a server that speaks it answers,
-and one that does not says nothing and the browser's camera is never plugged.
+[`wlshare-outputs.md`](wlshare-outputs.md)). A `wlshare` target with
+`camera = true` lists a pseudo-encoding and wlshare answers that it takes a
+camera; until it answers, the browser's camera is never plugged.
 
 The server side is [wlshare](https://github.com/andrewtheguy/wlshare), which
 decodes the H.264 with the system's libavcodec and offers it to the desktop as a
@@ -22,14 +22,16 @@ PipeWire can open. How wlshare builds that node is in its own
 [[targets]]
 name = "workstation"
 protocol = "vnc"
+subtype = "wlshare"
 host = "127.0.0.1"
 port = 5900
 camera = true
 ```
 
-`camera = true` is the whole of it, and it is what makes the gateway *ask*. It is
-accepted on any plain `vnc` target and refused on both Apple subtypes, whose
-Screen Sharing has no camera to offer. As on RDP it is capability only: the camera
+`subtype = "wlshare"` says the server is wlshare, and `camera = true` is what
+makes the gateway list the extension to it. The key is accepted on a `wlshare`
+target and refused on a plain `vnc` target and on both Apple subtypes, none of
+which has anywhere to put a camera. As on RDP it is capability only: the camera
 is plugged when a browser enables it from the floating menu, per session and never
 remembered, and unplugged when that socket closes, the session changes hands, or
 the engine ends. wlshare's own `camera` key (default `false`) is the server's side

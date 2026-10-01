@@ -1,14 +1,13 @@
 # The browser's microphone over VNC with wlshare
 
 How the browser's microphone reaches a wlroots-based Wayland desktop behind
-wlshare, on the RFB connection the session already has, so a `vnc` target can take
-a microphone the way an RDP one does over MS-RDPEAI. The audio extension
+wlshare, on the RFB connection the session already has, so a `wlshare` target can
+take a microphone the way an RDP one does over MS-RDPEAI. The audio extension
 ([`wlshare-audio.md`](wlshare-audio.md)) carries sound from the server only, so
 this private extension is the camera's twin
-([`wlshare-camera.md`](wlshare-camera.md)). It is discovered
-rather than configured: the client lists a pseudo-encoding, a server that speaks it
-answers, and one that does not says nothing and the browser's microphone is never
-plugged.
+([`wlshare-camera.md`](wlshare-camera.md)). A `wlshare` target with
+`microphone = true` lists a pseudo-encoding and wlshare answers that it takes a
+microphone; until it answers, the browser's microphone is never plugged.
 
 The server side is [wlshare](https://github.com/andrewtheguy/wlshare), which offers
 the PCM to the desktop as a PipeWire `Audio/Source` node, "wlshare remote
@@ -22,13 +21,15 @@ node is in its own
 [[targets]]
 name = "workstation"
 protocol = "vnc"
+subtype = "wlshare"
 host = "127.0.0.1"
 port = 5900
 microphone = true
 ```
 
-`microphone = true` is the whole of it, and it is what makes the gateway *ask*. It
-is accepted on any plain `vnc` target and refused on both Apple subtypes. As on RDP
+`subtype = "wlshare"` says the server is wlshare, and `microphone = true` is what
+makes the gateway list the extension to it. The key is accepted on a `wlshare`
+target and refused on a plain `vnc` target and on both Apple subtypes. As on RDP
 it is capability only: the microphone is plugged when a browser enables it from the
 floating menu, per session and never remembered, and unplugged when that socket
 closes, the session changes hands, or the engine ends. wlshare's own `microphone`

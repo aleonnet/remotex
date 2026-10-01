@@ -10,8 +10,8 @@ The main reason this exists is the client: it is a browser, so anything with one
 reaches every target — RDP, VNC and Macs alike — with nothing to install per
 platform and nothing that has to exist for your OS. With `resize = true`, the
 window drives the remote's size, so the desktop is renegotiated at the size asked
-for rather than scaled on the client; plain `vnc`, a High Performance Mac and
-`rdp` can all be handed the window. On RDP a resize is a graphics reset of the
+for rather than scaled on the client; `vnc`, plain or wlshare, a High Performance
+Mac and `rdp` can all be handed the window. On RDP a resize is a graphics reset of the
 default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
 Not every server is served alike: see [Supported servers](#supported-servers)
 for the tiers they are ranked in.
@@ -35,10 +35,12 @@ for the tiers they are ranked in.
   and was tested on macOS 26 only. Both modes are reverse engineered, having no
   specification.
   A wlroots-based Wayland desktop behind
-  [wlshare](https://github.com/andrewtheguy/wlshare) is a plain `vnc` target:
-  that server carries pixel density over one private RFB extension the gateway
-  asks every generic server for, so the output's scale is reported and shown as
-  such, and with `resize = true` the output follows the browser's density.
+  [wlshare](https://github.com/andrewtheguy/wlshare) is a `vnc` target with
+  `subtype = "wlshare"`: the gateway then lists wlshare's private RFB
+  extensions, so its own VP9 stream is passed through, the output's scale is
+  reported and shown as such, and with `resize = true` the output follows the
+  browser's density. Without the subtype the same server is read as any VNC
+  server is.
 
 There is one client: the page a browser loads. For desktop use, install that page
 as an app in Chrome or Edge. The app window gives the client the browser-reserved
@@ -91,9 +93,10 @@ server for wlroots-based Wayland desktops, is the ideal. It codes the desktop as
 VP9 itself, at the quality and chroma the target asks for, and walks that quality
 by the browser's link, so the gateway passes its stream through untouched and
 the session still adapts to a slow link. Because wlshare is ours, what generic
-VNC lacks is added to it as an extension the gateway finds on the connection:
-pixel density, switching outputs, sound, and the browser's camera and
-microphone. It is a plain `vnc` target.
+VNC lacks is added to it as an extension: pixel density, switching outputs,
+sound, and the browser's camera and microphone. It is a `vnc` target with
+`subtype = "wlshare"`, which is what makes the gateway list those extensions and
+ask for the stream.
 
 #### Tier 2: modern Windows' Remote Desktop, and a Mac's High Performance Screen Sharing
 
@@ -126,9 +129,11 @@ to the link. Nothing of it is passed through.
 
 ### Other servers, not prioritized
 
-Every other VNC server is reached through the RFB baseline and always encoded
-as VP9 in the gateway. It stays supported, and is worked on as needed rather
-than ahead of the tiers.
+Every other VNC server is a plain `vnc` target, reached through the RFB baseline
+and always encoded as VP9 in the gateway from ZRLE, at 1x and without sound. A
+wlshare server behind a plain target is read the same way: its fallback for
+ordinary VNC clients. Plain VNC stays supported, and is worked on as needed
+rather than ahead of the tiers.
 
 Another RDP server, an older Windows or xrdp say, may happen to work if it
 speaks what the client implements ([The RDP client](docs/rdp-client.md)), but
@@ -313,18 +318,18 @@ sizes in pixels and nothing else — so those targets are shown at 1x, one CSS
 pixel per framebuffer pixel, and the window's points go to the server as pixels.
 See [`docs/generic-vnc-hidpi.md`](docs/generic-vnc-hidpi.md) for what that means
 on a sway output at scale 2 and why a second client's resize can come back
-prohibited. The one exception is a server that answers the density request the
-gateway puts in every generic `SetEncodings`, which today is wlshare: it reports
-its output's scale, the gateway labels the framebuffer with it, and the
-browser's density is declared back to the server together with the window in
-points × that density, so the output changes mode and scale at once. See [`docs/wlshare-density.md`](docs/wlshare-density.md).
+prohibited. The one exception is a `wlshare` target, which is asked for its
+density: wlshare reports its output's scale, the gateway labels the framebuffer
+with it, and the browser's density is declared back to the server together with
+the window in points × that density, so the output changes mode and scale at
+once. See [`docs/wlshare-density.md`](docs/wlshare-density.md).
 
-`audio = true` works on a plain VNC target too, through wlshare's audio
+`audio = true` works on a `wlshare` target too, through wlshare's audio
 extension: the gateway lists its pseudo-encoding, wlshare announces so and then
 streams the desktop's sound on the RFB connection itself as lossless FLAC. While
 a client listens the host is silent: the desktop plays into a PipeWire sink of
-wlshare's own, whose monitor is what is captured, and a server that does not
-speak it — wayvnc, TigerVNC, x11vnc, QEMU — gives the desktop and no sound. See [`docs/wlshare-audio.md`](docs/wlshare-audio.md).
+wlshare's own, whose monitor is what is captured. A plain `vnc` target carries
+no sound and is refused the key. See [`docs/wlshare-audio.md`](docs/wlshare-audio.md).
 
 On a Mac, audio is **experimental**. An `ard-high-performance` target receives
 it from Screen Sharing itself, beside the picture (above). No such path has been
@@ -335,10 +340,10 @@ runs outside remotex, on Linux or Windows.
 
 Two redirections send this browser's own media the other way and are
 **experimental**: `camera = true` offers the remote a virtual
-webcam over MS-RDPECAM — or, on a generic `vnc` target, over wlshare's camera
+webcam over MS-RDPECAM — or, on a `wlshare` target, over wlshare's camera
 extension, which makes it a PipeWire camera on the wlroots desktop (see
 [`docs/wlshare-camera.md`](docs/wlshare-camera.md)) — and `microphone = true`
-offers an RDP host a microphone over MS-RDPEAI, or a generic `vnc` target one over
+offers an RDP host a microphone over MS-RDPEAI, or a `wlshare` target one over
 wlshare's microphone extension, which makes it a PipeWire audio source on the
 wlroots desktop (see
 [`docs/wlshare-microphone.md`](docs/wlshare-microphone.md)). They serve a
@@ -349,7 +354,7 @@ someone who needs one for a while — a call, a recording — and are sent as
 cheaply as that allows on any link. The microphone goes as mono speech Opus at
 16 kbit/s, which the gateway decodes to the PCM the host records in. Both are off
 by default and enabled per session from the floating menu, never remembered, and
-both are refused on Apple's Screen Sharing. A Windows host starts the microphone only once something on it
+both are refused on Apple's Screen Sharing and on a plain `vnc` target. A Windows host starts the microphone only once something on it
 records. Their socket rules, control messages and channel wire formats are tested
 like everything else, and the wlshare paths have container coverage. On RDP,
 `a_real_host_records_the_microphone` feeds a host's recording device.

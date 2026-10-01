@@ -1686,8 +1686,8 @@ mod tests {
              [[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nhost = \"192.168.1.20\"\n\
              username = \"andrew\"\npassword = \"hunter2\"\nresize = true\n\
              video_quality = 70\n\n\
-             [[targets]]\nname = \"desk\"\nprotocol = \"vnc\"\nhost = \"192.168.1.21\"\n\
-             audio = true\n",
+             [[targets]]\nname = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\n\
+             host = \"192.168.1.21\"\naudio = true\n",
         )
         .unwrap();
 

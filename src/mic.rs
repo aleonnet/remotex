@@ -8,7 +8,7 @@
 //! browser cannot know, and which say when it is worth encoding at all.
 //!
 //! Nothing here names an engine. The engine side registers a [`MicControl`] and publishes
-//! [`MicSignal`]s; RDP's adapter is [`crate::rdp_mic`], over MS-RDPEAI, and a generic VNC
+//! [`MicSignal`]s; RDP's adapter is [`crate::rdp_mic`], over MS-RDPEAI, and a wlshare
 //! target's is [`crate::vnc_mic`], over wlshare's microphone extension.
 
 use std::sync::{Arc, Mutex};

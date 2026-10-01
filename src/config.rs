@@ -37,7 +37,8 @@ pub enum Protocol {
 /// Generic by design — a protocol with more than one flavour of server names
 /// which one it is talking to here, rather than each protocol growing a key of
 /// its own. Which subtypes a protocol accepts is [`ConfigFile::parse`]'s
-/// business; both current subtypes are `vnc`'s, and both describe the same Mac.
+/// business; every current subtype is `vnc`'s: two describe the same Mac, and one
+/// is wlshare.
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Subtype {
@@ -91,6 +92,19 @@ pub enum Subtype {
     /// lacks them refuses a browser that cannot take the stream, and passes it to
     /// one that can with [`TargetConfig::media_passthrough`].
     ArdHighPerformance,
+    /// [wlshare](https://github.com/andrewtheguy/wlshare), our own wlroots VNC
+    /// server, spoken to as what it is: RFB 3.8 with wlshare's private extensions
+    /// listed. Its picture is its own VP9 stream, passed to the browser untouched
+    /// ([`crate::vnc`]), the output's pixel density and the compositor's output
+    /// list come over extensions of their own, and [`TargetConfig::audio`],
+    /// [`TargetConfig::camera`] and [`TargetConfig::microphone`] ask for the
+    /// extensions that carry them.
+    ///
+    /// The subtype is what lists any of it. A plain `vnc` target pointed at the
+    /// same server lists none, and wlshare serves it as it serves any VNC client:
+    /// ZRLE, encoded here, at 1x, on the one output it opened with and without
+    /// sound. Credentials are a plain target's.
+    Wlshare,
 }
 
 impl Subtype {
@@ -99,23 +113,26 @@ impl Subtype {
         match self {
             Subtype::Ard => "ard",
             Subtype::ArdHighPerformance => "ard-high-performance",
+            Subtype::Wlshare => "wlshare",
         }
     }
 
     /// Whether the picture and sound come over the media stream.
     pub fn media_stream(self) -> bool {
         match self {
-            Subtype::Ard => false,
+            Subtype::Ard | Subtype::Wlshare => false,
             Subtype::ArdHighPerformance => true,
         }
     }
 
-    /// Whether this subtype authenticates to a Mac the Apple Remote Desktop way
-    /// (RFB security type 30), which both of them do and no plain `vnc` target
-    /// does. What makes the credentials a macOS account's.
-    pub fn apple_authentication(self) -> bool {
+    /// Whether this subtype is a Mac's: Apple's RFB 003.889, authenticated the
+    /// Apple Remote Desktop way (RFB security type 30), which is what makes the
+    /// credentials a macOS account's. Neither a plain `vnc` target nor a
+    /// `wlshare` one is.
+    pub fn apple(self) -> bool {
         match self {
             Subtype::Ard | Subtype::ArdHighPerformance => true,
+            Subtype::Wlshare => false,
         }
     }
 }
@@ -559,19 +576,19 @@ pub struct TargetConfig {
     #[serde(default, rename = "audio")]
     pub audio_key: Option<bool>,
     /// Carry the remote's sound. Packets are sent only while the attached client
-    /// subscribes. RDP negotiates it at connect (MS-RDPEA); a plain `vnc` target
-    /// asks a generic server for wlshare's audio extension, FLAC on the RFB
-    /// connection, and is answered by wlshare — see [`crate::vnc_audio`]. Both
-    /// opt in with `audio = true`. An `ard` target never carries sound: Standard
-    /// mode never touches the Mac's sound output. An `ard-high-performance` target
-    /// always does, its media stream's ([`crate::vnc_apple_media`]).
+    /// subscribes. RDP negotiates it at connect (MS-RDPEA); a `wlshare` target
+    /// lists wlshare's audio extension, FLAC on the RFB connection — see
+    /// [`crate::vnc_audio`]. Both opt in with `audio = true`. A plain `vnc`
+    /// target carries none and is refused the key. An `ard` target never carries
+    /// sound: Standard mode never touches the Mac's sound output. An
+    /// `ard-high-performance` target always does, its media stream's
+    /// ([`crate::vnc_apple_media`]).
     #[serde(skip)]
     pub audio: bool,
-    /// Offer the remote a redirected camera: MS-RDPECAM on RDP, and on a generic
-    /// VNC target the wlshare camera extension ([`crate::vnc_camera`]), which is
-    /// asked for the way [`Self::audio`]'s extension is — a server that never
-    /// announces it leaves the camera unplugged. Rejected on both Apple
-    /// subtypes: Screen Sharing speaks no such extension.
+    /// Offer the remote a redirected camera: MS-RDPECAM on RDP, and on a
+    /// `wlshare` target the wlshare camera extension ([`crate::vnc_camera`]),
+    /// listed the way [`Self::audio`]'s extension is. Rejected on a plain `vnc`
+    /// target and on both Apple subtypes: neither speaks such an extension.
     ///
     /// **Experimental.** The socket's session rules and message encodings are
     /// unit tested, both wires are checked, and the wlshare path has container
@@ -588,11 +605,10 @@ pub struct TargetConfig {
     /// through, so there is no codec key beside this one.
     #[serde(default)]
     pub camera: bool,
-    /// Offer the remote this browser's microphone: MS-RDPEAI on RDP, and on a generic VNC
-    /// target the wlshare microphone extension ([`crate::vnc_mic`]), asked for the way
-    /// [`Self::camera`]'s is — a server that never announces it leaves the microphone
-    /// unplugged. Rejected on both Apple subtypes: Screen Sharing speaks no such
-    /// extension.
+    /// Offer the remote this browser's microphone: MS-RDPEAI on RDP, and on a `wlshare`
+    /// target the wlshare microphone extension ([`crate::vnc_mic`]), listed the way
+    /// [`Self::camera`]'s is. Rejected on a plain `vnc` target and on both Apple
+    /// subtypes: neither speaks such an extension.
     ///
     /// Capability only, like [`Self::camera`]: the recording device is fed when a client
     /// enables its microphone — explicitly, per session — by opening `/ws/mic`. The
@@ -833,7 +849,7 @@ impl TargetConfig {
     /// The one PCM format this target's wave buffers can be in, known before the
     /// remote has said anything: what the RDP engine asks a server to redirect
     /// ([`crate::audio::PCM_CD_QUALITY`]), what a Mac's media stream decodes to
-    /// ([`crate::vnc_apple_media::AUDIO_FORMAT`]), or what a generic VNC server
+    /// ([`crate::vnc_apple_media::AUDIO_FORMAT`]), or what a `wlshare` target
     /// is asked to send over wlshare's audio extension
     /// ([`crate::vnc_audio::SOURCE_FORMAT`]) — the last of which this client
     /// chooses outright, since the extension leaves the format to the client. The
@@ -855,6 +871,17 @@ impl TargetConfig {
         self.protocol == Protocol::Vnc && self.subtype.is_some_and(Subtype::media_stream)
     }
 
+    /// Whether this target is a Mac, on either Apple subtype.
+    pub fn apple(&self) -> bool {
+        self.protocol == Protocol::Vnc && self.subtype.is_some_and(Subtype::apple)
+    }
+
+    /// Whether this target is a wlshare server spoken to as one: `subtype =
+    /// "wlshare"`, the one target whose VNC connection lists wlshare's extensions.
+    pub fn wlshare(&self) -> bool {
+        self.protocol == Protocol::Vnc && self.subtype == Some(Subtype::Wlshare)
+    }
+
     /// Whether this target's session opens one virtual display on the Mac rather
     /// than sharing its physical ones: `ard-high-performance` always, and `ard`
     /// with the unofficial [`Self::virtual_display`] key. What the VNC engine's
@@ -864,7 +891,7 @@ impl TargetConfig {
         match (self.protocol, self.subtype) {
             (Protocol::Vnc, Some(Subtype::ArdHighPerformance)) => true,
             (Protocol::Vnc, Some(Subtype::Ard)) => self.virtual_display,
-            (Protocol::Vnc, None) | (Protocol::Rdp, _) => false,
+            (Protocol::Vnc, None | Some(Subtype::Wlshare)) | (Protocol::Rdp, _) => false,
         }
     }
 }
@@ -1343,7 +1370,7 @@ impl ConfigFile {
                      always opens a virtual display: the key is subtype \"ard\"'s. Remove it.",
                     target.name
                 ),
-                (Protocol::Vnc, None) | (Protocol::Rdp, _) => anyhow::bail!(
+                (Protocol::Vnc, None | Some(Subtype::Wlshare)) | (Protocol::Rdp, _) => anyhow::bail!(
                     "target {:?} sets virtual_display, which only subtype \"ard\" takes: it \
                      opens Standard Screen Sharing on one of the Mac's virtual displays, \
                      and nothing else here has one to open. Remove the key.",
@@ -1353,7 +1380,7 @@ impl ConfigFile {
             // A Mac's sound is not the target's to turn on or off: Standard mode
             // never touches it, and High Performance's media stream always carries
             // its own.
-            let apple = target.protocol == Protocol::Vnc && target.subtype.is_some();
+            let apple = target.apple();
             anyhow::ensure!(
                 !(apple && target.audio_key.is_some()),
                 "target {:?} sets audio on an {} target, whose sound is not the target's to \
@@ -1362,6 +1389,17 @@ impl ConfigFile {
                  always carries the Mac's sound itself. Remove the key.",
                 target.name,
                 target.subtype.map_or("apple", Subtype::name)
+            );
+            // Sound over VNC is wlshare's audio extension, and only a target that
+            // says it is wlshare lists it. A plain target is read as any VNC
+            // server is, which carries none, so either value there would be inert.
+            let plain_vnc = target.protocol == Protocol::Vnc && target.subtype.is_none();
+            anyhow::ensure!(
+                !(plain_vnc && target.audio_key.is_some()),
+                "target {:?} sets audio on a plain vnc target, which carries no sound: over \
+                 VNC the sound is wlshare's audio extension, which only a target with \
+                 subtype = \"wlshare\" lists. Add the subtype, or remove the key.",
+                target.name
             );
             target.audio = target.media_stream() || (!apple && target.audio_key.unwrap_or(false));
         }
@@ -1515,40 +1553,37 @@ impl ConfigFile {
                 target.name
             );
             // Audio is carried three ways: MS-RDPEA on RDP, wlshare's audio
-            // extension on a generic VNC target ([`crate::vnc_audio`]), and High
+            // extension on a `wlshare` target ([`crate::vnc_audio`]), and High
             // Performance's media stream on `ard-high-performance`
-            // ([`crate::vnc_apple_media`]). `ard` carries none. The Apple
-            // subtypes are checked above.
+            // ([`crate::vnc_apple_media`]). `ard` and a plain `vnc` target carry
+            // none, and both are refused the key where the targets are first read.
             //
-            // A generic VNC target is *asked* rather than assumed: the extension is
-            // discovered on the connection, and a server that never announces it —
-            // wayvnc, TigerVNC, x11vnc — runs the session in silence. The key is
-            // what makes this client ask at all.
+            // The key is what makes this client list wlshare's extension, and
+            // wlshare announces it on the connection before the stream is turned on.
             //
             // Everything downstream of the channel — the socket, the bridge, the
             // encoders — is protocol-agnostic, which is why this rule is about the
             // *engine* and not about any of them.
             // The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
-            // generic VNC target, asked for the way its audio extension is: a
-            // server that never announces it leaves the camera unplugged. Apple's
-            // Screen Sharing speaks no such extension, in either subtype.
+            // `wlshare` target. Neither Apple's Screen Sharing nor a VNC server read
+            // as a plain one speaks such an extension.
+            let carries_devices = target.protocol == Protocol::Rdp || target.wlshare();
+            let kind = target.subtype.map_or("plain vnc", Subtype::name);
             anyhow::ensure!(
-                !target.camera || target.protocol == Protocol::Rdp || target.subtype.is_none(),
-                "target {:?} sets camera on an {} target, and Apple's Screen Sharing has nowhere \
-                 to put one: the camera rides MS-RDPECAM on rdp and wlshare's camera extension on \
-                 a generic vnc target. Remove the key.",
-                target.name,
-                target.subtype.map_or("apple", Subtype::name)
+                !target.camera || carries_devices,
+                "target {:?} is {kind} and sets camera, which has nowhere to go there: the \
+                 camera rides MS-RDPECAM on rdp and wlshare's camera extension on a vnc target \
+                 with subtype = \"wlshare\". Remove the key.",
+                target.name
             );
             // The microphone likewise: MS-RDPEAI on RDP, wlshare's microphone extension on
-            // a generic VNC target, and nothing on a Mac.
+            // a `wlshare` target, and nothing anywhere else.
             anyhow::ensure!(
-                !target.microphone || target.protocol == Protocol::Rdp || target.subtype.is_none(),
-                "target {:?} sets microphone on an {} target, and Apple's Screen Sharing has \
-                 nowhere to put one: the microphone rides MS-RDPEAI on rdp and wlshare's \
-                 microphone extension on a generic vnc target. Remove the key.",
-                target.name,
-                target.subtype.map_or("apple", Subtype::name)
+                !target.microphone || carries_devices,
+                "target {:?} is {kind} and sets microphone, which has nowhere to go there: \
+                 the microphone rides MS-RDPEAI on rdp and wlshare's microphone extension on a \
+                 vnc target with subtype = \"wlshare\". Remove the key.",
+                target.name
             );
             // The pipeline is RDP's, and passing it needs it on.
             anyhow::ensure!(
@@ -1651,7 +1686,7 @@ impl ConfigFile {
                         target.name
                     );
                 }
-                (Protocol::Vnc, None) => {
+                (Protocol::Vnc, None | Some(Subtype::Wlshare)) => {
                     anyhow::ensure!(
                         target.username.is_empty() || !target.password.is_empty(),
                         "target {:?} is protocol \"vnc\" and sets username without password — \
@@ -3445,19 +3480,31 @@ mod tests {
         }
     }
 
-    /// RDP and generic VNC both take a per-target audio key; `ard` carries no
+    /// RDP and wlshare both take a per-target audio key; `ard` carries no
     /// sound and `ard-high-performance` always carries its own, so both Apple
-    /// subtypes refuse it.
+    /// subtypes refuse it, and so does a plain `vnc` target, which lists no
+    /// extension to carry any.
     ///
     /// The error has to say what does carry it, because the mistake behind the
     /// key is a belief about what the subtype does rather than a typo — and a
     /// target that silently ignored it would be a desktop that is simply quiet,
     /// with nothing anywhere to say why.
     #[test]
-    fn audio_belongs_to_rdp_and_generic_vnc() {
-        // A plain `vnc` target asks a generic server for wlshare's audio
-        // extension, and gets silence from one that does not speak it. That is
-        // discovery, not a config error.
+    fn audio_belongs_to_rdp_and_wlshare() {
+        // A plain `vnc` target lists no audio extension, so the key is refused
+        // there at either value, and the error names the subtype that carries it.
+        for value in ["true", "false"] {
+            let err = ConfigFile::parse(&format!(
+                "[server]\n{}\n[[targets]]\nname = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.5\"\naudio = {value}\n",
+                site_passwd_line()
+            ))
+            .unwrap_err();
+            let rendered = format!("{err:#}");
+            assert!(rendered.contains("audio on a plain vnc target"), "{rendered}");
+            assert!(rendered.contains("subtype = \"wlshare\""), "{rendered}");
+        }
+
+        // A `wlshare` target lists wlshare's audio extension.
         let config = ConfigFile::parse(&format!(
             r#"
             [server]
@@ -3466,6 +3513,7 @@ mod tests {
             [[targets]]
             name = "wlshare"
             protocol = "vnc"
+            subtype = "wlshare"
             host = "10.0.0.5"
             audio = true
             "#,
@@ -3506,11 +3554,20 @@ mod tests {
     }
 
     /// The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
-    /// generic VNC target, so the key is accepted on both — opt-in (default off) on
-    /// each — and refused on both Apple subtypes, whose Screen Sharing speaks no
-    /// such extension.
+    /// `wlshare` target, so the key is accepted on both — opt-in (default off) on
+    /// each — and refused on both Apple subtypes and on a plain `vnc` target,
+    /// none of which speaks such an extension.
     #[test]
-    fn camera_rides_rdp_and_generic_vnc_and_is_refused_on_a_mac() {
+    fn camera_rides_rdp_and_wlshare_and_is_refused_elsewhere() {
+        let err = ConfigFile::parse(&format!(
+            "[server]\n{}\n[[targets]]\nname = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"\ncamera = true\n",
+            site_passwd_line()
+        ))
+        .unwrap_err();
+        let rendered = format!("{err:#}");
+        assert!(rendered.contains("is plain vnc and sets camera"), "{rendered}");
+        assert!(rendered.contains("subtype = \"wlshare\""), "{rendered}");
+
         for subtype in APPLE_SUBTYPES {
             let err = ConfigFile::parse(&format!(
                 r#"
@@ -3531,7 +3588,7 @@ mod tests {
             .and_then(|file| file.resolve())
             .unwrap_err();
             let rendered = format!("{err:#}");
-            assert!(rendered.contains(&format!("camera on an {subtype} target")), "{rendered}");
+            assert!(rendered.contains(&format!("is {subtype} and sets camera")), "{rendered}");
             assert!(
                 rendered.contains("wlshare's camera extension"),
                 "the path a vnc target does have is named: {rendered}"
@@ -3554,6 +3611,7 @@ mod tests {
             [[targets]]
             name = "desk"
             protocol = "vnc"
+            subtype = "wlshare"
             host = "10.0.0.7"
             camera = true
 
@@ -3570,15 +3628,16 @@ mod tests {
         .resolve()
         .unwrap();
         assert!(config.targets[0].camera);
-        assert!(config.targets[1].camera, "a generic vnc target asks wlshare for it");
+        assert!(config.targets[1].camera, "a wlshare target lists the extension");
         assert!(!config.targets[2].camera, "the camera is opt-in");
     }
 
     /// The microphone rides MS-RDPEAI on RDP and wlshare's microphone extension on a
-    /// generic VNC target, and is refused on both Apple subtypes. On either it stands on
-    /// its own: a remote records with or without redirected sound.
+    /// `wlshare` target, and is refused on both Apple subtypes and on a plain `vnc`
+    /// target. On either it stands on its own: a remote records with or without
+    /// redirected sound.
     #[test]
-    fn microphone_rides_rdp_and_generic_vnc_and_is_refused_on_a_mac() {
+    fn microphone_rides_rdp_and_wlshare_and_is_refused_elsewhere() {
         let parse = |target: &str| {
             ConfigFile::parse(&format!("[server]\n{}\n\n[[targets]]\n{target}", site_passwd_line()))
                 .and_then(|file| file.resolve())
@@ -3589,11 +3648,17 @@ mod tests {
             ))
             .unwrap_err();
             let rendered = format!("{mac:#}");
-            assert!(rendered.contains(&format!("microphone on an {subtype} target")), "{rendered}");
+            assert!(rendered.contains(&format!("is {subtype} and sets microphone")), "{rendered}");
             assert!(rendered.contains("wlshare's microphone extension"), "{rendered}");
         }
-        let vnc = parse("name = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"\nmicrophone = true").unwrap();
-        assert!(vnc.targets[0].microphone, "a generic vnc target asks wlshare for it");
+        let plain = parse("name = \"desk\"\nprotocol = \"vnc\"\nhost = \"10.0.0.7\"\nmicrophone = true").unwrap_err();
+        let rendered = format!("{plain:#}");
+        assert!(rendered.contains("is plain vnc and sets microphone"), "{rendered}");
+        let vnc = parse(
+            "name = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\nhost = \"10.0.0.7\"\nmicrophone = true",
+        )
+        .unwrap();
+        assert!(vnc.targets[0].microphone, "a wlshare target lists the extension");
         let config = parse(
             "name = \"win\"\nprotocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"\nhost = \"10.0.0.5\"\nmicrophone = true",
         )
@@ -3767,7 +3832,7 @@ mod tests {
     }
 
     /// The pre-negotiation format follows the engine: CD quality is what RDP is
-    /// asked for, 48 kHz stereo is what a generic server is asked for.
+    /// asked for, 48 kHz stereo is what wlshare is asked for.
     #[test]
     fn the_audio_source_format_is_the_engines() {
         // Without the key, which RDP is refused until its client carries sound —
@@ -3781,10 +3846,10 @@ mod tests {
         .unwrap();
         assert_eq!(rdp.targets[0].audio_source_format(), crate::audio::PCM_CD_QUALITY);
 
-        // A generic vnc target's is the format this client asks the extension
+        // A wlshare target's is the format this client asks the extension
         // for, which is the same 48 kHz stereo and needs no resampling either.
         let vnc = ConfigFile::parse(&format!(
-            "[server]\n{}\n[[targets]]\nname = \"v\"\nprotocol = \"vnc\"\nhost = \"h\"\naudio = true\n",
+            "[server]\n{}\n[[targets]]\nname = \"v\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\nhost = \"h\"\naudio = true\n",
             site_passwd_line()
         ))
         .unwrap()
@@ -3809,6 +3874,7 @@ mod tests {
             [[targets]]
             name = "t"
             protocol = "vnc"
+            subtype = "wlshare"
             host = "10.0.0.5"
             {body}
             "#,

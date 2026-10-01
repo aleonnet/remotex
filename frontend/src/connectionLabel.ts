@@ -5,14 +5,16 @@
 // `FloatingMenu.tsx` runs modules that read `window` at load, and a test of this
 // string should not have to stand up a fake browser to reach it.
 //
-// Worth showing because `vnc` is three different things. A plain VNC server, a Mac
-// in Screen Sharing's Standard mode and a Mac in High Performance mode all arrive
-// as `"protocol":"vnc"`, and they differ in what a person will notice: Standard
-// shares the Mac's physical displays and refuses resize, High Performance replaces
-// them with one virtual display and is reverse engineered from end to end. "Why is
-// there no display list", "why does this target not follow the window", "why did
-// the desktop come back wrong after a resize" all have the same first question —
-// which of the three is this — and until this row existed the answer was in the
+// Worth showing because `vnc` is four different things. A plain VNC server, a
+// wlshare server, a Mac in Screen Sharing's Standard mode and a Mac in High
+// Performance mode all arrive as `"protocol":"vnc"`, and they differ in what a
+// person will notice: a plain server is read at 1x with no sound and no display
+// list, wlshare passes its own stream and has all three, Standard shares the Mac's
+// physical displays and refuses resize, High Performance replaces them with one
+// virtual display and is reverse engineered from end to end. "Why is there no
+// display list", "why does this target not follow the window", "why did the
+// desktop come back wrong after a resize" all have the same first question —
+// which of the four is this — and until this row existed the answer was in the
 // operator's config file, which whoever is looking at the screen generally does
 // not have.
 //

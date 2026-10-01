@@ -1,5 +1,5 @@
-//! End-to-end test of the VNC engine against wlshare, the one generic VNC server
-//! that answers the gateway's private density and outputs extensions.
+//! End-to-end test of the VNC engine against wlshare: as a `wlshare` target,
+//! which lists wlshare's extensions, and as a plain `vnc` one, which lists none.
 //!
 //! Builds wlshare from its checkout — `../wlshare` beside this repository, or
 //! wherever `REMOTEX_TEST_WLSHARE_DIR` names — and starts it on a headless sway
@@ -21,12 +21,16 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, TargetConfig};
+use remotex::config::{AppConfig, Protocol, Subtype, TargetConfig};
 use remotex::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
 const TARGET: &str = "wlshare-dummy";
+
+/// The same server as a plain `vnc` target: no subtype, so nothing of wlshare's
+/// is listed to it.
+const PLAIN_TARGET: &str = "wlshare-dummy-plain";
 
 /// Where the wlshare checkout to build is, when not beside this repository.
 const WLSHARE_DIR_ENV: &str = "REMOTEX_TEST_WLSHARE_DIR";
@@ -54,10 +58,18 @@ async fn wait_for_vnc_port(port: u16) {
     .expect("wlshare never sent an RFB greeting");
 }
 
-/// Start the real server pointed at wlshare: a plain `vnc` target with
-/// `resize`, a camera and a microphone, and nothing naming the server — the
-/// extensions are discovered.
+/// Start the real server pointed at wlshare twice: a `wlshare` target with
+/// `resize`, a camera and a microphone, and a plain `vnc` target with `resize`
+/// alone, which is all a plain target may carry.
 async fn spawn_app(vnc_port: u16) -> SocketAddr {
+    let wlshare = wlshare_target(vnc_port);
+    let plain = TargetConfig {
+        name: PLAIN_TARGET.to_owned(),
+        subtype: None,
+        camera: false,
+        microphone: false,
+        ..wlshare.clone()
+    };
     let config = AppConfig {
         listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         auth: common::test_auth(),
@@ -66,36 +78,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         meter: None,
         hevc_wasm: None,
         hp_decoders: Default::default(),
-        targets: vec![TargetConfig {
-            name: TARGET.to_owned(),
-            protocol: Protocol::Vnc,
-            subtype: None,
-            host: common::container_host(),
-            port: vnc_port,
-            // The container's wlshare asks for no login.
-            username: String::new(),
-            password: String::new(),
-            vnc_password: String::new(),
-            domain: None,
-            width: None,
-            height: None,
-            resize: true,
-            egfx: None,
-            clipboard: false,
-            audio_key: None,
-            audio: false,
-            camera: true,
-            microphone: true,
-            video_quality: None,
-            render_chroma: None,
-            render_adaptive: None,
-            media_passthrough: false,
-            egfx_passthrough: false,
-            virtual_display: false,
-            audio_bitrate: None,
-            audio_adaptive: None,
-            audio_adaptive_min: None,
-        }],
+        targets: vec![wlshare, plain],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let addr = listener.local_addr().unwrap();
@@ -104,6 +87,39 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         axum::serve(listener, app).await.unwrap();
     });
     addr
+}
+
+fn wlshare_target(vnc_port: u16) -> TargetConfig {
+    TargetConfig {
+        name: TARGET.to_owned(),
+        protocol: Protocol::Vnc,
+        subtype: Some(Subtype::Wlshare),
+        host: common::container_host(),
+        port: vnc_port,
+        // The container's wlshare asks for no login.
+        username: String::new(),
+        password: String::new(),
+        vnc_password: String::new(),
+        domain: None,
+        width: None,
+        height: None,
+        resize: true,
+        egfx: None,
+        clipboard: false,
+        audio_key: None,
+        audio: false,
+        camera: true,
+        microphone: true,
+        video_quality: None,
+        render_chroma: None,
+        render_adaptive: None,
+        media_passthrough: false,
+        egfx_passthrough: false,
+        virtual_display: false,
+        audio_bitrate: None,
+        audio_adaptive: None,
+        audio_adaptive_min: None,
+    }
 }
 
 /// A `resize` control message: the framebuffer's pixels and their density.
@@ -124,6 +140,9 @@ struct View {
     displays: Option<(u64, Vec<(u64, String)>)>,
     /// The last `videoFormat` announcement: the decoder configuration string.
     decode: Option<String>,
+    /// Whether that announcement said the stream is the remote's own, passed
+    /// through, rather than one encoded here.
+    passed: Option<bool>,
     /// Whether a keyframe of the last announced size has arrived.
     painted: bool,
 }
@@ -135,6 +154,7 @@ impl View {
             sizes: Vec::new(),
             displays: None,
             decode: None,
+            passed: None,
             painted: false,
         }
     }
@@ -188,7 +208,10 @@ impl View {
                     .collect();
                 self.displays = Some((msg["active"].as_u64().unwrap(), entries));
             }
-            Some("videoFormat") => self.decode = Some(msg["decode"].as_str().unwrap().to_owned()),
+            Some("videoFormat") => {
+                self.decode = Some(msg["decode"].as_str().unwrap().to_owned());
+                self.passed = Some(msg["passthrough"].as_bool().unwrap());
+            }
             _ => {}
         }
     }
@@ -319,6 +342,44 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
     );
     let decode = view.decode.as_deref().expect("a video format was announced");
     assert!(decode.starts_with("vp09.01."), "a 4:4:4 browser was announced {decode}");
+    assert_eq!(view.passed, Some(true), "the stream is wlshare's own");
+}
+
+/// The same server behind a plain `vnc` target is read as any VNC server is: the
+/// gateway lists nothing of wlshare's, so wlshare is never asked for its VP9 and
+/// sends ZRLE, which is encoded here; the 2x browser is shown the output at the
+/// 1x generic VNC is presented at, and no output list arrives.
+#[tokio::test]
+#[ignore = "requires Docker or Podman"]
+async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
+    common::init_logging();
+    let (container, vnc_port) = start_wlshare().await;
+
+    let addr = spawn_app(vnc_port).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = common::connect_ws(addr, &token, &cookie).await;
+    let mut view = View::new();
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"{PLAIN_TARGET}","display":{{"w":1728,"h":1117,"scale":200}}}}"#
+    )))
+    .await
+    .unwrap();
+    view.until(&mut ws, "the desktop's first keyframe", |v| v.decode.is_some()).await;
+
+    assert_eq!(view.passed, Some(false), "the picture is encoded here");
+    assert!(
+        view.sizes.iter().all(|size| size.scale == 1.0),
+        "a plain target takes no density from the server or the browser: {:?}",
+        view.sizes
+    );
+    assert_eq!(sway_output(&container, "HEADLESS-1"), (1024, 768, 1.0), "the output is left as it was");
+    assert!(view.displays.is_none(), "a plain target is sent no output list");
+    assert!(
+        !container.logs().contains("asked for VP9"),
+        "a plain target asked wlshare for its VP9 encoding:\n{}",
+        container.logs()
+    );
 }
 
 /// A browser whose decoder takes only profile 0 is passed wlshare's stream as well,

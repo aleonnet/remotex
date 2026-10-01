@@ -11,8 +11,8 @@ edge of the desktop: it is not in the session at all until the client asks for i
 Standard RFB has no way to ask. `ExtendedDesktopSize` describes screens *inside*
 one framebuffer, which is a different thing entirely, and a plain VNC server has
 nothing else to say. So this is a private extension beside
-[the density one](wlshare-density.md), with the same shape and discovered the same
-way: the client lists a pseudo-encoding, and the server that knows it answers.
+[the density one](wlshare-density.md), with the same shape and asked for the
+same way: a `wlshare` target lists a pseudo-encoding, and wlshare answers.
 
 The server side is [wlshare](https://github.com/andrewtheguy/wlshare). Its
 `outputs.rs` already tracks every `wl_output` and every wlr-output-management
@@ -21,14 +21,14 @@ comes from; this extension lists them and takes one back.
 
 ## Configuration
 
-Nothing. wlshare is a plain `vnc` target, the same one
-[the density doc](wlshare-density.md#configuration) configures, and the extension
-is discovered on the connection:
+Nothing beyond the subtype. It is the `wlshare` target
+[the density doc](wlshare-density.md#configuration) configures:
 
 ```toml
 [[targets]]
 name = "workstation"
 protocol = "vnc"
+subtype = "wlshare"
 host = "127.0.0.1"
 port = 5900
 username = "me"
@@ -36,10 +36,11 @@ password = "…"
 resize = true
 ```
 
-The gateway lists the pseudo-encoding in every generic `SetEncodings`, after the
-density one and after everything that decides pixels, so it never weighs on
-encoding preference. A server that does not know it ignores it, as RFB requires,
-sends no list, and its client shows no picker.
+The gateway lists the pseudo-encoding in a `wlshare` target's `SetEncodings`,
+after the density one and after everything that decides pixels, so it never
+weighs on encoding preference. A plain `vnc` target does not list it, is sent no
+list, and its client shows no picker: a wlshare server behind one stays on the
+output it opened with.
 
 ## The wire
 
@@ -147,7 +148,7 @@ before the wire.
 - **The size is announced whatever `resize` says.** A switch to a differently
   sized output is an `ExtendedDesktopSize` rectangle, and a server with nothing
   negotiated to send one in has no choice but to close the connection. So both
-  size pseudo-encodings are listed on every generic target; `resize` decides only
+  size pseudo-encodings are listed on every `vnc` target; `resize` decides only
   whether the window asks for sizes of its own.
 - **An emptied list is still a list.** A browser attaching after the compositor
   lost its last output is told the list is empty rather than left with the menu

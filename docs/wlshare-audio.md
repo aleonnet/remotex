@@ -1,14 +1,14 @@
 # Desktop audio over VNC with wlshare
 
 How a wlroots-based Wayland desktop behind wlshare hands the gateway its sound,
-on the RFB connection it already has, so a `vnc` target plays through the
+on the RFB connection it already has, so a `wlshare` target plays through the
 browser the way an RDP one does. Standard RFB carries pixels and a clipboard and
 nothing else; this is wlshare's private audio extension, which carries the sound
 as lossless FLAC and borrows its control messages from the QEMU Audio extension
-`rfbproto` registers. It is discovered rather than configured, exactly as the density extension is
-([`wlshare-density.md`](wlshare-density.md)): the client lists a pseudo-encoding,
-a server that speaks it announces so, and one that does not says nothing and the
-session runs in silence.
+`rfbproto` registers. It is announced the way the density extension is
+([`wlshare-density.md`](wlshare-density.md)): a `wlshare` target with
+`audio = true` lists a pseudo-encoding, and wlshare announces that it speaks it
+before anything is turned on.
 
 Measured 2026-09-09 on `workstation-wsl`, a headless sway with one `HEADLESS-1`
 output and PipeWire's own dummy sink, through a one-off WebSocket probe. The
@@ -26,6 +26,7 @@ it — and sends it as FLAC frames of the format the client asked for.
 [[targets]]
 name = "workstation"
 protocol = "vnc"
+subtype = "wlshare"
 host = "127.0.0.1"
 port = 5900
 username = "me"
@@ -33,15 +34,15 @@ password = "…"
 audio = true
 ```
 
-`audio = true` is the whole of it, and it is what makes the gateway *ask*.
-Nothing names the server or the extension: a target that asks and connects to
-wayvnc, TigerVNC or x11vnc gets a desktop and no sound, which is what those
-servers have to give. So does QEMU, whose own audio extension carries raw
-samples and is not asked for. On the gateway side `audio = true` is accepted on any
-plain `vnc` target. A target of either Apple subtype is never asked for the
-extension — `ard` carries no sound, and `ard-high-performance` takes its sound
-from the media stream — but a Mac configured as a plain `vnc` target with `audio = true` is asked like
-any other server, and lists the pseudo-encoding in its `SetEncodings`.
+`subtype = "wlshare"` says the server is wlshare, and `audio = true` is what
+makes the gateway list the extension to it. The key is accepted on a `wlshare`
+target and refused on every other `vnc` target: a plain one is read through the
+RFB baseline, which carries no sound, `ard` carries none either, and
+`ard-high-performance` takes its sound from the media stream. A `wlshare`
+target pointed at a server that is not wlshare, or at a wlshare with its own
+switch off, lists the pseudo-encoding, hears no announcement, and runs in
+silence. QEMU's own audio extension, which carries raw samples, is never asked
+for.
 
 wlshare's own `audio` key (default `false`) is the server's side of the same
 switch: with it off the extension is not announced, and a client that lists the
