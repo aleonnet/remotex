@@ -71,7 +71,8 @@ try {
     if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
     New-Item -ItemType Directory -Force -Path "$stage\bin", "$stage\share\doc\remotex" | Out-Null
     Copy-Item $exe "$stage\bin\remotex.exe"
-    # libFLAC, which decodes wlshare's sound and is loaded at run time (desktop-flac), beside
+    # libFLAC, which encodes a lossless "rdp" target's sound and is loaded at run time
+    # (desktop-flac), beside
     # the exe, where Windows looks first. FLAC's own release build, checked against the digest
     # of the file this was written against; it needs nothing but the system's own DLLs.
     $flacZip = "$stage\flac-1.5.0-win.zip"

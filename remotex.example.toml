@@ -332,17 +332,20 @@ password = "change-me"
 # is 96: well clear of where stereo Opus starts to be audibly lossy. Like
 # `video_quality` it is a ceiling, not a promise — and an average, not a packet
 # size: Opus is variable-rate, so silence costs a few bytes a packet and music
-# about this. Valid on a target whose sound is encoded here — "rdp" and
-# "wlshare" — and refused rather than ignored on one that has none, and on
-# "ard-high-performance", whose sound is passed as the Mac's own AAC-ELD.
+# about this. Valid on a target whose sound is Opus at a rate the gateway
+# chooses — "rdp", encoded here, and "wlshare", which encodes its own at the
+# rate the gateway tells it — and refused rather than ignored on one that has
+# none, and on "ard-high-performance", whose sound is passed as the Mac's own
+# AAC-ELD.
 #audio_bitrate = 96
 
 # Let that bitrate follow the audio socket's own backpressure — on by default,
 # like `render_adaptive`. Sustained slow sends walk the bitrate down toward
 # `audio_adaptive_min`, sustained clear sends walk it back up to `audio_bitrate`,
-# and silence is shed while the link is behind so old sound does not accumulate.
-# `false` holds `audio_bitrate` whatever the link does. Either value is refused
-# on a target without sound to encode.
+# and, where the sound is encoded here, silence is shed while the link is behind
+# so old sound does not accumulate; a "wlshare" target's packets are passed as
+# they came, and only the rate moves. `false` holds `audio_bitrate` whatever the
+# link does. Either value is refused on a target without such sound.
 #audio_adaptive = true
 
 # Floor for that walk in kbit/s, default 32: degraded, but continuous, which is

@@ -530,6 +530,20 @@ async fn send(uplink: &SharedUplink, msg: &[u8]) -> anyhow::Result<()> {
     uplink.lock().await.send(msg).await
 }
 
+/// Name the rate the remote's Opus is to be coded at: the one a listener's walk
+/// last asked for, or `own` where none has. Read under the uplink's lock, so a
+/// rate asked for meanwhile is either the one sent here or sent after it by the
+/// loop that hears it, and never before a staler one.
+async fn send_asked_rate(
+    uplink: &SharedUplink,
+    bridge: &crate::audio::AudioBridge,
+    own: i32,
+) -> anyhow::Result<()> {
+    let mut uplink = uplink.lock().await;
+    let rate = bridge.asked_rate().borrow().unwrap_or(own);
+    uplink.send(&vnc_audio::set_bitrate(rate as u32)).await
+}
+
 /// Send several, in order, stopping at the first failure. The lock is taken once
 /// so nothing can interleave between them — a wheel notch's press and release
 /// must not be split by a pointer move.
@@ -3601,8 +3615,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     // is sent by the loop that hears it, and none is missed.
                     shared.audio_announced.store(true, Ordering::Relaxed);
                     if let Some(bridge) = audio {
-                        let rate = bridge.asked_rate().borrow().unwrap_or(*audio_rate);
-                        send(uplink, &vnc_audio::set_bitrate(rate as u32)).await?;
+                        send_asked_rate(uplink, bridge, *audio_rate).await?;
                     }
                     send(uplink, &vnc_audio::enable()).await?;
                 } else if audio_state == Audio::Asked && painted {
@@ -7587,6 +7600,26 @@ mod tests {
         .await;
         assert_eq!(written(&sent)[10..18], [255, 1, 0, 3, 0, 0, 0xFA, 0]);
         assert!(announced.load(Ordering::Relaxed), "a later rate may be named to this server");
+    }
+
+    /// A rate asked for while the announcement's answer waits for the uplink is
+    /// the one that answer names: it is read once the uplink is held, not
+    /// before, so it cannot follow the newer one onto the wire.
+    #[tokio::test]
+    async fn a_rate_asked_for_while_the_uplink_is_busy_is_the_one_named() {
+        let (uplink, sent) = test_uplink();
+        let bridge = Arc::new(crate::audio::AudioBridge::new());
+        bridge.ask_rate(96_000);
+        let held = uplink.lock().await;
+        let naming = tokio::spawn({
+            let (uplink, bridge) = (Arc::clone(&uplink), Arc::clone(&bridge));
+            async move { send_asked_rate(&uplink, &bridge, 96_000).await }
+        });
+        tokio::task::yield_now().await;
+        bridge.ask_rate(64_000);
+        drop(held);
+        naming.await.unwrap().unwrap();
+        assert_eq!(written(&sent), vnc_audio::set_bitrate(64_000));
     }
 
     /// The rates a walk asks for arrive in order, the latest standing in for
