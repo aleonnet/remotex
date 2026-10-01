@@ -53,7 +53,9 @@ area's section before changing what it covers:
   WebAssembly module; the pinned HEVC decoder archive as the one file read at run
   time; no fallback browser paths.
 - [Sessions](docs/architecture.md#sessions): one active session per gateway,
-  with takeover, and a fresh engine for every `connect`.
+  with takeover, and a fresh engine for every `connect`; resize, sound and
+  passthrough chosen at the picker, not in the config, and held for the
+  session's life.
 - [Input and display](docs/architecture.md#input-and-display): the two touch
   layers, the display picker as the remote's, presentation at 100%, density as
   the wire's word, and the Apple mosaic as the one rescale.

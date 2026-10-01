@@ -34,9 +34,9 @@ host = "127.0.0.1"
 port = 5900
 username = "me"              # the account wlshare runs as; its [pam] table checks the login
 password = "…"
-resize = true
 ```
 
+The session is started with resize, ticked under the target at the picker.
 `subtype = "wlshare"` names the server, and is what makes the gateway list the
 pseudo-encoding in its `SetEncodings`, after everything that decides pixels and
 immediately before the output-list request, so it never weighs on encoding
@@ -88,8 +88,8 @@ framebuffer.
 ### Client → server: ClientDensity
 
 Sent once the first `OutputScale` has arrived, whenever the client's screen
-changes density (`hostDisplay`), and on a switch of shared output — only on a
-target with `resize = true`, because the answer changes the output. It carries
+changes density (`hostDisplay`), and on a switch of shared output — only in a
+session started with resize, because the answer changes the output. It carries
 the density the browser would like the desktop rendered at, quantized to 1x or
 2x like every other engine's request ([`protocol::render_density`]), *and* the
 window in pixels at that density, every time. A scale alone would change the
@@ -137,7 +137,7 @@ report.
   relabels it at once — the same pixels shown at a new density are a new canvas
   — and a report naming a size the framebuffer does not have yet is the label
   for the rectangle about to arrive.
-- **Resize.** With `resize = true` the window's points are asked for as
+- **Resize.** In a session started with resize the window's points are asked for as
   `points × scale` pixels, so the logical desktop is the window. The first
   request waits for the report, or for the first update that shows none is
   coming, because a request in the wrong pixels is a desktop redrawn twice; on
@@ -196,7 +196,7 @@ swaymsg output HEADLESS-1 scale 2 ; sleep 7 ; swaymsg output HEADLESS-1 scale 1
 
 ## Following the client
 
-A 2x browser connecting to an output at scale 1, with `resize = true`:
+A 2x browser connecting to an output at scale 1, in a session started with resize:
 
 ```
 resize  3456x1802  scale=1.0  -> 3456x1802 CSS px     connect: the framebuffer, unlabelled

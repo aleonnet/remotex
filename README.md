@@ -8,11 +8,15 @@ picture; redirected camera and microphone media each use their own socket too.
 
 The main reason this exists is the client: it is a browser, so anything with one
 reaches every target — RDP, VNC and Macs alike — with nothing to install per
-platform and nothing that has to exist for your OS. With `resize = true`, the
-window drives the remote's size, so the desktop is renegotiated at the size asked
-for rather than scaled on the client; `vnc`, plain or wlshare, a High Performance
-Mac and `rdp` can all be handed the window. On RDP a resize is a graphics reset of the
-default graphics pipeline, so `resize = true` is refused beside `egfx = false`.
+platform and nothing that has to exist for your OS. Picking a target at the
+picker opens it: whether the window drives the desktop's size, whether the
+remote's sound is taken and whether the remote's own stream is passed through are
+chosen under it, and Start connects with them. In a session started with resize,
+the window drives the remote's size, so the desktop is renegotiated at the size
+asked for rather than scaled on the client; `vnc`, plain or wlshare, a High
+Performance Mac and `rdp` can all be handed the window. On RDP a resize is a
+graphics reset of the default graphics pipeline, so a target with `egfx = false`
+does not offer it.
 Not every server is served alike: see [Supported servers](#supported-servers)
 for the tiers they are ranked in.
 
@@ -29,7 +33,7 @@ for the tiers they are ranked in.
   `subtype = "ard-high-performance"` is its High Performance mode as Apple's
   viewer has it: one virtual display holding every remote window,
   with the picture as HEVC and the sound as AAC-ELD over the Mac's SRTP media
-  stream, decoded by the host's FFmpeg and fdk-aac. `resize = true`
+  stream, decoded by the host's FFmpeg and fdk-aac. Resize
   needs a virtual display: High Performance's, or the unofficial
   `virtual_display = true` under `ard`, which puts Standard mode's picture on one
   and was tested on macOS 26 only. Both modes are reverse engineered, having no
@@ -38,8 +42,8 @@ for the tiers they are ranked in.
   [wlshare](https://github.com/andrewtheguy/wlshare) is a `vnc` target with
   `subtype = "wlshare"`: the gateway then lists wlshare's private RFB
   extensions, so its own VP9 stream is passed through, the output's scale is
-  reported and shown as such, and with `resize = true` the output follows the
-  browser's density. Without the subtype the same server is read as any VNC
+  reported and shown as such, and in a session started with resize the output
+  follows the browser's density. Without the subtype the same server is read as any VNC
   server is.
 
 There is one client: the page a browser loads. For desktop use, install that page
@@ -102,24 +106,25 @@ ask for the stream.
 
 The host's own stream, passed through to the browser for a LAN:
 
-- **Modern Windows' own Remote Desktop server** with `egfx_passthrough = true`:
-  the host's graphics pipeline (MS-RDPEGFX), composed in the browser by the
-  gateway's own compositor built to WebAssembly, which takes nearly all of the
-  picture's work off the gateway. It is **experimental**: run against one
+- **Modern Windows' own Remote Desktop server**, in a session started with the
+  passthrough: the host's graphics pipeline (MS-RDPEGFX), composed in the browser
+  by the gateway's own compositor built to WebAssembly, which takes nearly all of
+  the picture's work off the gateway. It is **experimental**: run against one
   Windows 11 host, with sound and the clipboard beside it, and not yet with the
   camera or the microphone.
-- **macOS Screen Sharing's High Performance mode** (`ard-high-performance`) with
-  `media_passthrough = true`: the Mac's HEVC picture and AAC-ELD sound, to a
-  browser that decodes them (Chrome and Safari; not Firefox).
+- **macOS Screen Sharing's High Performance mode** (`ard-high-performance`), in a
+  session started with the passthrough: the Mac's HEVC picture and AAC-ELD sound,
+  to a browser that decodes them (Chrome and Safari; not Firefox).
 
-A passed stream does not adapt to a slow link: the Mac's own rate control keeps
-it between 20 and 60 Mbit/s, and a Windows host's pipeline is sent as drawn. The
-fallback is the gateway's VP9, which does adapt. It serves a target without the
-key, which is the answer for a slow link; a browser that cannot decode the Mac's
-stream; and a Windows host that draws with plain bitmap updates rather than the
-pipeline. On RDP the key is the only way past VP9: without it the gateway
-composes the host's pipeline, or takes its bitmap updates, and encodes the
-picture as VP9.
+The passthrough is a choice made at the picker, greyed for a browser that cannot
+take the stream. A passed stream does not adapt to a slow link: the Mac's own
+rate control keeps it between 20 and 60 Mbit/s, and a Windows host's pipeline is
+sent as drawn. A session started without it is the gateway's VP9, which does
+adapt and is the answer for a slow link. VP9 also serves a browser that cannot
+decode the Mac's stream, and a Windows host that draws with plain bitmap updates
+rather than the pipeline. On RDP the passthrough is the only way past VP9:
+without it the gateway composes the host's pipeline, or takes its bitmap updates,
+and encodes the picture as VP9.
 
 #### Tier 3: a Mac's Standard Screen Sharing
 
@@ -138,7 +143,8 @@ rather than ahead of the tiers.
 Another RDP server, an older Windows or xrdp say, may happen to work if it
 speaks what the client implements ([The RDP client](docs/rdp-client.md)), but
 it is not a target: nothing is done to make it work. Its picture follows
-Windows' rule, encoded as VP9 in the gateway unless `egfx_passthrough = true`.
+Windows' rule, encoded as VP9 in the gateway unless the session was started with
+the pipeline passed.
 
 ## Install
 
@@ -275,34 +281,36 @@ gateway reports to it every 50 ms allows, as Apple's viewer reports. A Linux
 gateway needs `net.core.rmem_max` of at least 4194304 for the screen's socket,
 which the log warns about when it is lower: the stock 212992 loses keyframes at
 Retina sizes. The gateway authenticates and decrypts every packet, decodes both, and sends them on as the VP9 and Opus every
-target uses — or, with `media_passthrough = true` and a browser that decodes them
-(Chrome and Safari; not Firefox), sends the HEVC and the AAC-ELD on as the Mac sent
-them, for a LAN;
+target uses — or, in a session started with the passthrough, which the picker
+offers a browser that decodes them (Chrome and Safari; not Firefox), sends the HEVC
+and the AAC-ELD on as the Mac sent them, for a LAN;
 the browser stays behind its resize notice until the stream sends its first picture,
 at connect and across display changes, and a stream that fails ends the session, as
 it does in Apple's viewer. A playing
 video does not delay the Mac's reading of the input, as RFB pixels' deflate does. The Mac refuses the picture without the sound, and
-mutes its own speakers while it streams, so the target always carries sound, and
-nothing reaches an AirPlay speaker the Mac plays to. It is **experimental**.
+mutes its own speakers while it streams, so a session always carries sound, with
+nothing to choose at the picker, and nothing reaches an AirPlay speaker the Mac
+plays to. It is **experimental**.
 
 Decoding the stream needs two libraries on the gateway's host that no release
 artifact contains: FFmpeg's libavcodec and Fraunhofer's fdk-aac. Install them as
 [High Performance decoders](docs/high-performance-decoders.md) says for Linux,
-macOS and Windows. A gateway without them still passes the stream under
-`media_passthrough = true`, and refuses a browser that cannot decode it. See
+macOS and Windows. A gateway without them can only pass the stream: the picker
+shows the passthrough as already chosen, and a browser that cannot decode the
+stream cannot start the target. See
 [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
 Every Apple subtype supports the native Apple pasteboard when `clipboard =
-true`. With `resize = true`, the window continuously drives High Performance's
-virtual display, using Apple's
+true`. In a session started with resize, the window continuously drives High
+Performance's virtual display, using Apple's
 dynamic-resolution feature to replace its mode from client viewport reports.
-There is no client-side control for resizing the remote: no auto-resize toggle or
-one-shot remote-resize button. The local app-window sizing control described above
-does not change that policy. The descriptor's fixed 3840×2160 backing ceiling
-permits successive arbitrary sizes within that bound, and every fresh connection
-turns the Mac's Dynamic resolution setting back on. Standard `ard` on the Mac's
-physical displays still refuses resize, and the one/two-virtual-display control
-is not implemented.
+Resize is chosen before the session starts and holds for it: there is no
+auto-resize toggle or one-shot remote-resize button in the session. The local
+app-window sizing control described above does not change that. The descriptor's
+fixed 3840×2160 backing ceiling permits successive arbitrary sizes within that
+bound, and every fresh connection turns the Mac's Dynamic resolution setting back
+on. Standard `ard` on the Mac's physical displays offers no resize, and the
+one/two-virtual-display control is not implemented.
 
 **Unofficial:** `virtual_display = true` on an `ard` target opens Standard mode on
 one virtual display instead of the Mac's physical ones — the display and the
@@ -324,17 +332,20 @@ with it, and the browser's density is declared back to the server together with
 the window in points × that density, so the output changes mode and scale at
 once. See [`docs/wlshare-density.md`](docs/wlshare-density.md).
 
-`audio = true` works on a `wlshare` target too, through wlshare's audio
-extension: the gateway lists its pseudo-encoding, wlshare announces so and then
-streams the desktop's sound on the RFB connection itself as lossless FLAC. While
-a client listens the host is silent: the desktop plays into a PipeWire sink of
-wlshare's own, whose monitor is what is captured. A plain `vnc` target carries
-no sound and is refused the key. See [`docs/wlshare-audio.md`](docs/wlshare-audio.md).
+Sound is chosen at the picker on an `rdp` target and on a `wlshare` one. On
+wlshare it comes through wlshare's audio extension: the gateway lists its
+pseudo-encoding, wlshare announces so and then streams the desktop's sound on the
+RFB connection itself as lossless FLAC. While a client listens the host is
+silent: the desktop plays into a PipeWire sink of wlshare's own, whose monitor is
+what is captured. A session started without sound asks for none, and the host
+keeps playing where it did. In the session the menu's Mute and Unmute change only
+whether this browser listens. A plain `vnc` target carries no sound and offers
+none. See [`docs/wlshare-audio.md`](docs/wlshare-audio.md).
 
 On a Mac, audio is **experimental**. An `ard-high-performance` target receives
 it from Screen Sharing itself, beside the picture (above). No such path has been
 measured in Standard mode, so an `ard` target carries no sound; no Mac target
-takes an `audio` key. Standard mode never touches the Mac's sound output, so the
+offers sound as a choice. Standard mode never touches the Mac's sound output, so the
 Mac keeps playing where it did — its own speakers, or an AirPlay receiver that
 runs outside remotex, on Linux or Windows.
 
@@ -363,7 +374,7 @@ frames to a host's Camera app, but it is ignored by default and does not check
 the pixels the host displays. The camera channel is created only by a Windows
 host that redirects cameras — a workstation, or a Windows Server carrying the
 Remote Desktop Session Host role. The picture is verified by hand there, where
-remote audio (`audio = true`) and the rest of the RDP feature set are exercised on
+remote audio and the rest of the RDP feature set are exercised on
 every test run. Expect to re-check it by hand after a change.
 
 Apple's protocol revision is the one part of remotex built entirely without a specification: Apple

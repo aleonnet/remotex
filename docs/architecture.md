@@ -24,7 +24,7 @@ Ordinary RDP and VNC source frames are decoded in the gateway and sent as one VP
 stream of the whole desktop, at the quality and chroma the target's render plan
 resolves to. wlshare, reached as `subtype = "wlshare"`, instead codes that
 resolved VP9 stream itself for the gateway to pass through unchanged. A
-VNC desktop too large for that stream, on a target that does not resize it, has no
+VNC desktop too large for that stream, in a session that does not resize it, has no
 picture: the session stays up and the page offers the remote's displays — see
 [past the ceiling](#past-the-ceiling). A
 Mac is reached
@@ -32,12 +32,15 @@ over Apple's own RFB 003.889 with Apple Remote Desktop authentication, as
 Apple's viewer reaches it: in Screen Sharing's Standard mode with `subtype = "ard"`,
 or in High Performance with `ard-high-performance` (a virtual display, with its
 picture and sound over the Mac's media stream, as Apple's viewer takes them),
-whose HEVC and AAC-ELD a target with `media_passthrough` passes to a browser that
-decodes them rather than re-encoding them — see
+whose HEVC and AAC-ELD a session started with the passthrough passes to the
+browser rather than re-encoding them — see
 [Apple's media stream, passed through](#apples-media-stream-passed-through). An RDP
-target with `egfx_passthrough` is not decoded here either: the host's graphics
-pipeline is passed on for the browser to compose, which is experimental — see
-[RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through). Remote audio is encoded as
+session started with its passthrough is not decoded here either: the host's
+graphics pipeline is passed on for the browser to compose, which is experimental — see
+[RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
+Whether a session resizes with the window, takes the remote's sound and passes
+the remote's stream is chosen at the picker before it starts — see
+[What a session is started with](#what-a-session-is-started-with). Remote audio is encoded as
 Opus, save that passed AAC-ELD, and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
@@ -96,6 +99,18 @@ area and points here; read the area's section before changing what it covers.
   owning browser's reattach to the same target resumes an engine. Preserve the
   takeover and fresh-session behavior in
   [Session lifecycle](#session-lifecycle).
+- Resize, sound and passthrough are chosen under the target at the picker and
+  carried by `connect`; they are not config keys, and the gateway holds the
+  session to them. Which of the three a target shows is its type's to say
+  (`TargetConfig::offers`): one it does not offer has no row and is refused in a
+  `connect`, and one it offers that cannot be had is greyed with the reason. Do
+  not add a config key that makes one of these choices, a session-time control
+  that changes one, or a default the gateway applies for a browser that named
+  none. A takeover reconnects the target with the choices it was started with,
+  and a browser that cannot take the session's passthrough is told `unserved`
+  and covered: do not rebuild the session with other choices for it, and do not
+  send it a stream to fail in its decoder. See
+  [What a session is started with](#what-a-session-is-started-with).
 
 ### Input and display
 
@@ -120,12 +135,11 @@ area and points here; read the area's section before changing what it covers.
   browser composes each screen at its points (`frontend/src/mosaic.ts`). Do not
   extend it to another engine, view or density.
 - `ClientMsg::Viewport` is in CSS points. `ServerMsg::Resize.scale` is remote
-  pixel density, not a fit factor. `resize = true` means the window continuously
-  drives the remote size; do not add a client resize toggle or remembered resize
-  preference. Density is the wire's word alone, and a plain `vnc` target, or a
-  `wlshare` one whose density request goes unanswered, is presented at 1x: do
-  not add a
-  client-side density control, and never label a framebuffer with a density the
+  pixel density, not a fit factor. A session started with resize has the window
+  continuously driving the remote size; the choice is made once, at the picker,
+  so do not add a resize toggle to the session. Density is the wire's word
+  alone, and a plain `vnc` target, or a `wlshare` one whose density request goes
+  unanswered, is presented at 1x: do not add a client-side density control, and never label a framebuffer with a density the
   server has not confirmed. Read
   [Display geometry](#display-geometry),
   [HiDPI over generic VNC](generic-vnc-hidpi.md) and
@@ -146,9 +160,9 @@ A session's picture reaches the browser one of two ways, both ordinary:
   string or the quality walk changes in the desktop-vp9 repository and reaches
   here as a pin bump.
 - **Passed untouched**, as the remote made it, for the browser to decode or
-  compose: today wlshare's VP9 on a `wlshare` target, a High Performance
-  Mac's HEVC under `media_passthrough`, and an RDP host's graphics pipeline
-  under `egfx_passthrough`, each with its rule below. Another stream the user
+  compose: today wlshare's VP9 on a `wlshare` target, and in a session started
+  with the target's passthrough a High Performance Mac's HEVC or an RDP host's
+  graphics pipeline, each with its rule below. Another stream the user
   asks to pass joins them with a rule of its own; do not refuse it on this
   rule's account.
 
@@ -156,15 +170,21 @@ The gateway keeps to one encoder: whatever it transcodes goes to VP9, and a
 second encoder (H.264, AV1 or any other), a codec probe, or a codec key that
 selects one is not added as a side effect of other work.
 
-#### The browser's two answers
+#### The browser's three answers
 
-The browser is asked two questions, each once at page load and stated on the
+The browser is asked three questions, each once at page load and stated on the
 session socket: which VP9 profile its decoder takes (for
-`render_chroma = "auto"`), and whether it decodes a High Performance Mac's HEVC
-and AAC-ELD (for `media_passthrough`). The gateway *selects* on the answers and
-never refuses a client for them, save a gateway whose host lacks FFmpeg or
-fdk-aac facing a browser that cannot take the Mac's stream. Do not grow them
-into a capability negotiation or another reason to turn a session away.
+`render_chroma = "auto"`), whether it decodes a High Performance Mac's HEVC
+and AAC-ELD, and whether it composes an RDP host's graphics pipeline. The
+gateway *selects* a chroma on the first and never refuses a client for it. The
+other two say which passthrough the browser can take. They grey the choice at
+the picker, where a browser that says no starts the target encoded here; they
+refuse a `connect` that asks for the passthrough all the same; and they cover a
+browser that attaches to a session another one started with it. The one target
+they can leave unstartable is a High Performance Mac on a gateway whose host
+lacks FFmpeg or fdk-aac, which can only pass the stream. Do not grow them into
+a wider capability negotiation, and do not let either change what a running
+session is.
 Preserve the announced configuration and color-space behavior in
 [The codec](#the-codec) and
 [Choosing a chroma](#choosing-a-chroma).
@@ -172,8 +192,8 @@ Preserve the announced configuration and color-space behavior in
 #### A desktop past the ceiling
 
 A desktop past the video ceiling has no picture, and nor has a Mac's All
-Displays over more than two screens, whatever its size. On VNC without `resize`
-the session stays up and the page says so, offering the remote's displays; every
+Displays over more than two screens, whatever its size. On VNC started without
+resize the session stays up and the page says so, offering the remote's displays; every
 other source ends on the ceiling's refusal. Do not carry such a desktop some
 other way, in the gateway or the page: rectangles as images, a scaled or a
 cropped picture. Two streams for Apple's All Displays are the planned way, in
@@ -184,8 +204,9 @@ cropped picture. Two streams for Apple's All Displays are the planned way, in
 
 `subtype = "wlshare"` on a `vnc` target says the server is wlshare, and is the
 one thing that lists any of wlshare's extensions to it: its VP9 encoding, the
-density and output-list requests, and with their keys the audio, camera and
-microphone extensions. A plain `vnc` target lists none of them, whatever server
+density and output-list requests, the audio extension in a session started with
+sound, and with their keys the camera and microphone extensions. A plain `vnc`
+target lists none of them, whatever server
 answers: a wlshare behind one is read through the RFB baseline, ZRLE encoded
 here at 1x on the output it opened with, which is the fallback wlshare keeps for
 ordinary VNC clients. Do not list a wlshare extension on a plain target, or
@@ -193,44 +214,52 @@ detect wlshare on one.
 
 A `wlshare` target lists the VP9 encoding for every browser, with the plan's
 chroma, dial and walk as pseudo-encodings beside it, and passes its frames
-untouched; the stream is the subtype's picture, with no key beside it. A server
-that ignores the listing is encoded here from ZRLE. Do not transcode a passed
-frame, pass one at a chroma other than the plan's, ask wlshare for the plan with
-a client message, or add a key that selects the stream. See
+untouched; the stream is the subtype's picture, with no key and no choice at
+the picker beside it. A server that ignores the listing is encoded here from
+ZRLE. Do not transcode a passed frame, pass one at a chroma other than the
+plan's, ask wlshare for the plan with a client message, or add a key or a choice
+that selects the stream. See
 [wlshare's stream, passed through](#wlshares-stream-passed-through).
 
 #### Remote audio
 
+- Whether a session takes the remote's sound is chosen at the picker, on the
+  targets that offer it: `rdp` and `wlshare`. A session started without it asks
+  the remote for none, so the host keeps playing where it did. The session's
+  audio button reads Mute and Unmute because the browser's subscription is all
+  it changes; do not make it a way to start or stop the remote's sound.
 - Remote audio uses its own `/ws/audio` socket and queue; opening the socket is
   the subscription. Do not put audio on the session socket. It is Opus encoded
-  here, save a High Performance Mac's AAC-ELD under `media_passthrough`; there is
-  no codec key, and do not add another encoder or another passthrough. Preserve
-  claim-bound eviction and the source-format/resampling boundaries in
-  [Audio frames](#audio-frames).
+  here, save a High Performance Mac's AAC-ELD in a session that passes its
+  stream; there is no codec key, and do not add another encoder or another
+  passthrough. Preserve claim-bound eviction and the source-format/resampling
+  boundaries in [Audio frames](#audio-frames).
 - VNC audio is wlshare's audio extension (FLAC frames, with the QEMU Audio
-  extension's control messages), on a `wlshare` target: `audio = true` makes the
-  gateway list it, and a server that never announces it leaves the session
-  silent rather than failing it. A plain `vnc` target carries no sound and is
-  refused the key. Do not take raw PCM from the RFB connection or add a second
-  codec to it. See
+  extension's control messages), on a `wlshare` target: a session started with
+  sound makes the gateway list it, and a server that never announces it leaves
+  the session silent rather than failing it. A plain `vnc` target carries no
+  sound and offers none. Do not take raw PCM from the RFB connection or add a
+  second codec to it. See
   [Desktop audio over VNC with wlshare](wlshare-audio.md).
-- `ard` carries no sound and takes no `audio` key: the Mac's sound keeps playing
-  where the Mac sends it. Do not add an AirPlay receiver or any other sound path
-  for it to the gateway.
+- `ard` carries no sound and offers none: the Mac's sound keeps playing where
+  the Mac sends it. Do not add an AirPlay receiver or any other sound path for
+  it to the gateway.
 
 #### Apple High Performance
 
 - `ard-high-performance` takes the Mac's picture and sound together from High
   Performance's media stream (`src/vnc_apple_media.rs`): HEVC and AAC-ELD over
   SRTP, every packet authenticated before it is decrypted and every report sent
-  as SRTCP. The Mac refuses one leg without the other, so the target always
-  carries sound and takes no `audio` key. Its decoders, FFmpeg's libavcodec and
-  fdk-aac, are the system's shared libraries, loaded when a session needs them,
-  or on Windows from the folders `[hp_decoders]` names, loaded at start-up,
-  so published release artifacts link neither; only the non-default
+  as SRTCP. The Mac refuses one leg without the other, so a session always
+  carries sound and the picker offers no choice of it. Its decoders, FFmpeg's
+  libavcodec and fdk-aac, are the system's shared libraries, loaded when they
+  are needed, or on Windows from the folders `[hp_decoders]` names, loaded at
+  start-up, so published release artifacts link neither; only the non-default
   `apple-hp-media-static` feature
-  links static archives instead. A gateway whose host lacks either ends the
-  session of a browser that cannot decode the stream before it dials the Mac.
+  links static archives instead. A gateway whose host lacks either can only pass
+  the stream: `/api/targets` says so, the picker shows the passthrough as
+  chosen, and a session started without it all the same ends before it dials
+  the Mac.
   ZRLE is stepped over by its length, never inflated or shown; the
   browser remains covered until the media stream sends the display's first picture.
   A stream that fails ends the session: do not add a subtype
@@ -245,26 +274,29 @@ a client message, or add a key that selects the stream. See
   every other target, and everything but the display follows `ard`. Call it
   unofficial wherever it is named, and tested with macOS 26 only; do not present
   it as a mode of Apple's viewer or grow it into a third subtype.
-- `media_passthrough` on `ard-high-performance` passes the Mac's media stream
-  unaltered, for a LAN, to a browser that said it decodes both halves: HEVC
-  access units on the session socket, AAC-ELD units on `/ws/audio`. Both pass or
-  neither does; every other browser is sent VP9 and Opus. Decoded or passed, the
+- The passthrough on `ard-high-performance` passes the Mac's media stream
+  unaltered, for a LAN: HEVC access units on the session socket, AAC-ELD units
+  on `/ws/audio`. Both pass or neither does. It is offered at the picker to a
+  browser that said it decodes both halves; a session started without it is
+  sent VP9 and Opus. Decoded or passed, the
   stream is the whole picture: the Mac's ZRLE rectangles are never shown, and
   the browser stays behind its resize notice until the stream's first picture,
   at connect and across every display change. A PLI is a passed stream's
   repaint. The page answers for the
   sound by decoding one of the Mac's units in each form `isConfigSupported`
   accepts, since it accepts forms that do not decode, and plays in the form that
-  decoded (`frontend/src/appleMedia.ts`). Keep the key to that stream. See
+  decoded (`frontend/src/appleMedia.ts`). Keep the choice to that stream. See
   [Apple's media stream, passed through](#apples-media-stream-passed-through).
 
 #### RDP's graphics pipeline
 
-`egfx_passthrough` on `rdp` passes the host's graphics pipeline (MS-RDPEGFX) to
+The passthrough on `rdp` passes the host's graphics pipeline (MS-RDPEGFX) to
 the browser, for a LAN: its commands out of their bulk compression, never
 altered, as `GRAPHICS` records on the session socket behind a `graphicsStart`;
-the gateway neither composes nor encodes them. Every browser composes it, so
-the key alone selects it; do not add a browser question for it. The page
+the gateway neither composes nor encodes them. It is offered at the picker by a
+target with the pipeline on, to a page that said it composes one: a
+cross-origin isolated page, for the compositor's threads, with a WebGL 2 canvas
+to present on (`frontend/src/rdpGraphics.ts`). The page
 composes with the gateway's own compositor, `crates/remotex-rdp-graphics`,
 bound to WebAssembly by `frontend/wasm/egfx`: keep that crate building for
 `wasm32-unknown-unknown`. One decoder and compositor is the gateway's rule; do
@@ -326,12 +358,12 @@ updates in source order even though each encode runs off the engine's own task.
 
 Each target has one full-desktop picture path. Ordinarily it is one inter-frame
 VP9 stream, encoded by the gateway or made by wlshare and passed through. Two
-configured paths keep another representation the remote made: an
-`ard-high-performance` target with `media_passthrough` can pass the Mac's HEVC,
-with its AAC-ELD sound, and an RDP target with `egfx_passthrough` can pass the
-host's graphics pipeline for the browser to compose. A VNC desktop past the
-stream's picture ceiling on a target without `resize` has no picture until the
-remote sends a smaller one — see [past the ceiling](#past-the-ceiling).
+paths, chosen at the picker, keep another representation the remote made: an
+`ard-high-performance` session can pass the Mac's HEVC, with its AAC-ELD sound,
+and an RDP session can pass the host's graphics pipeline for the browser to
+compose. A VNC desktop past the stream's picture ceiling in a session started
+without resize has no picture until the remote sends a smaller one — see
+[past the ceiling](#past-the-ceiling).
 
 > **There is no configurable tile transport.** Earlier releases also sent each
 > changed region as an independent PNG or WebP still (`render_type = "tiles"`, with
@@ -357,18 +389,19 @@ A target's stream keys are per target, and every one has a default:
   it hands off from quality to frame rate as WebRTC's quality scaler does at its
   own quantizer threshold, and the settle sharpens a quiet desktop back at the
   dial. Turned off, the walk is the pressure-only one.
-- `media_passthrough` (off unless a target writes `true`, and only on
-  `ard-high-performance`) passes the Mac's HEVC and AAC-ELD to a browser that
-  decodes them, which none of the keys above then reach.
 
-The engines never see the config keys. They collapse to one `RenderPlan`
-(`quality`, `adaptive`, `chroma`, `apple_media`) at the config boundary in
+None of them reaches a passed stream: a session started with the passthrough
+sends the Mac's HEVC and AAC-ELD, or the RDP host's pipeline, as it came.
+
+The engines never see the config keys. They and the session's choices collapse
+to one `RenderPlan` (`quality`, `adaptive`, `chroma`, `apple_media`,
+`rdp_graphics`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
 ```text
-video_quality / render_chroma / render_adaptive / media_passthrough
-  → TargetConfig::render_plan(browser decoders) → RenderPlan → vnc::run / rdp::run
+video_quality / render_chroma / render_adaptive, and the session's choices
+  → TargetConfig::render_plan(choices, browser decoders) → RenderPlan → vnc::run / rdp::run
   → VideoSink::new(engine, frame_tx, plan, feedback, oversize)
   → DesktopStream (src/stream.rs) → vp9::Stream
 ```
@@ -470,10 +503,10 @@ of it, fixed when the engine starts:
 
 | Source | `Oversize` | Past the ceiling |
 |---|---|---|
-| VNC (generic, Apple Standard) without `resize` | `Hold` | the session stays up without a picture |
-| VNC with `resize`, Apple High Performance, RDP | `Refuse` | the session ends: "a video stream will not encode a W×H picture" |
+| VNC (generic, Apple Standard) started without resize | `Hold` | the session stays up without a picture |
+| VNC started with resize, Apple High Performance, RDP | `Refuse` | the session ends: "a video stream will not encode a W×H picture" |
 
-`resize` refuses because it is the gateway sizing the remote: every size it asks
+Resize refuses because it is the gateway sizing the remote: every size it asks
 for is under the ceiling, and a remote that answers past it has refused what it
 was asked. High Performance's virtual display is held under the ceiling.
 
@@ -573,16 +606,16 @@ sends.
 - **Past the ceiling it is off the list.** A frame is the whole desktop, which past
   the ceiling is not video: a desktop past it is not listed the encoding, and one
   that a resize takes there has it taken off the list, which wlshare answers with
-  the whole desktop in ZRLE — [held](#past-the-ceiling) on a target without
-  `resize`, where a frame already on its way is dropped, and refused by the ceiling
-  on one with it. Back within the ceiling, the encoding is listed again and wlshare
+  the whole desktop in ZRLE — [held](#past-the-ceiling) in a session started
+  without resize, where a frame already on its way is dropped, and refused by the
+  ceiling in one started with it. Back within the ceiling, the encoding is listed again and wlshare
   starts over at a keyframe.
 
 #### Apple's media stream, passed through
 
 `ard-high-performance` decodes the Mac's HEVC here and encodes every picture again
-as VP9, and decodes its AAC-ELD and encodes the sound again as Opus. With
-`media_passthrough = true`, a browser that decodes both is sent them instead, as
+as VP9, and decodes its AAC-ELD and encodes the sound again as Opus. A session
+started with the passthrough is sent them instead, as
 the Mac sent them, and the gateway neither decodes nor encodes a picture or a sound
 of the stream. Both halves pass or neither does. It is for a LAN. High Performance always enables its
 own rate controller, between 20 and 60 Mbit/s
@@ -604,9 +637,11 @@ Three controls with similar names therefore remain separate:
 | High Performance rate controller | Always enabled by the Mac's video profile; no UI choice | The Mac's HEVC encoder, within its fixed 20–60 Mbit/s range, by the gateway's reports |
 | `render_adaptive` | A remotex target key, on by default | VP9 encoded in the gateway, including every picture after local HEVC decoding; it does not reach passed HEVC |
 
-- **The browser selects.** The page asks once, at load (`frontend/src/appleMedia.ts`),
+- **The browser says whether it can.** The page asks once, at load (`frontend/src/appleMedia.ts`),
   and states the answer as `apple_media=true|false` on every session socket, beside
-  its chroma. For the picture it asks its `VideoDecoder` about the configuration
+  its chroma. The picker offers the passthrough to a page that said yes and greys
+  it for one that said no, and the gateway holds both to it
+  ([What a session is started with](#what-a-session-is-started-with)). For the picture it asks its `VideoDecoder` about the configuration
   macwork's stream announces, `hev1.4.10.L150.BE.8`. For the sound it decodes one of
   the Mac's own units, because no question answers it: Chrome and Safari both
   refuse `mp4a.40.39`, both decode AAC-ELD as `mp4a.40.2`, and they need the
@@ -615,7 +650,7 @@ Three controls with similar names therefore remain separate:
   cannot decode ([The sound](apple-vnc-889.md#the-sound)). The page asks
   `isConfigSupported` about the bare form, then the ES_Descriptor, decodes the unit
   in each it says yes to, and keeps the first that produced sound. Only a definite
-  "yes" to both asks for the stream; VP9 and Opus are what every browser here
+  "yes" to both offers the stream; VP9 and Opus are what every browser here
   decodes, so a "no", an answer with no verdict, a decoder that fails or never
   answers, and a question that throws all keep them. Measured, Chrome and Safari,
   desktop and mobile, decode the stream picture for picture and unit for unit,
@@ -717,16 +752,19 @@ Three controls with similar names therefore remain separate:
   oldest unit are the Opus path's; there is no bitrate to walk and no silence to
   shed.
 - **Without the decoders.** The decoders are the host's FFmpeg and fdk-aac,
-  loaded when a session needs them. On a host without either, a browser that
-  cannot take the stream has nothing to be sent: the engine tells it so, naming
-  the library, and ends before it dials the Mac. That is the one session the
-  browser's answer turns away.
+  loaded when they are needed: when a session without the passthrough starts,
+  and when `/api/targets` lists a High Performance target, which is how the
+  picker knows. On a host without either the stream can only be passed, so the
+  picker shows the passthrough as chosen, and for a browser that cannot take the
+  stream Start is greyed with the reason: that is the one target the browser's
+  answer leaves unstartable. A `connect` that asks for the stream decoded all the
+  same is told so by the engine, naming the library, before it dials the Mac.
 
 #### RDP's graphics pipeline, passed through
 
 An `rdp` target composes the host's graphics pipeline here — every codec, the
-surfaces and the caches — and encodes the picture that results as VP9. With
-`egfx_passthrough = true` it does neither: the pipeline's commands go to the
+surfaces and the caches — and encodes the picture that results as VP9. In a
+session started with the passthrough it does neither: the pipeline's commands go to the
 browser as the host sent them, and the page composes them. It is for a LAN. What
 it saves is the gateway's work, which for a desktop in use was measured at about
 three quarters VP9 encoding and a quarter decoding; passing the commands leaves
@@ -742,15 +780,18 @@ What is passed is checked against a real host: `tests/rdp_client_probe.rs`
 composes a passed pipeline beside the session that passed it, and
 `tests/playwright/egfx-passthrough.spec.ts` reads the session socket of a
 headless browser composing one. That host is one Windows 11 machine, used with
-sound and the clipboard beside the key; the camera and the microphone beside it
+sound and the clipboard beside it; the camera and the microphone beside it
 have not been tried, and no container stands in for a host that draws through
 the pipeline.
 
-- **The key selects, and no browser's answer does.** The page composes with
-  WebAssembly, which every browser that has the two WebCodecs decoders the page
-  requires has as well, so there is no question to ask and `render_plan` sets
-  `rdp_graphics` from the key alone. The key is refused on anything but an `rdp`
-  target with its pipeline on.
+- **The page says whether it can.** The page composes with WebAssembly on
+  threads that share a memory, and presents on a WebGL 2 canvas. A page that is
+  not cross-origin isolated has no shared memory, which is what a proxy that
+  drops the gateway's two headers leaves, and one without WebGL 2 has nowhere to
+  present. So the page asks itself once (`frontend/src/rdpGraphics.ts`) and states
+  `rdp_graphics=true|false` on its session socket; the picker greys the choice
+  for a page that said no, and `render_plan` sets `rdp_graphics` from the
+  session's choice. Only an `rdp` target with its pipeline on offers it.
 - **What passes** (`VideoSink::pass_graphics`). The RDP client still owns the
   channel: it answers the capability exchange, unwraps the bulk compression —
   whose history is the connection's — and writes every frame's acknowledgement
@@ -1075,15 +1116,15 @@ any fault anywhere near the path — a serde field-name mismatch, for one — su
 as an accusation against the browser and sent the reader to the wrong half of the
 system.
 
-What survives of asking is two questions that select rather than refuse: how much
-colour this decoder takes, for `render_chroma = "auto"` to resolve against
-([choosing a chroma](#choosing-a-chroma)), and whether it takes a High Performance
-Mac's HEVC and AAC-ELD, for `media_passthrough` to pass them. Each selects between
-streams the gateway is willing to send. A wrong answer costs a picture, not a
-desktop, save in the one case where the gateway has only one stream to send: a
-gateway whose host lacks the Mac's decoders ends the session of a browser that
-says no to the Mac's stream
-([Apple's media stream, passed through](#apples-media-stream-passed-through)).
+What survives of asking is three questions. One selects rather than refuses: how
+much colour this decoder takes, for `render_chroma = "auto"` to resolve against
+([choosing a chroma](#choosing-a-chroma)). A wrong answer to it costs a picture,
+not a desktop. The other two say which passthrough the browser can take: a High
+Performance Mac's HEVC and AAC-ELD, and an RDP host's graphics pipeline. They
+decide what the picker offers before a session starts, where a "no" starts the
+target encoded here, and they keep a session started with a passthrough from
+being sent to a browser that cannot show it
+([What a session is started with](#what-a-session-is-started-with)).
 
 The refusal itself stays where it always was: one honest failure at the client's own
 decoder. The gateway announces the configuration in `ServerMsg::VideoFormat` before
@@ -1098,15 +1139,18 @@ Authentication and desktop ownership are separate:
 1. `POST /api/auth/login` creates the login cookie.
 2. `POST /api/session` claims the single slot. A conflicting claim returns
    `409` unless the request reclaims its token or forces takeover.
-3. `/ws?session=<token>&chroma=420|444&apple_media=true|false` attaches to the slot and
-   reports either the target picker or the current connected target. `chroma` and
-   `apple_media` are required: the most colour this browser's video decoder takes,
-   and whether it decodes a High Performance Mac's HEVC and AAC-ELD; see
-   [Choosing a chroma](#choosing-a-chroma) and
-   [Apple's media stream, passed through](#apples-media-stream-passed-through). The media sockets
-   carry the token alone.
-4. `connect` starts the selected engine. `disconnect` stops it and returns to
-   the picker.
+3. `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false`
+   attaches to the slot and reports the target picker, the current connected
+   target, or a session this browser cannot be served. `chroma`, `apple_media`
+   and `rdp_graphics` are required: the most colour this browser's video decoder
+   takes, whether it decodes a High Performance Mac's HEVC and AAC-ELD, and
+   whether it composes an RDP host's graphics pipeline; see
+   [Choosing a chroma](#choosing-a-chroma),
+   [Apple's media stream, passed through](#apples-media-stream-passed-through) and
+   [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
+   The media sockets carry the token alone.
+4. `connect` starts the selected engine with the choices made at the picker.
+   `disconnect` stops it and returns to the picker.
 5. Losing the WebSocket detaches the client. The engine remains available for a
    60-second reattach grace period while frames are discarded.
 6. Logging out ends the login and session immediately, closes the engine, and
@@ -1128,12 +1172,73 @@ selection, and connection state do not carry into any other session.
 
 Any claim by a different browser — a forced takeover, or a plain claim while
 nobody is attached — closes the previous WebSocket and its engine but
-preserves the selected target: the new claimant's attach reconnects that
-target for its own screen and chroma (both named on the `/ws` URL), so a desktop
-opened for one display never carries its size, density, or colour over to a
-different device.
+preserves the selected target and the choices it was started with: the new
+claimant's attach reconnects that target for its own screen and chroma (both
+named on the `/ws` URL), so a desktop opened for one display never carries its
+size, density, or colour over to a different device.
 Only the owner reclaiming its token resumes the running engine, with a
 full-repaint request instead of a reconnect.
+
+### What a session is started with
+
+Three things about a session are chosen by whoever starts it, before it starts:
+whether the window drives the desktop's size, whether the remote's sound is
+taken, and whether the remote's own stream is passed through. Picking a target at
+the picker opens it, its options show under it with a Start button, and Start
+sends `connect` with the choices (`Choices` in `src/config.rs`). None of them is
+a config key.
+
+Which options a target shows is its type's to say, from `TargetConfig::offers`,
+and `GET /api/targets` carries it:
+
+| Target | Resize | Sound | Passthrough |
+|---|---|---|---|
+| `rdp` | shown | shown | shown: the graphics pipeline, experimental |
+| `vnc` | shown | hidden | hidden |
+| `vnc`, `wlshare` | shown | shown | hidden: its VP9 is the subtype's picture |
+| `vnc`, `ard` | hidden | hidden | hidden |
+| `vnc`, `ard` with `virtual_display` | shown | hidden | hidden |
+| `vnc`, `ard-high-performance` | shown | hidden: always carried | shown: the Mac's media stream |
+
+- **Not offered is not shown.** An option the target type does not have has no
+  row. High Performance's sound is such a one: the Mac refuses the picture
+  without it, so there is nothing to choose, and the session's Mute is what a
+  person has. An `rdp` target with `egfx = false` has no pipeline, so neither
+  resize nor the pipeline's row. A `connect` that names a choice the target does
+  not offer is refused with an `error`, and the slot stays as it was.
+- **Offered but unavailable is greyed, with the reason.** A passthrough is
+  greyed wherever the browser cannot take it: one that decodes neither the Mac's
+  HEVC nor its AAC-ELD, a gateway with no HEVC decoder archive to serve a
+  browser that needs it, a page that cannot compose the pipeline. `/api/targets`
+  also says, as `passthroughOnly`, where a gateway's host lacks FFmpeg or
+  fdk-aac and so cannot decode a Mac's stream at all: there the stream can only
+  be passed, the row shows it chosen, and where the browser cannot take it
+  either Start is greyed and says why, before the Mac is dialled. A `connect`
+  that asks for a passthrough the browser said it cannot take is refused like an
+  unoffered one.
+- **The choice reaches the remote.** A session started without sound asks for
+  none: RDP names no sound channel and a `wlshare` target lists no audio
+  extension, so the host keeps playing where it did. The session's audio button
+  opens and closes the browser's subscription and nothing else, which is why it
+  reads Mute and Unmute. Start's click is the gesture a browser needs for an
+  audio context, so a session started with sound comes up playing; in Safari and
+  on iOS a reload has no gesture, and comes back muted. A mute is the tab's, for
+  its session, and survives a reload.
+- **The browser remembers.** What was ticked under a target is kept in the
+  browser's local storage per target, and is how the target opens next time.
+  Everything starts unticked: a pinned size stays the size and no remote's sound
+  plays until somebody asks. A greyed row is not remembered.
+- **A session is held to its choices.** The slot keeps them beside the selected
+  target (`Selected` in `src/session.rs`). `connected` reports them: `resize`,
+  `audio` and `passthrough`. A reattach resumes the session and a takeover
+  reconnects its target with the choices the first browser made. A browser that
+  cannot take the session's passthrough is sent `unserved`, naming it, instead
+  of `connected`: no engine is rebuilt with other choices, and none runs for a
+  browser that cannot show it. The page covers the desktop with the reason and
+  offers End session, there and in the menu, which returns it to the picker to
+  start the target again. The session stays selected meanwhile, so a browser
+  that can take the stream takes it over as it was started, and it lapses with
+  the reattach grace once nobody is attached.
 
 Login tokens are held in memory with sliding expiry and delivered through an
 `HttpOnly`, `SameSite=Strict` cookie. The cookie is marked `Secure` when
@@ -1151,9 +1256,11 @@ the same build, and no second client is supported.
 
 Control and input messages are tagged JSON. Server messages cover picker and
 connected state, desktop size, display selection, cursor shape, clipboard,
-audio format, and errors. The `connected` message includes `resize`,
-`clipboard`, `audio`, `camera`, and `microphone` capability flags so clients
-expose only supported controls.
+audio format, and errors. The `connected` message says what the session was
+started with — `resize`, `audio` and `passthrough` — and includes the
+`clipboard`, `camera`, and `microphone` capability flags, so clients
+expose only supported controls. `unserved` stands in for it where the browser
+cannot take the session's passthrough.
 
 It also carries two things a client cannot work out and nothing else reveals:
 `render`, the resolved render dial, and `subtype`, the target's `wlshare`, `ard`
@@ -1166,7 +1273,8 @@ one. Both appear on the client's session card, which
 `frontend/src/connectionLabel.ts` words, beside the video decoder's configuration
 (`mediaLabel.ts`).
 
-`GET /api/targets` carries `subtype` too, so the picker names it one step
+`GET /api/targets` carries `subtype` too, beside the options each target offers
+(`resize`, `audio`, `passthrough` and `passthroughOnly`), so the picker names it one step
 earlier — the difference between two Macs in that list is a choice being made,
 not something to discover after connecting. The row uses the config spelling
 alone (`VNC · ard · 192.0.2.10:5900`); the card, which describes one target and
@@ -1246,11 +1354,13 @@ differs from the last unit's is a stream that started over, preceded by a fresh
 
 ### Audio frames
 
-Remote audio is opt-in — `audio = true` on an `rdp` or a `wlshare` target,
-and always on for `ard-high-performance`, whose sound comes with its picture;
-`ard` and a plain `vnc` target carry none — and it has a socket of its own. **Opening
-`/ws/audio?session=<token>` is the subscription** — there is no message that turns
-sound on, and closing the socket is the only way to stop.
+Remote audio is a session's choice — sound, ticked at the picker on an `rdp` or
+a `wlshare` target — and always on for `ard-high-performance`, whose sound comes
+with its picture; `ard` and a plain `vnc` target carry none. It has a socket of
+its own. **Opening `/ws/audio?session=<token>` is the subscription** — there is no
+message that turns sound on, and closing the socket is the only way to stop. The
+page opens it when a session that carries sound starts, and its Mute and Unmute
+close and open it.
 
 The separation is the point. Sound and pictures used to share the session socket and
 the bounded queue behind it, which is four frames deep; an audio pump waiting behind
@@ -1303,16 +1413,17 @@ While the link is *behind*, wave buffers that are pure silence are shed before
 the encoder instead of queued — silence is the one content whose loss cannot be
 heard, the client just receives no packets for a while (what a quiet remote
 already produces), and the backlog drains by exactly that much. All three keys
-are refused on a target without `audio`; the floor is also refused beside
+are refused on a target none of whose sessions can carry sound, which is `ard`
+and a plain `vnc` target; the floor is also refused beside
 `audio_adaptive = false`, and the default floor is held to a lower
 `audio_bitrate` rather than refused.
 
 The RDP engine carries sound over MS-RDPEA (`rdp_client/proto/rdpsnd.rs`).
-`audio = true` names the `rdpsnd` and `rdpdr` static channels and leaves
-`INFO_NOAUDIOPLAYBACK` out of the Client Info PDU; the host opens
+A session started with sound names the `rdpsnd` and `rdpdr` static channels and
+leaves `INFO_NOAUDIOPLAYBACK` out of the Client Info PDU; the host opens
 `AUDIO_PLAYBACK_DVC`, negotiates 44.1 kHz 16-bit stereo PCM the moment something
 plays, and every Wave2 buffer reaches `AudioBridge` from the client's own thread,
-never through the event queue. `audio` absent or false sets the flag and names
+never through the event queue. One started without it sets the flag and names
 neither channel, so the host's audio settings are left exactly as they were and the
 session has no audio device at all.
 
@@ -1350,17 +1461,17 @@ An **`ard-high-performance`** engine always carries sound, from the Mac's media
 stream: AAC-ELD at 48 kHz stereo over SRTP, authenticated and decrypted per
 packet, decoded by Fraunhofer's decoder on a thread of its own (`src/aac_eld.rs`)
 and handed to the bridge as 16-bit PCM, 20 ms at a time. The format is announced
-when the decoder opens and withdrawn when the receiver ends. The target takes no
-`audio` key: the Mac refuses the picture without the sound, and mutes its own
+when the decoder opens and withdrawn when the receiver ends. The picker offers
+no choice of it: the Mac refuses the picture without the sound, and mutes its own
 output while it streams. See
 [The media stream](apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
 An **`ard`** engine carries no sound: Standard has no measured audio path, so
-the target has no audio bridge and takes no `audio` key. Standard mode never
+the target has no audio bridge and offers no sound. Standard mode never
 touches the Mac's sound output either, which keeps playing where the Mac sends it
 — its speakers, or an AirPlay receiver outside remotex.
 
-An audio-enabled **`wlshare`** target has no channel to negotiate either. It
+A **`wlshare`** session started with sound has no channel to negotiate either. It
 lists wlshare's audio pseudo-encoding, and wlshare announces that it speaks it
 with an empty rectangle, at which point the gateway names the format it wants —
 48 kHz, 16-bit stereo, little-endian, which is Opus's own rate — and turns the
@@ -1394,7 +1505,7 @@ The browser's camera goes the other way, on a third socket, to an RDP target or 
 target and on both Apple subtypes at parse time: neither has anywhere to put a
 camera). **Opening
 `/ws/camera?session=<token>` is the enable** — explicit, per session, and never a
-remembered preference, unlike audio's "sound by default". Its refusals add one
+remembered preference or something a session is started with, unlike sound. Its refusals add one
 code to the family: 401 before the upgrade, 4000 for a stale token, 4001 on
 eviction, and **4002** when the running target carries no camera (or no engine is
 running at all). Where the audio socket is bound to the claim alone and survives a
@@ -1518,13 +1629,13 @@ after a connect when no remote scale has been announced. `ServerMsg::Resize`
 reports framebuffer pixels and the remote density; the browser presents it at
 `w / scale` by `h / scale` CSS pixels. The scale is never a fit factor.
 
-A target's `resize` means the window drives the remote's size, continuously and
-on every engine alike: an engine that has it applies every `viewport` it is
-sent — in points, the window's CSS pixels, rendered at the engine's own density —
-an engine without it drops them all, and the client sends them exactly
-when `connected` said `resize` — on every window change, with no toggle, no
-manual button and no remembered preference beside it. Standard `ard` rejects
-`resize` at config parse because it shares physical displays.
+A session started with resize has the window drive the remote's size,
+continuously and on every engine alike: an engine that has it applies every
+`viewport` it is sent — in points, the window's CSS pixels, rendered at the
+engine's own density — an engine without it drops them all, and the client sends
+them exactly when `connected` said `resize` — on every window change, with no
+toggle and no manual button in the session. Standard `ard` does not offer
+resize, because it shares physical displays.
 
 The opening size is one rule for every engine that can ask for one: the pinned
 `width`/`height` when the config sets both, else the full resolution of the
@@ -1539,14 +1650,14 @@ while its density still counts. See
 `TargetConfig::opening_size`; `width` and `height` remain options because whether
 the operator specified them is meaningful.
 
-A pin is spent whether or not `resize` is granted, because the two answer
-different questions: the pin is the size the session *opens* at, and `resize` is
+A pin is spent whether or not the session resizes, because the two answer
+different questions: the pin is the size the session *opens* at, and resize is
 whether the browser window drives it afterwards. RDP connects at the pin, High
 Performance builds its virtual display at it, and generic VNC asks for it with a
 single `SetDesktopSize` as soon as the server declares support — seeded into the
 same held-request slot a viewport report uses, so it goes out on the first
-`ExtendedDesktopSize` rect and no earlier. A pinned target without `resize` stays
-at the pin on all three. With `resize`, RDP and High Performance open at the pin
+`ExtendedDesktopSize` rect and no earlier. A pinned target started without resize
+stays at the pin on all three. Started with it, RDP and High Performance open at the pin
 and then follow the window, because they state a size at connect and no report
 can precede that; generic VNC cannot state one until the server declares support,
 by which time the browser — which reports its window as soon as `connected`
@@ -1559,10 +1670,10 @@ default-size request.
 
 What is engine-specific is the mechanism:
 
-| Engine | With `resize` |
+| Engine | Started with resize |
 |---|---|
 | Generic VNC | applies a requested size, on servers accepting SetDesktopSize |
-| Apple Standard VNC | rejects `resize`: it shares physical displays |
+| Apple Standard VNC | not offered: it shares physical displays |
 | Apple High Performance VNC | applies dynamic-resolution sizes within its fixed 3840×2160 backing ceiling |
 | RDP | applies a requested size, and the client's reported display density |
 
@@ -1597,8 +1708,8 @@ browser that reattaches mid-resize is told again. No other engine sends
 [Resizing a High Performance display](apple-vnc-889.md#resizing-a-high-performance-display-as-measured).
 
 `hostDisplay` reports the screen the client's window is on — its full resolution
-and its density. Mid-session only the density is acted on, and only with
-`resize`: RDP quantizes it to 1x or 2x at a midpoint (and opens at it, from the
+and its density. Mid-session only the density is acted on, and only in a
+session started with resize: RDP quantizes it to 1x or 2x at a midpoint (and opens at it, from the
 screen `connect` names), a High Performance virtual
 display re-renders the same points at it; the resulting density travels back as
 the `scale` on `resize`, and clients present the framebuffer at `pixels / scale`.
@@ -1695,9 +1806,10 @@ clipboard, sound, and the browser's camera and microphone, and no touch: touch i
 announced only by a host that opens MS-RDPEI, which this client never asks for. What it would take is in
 [`roadmap.md`](roadmap.md).
 
-Static virtual channels are asked for by key: `drdynvc` for `resize = true`, the
-default `egfx = true`, `camera = true`, or `microphone = true`; `cliprdr` for
-`clipboard = true`; and `rdpsnd` with `rdpdr` for `audio = true`.
+Static virtual channels are asked for by what the session needs: `drdynvc` for a
+session started with resize, the default `egfx = true`, `camera = true`, or
+`microphone = true`; `cliprdr` for `clipboard = true`; and `rdpsnd` with `rdpdr`
+for a session started with sound.
 Under the Graphics Pipeline (MS-RDPEGFX) the server draws through surfaces on a
 dynamic channel, marks every frame's end — which is the engine's flush signal, with
 the 16 ms coalescer demoted to a 100 ms safety net — and answers a monitor layout
@@ -1707,14 +1819,14 @@ and its compositor carries the copies and caches between them, so the desktop is
 lit and sharp; a rectangle that will not decode is left for the host to draw again,
 not made the end of the session. H.264 is refused in the capability advertise: a
 host would hand the parts of the desktop that move like video to it, and a lossy
-video codec would lose detail before the gateway ever encodes the picture. With
-`egfx_passthrough` the same channel is answered and acknowledged here and
+video codec would lose detail before the gateway ever encodes the picture. In a
+session started with the passthrough the same channel is answered and acknowledged here and
 composed in the browser
 ([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)).
 `egfx = false` is the bitmap path: the
 server draws with bitmap updates, damage is flushed on the 16 ms guess because those
-carry no frame boundary, and the desktop keeps its opening size — `resize = true` is
-refused beside it, because an RDP resize is the pipeline's graphics reset.
+carry no frame boundary, and the desktop keeps its opening size — resize is
+not offered beside it, because an RDP resize is the pipeline's graphics reset.
 On either path the pointer travels as its own shape rather than in the framebuffer.
 
 Read [The RDP client, written here](rdp-client.md) for the whole of it: the
@@ -1797,13 +1909,13 @@ offered either: their encoding lists are measured exact, and adding to one costs
 the display layout.
 
 The client advertises DesktopSize and ExtendedDesktopSize on every generic
-target, so a server can always say its size changed; `resize = true` decides only
+target, so a server can always say its size changed; the session's resize decides only
 whether the window asks it to change, with `SetDesktopSize`. Generic VNC clipboard support uses Extended Clipboard when the server
 advertises it and falls back to Latin-1 `ServerCutText` otherwise. Both Apple
 subtypes negotiate Apple's display metadata and native pasteboard instead, and ask
 for ZRLE in their first `SetEncodings`.
 
-**Apple Standard mode remains fixed-size.** It rejects `resize = true`, shares the
+**Apple Standard mode remains fixed-size.** It offers no resize, shares the
 Mac's physical displays and never sends a viewport size or `SetDesktopSize`.
 Density is handled by the Mac instead: from each `AppleDisplayLayout`, the gateway
 reads the displays' native densities and the viewer scale already applied. It sends
@@ -1831,7 +1943,7 @@ it, as Apple's viewer answers every Mac before choosing a mode after ServerInit.
 None of it is documented by Apple, so every claim in this section is measurement
 or a reading of Apple's binaries rather than specification, holding for the Macs
 in [apple-vnc-889.md](apple-vnc-889.md) rather than for the protocol. The
-dynamic-resolution path behind `resize = true` remains reverse engineered. It
+dynamic-resolution path behind a resizing session remains reverse engineered. It
 authenticates with Apple's Diffie-Hellman security, type 30, with the macOS
 account's username and password: named, the connection shares that user's screen,
 where an anonymous one lands at a separate login-window session. It then differs
@@ -1859,14 +1971,14 @@ Mac's physical displays are disabled and all of its windows are placed on that
 virtual display. Apple's
 official macOS Screen Sharing client can choose up to two virtual displays, while
 Remotex always requests one. The full descriptor enables dynamic resolution on
-every fresh session. With `resize = true`, the window continuously drives the
+every fresh session. In a session started with resize, the window continuously drives the
 virtual display through Apple's dynamic-resolution feature: later viewport reports
 resend the same full descriptor with the requested mode, and the Mac's answering
-display layout sets the actual framebuffer geometry. There is no client-side
-resize mode or one-shot button. The Mac supplies that virtual display the way
+display layout sets the actual framebuffer geometry. There is no resize mode or
+one-shot button in the session. The Mac supplies that virtual display the way
 it does to Apple's viewer: as HEVC over its media stream, offered once the display has
 settled and decoded in the gateway by the host's FFmpeg libavcodec (`src/vnc_apple_media.rs`),
-or passed to a browser that decodes it under `media_passthrough`. The gateway's
+or passed to the browser in a session started with the passthrough. The gateway's
 decoder runs four slice threads because one is too slow for 60 pictures a second:
 on one core of an i5-8500T a 1600×1000 picture took 14–23 ms, on four 7–14 ms.
 ZRLE rectangles never carry the

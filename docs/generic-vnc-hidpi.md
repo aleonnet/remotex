@@ -41,7 +41,7 @@ Wayland desktop behind the wlshare server, asked for on a target with
 A wlshare server behind a plain `vnc` target is 1x like any other.
 
 The consequence on a sway output at `scale 2` is that it is *worse* than at
-`scale 1`: with `resize = true` the window asks for its 1728×883 points as
+`scale 1`: in a session started with resize the window asks for its 1728×883 points as
 1728×883 pixels, sway makes that an 864×441 logical desktop, and the browser
 stretches it back up. Half the workspace, still soft. Run the output wayvnc
 captures at `scale 1` for a generic target. Applying that is live and keeps every

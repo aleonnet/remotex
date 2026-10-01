@@ -102,7 +102,7 @@ them, so it needs cargo-about and uv beside the frontend's `node_modules`; the
 native-package build consumes those notices from the tarball. The frontend's
 build compiles a WebAssembly module from the gateway's graphics crate
 (`frontend/wasm/egfx` around
-`crates/remotex-rdp-graphics`, the page's compositor for `egfx_passthrough`), so wherever the frontend is built — `bun run build`, or a
+`crates/remotex-rdp-graphics`, the page's compositor for a passed RDP pipeline), so wherever the frontend is built — `bun run build`, or a
 Cargo build without `REMOTEX_PREBUILT_FRONTEND` — the module is built by the nightly
 toolchain `frontend/wasm/egfx/rust-toolchain.toml` pins, which its threads need and
 nothing else is built with. rustup installs it on the first build, unless
@@ -162,8 +162,8 @@ is not OSI-approved and grants no patents, for the AAC-ELD sound. Published rele
 artifacts compile and link neither: the gateway loads the system's shared libraries
 when a session needs them, or on Windows the ones in the folders `[hp_decoders]`
 names when it starts (`src/libav.rs`, `src/aac_eld.rs`), and a host without them
-runs those targets only with `media_passthrough`, for browsers that decode the
-stream. The `.deb` recommends the Linux ones, the public container image carries
+runs those targets only with the stream passed through, for browsers that decode
+it. The `.deb` recommends the Linux ones, the public container image carries
 neither and the private one `publish-full-image.sh` builds carries Debian's;
 elsewhere the operator installs them, as
 [High Performance decoders](../docs/high-performance-decoders.md) says for each
