@@ -29,18 +29,16 @@
 //! PCM rate or less, and a silent desktop a few bytes a frame. The FLAC stream
 //! header (`STREAMINFO`) is never sent: everything in it follows from the format
 //! this client set and the extension's one rule, that every frame is
-//! [`BLOCK_FRAMES`] frames of it, so the decoder builds it here ([`streaminfo`]).
+//! [`BLOCK_FRAMES`] frames of it, so the decoder builds it from those
+//! ([`STREAM`]). The decoder is libFLAC, as wlshare's encoder is, both through
+//! `desktop-flac`, which loads the library at run time.
 //!
 //! wlshare is the server this was built against; see docs/wlshare-audio.md.
 //! Apple's dialects are not asked: neither Screen Sharing subtype speaks this
 //! extension.
 
 use anyhow::Context as _;
-use symphonia_bundle_flac::FlacDecoder;
-use symphonia_core::codecs::audio::well_known::CODEC_ID_FLAC;
-use symphonia_core::codecs::audio::{AudioCodecParameters, AudioDecoder as _, AudioDecoderOptions};
-use symphonia_core::packet::Packet;
-use symphonia_core::units::{Duration, Timestamp};
+use desktop_flac::{Decoder, Stream};
 
 use crate::audio::PcmFormat;
 
@@ -199,137 +197,59 @@ pub fn frame_length(header: [u8; FRAME_HEADER_LEN]) -> u32 {
     u32::from_be_bytes([header[3], header[4], header[5], header[6]])
 }
 
-/// The `STREAMINFO` block wlshare's frames decode against, built from
-/// [`SOURCE_FORMAT`] as the FLAC specification lays it out: the block size as
-/// both minimum and maximum, the frame sizes and total samples unknown, and no
-/// MD5.
-pub fn streaminfo() -> [u8; 34] {
-    let mut info = [0u8; 34];
-    info[0..2].copy_from_slice(&BLOCK_FRAMES.to_be_bytes());
-    info[2..4].copy_from_slice(&BLOCK_FRAMES.to_be_bytes());
-    // Bytes 4..10 are the minimum and maximum frame sizes, zero for unknown.
-    // Then the rate (20 bits), channels - 1 (3), bits per sample - 1 (5) and
-    // total samples (36, zero for unknown).
-    let packed = (u64::from(SOURCE_FORMAT.sample_rate) << 44)
-        | (u64::from(SOURCE_FORMAT.channels - 1) << 41)
-        | (u64::from(SOURCE_FORMAT.bits_per_sample - 1) << 36);
-    info[10..18].copy_from_slice(&packed.to_be_bytes());
-    info
+/// What every frame of a stream is: [`SOURCE_FORMAT`], in blocks of
+/// [`BLOCK_FRAMES`].
+pub const STREAM: Stream = Stream {
+    rate: SOURCE_FORMAT.sample_rate,
+    channels: SOURCE_FORMAT.channels as u8,
+    bits: SOURCE_FORMAT.bits_per_sample as u8,
+    block: BLOCK_FRAMES,
+};
+
+/// Load libFLAC, or say that the host lacks it: what a session with wlshare's
+/// sound needs before it dials. A failure is not remembered, so a library
+/// installed while the gateway runs is found by the next session.
+pub fn load() -> anyhow::Result<()> {
+    desktop_flac::load().context("wlshare's sound is FLAC, decoded by libFLAC")
+}
+
+/// Load the libFLAC this gateway's package carries, if it carries one, before
+/// the gateway listens: a package that brought the library refuses to start
+/// without it, and decodes with no other.
+pub fn load_carried() -> anyhow::Result<()> {
+    if let Some(dir) = crate::config::carried_libflac() {
+        desktop_flac::load_from(&dir).context("the libFLAC this package installs is missing; reinstall it")?;
+    }
+    Ok(())
 }
 
 /// One stream's decoder: a FLAC frame in, its samples out as the interleaved
 /// little-endian 16-bit stereo [`SOURCE_FORMAT`] names.
 ///
-/// Made at each begin, since frames are numbered from zero again there. Each
-/// frame decodes on its own, so one wlshare dropped for a session that fell
-/// behind costs nothing but its own twenty milliseconds.
+/// Made at each begin. Each frame decodes on its own, so one wlshare dropped
+/// for a session that fell behind costs nothing but its own twenty
+/// milliseconds.
 pub struct FrameDecoder {
-    decoder: FlacDecoder,
-    samples: Vec<i16>,
+    decoder: Decoder,
+    samples: Vec<i32>,
 }
 
 impl FrameDecoder {
     pub fn new() -> anyhow::Result<Self> {
-        let mut params = AudioCodecParameters::new();
-        params.for_codec(CODEC_ID_FLAC).with_extra_data(Box::new(streaminfo()));
-        let decoder = FlacDecoder::try_new(&params, &AudioDecoderOptions::default())
-            .context("setting up the FLAC decoder")?;
+        let decoder = Decoder::new(STREAM).context("setting up the FLAC decoder")?;
         Ok(Self { decoder, samples: Vec::new() })
     }
 
     /// The samples of one FLAC frame, which must be exactly [`BLOCK_FRAMES`]
-    /// frames of [`SOURCE_FORMAT`]: a frame of any other shape is not one this
-    /// client asked for.
-    pub fn decode(&mut self, frame: Vec<u8>) -> anyhow::Result<Vec<u8>> {
-        // symphonia's decoder expects a demuxer to have vetted the frame: it
-        // takes the channels from the STREAMINFO built here, not from the
-        // frame, and leaves the frame's CRC-16 unchecked. Both are this
-        // client's to check.
-        check_frame(&frame)?;
-        let packet = Packet::new(0, Timestamp::new(0), Duration::new(u64::from(BLOCK_FRAMES)), frame);
-        let decoded = self.decoder.decode(&packet).context("decoding a FLAC frame")?;
-        anyhow::ensure!(
-            decoded.frames() == usize::from(BLOCK_FRAMES)
-                && decoded.spec().channels().count() == usize::from(SOURCE_FORMAT.channels),
-            "a FLAC frame of {} frames and {} channels, not the {BLOCK_FRAMES} and {} asked for",
-            decoded.frames(),
-            decoded.spec().channels().count(),
-            SOURCE_FORMAT.channels
-        );
-        // The decoder scales to 32 bits; the conversion to 16 takes the top
-        // half, which is exactly the sample that went in.
-        decoded.copy_to_vec_interleaved(&mut self.samples);
-        Ok(self.samples.iter().flat_map(|sample| sample.to_le_bytes()).collect())
+    /// frames of [`SOURCE_FORMAT`], and the frame whole and nothing more: a
+    /// frame of any other shape is not one this client asked for. The decoder
+    /// checks the frame's header against [`STREAM`] and both of its CRCs.
+    pub fn decode(&mut self, frame: &[u8]) -> anyhow::Result<Vec<u8>> {
+        self.samples.clear();
+        self.decoder.decode(frame, &mut self.samples)?;
+        // A sample is a signed value of the stream's 16 bits.
+        Ok(self.samples.iter().flat_map(|&sample| (sample as i16).to_le_bytes()).collect())
     }
-}
-
-/// Check a FLAC frame's header against [`SOURCE_FORMAT`] and [`BLOCK_FRAMES`],
-/// and its CRC-8 and CRC-16, as the FLAC specification lays them out.
-fn check_frame(frame: &[u8]) -> anyhow::Result<()> {
-    anyhow::ensure!(frame.len() >= 8, "a FLAC frame of {} bytes", frame.len());
-    anyhow::ensure!(frame[..2] == [0xFF, 0xF8], "not a fixed-blocking FLAC frame");
-    let (block_code, rate_code) = (frame[2] >> 4, frame[2] & 0xF);
-    let (channel_code, size_code) = (frame[3] >> 4, (frame[3] >> 1) & 0b111);
-    anyhow::ensure!(
-        matches!(channel_code, 0x1 | 0x8..=0xA),
-        "a FLAC frame with channel assignment {channel_code}, not stereo"
-    );
-    anyhow::ensure!(
-        matches!(size_code, 0 | 0x4) && frame[3] & 1 == 0,
-        "a FLAC frame of sample size code {size_code}, not 16 bits"
-    );
-    // The frame number, UTF-8 coded: a lead byte's leading ones count its bytes.
-    let number_len = match frame[4].leading_ones() {
-        0 => 1,
-        n @ 2..=7 => n as usize,
-        _ => anyhow::bail!("a FLAC frame number that is not UTF-8 coded"),
-    };
-    let mut at = 4 + number_len;
-    let mut field = |len: usize| -> anyhow::Result<u32> {
-        let bytes = frame.get(at..at + len).context("a truncated FLAC frame header")?;
-        at += len;
-        Ok(bytes.iter().fold(0, |value, &byte| value << 8 | u32::from(byte)))
-    };
-    let block = match block_code {
-        0x6 => field(1)? + 1,
-        0x7 => field(2)? + 1,
-        _ => 0,
-    };
-    anyhow::ensure!(block == u32::from(BLOCK_FRAMES), "a FLAC frame whose block is not {BLOCK_FRAMES} frames");
-    let rate = match rate_code {
-        0x0 | 0xA => SOURCE_FORMAT.sample_rate,
-        0xC => field(1)? * 1000,
-        0xD => field(2)?,
-        0xE => field(2)? * 10,
-        _ => 0,
-    };
-    anyhow::ensure!(rate == SOURCE_FORMAT.sample_rate, "a FLAC frame not at {} Hz", SOURCE_FORMAT.sample_rate);
-    anyhow::ensure!(
-        frame.get(at) == Some(&crc8(&frame[..at])),
-        "a FLAC frame header whose CRC-8 does not match"
-    );
-    let (body, crc) = frame.split_at(frame.len() - 2);
-    anyhow::ensure!(
-        u16::from_be_bytes([crc[0], crc[1]]) == crc16(body),
-        "a FLAC frame whose CRC-16 does not match"
-    );
-    Ok(())
-}
-
-/// FLAC's header CRC: polynomial 0x07, initialised to zero.
-fn crc8(bytes: &[u8]) -> u8 {
-    bytes.iter().fold(0, |crc, &byte| {
-        (0..8).fold(crc ^ byte, |crc, _| if crc & 0x80 != 0 { crc << 1 ^ 0x07 } else { crc << 1 })
-    })
-}
-
-/// FLAC's frame CRC: polynomial 0x8005, initialised to zero.
-fn crc16(bytes: &[u8]) -> u16 {
-    bytes.iter().fold(0, |crc, &byte| {
-        (0..8).fold(crc ^ u16::from(byte) << 8, |crc, _| {
-            if crc & 0x8000 != 0 { crc << 1 ^ 0x8005 } else { crc << 1 }
-        })
-    })
 }
 
 #[cfg(test)]
@@ -407,23 +327,15 @@ mod tests {
         assert_eq!(frame_length(wire[1..].try_into().unwrap()), 0x0102);
     }
 
-    /// The header's fields, read back by a reader written from the FLAC
-    /// specification's bit layout rather than the packing above.
+    /// The stream the decoder is made for is the format the wave buffers are
+    /// declared in, in the extension's twenty-millisecond blocks.
     #[test]
-    fn the_streaminfo_is_the_asked_format_in_twenty_millisecond_blocks() {
-        let info = streaminfo();
-        assert_eq!(u16::from_be_bytes([info[0], info[1]]), 960);
-        assert_eq!(u16::from_be_bytes([info[2], info[3]]), 960);
-        assert_eq!(&info[4..10], &[0; 6]);
-        let rate = (u32::from(info[10]) << 12) | (u32::from(info[11]) << 4) | (u32::from(info[12]) >> 4);
-        assert_eq!(rate, 48_000);
-        assert_eq!(((info[12] >> 1) & 0b111) + 1, 2, "channels");
-        assert_eq!((((info[12] & 1) << 4) | (info[13] >> 4)) + 1, 16, "bits per sample");
-        assert_eq!(&info[18..], &[0; 16], "no MD5");
+    fn the_stream_is_the_asked_format_in_twenty_millisecond_blocks() {
+        assert_eq!(STREAM, Stream { rate: 48_000, channels: 2, bits: 16, block: 960 });
     }
 
-    /// Frames as wlshare makes them — flacenc, in fixed 960-frame blocks —
-    /// which shares nothing with the symphonia decoder under test.
+    /// Frames in the fixed 960-frame blocks wlshare makes them in, by flacenc,
+    /// which shares nothing with the libFLAC decoder under test.
     fn encode(pcm: &[u8]) -> Vec<Vec<u8>> {
         let block = usize::from(BLOCK_FRAMES);
         let mut info = StreamInfo::new(48_000, 2, 16).unwrap();
@@ -466,7 +378,7 @@ mod tests {
         let frames = encode(&pcm);
         assert_eq!(frames.len(), 4);
         let mut decoder = FrameDecoder::new().unwrap();
-        let decoded: Vec<u8> = frames.into_iter().flat_map(|frame| decoder.decode(frame).unwrap()).collect();
+        let decoded: Vec<u8> = frames.iter().flat_map(|frame| decoder.decode(frame).unwrap()).collect();
         assert!(decoded == pcm, "FLAC is lossless");
     }
 
@@ -479,8 +391,8 @@ mod tests {
         frames.remove(1);
         let mut decoder = FrameDecoder::new().unwrap();
         let block = usize::from(BLOCK_FRAMES) * 4;
-        assert_eq!(decoder.decode(frames.remove(0)).unwrap(), &pcm[..block]);
-        assert_eq!(decoder.decode(frames.remove(0)).unwrap(), &pcm[2 * block..]);
+        assert_eq!(decoder.decode(&frames[0]).unwrap(), &pcm[..block]);
+        assert_eq!(decoder.decode(&frames[1]).unwrap(), &pcm[2 * block..]);
     }
 
     #[test]
@@ -495,8 +407,8 @@ mod tests {
         let frame = flacenc::encode_fixed_size_frame(&config, &framebuf, 0, &info).unwrap();
         let mut sink = ByteSink::new();
         frame.write(&mut sink).unwrap();
-        assert!(decoder.decode(sink.into_inner()).is_err(), "half a block");
-        assert!(decoder.decode(vec![0xAB; 64]).is_err(), "not a frame");
+        assert!(decoder.decode(sink.as_slice()).is_err(), "half a block");
+        assert!(decoder.decode(&[0xAB; 64]).is_err(), "not a frame");
         // A whole block, but of one channel.
         let mut info = StreamInfo::new(48_000, 1, 16).unwrap();
         info.set_block_sizes(960, 960).unwrap();
@@ -505,14 +417,14 @@ mod tests {
         let frame = flacenc::encode_fixed_size_frame(&config, &framebuf, 0, &info).unwrap();
         let mut sink = ByteSink::new();
         frame.write(&mut sink).unwrap();
-        assert!(decoder.decode(sink.into_inner()).is_err(), "mono");
+        assert!(decoder.decode(sink.as_slice()).is_err(), "mono");
         // A good frame with one bit of its samples flipped.
         let mut damaged = encode(&signal(1)).remove(0);
         let middle = damaged.len() / 2;
         damaged[middle] ^= 1;
-        assert!(decoder.decode(damaged).is_err(), "a bit flipped");
+        assert!(decoder.decode(&damaged).is_err(), "a bit flipped");
         // And a good frame still decodes after both.
         let pcm = signal(1);
-        assert_eq!(decoder.decode(encode(&pcm).remove(0)).unwrap(), pcm);
+        assert_eq!(decoder.decode(&encode(&pcm)[0]).unwrap(), pcm);
     }
 }

@@ -10,6 +10,7 @@
 #   C:\Program Files\remotex\
 #   ├── VERSION
 #   ├── bin\remotex.exe
+#   ├── bin\libFLAC.dll
 #   └── share\doc\remotex\
 #       ├── remotex.example.toml
 #       ├── LICENSE
@@ -72,6 +73,19 @@ try {
     if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
     New-Item -ItemType Directory -Force -Path "$stage\bin", "$stage\share\doc\remotex" | Out-Null
     Copy-Item $exe "$stage\bin\remotex.exe"
+    # libFLAC, which decodes wlshare's sound and is loaded at run time (desktop-flac), beside
+    # the exe, where Windows looks first. FLAC's own release build, checked against the digest
+    # of the file this was written against; it needs nothing but the system's own DLLs.
+    $flacZip = "$stage\flac-1.5.0-win.zip"
+    Invoke-WebRequest 'https://github.com/xiph/flac/releases/download/1.5.0/flac-1.5.0-win.zip' -OutFile $flacZip
+    $flacDigest = (Get-FileHash $flacZip -Algorithm SHA256).Hash
+    # `-ne` compares strings case-insensitively; Get-FileHash prints upper case.
+    if ($flacDigest -ne '53f1500f0d6e7c61379d7fee50d4a9f7f504c650009506d9ba015530d76c0dde') {
+        throw "flac-1.5.0-win.zip: sha256 is $flacDigest"
+    }
+    Expand-Archive -Path $flacZip -DestinationPath "$stage\flac"
+    Copy-Item "$stage\flac\flac-1.5.0-win\Win64\libFLAC.dll" "$stage\bin\libFLAC.dll"
+    Remove-Item -Recurse -Force $flacZip, "$stage\flac"
     Copy-Item 'remotex.example.toml', 'LICENSE' "$stage\share\doc\remotex\"
     # The notices are a build output, as in build-tarball.sh: release CI's, named in
     # REMOTEX_PREBUILT_NOTICES, or made here with cargo-about and frontend\node_modules.

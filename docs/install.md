@@ -28,6 +28,9 @@ Use the `arm64` filename on an arm64 host. The package installs:
 /usr/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
+It depends on the distribution's libFLAC, which decodes a wlshare target's
+sound, and `apt` installs it with the package.
+
 ### Fedora, RHEL, and other RPM distributions (`.rpm`)
 
 Releases provide `remotex-linux-amd64.rpm` and
@@ -39,7 +42,8 @@ sudo dnf install ./remotex-linux-amd64.rpm
 ```
 
 Use the `arm64` filename on an arm64 host. The package uses the same `/usr/bin`
-and `/usr/share` layout as the `.deb`. `sudo rpm -i` and a distribution's other
+and `/usr/share` layout as the `.deb`, and depends on the distribution's libFLAC
+as it does. `sudo rpm -i` and a distribution's other
 RPM frontend work too, but `dnf` is preferred because it resolves dependencies.
 
 ### macOS (`.pkg`)
@@ -55,10 +59,14 @@ It installs:
 
 ```text
 /usr/local/bin/remotex
+/usr/local/lib/remotex/libFLAC.14.dylib
 /usr/local/share/doc/remotex/remotex.example.toml
 /usr/local/share/doc/remotex/LICENSE
 /usr/local/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
+
+The library decodes a wlshare target's sound. It is the package's own copy, in a
+folder of its own, and the installed gateway uses no other.
 
 The package is unsigned and not notarized. A browser download is quarantined,
 so fetch it with `curl` as shown and install it from the terminal. The `.pkg`
@@ -80,6 +88,7 @@ on the machine `PATH`, so `remotex` works in a shell opened after the install:
 
 ```text
 C:\Program Files\remotex\bin\remotex.exe
+C:\Program Files\remotex\bin\libFLAC.dll
 C:\Program Files\remotex\VERSION
 C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
 C:\Program Files\remotex\share\doc\remotex\LICENSE

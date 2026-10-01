@@ -117,6 +117,19 @@ try {
     Add-MachinePath 'C:\tools\bun'
     Log "bun $(& 'C:\tools\bun\bun.exe' --version)"
 
+    # --- libFLAC, which the tests load to decode wlshare's sound ----------------------
+    # FLAC's own release build, the one the MSI carries (packaging\build-windows-msi.ps1).
+    if (-not (Test-Path 'C:\tools\flac\libFLAC.dll')) {
+        $zip = "$Root\flac-1.5.0-win.zip"
+        Get-File 'https://github.com/xiph/flac/releases/download/1.5.0/flac-1.5.0-win.zip' $zip `
+            -Sha256 '53f1500f0d6e7c61379d7fee50d4a9f7f504c650009506d9ba015530d76c0dde'
+        New-Item -ItemType Directory -Force -Path 'C:\tools\flac' | Out-Null
+        Expand-Archive -Path $zip -DestinationPath "$Root\flac-unpack" -Force
+        Copy-Item "$Root\flac-unpack\flac-1.5.0-win\Win64\libFLAC.dll" 'C:\tools\flac\libFLAC.dll' -Force
+        Remove-Item -Recurse -Force "$Root\flac-unpack"
+    } else { Log 'libFLAC already present' }
+    Add-MachinePath 'C:\tools\flac'
+
     # --- .NET SDK + WiX: the MSI toolset is a dotnet tool ----------------------------
     # The SDK lands in C:\dotnet through Microsoft's dotnet-install script, which works
     # from a SYSTEM task with no UI; WiX beside it under C:\tools\wix via --tool-path,

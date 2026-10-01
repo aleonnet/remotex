@@ -121,9 +121,10 @@ formats, 4 and 5, are refused by wlshare, since FLAC stores at most 24 bits.
 
 Sent between a begin and an end. Every frame holds exactly `frequency / 50`
 frames of samples — 20 ms, **960** at the gateway's 48 kHz — in FLAC's
-fixed-blocking mode, numbered from zero at each begin. The FLAC stream header,
+fixed-blocking mode, and is numbered zero: wlshare makes each frame a FLAC
+stream of its own, one block long, so that none waits for the next. The FLAC stream header,
 `STREAMINFO`, is never sent: everything in it follows from the format the client
-set and that block size, so the client builds it (`vnc_audio::streaminfo`). An
+set and that block size, so the decoder builds it (`vnc_audio::STREAM`). An
 unsigned format has the top bit of every sample flipped before it is encoded,
 mapping it onto the signed range with silence on zero, and flipped back after;
 the gateway asks for a signed one, so it never flips. Decoded samples are
@@ -150,17 +151,32 @@ announces late is still taken.
   `AudioBridge`; `end` drops the decoder and clears the format, which leaves an
   open `/ws/audio` response filling with silence rather than ending. A desktop
   going quiet must not cost the listener its stream.
-- Each frame is decoded by symphonia's FLAC decoder into interleaved
+- Each frame is decoded by libFLAC, behind the stream header built for it,
+  into interleaved
   little-endian 16-bit stereo, which is what was asked for and what the queue
   takes, and goes to the bridge as one wave buffer. From there the path is every
   target's: the queue, the Opus encoder, `/ws/audio`
   ([Audio frames](architecture.md#audio-frames)).
 - A frame that does not decode, or does not hold exactly 960 stereo frames, is
   dropped with a warning: each FLAC frame decodes on its own, so it costs its
-  20 ms and nothing after it. So is a frame outside a begin and an end.
+  20 ms and nothing after it. So is a frame outside a begin and an end. The
+  decoder checks the frame's header against the format and both of its CRCs,
+  and takes one whole frame and nothing more.
 - A frame length past 64 KiB is read past rather than allocated: a frame is
   3840 bytes of samples before compression, and FLAC adds a few header bytes at
   worst, so anything larger is a server that has lost its framing.
+
+The decoder and wlshare's encoder are both libFLAC, spoken to in one place:
+[desktop-flac](https://github.com/andrewtheguy/desktop-flac), a repository of its
+own that the gateway and wlshare each pin by release tag. It links nothing and
+loads the shared library at run time, FLAC 1.5's or 1.4's. Every package brings
+it: the `.deb` and `.rpm` depend on the distribution's, the container image
+installs Debian's, the macOS `.pkg` carries one in `/usr/local/lib/remotex`,
+which the gateway it installs loads when it starts and decodes with no other,
+and the Windows `.msi` puts `libFLAC.dll` beside `remotex.exe`. A gateway built
+by hand loads the system's, and where there is none a session started with sound
+on a `wlshare` target is refused before wlshare is dialled, naming the library;
+one started without sound never needs it.
 
 Audio shares the TCP stream with the pixels, which is the one cost of carrying
 it in band. wlshare drains its capture queue before every framebuffer update, so
@@ -191,7 +207,7 @@ for 20 ms buffers. The process callback runs on that capture's own loop thread
 rather than on the graph's real-time one — `RT_PROCESS` is deliberately not set,
 since the callback encodes, allocates, takes a mutex and wakes a task, none of
 which is real-time safe: on the data thread it could stall the whole audio graph
-and give every application on the host an xrun. It encodes with `flacenc` there,
+and give every application on the host an xrun. It encodes with libFLAC there,
 off the session's task, and queues each finished frame in a sixteen-deep queue,
 dropping the oldest when a client cannot keep up — a dropped frame is a 20 ms
 hole, and a stalled capture callback is worse. A set-format on a running stream

@@ -224,12 +224,13 @@ jobs:
           GH_REPO: ${{ github.repository }}
         # Named globs, not `artifacts/*`: `merge-multiple` also drops the
         # frontend-dist and third-party-notices artifacts' files in here, and those
-        # are build input, not release assets. The .pkg is the native macOS gateway package, the .msi
-        # the Windows one.
+        # are build input, not release assets, as the tarballs are: the container job takes
+        # those from the workflow's artifacts. The .pkg is the native macOS gateway package, the
+        # .msi the Windows one.
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \
             artifacts/*.deb artifacts/*.rpm artifacts/*.pkg \
-            artifacts/*.tar.gz artifacts/*.msi --clobber
+            artifacts/*.msi --clobber
 
       - name: Publish release (remove draft, creates the tag)
         env:

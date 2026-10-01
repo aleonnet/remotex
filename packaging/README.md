@@ -1,8 +1,8 @@
 # Packaging
 
 Native packages are the release install contract. Linux ships both `.deb` and
-`.rpm`; macOS ships `.pkg`. The distro-agnostic tarball remains the layout input
-for native package and container builds. Containers replace its native binary
+`.rpm`; macOS ships `.pkg`. The distro-agnostic tarball is the layout input
+for native package and container builds, and no release asset. Containers replace its native binary
 with a build that excludes the `embedded-gateway` default feature.
 
 Every artifact carries one gateway binary with the web client compiled into it
@@ -169,6 +169,23 @@ elsewhere the operator installs it, as
 [High Performance decoder](../docs/high-performance-decoder.md) says for each
 platform.
 
+wlshare's sound is FLAC, decoded by libFLAC, which
+[desktop-flac](https://github.com/andrewtheguy/desktop-flac) loads at run time
+and nothing links (`src/vnc_audio.rs`). Every artifact brings it, FLAC 1.5's or
+1.4's:
+
+| Artifact | libFLAC |
+|---|---|
+| `.deb` | `Depends: libflac14 \| libflac12t64`, the distribution's |
+| `.rpm` | `Requires: (libFLAC.so.14()(64bit) or libFLAC.so.12()(64bit))`, the distribution's |
+| container image | Debian's `libflac14`, installed by the `Dockerfile` |
+| `.pkg` | `/usr/local/lib/remotex/libFLAC.14.dylib`, built by `build-native-packages.sh` from FLAC's release source without Ogg, for macOS 11; building the package takes CMake |
+| `.msi` | `bin\libFLAC.dll` beside the executable, from FLAC's own Windows release |
+
+The source and the Windows release are each checked against a SHA-256 the
+script pins. libFLAC is BSD-3-Clause, and its notice is in
+`THIRD-PARTY-NOTICES.txt`.
+
 The non-default `apple-hp-media-static` feature links private static archives
 instead, and is in no release artifact. No artifact holds the EXPERIMENTAL
 software HEVC decoder either, libavcodec in WebAssembly for the page: an operator
@@ -178,8 +195,8 @@ serves it when it finds it. Every release target looks for it by its release
 name in `share/remotex`, beside the `share/doc/remotex` it installs, unless
 `[hevc_wasm].archive` names another file:
 `/usr/share/remotex` for the `.deb` and `.rpm`, `/usr/local/share/remotex` for
-the `.pkg`, `share\remotex` under the `.msi`'s install directory, the unpacked
-tarball's own, and `/opt/remotex/versions/<version>/share/remotex` in the
+the `.pkg`, `share\remotex` under the `.msi`'s install directory, and
+`/opt/remotex/versions/<version>/share/remotex` in the
 container image. No package owns or makes that directory: the operator does. The
 private image `publish-full-image.sh` builds carries it there.
 `libavcodec-hevc-prebuilt` links FFmpeg's libavcodec and libavutil, configured
@@ -214,6 +231,6 @@ succeed.
 Container images take their layout from the Linux tarballs, then replace
 `bin/remotex` with the separately built container gateway. The build
 script, release smoke test, and Dockerfile all reject a binary that exposes
-`tui`, `serve-embedded`, or `check-config --embedded`. The tarballs therefore remain
-build plumbing and fallback payloads even though native packages are what users
-are directed to install.
+`tui`, `serve-embedded`, or `check-config --embedded`. The tarballs are build
+plumbing between the workflow's jobs and are not published: the native packages
+and the image are what bring the gateway everything it needs.

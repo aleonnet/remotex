@@ -93,8 +93,8 @@
 # as it is, into share/remotex in the gateway's release tree, beside the
 # share/doc/remotex that holds this file: /usr/share/remotex for the .deb and
 # .rpm, /usr/local/share/remotex for the macOS .pkg, share\remotex under the
-# .msi's install directory (C:\Program Files\remotex\share\remotex), an
-# unpacked tarball's own, and /opt/remotex/current/share/remotex in the
+# .msi's install directory (C:\Program Files\remotex\share\remotex), and
+# /opt/remotex/current/share/remotex in the
 # container image. It belongs to the binary, not to the state directory: it is
 # pinned to this version, so an upgrade that pins another release wants that one
 # beside it. A gateway run from a Cargo build looks in its config's directory.

@@ -1562,6 +1562,22 @@ async fn session(
             .await;
         return;
     }
+    // wlshare's sound is FLAC, which libFLAC decodes. Every installer brings the
+    // library, so a host without it is one built by hand, and a session started
+    // with sound is told here, naming the library, before wlshare is dialled
+    // rather than at the stream's begin.
+    if config.wlshare()
+        && choices.audio
+        && let Err(e) = vnc_audio::load()
+    {
+        warn!("vnc: refusing a session with wlshare's sound: {e:#}");
+        let _ = sink
+            .msg(ServerMsg::Error {
+                message: format!("This remotex cannot decode wlshare's sound: {e:#}"),
+            })
+            .await;
+        return;
+    }
     // The budget covers the RFB handshake, which can stall on a host that accepts
     // the connection and then says nothing — no socket timeout catches that. The
     // TCP connect has its own deadline inside the helper, so a slow one is
@@ -3834,7 +3850,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     reader.read_exact(&mut frame).await?;
                     match flac.as_mut() {
                         None => warn!("vnc: dropped an audio frame sent outside a stream"),
-                        Some(decoder) => match decoder.decode(frame) {
+                        Some(decoder) => match decoder.decode(&frame) {
                             Ok(samples) => {
                                 if let Some(bridge) = audio {
                                     bridge.wave(samples);

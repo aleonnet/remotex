@@ -2174,8 +2174,8 @@ pub fn state_dir(config: &Path) -> PathBuf {
 /// tree, beside the `share/doc/remotex` every release target installs. That is
 /// `/usr/share/remotex` for the `.deb` and `.rpm`, `/usr/local/share/remotex` for
 /// the macOS `.pkg`, `share\remotex` under the `.msi`'s install directory,
-/// `/opt/remotex/versions/<version>/share/remotex` in the container image, and
-/// the unpacked tarball's own. They follow the binary, not the config, and are
+/// and `/opt/remotex/versions/<version>/share/remotex` in the container image.
+/// They follow the binary, not the config, and are
 /// replaced with it: they are pinned to its version, unlike the state directory.
 ///
 /// A binary outside a release tree — a Cargo build — has `outside`: the config's
@@ -2206,6 +2206,16 @@ fn running_exe() -> Option<PathBuf> {
 /// from the executable that is actually running.
 fn installed_layout() -> Option<InstalledLayout> {
     installed_layout_for_exe(&running_exe()?)
+}
+
+/// The folder the macOS package carries libFLAC in, for a gateway that package
+/// installed: one of its own, so it neither replaces nor is replaced by a FLAC
+/// the operator installed. The Linux packages depend on the distribution's, and
+/// the Windows package puts the DLL beside the executable, where the system's
+/// loader looks first, so neither has a folder to name.
+pub fn carried_libflac() -> Option<PathBuf> {
+    let packaged = cfg!(target_os = "macos") && running_exe()?.parent()? == Path::new("/usr/local/bin");
+    packaged.then(|| PathBuf::from("/usr/local/lib/remotex"))
 }
 
 fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
@@ -2313,7 +2323,7 @@ mod tests {
         assert_eq!(
             data("/home/me/remotex-0.0.294-linux-x86_64/bin/remotex"),
             Some("/home/me/remotex-0.0.294-linux-x86_64/share/remotex".into()),
-            "an unpacked tarball"
+            "any other release tree"
         );
         #[cfg(windows)]
         assert_eq!(

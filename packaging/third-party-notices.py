@@ -13,8 +13,9 @@ repository.
 
 Three parts, each from where it is kept:
 
-- the C libraries linked into the gateway from their prebuilt archives, whose
-  licences are in packaging/notices/, since no crate carries them all;
+- the C libraries linked into the gateway from their prebuilt archives, and
+  libFLAC, which the macOS and Windows packages carry beside it, whose licences
+  are in packaging/notices/, since no crate carries them all;
 - the web client's packages, compiled into the gateway with it, from
   frontend/node_modules (`bun install` in frontend/ first);
 - the Rust crates, from cargo-about (`cargo install cargo-about --locked
@@ -40,6 +41,7 @@ ROOT = Path(__file__).resolve().parent.parent
 C_LIBRARIES = [
     ("libvpx, the VP9 encoder (desktop-vp9, libvpx-prebuilt-sys)", "libvpx.txt"),
     ("Opus, the audio codec (opus-prebuilt, libopus-prebuilt-sys)", "opus.txt"),
+    ("libFLAC, wlshare's audio codec, in the macOS and Windows packages (desktop-flac)", "flac.txt"),
     ("jemalloc, the memory allocator (tikv-jemalloc-sys)", "jemalloc.txt"),
 ]
 
