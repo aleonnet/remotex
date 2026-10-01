@@ -228,7 +228,7 @@ export function createFramePainter(options: {
     // Retracted, and not merely forgotten. This is the attachment boundary: the
     // decoder that said it is gone, the next attachment may be a different target
     // through a different origin, and the page clears its own copy on the way back to
-    // the picker only — a reattach or a takeover would otherwise inherit the sentence.
+    // the picker only — a reattach would otherwise inherit the sentence.
     options.onVideoError(null);
   };
 

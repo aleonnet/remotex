@@ -83,63 +83,22 @@ function OversizeNotice({
   );
 }
 
-// Why a session cannot be shown here, by the passthrough it was started with.
-const UNSERVED_REASON: Record<string, string> = {
-  "apple-media":
-    "It was started with the Mac's picture passed through, and this browser does not decode the Mac's HEVC.",
-  "rdp-graphics":
-    "It was started with the host's graphics pipeline passed through, and this browser cannot compose it: that needs WebGL 2 and a cross-origin isolated page.",
-};
-
-// The cover over a session this browser is not served. The session is held to what
-// it was started with, so nothing is rebuilt for this browser and nothing is tried
-// that would fail in a decoder: it says why, and End session, here and in the menu,
-// returns to the picker to start the target again with other choices. A browser
-// that can take the stream takes the session over as it is.
-function UnservedNotice({
-  passthrough,
-  onEndSession,
-}: {
-  passthrough: string;
-  onEndSession: () => void;
-}) {
-  return (
-    <div className="oversize-overlay" role="alert">
-      <span className="status">This session cannot be shown here</span>
-      <span className="status-hint">
-        {UNSERVED_REASON[passthrough] ??
-          `It was started with a passthrough (${passthrough}) this browser cannot take.`}
-      </span>
-      <span className="status-hint">
-        End it to choose again, or open it in a browser that can.
-      </span>
-      <button type="button" className="status-action" onClick={onEndSession}>
-        End session
-      </button>
-    </div>
-  );
-}
-
 // What can lie over a live session's desktop, under the menu, which stays the way
 // to another target from all three.
 function SessionCovers({
   resizing,
   oversize,
-  unserved,
   size,
   displays,
   activeDisplayId,
   onSelectDisplay,
-  onEndSession,
 }: {
   resizing: boolean;
   oversize: HoldCause | null;
-  unserved: string | null;
   size: RemoteSize | null;
   displays: DisplayInfo[];
   activeDisplayId: number | null;
   onSelectDisplay: (id: number) => void;
-  onEndSession: () => void;
 }) {
   return (
     <>
@@ -166,12 +125,6 @@ function SessionCovers({
           activeDisplayId={activeDisplayId}
           onSelectDisplay={onSelectDisplay}
         />
-      )}
-
-      {/* A session started with a passthrough this browser cannot take: covered
-          like a desktop past the ceiling, with the way out on it. */}
-      {unserved && (
-        <UnservedNotice passthrough={unserved} onEndSession={onEndSession} />
       )}
     </>
   );
@@ -223,7 +176,6 @@ export default function RemoteDesktop({
     micEnabled,
     micError,
     micStreaming,
-    unserved,
     displays,
     activeDisplayId,
     remoteClipboard,
@@ -277,10 +229,8 @@ export default function RemoteDesktop({
 
   // The status overlay covers the connection lifecycle (connecting/reconnecting)
   // and the claim conflicts (busy/takenOver); in the desktop it also covers the
-  // gap before the first frame, which a session this browser is not served never
-  // ends. The picker owns the screen once connected.
-  const showStatus =
-    status !== "connected" || (mode === "desktop" && !size && !unserved);
+  // gap before the first frame. The picker owns the screen once connected.
+  const showStatus = status !== "connected" || (mode === "desktop" && !size);
 
   return (
     /* screen-touch swaps native scrolling for the gesture transform
@@ -415,12 +365,10 @@ export default function RemoteDesktop({
         <SessionCovers
           resizing={remoteResizing}
           oversize={oversize}
-          unserved={unserved}
           size={size}
           displays={displays}
           activeDisplayId={activeDisplayId}
           onSelectDisplay={selectDisplay}
-          onEndSession={switchTarget}
         />
       )}
 

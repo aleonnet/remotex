@@ -271,8 +271,8 @@ test("a record of an unknown op drops the batch", async () => {
 });
 
 test("units that arrive before their format are dropped, not reported", async () => {
-  // The takeover: the gateway announces the stream once, to whoever was attached, so a
-  // browser that takes the session over gets whatever was already in flight before the
+  // The reattach: the gateway announces the stream once, to whoever was attached, so a
+  // page that comes back to the session gets whatever was already in flight before the
   // repaint its attach triggers. Those units cannot be decoded here whatever happens,
   // so they are dropped in silence, and the repaint that follows carries the format
   // and a keyframe.
@@ -354,7 +354,7 @@ test("a refused stream says so, asks for nothing, and stays said", async () => {
 
 test("clear() retracts the complaint and ends the decoder", async () => {
   // The attachment boundary. The page clears its own copy on the way back to the
-  // picker only, so a reattach or a takeover would otherwise inherit this sentence.
+  // picker only, so a reattach would otherwise inherit this sentence.
   refused = 0xbd;
   const p = announced();
   await p.draw(batchFrame([{ w: 64, h: 64, payload: [...KEYFRAME, 0xbd] }]));

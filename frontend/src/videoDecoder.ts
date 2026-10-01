@@ -116,7 +116,7 @@ export function createDesktopVideo(
   // running on: the announcement arrives first and the decoder is built by the unit
   // that follows it.
   let format: VideoFormat | null = null;
-  // Whether a unit arriving before its format has been logged, so a takeover costs one
+  // Whether a unit arriving before its format has been logged, so a reattach costs one
   // console line rather than one per frame until the repaint lands.
   let warned = false;
 
@@ -203,8 +203,8 @@ export function createDesktopVideo(
     decode(size, data, keyframe) {
       if (!format) {
         // **Dropped, and that is correct rather than defensive.** It happens on a
-        // takeover: the gateway announces the stream once, to whoever was attached,
-        // and a browser that takes the session over receives whatever units were
+        // reattach: the gateway announces the stream once, to whoever was attached,
+        // and a page that comes back to the session receives whatever units were
         // already in flight before the repaint its attach triggers has taken effect.
         // Those units are undecodable here whatever this does — a decoder that has
         // just been built can only start at a keyframe, and the keyframe is in the

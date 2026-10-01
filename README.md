@@ -100,6 +100,22 @@ wlshare, our own. They are ranked in tiers. Design, testing and optimization
 start from the first tier, and a higher tier comes first when work for two
 competes.
 
+All three have these in common:
+
+- **The desktop outlives the viewer.** A Windows host holds a disconnected
+  session for the next logon, and a Mac's or a wlshare desktop keeps running
+  with nobody watching. A browser coming back from a reload or a dropped
+  connection resumes where it was. A different browser, a phone picking up what
+  a desktop started, say, starts at the picker and chooses its own size, sound
+  and passthrough; starting the target returns it to the same desktop, with its
+  windows as they were left.
+- **HiDPI and Retina.** Each renders at the pixel density of the browser's
+  screen, or says which density its pixels are, so the desktop is sharp on a
+  Retina display and is shown at its true size.
+- **The pointer travels apart from the picture.** It arrives as its own shape
+  and the browser wears it on its own pointer, so it moves with the hand rather
+  than a network round trip behind it.
+
 #### Tier 1: wlshare on Linux
 
 [wlshare](https://github.com/andrewtheguy/wlshare), this project's own VNC
@@ -146,14 +162,17 @@ to the link. Nothing of it is passed through.
 ### Other servers, not prioritized
 
 Every other VNC server is a plain `vnc` target, reached through the RFB baseline
-and always encoded as VP9 in the gateway from ZRLE, at 1x and without sound. A
+and always encoded as VP9 in the gateway, at 1x and without sound. The gateway
+reads the standard lossless encodings, ZRLE first, then zlib, Hextile, RRE and
+Raw, with CopyRect beside them; Tight and the other vendor or lossy ones are not
+listed. A
 wlshare server behind a plain target is read the same way: its fallback for
 ordinary VNC clients. Plain VNC stays supported, and is worked on as needed
 rather than ahead of the tiers.
 
 Another RDP server, an older Windows or xrdp say, may happen to work if it
 speaks what the client implements ([The RDP client](docs/rdp-client.md)), but
-it is not a target: nothing is done to make it work. Its picture follows
+it is not a target: it is not tested against. Its picture follows
 Windows' rule, encoded as VP9 in the gateway unless the session was started with
 the pipeline passed.
 

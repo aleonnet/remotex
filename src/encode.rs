@@ -206,7 +206,7 @@ struct Shared {
     passing: AtomicBool,
     /// The browser must start the passed stream over: drop what is not a keyframe,
     /// and announce the configuration again ahead of the one that is. Set from the
-    /// start and by [`VideoSink::reset_render`], so a reattach, a takeover and a
+    /// start and by [`VideoSink::reset_render`], so a reattach and a
     /// resize each begin where a decoder can.
     pass_restart: AtomicBool,
     /// The configuration string last announced for the passed stream.
@@ -414,7 +414,7 @@ impl VideoSink {
         }
         // Read before it is consumed, because it decides whether the interval below
         // applies at all. A forced keyframe is never deferred: `reset_render` arms it
-        // for a repaint, a reattach, a takeover or a resize, and every one of those is
+        // for a repaint, a reattach or a resize, and every one of those is
         // a client sitting in front of nothing until the keyframe arrives. Holding one
         // back to keep a frame rate would be keeping time with an empty window.
         let owed = self.shared.keyframe_owed.load(Ordering::Relaxed);
@@ -1273,7 +1273,7 @@ mod tests {
         assert!(frame_rx.try_recv().is_err(), "a frame before the first keyframe went out");
     }
 
-    /// A reset — a reattach, a takeover, a resize — restarts the passed stream the
+    /// A reset — a reattach, a resize — restarts the passed stream the
     /// way it restarts one coded here: nothing until a keyframe, which is announced
     /// again for the browser that has never seen the announcement.
     #[tokio::test]
@@ -1556,7 +1556,7 @@ mod tests {
             "the format was repeated for a decoder that already has it"
         );
 
-        // A repaint does. This is the reattach and the takeover: `reset_render` is what
+        // A repaint does. This is the reattach: `reset_render` is what
         // `ClientMsg::Refresh` reaches, and the browser it is for has seen neither the format nor
         // a keyframe.
         sink.reset_render();
@@ -1750,7 +1750,7 @@ mod tests {
     }
 
     /// A forced keyframe is never deferred. `reset_render` arms one for a repaint, a
-    /// reattach, a takeover or a resize, and every one of those is a client sitting in
+    /// reattach or a resize, and every one of those is a client sitting in
     /// front of nothing until it arrives — keeping time there would be keeping time
     /// with an empty window.
     #[tokio::test(start_paused = true)]

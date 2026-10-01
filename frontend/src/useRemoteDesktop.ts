@@ -573,13 +573,8 @@ export function useRemoteDesktop(
   // encodes, or All Displays over too many screens. Null in the picker and at
   // every `connected`, until the gateway says otherwise.
   const [oversize, setOversize] = useState<HoldCause | null>(null);
-  // The passthrough this session was started with that this browser cannot take,
-  // from `unserved`: the gateway serves it no engine and rebuilds none, so the
-  // desktop is covered with the reason and End session is the way on. Null in the
-  // picker and in every session this browser is served.
-  const [unserved, setUnserved] = useState<string | null>(null);
-  // Whether it is held at all, which is what input and focus follow.
-  const held = oversize !== null || unserved !== null;
+  // Whether it is held, which is what input and focus follow.
+  const held = oversize !== null;
   // What this session is speaking, from `connected`: the protocol and the target's
   // subtype where it has one. Empty in the picker, and read only by the card — no
   // behaviour hangs off it, because every capability that varies by subtype already
@@ -1136,8 +1131,7 @@ export function useRemoteDesktop(
     };
     // A tablet's one size request, sent once on `connected`; rotations do not
     // revise it. A phone sends nothing: the picker offers it only sizes the
-    // desktop keeps, and a session another client started to follow its window
-    // stays as it finds it (see `fit` in hostDisplayMsg).
+    // desktop keeps (see `fit` in hostDisplayMsg).
     const sendMobileSize = () => {
       if (!ws || ws.readyState !== WebSocket.OPEN) {
         return;
@@ -1176,8 +1170,8 @@ export function useRemoteDesktop(
     const open = (sessionId: string) => {
       session = sessionId;
       // The URL names this window's screen and what its decoder takes, so a
-      // takeover's attach can reconnect the selected target for it — the attach
-      // happens before this client could send anything.
+      // reattach that has to start the session over can start it for them — the
+      // attach happens before this client could send anything.
       const socket = new WebSocket(
         gatewaySocketUrl("/ws", sessionId, {
           screen: hostDisplayMsg(),
@@ -1545,7 +1539,7 @@ export function useRemoteDesktop(
     // Audio belongs to one attachment: whatever was playing was on a socket that
     // is gone, so a subscription has to be asked for again. A session that
     // carries sound comes up unmuted — from the picker's Start, a reattach after a
-    // dropped socket, a reload and a takeover alike — unless this tab muted it.
+    // dropped socket and a reload alike — unless this tab muted it.
     // Where `connect` primed a context inside the Start click, `startAudio` adopts
     // it; otherwise it builds one with no gesture, which a browser that needs a
     // gesture for every context (AUDIO_NEEDS_GESTURE) would leave suspended, so
@@ -1567,15 +1561,14 @@ export function useRemoteDesktop(
     const handleConnected = (
       msg: Extract<ControlMsg, { type: "connected" }>,
     ) => {
-      // A target session started (picker connect, reattach, or takeover of a
-      // live desktop): switch to the desktop.
+      // A target session started (picker connect or reattach): switch to the
+      // desktop.
       setConnectError(null);
       setPendingTarget(null);
       setMode("desktop");
       setCanClipboard(msg.clipboard);
       setCanTouch(false);
       setRemoteResizing(false);
-      setUnserved(null);
       setCanAudio(msg.audio);
       seedAudioForAttachment(msg.audio);
       // Nothing here turns a camera on: unlike sound, the session is not started
@@ -1633,7 +1626,7 @@ export function useRemoteDesktop(
     };
 
     // Everything a live desktop put on this page, taken back off: what the picker
-    // and a session this browser is not served both start from.
+    // starts from.
     const endDesktop = () => {
       // No engine to resize: the next target states its own policy.
       followWindowRef.current = false;
@@ -1674,18 +1667,6 @@ export function useRemoteDesktop(
       // No engine left to answer a fetch that is still in flight.
       settleClipboardWaiters(null);
       clearDesktop();
-    };
-
-    // A session this browser cannot be served: nothing of a desktop is on the
-    // page, and the mode is still the desktop's, so the menu and its End session
-    // are there over the cover that says why.
-    const handleUnserved = (msg: Extract<ControlMsg, { type: "unserved" }>) => {
-      setConnectError(null);
-      setPendingTarget(null);
-      endDesktop();
-      setMode("desktop");
-      setConnection(connectionLabel(msg.protocol, msg.subtype));
-      setUnserved(msg.passthrough);
     };
 
     const mirrorRemoteClipboard = (text: string) => {
@@ -1742,9 +1723,6 @@ export function useRemoteDesktop(
           break;
         case "connected":
           handleConnected(msg);
-          break;
-        case "unserved":
-          handleUnserved(msg);
           break;
         case "audioFormat":
           startAudio(msg);
@@ -1816,12 +1794,11 @@ export function useRemoteDesktop(
           setOversize(msg.cause);
           break;
         case "picker":
-          // No target selected (idle attach, switch-target, or an engine that
-          // ended): show the picker. Drop any retained framebuffer so a later
+          // No target selected (idle attach, switch-target, a takeover, or an
+          // engine that ended): show the picker. Drop any retained framebuffer so a later
           // connect starts from a clean "waiting for the desktop" state.
           setPendingTarget(null);
           setMode("picker");
-          setUnserved(null);
           setConnection("");
           endDesktop();
           break;
@@ -2753,8 +2730,6 @@ export function useRemoteDesktop(
     touchEnabled,
     touchActive,
     setTouchEnabled,
-    // The passthrough this browser cannot take, in a session it is not served.
-    unserved,
     // The cover over a settling High Performance resize.
     remoteResizing,
     viewOnly,

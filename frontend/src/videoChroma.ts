@@ -10,8 +10,8 @@
 // the browser says: `chooseVideoChroma`
 // asks `VideoDecoder.isConfigSupported` about one representative 4:4:4 configuration,
 // and the answer rides every session socket this page opens (`gateway.ts`), which is
-// what makes it known both when a target is picked and when a takeover reconnects the
-// selected one for this browser — before any message the client could send.
+// what makes it known both when a target is picked and when a reattach has to start the
+// selected one over — before any message the client could send.
 //
 // A target that sets `render_chroma` overrules all of this and streams what it names;
 // the answer resolves the targets that name nothing, which is what lets one target
