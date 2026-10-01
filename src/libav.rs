@@ -181,8 +181,8 @@ fn files(dir: &str, major: u32) -> [String; 2] {
 const INSTALL: &str = if cfg!(target_os = "macos") {
     "install it with `brew install ffmpeg`"
 } else if cfg!(windows) {
-    "install MSYS2's mingw-w64-ucrt-x86_64-ffmpeg, or put a shared FFmpeg build's bin \
-     directory on PATH"
+    "put a shared FFmpeg build's bin directory on PATH, as `winget install \
+     BtbN.FFmpeg.LGPL.Shared.9.0` does, or install MSYS2's mingw-w64-ucrt-x86_64-ffmpeg"
 } else {
     "install your distribution's libavcodec, libavcodec60 to libavcodec63"
 };

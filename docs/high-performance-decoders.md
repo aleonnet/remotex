@@ -96,7 +96,25 @@ On macOS the loaded libavcodec decodes through VideoToolbox.
 
 ## Windows
 
-Both come from [MSYS2](https://www.msys2.org), from PowerShell 7 (`pwsh`):
+The two come from different places, both from PowerShell 7 (`pwsh`).
+
+### FFmpeg
+
+Install a shared build of FFmpeg 9.0, a download of about 80 MB:
+
+```powershell
+winget install BtbN.FFmpeg.LGPL.Shared.9.0
+```
+
+winget puts the build's `bin` folder, which holds `avcodec-63.dll` and
+`avutil-61.dll`, on the `PATH` of the user who installed it. So run the gateway
+as that user, from a shell opened after the install. A gateway already running
+has to be restarted to see the new `PATH`.
+
+### fdk-aac
+
+It comes from [MSYS2](https://www.msys2.org), as one small package with no
+dependencies:
 
 1. Install MSYS2 into its default folder, `C:\msys64`:
 
@@ -111,22 +129,30 @@ Both come from [MSYS2](https://www.msys2.org), from PowerShell 7 (`pwsh`):
    C:\msys64\usr\bin\pacman.exe -Syu --noconfirm
    ```
 
-3. Install both libraries:
+3. Install the library:
 
    ```powershell
-   C:\msys64\usr\bin\pacman.exe -S --needed --noconfirm mingw-w64-ucrt-x86_64-ffmpeg mingw-w64-ucrt-x86_64-fdk-aac
+   C:\msys64\usr\bin\pacman.exe -S --needed --noconfirm mingw-w64-ucrt-x86_64-fdk-aac
    ```
 
-The gateway finds the DLLs in `C:\msys64\ucrt64\bin` with nothing to configure.
-`PATH` does not need that folder.
+The gateway finds `libfdk-aac-2.dll` in `C:\msys64\ucrt64\bin` with nothing to
+configure. `PATH` does not need that folder.
 
-If MSYS2 is installed somewhere else, or the DLLs come from another build, the
-gateway finds them through Windows' own search instead:
+### Other builds and folders
+
+MSYS2 has an FFmpeg too, `mingw-w64-ucrt-x86_64-ffmpeg`, and the gateway finds
+it beside fdk-aac. It is a full build that brings more than a hundred packages
+and about 1.5 GB with it, which is why the steps above take FFmpeg from
+elsewhere.
+
+Any other shared build serves, found through Windows' own search:
 
 | Library | File | Where |
 |---|---|---|
-| FFmpeg | `avcodec-60.dll` to `avcodec-63.dll`, and the `avutil-58.dll` to `avutil-61.dll` released with it | put the build's `bin` folder on the machine `PATH`, then restart the gateway |
+| FFmpeg | `avcodec-60.dll` to `avcodec-63.dll`, and the `avutil-58.dll` to `avutil-61.dll` released with it | put the build's `bin` folder on `PATH`, then restart the gateway |
 | fdk-aac | `libfdk-aac-2.dll` | on `PATH`, or beside `remotex.exe` |
+
+A build on `PATH` is used before MSYS2's.
 
 ## Container
 
