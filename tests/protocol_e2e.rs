@@ -1740,7 +1740,7 @@ async fn switch_target_returns_to_the_picker_then_reconnects() {
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_frame(&mut ws).await;
 
-    // Switch target: disconnect returns the slot to the picker over the same
+    // End session: disconnect returns the slot to the picker over the same
     // socket (no reclaim, no close).
     ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
     expect_picker(&mut ws).await;

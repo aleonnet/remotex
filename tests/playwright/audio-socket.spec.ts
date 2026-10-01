@@ -100,10 +100,10 @@ test.describe("the audio socket", () => {
 
     const menu = page.getByRole("button", { name: "Open menu" });
     await menu.click();
-    const toggle = page.getByRole("button", { name: "Enable audio" });
+    const toggle = page.getByRole("button", { name: "Unmute", exact: true });
     await toggle.click();
     await expect(
-      page.getByRole("button", { name: "Disable audio" }),
+      page.getByRole("button", { name: "Mute", exact: true }),
     ).toHaveAttribute("aria-pressed", "true");
 
     // The format is what configures a decoder, and it must arrive on the socket that
@@ -141,14 +141,14 @@ test.describe("the audio socket", () => {
     await logInAndConnect(page);
 
     await page.getByRole("button", { name: "Open menu" }).click();
-    await page.getByRole("button", { name: "Enable audio" }).click();
+    await page.getByRole("button", { name: "Unmute", exact: true }).click();
     await expect
       .poll(() => traffic.filter((t) => t.url === "/ws/audio").length, {
         timeout: 20_000,
       })
       .toBe(1);
 
-    await page.getByRole("button", { name: "Disable audio" }).click();
+    await page.getByRole("button", { name: "Mute", exact: true }).click();
 
     // Closing the socket is the whole of unsubscribing, so this is the assertion
     // that the toggle does anything at all.
@@ -160,7 +160,7 @@ test.describe("the audio socket", () => {
       .toBe(true);
     // And the desktop is untouched: a session must survive its sound ending.
     expect(only(traffic, "/ws").closed).toBe(false);
-    await expect(page.getByRole("button", { name: "Enable audio" })).toBeVisible();
+    await expect(page.getByRole("button", { name: "Unmute", exact: true })).toBeVisible();
   });
 
   // Headless Chromium is not WebKit, so the choice is remembered and a reload —
@@ -171,7 +171,7 @@ test.describe("the audio socket", () => {
     await logInAndConnect(page);
 
     await page.getByRole("button", { name: "Open menu" }).click();
-    await page.getByRole("button", { name: "Enable audio" }).click();
+    await page.getByRole("button", { name: "Unmute", exact: true }).click();
     await expect
       .poll(() => traffic.filter((t) => t.url === "/ws/audio").length, {
         timeout: 20_000,
@@ -197,7 +197,7 @@ test.describe("the audio socket", () => {
     expect(traffic.filter((t) => t.url === "/ws/audio")).toHaveLength(2);
     await page.getByRole("button", { name: "Open menu" }).click();
     await expect(
-      page.getByRole("button", { name: "Disable audio" }),
+      page.getByRole("button", { name: "Mute", exact: true }),
     ).toHaveAttribute("aria-pressed", "true");
   });
 });

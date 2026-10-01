@@ -264,7 +264,7 @@ export async function returnToPicker(page: Page): Promise<void> {
     .getByRole("button", { name: "Open menu" })
     .click({ timeout: LEAVE_TIMEOUT_MS });
   await page
-    .getByRole("button", { name: "Switch target" })
+    .getByRole("button", { name: "End session" })
     .click({ timeout: LEAVE_TIMEOUT_MS });
   await expect(
     page.getByRole("heading", { name: "Pick a target" }),
