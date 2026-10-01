@@ -1627,7 +1627,7 @@ export function useRemoteDesktop(
     };
 
     // Everything a live desktop put on this page, taken back off: what the picker
-    // and a session this browser is not served both start from.
+    // starts from.
     const endDesktop = () => {
       // No engine to resize: the next target states its own policy.
       followWindowRef.current = false;
@@ -2731,7 +2731,6 @@ export function useRemoteDesktop(
     touchEnabled,
     touchActive,
     setTouchEnabled,
-    // The passthrough this browser cannot take, in a session it is not served.
     // The cover over a settling High Performance resize.
     remoteResizing,
     viewOnly,
