@@ -100,19 +100,21 @@ wlshare, our own. They are ranked in tiers. Design, testing and optimization
 start from the first tier, and a higher tier comes first when work for two
 competes.
 
-All three keep the desktop when a viewer leaves: a Windows host holds a
-disconnected session for the next logon, and a Mac's or a wlshare desktop goes on
-running with nobody watching. So what a browser continues is the desktop, not
-the gateway's session to it. The same browser coming back from a reload or a
-dropped connection resumes where it was. A different browser taking over, a
-phone picking up what a desktop started, say, ends that session and starts at
-the picker, where it chooses a size, sound and passthrough it can take; starting
-the target there returns it to the same desktop, with its windows as they were
-left.
+All three have these in common:
 
-All three also send the pointer apart from the picture, as its own shape. The
-browser wears it on its own pointer, so it moves with the hand rather than a
-network round trip behind it, and it is never drawn into the desktop's image.
+- **The desktop outlives the viewer.** A Windows host holds a disconnected
+  session for the next logon, and a Mac's or a wlshare desktop keeps running
+  with nobody watching. A browser coming back from a reload or a dropped
+  connection resumes where it was. A different browser, a phone picking up what
+  a desktop started, say, starts at the picker and chooses its own size, sound
+  and passthrough; starting the target returns it to the same desktop, with its
+  windows as they were left.
+- **HiDPI and Retina.** Each renders at the pixel density of the browser's
+  screen, or says which density its pixels are, so the desktop is sharp on a
+  Retina display and is shown at its true size.
+- **The pointer travels apart from the picture.** It arrives as its own shape
+  and the browser wears it on its own pointer, so it moves with the hand rather
+  than a network round trip behind it.
 
 #### Tier 1: wlshare on Linux
 
