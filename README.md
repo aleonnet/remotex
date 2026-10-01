@@ -162,7 +162,10 @@ to the link. Nothing of it is passed through.
 ### Other servers, not prioritized
 
 Every other VNC server is a plain `vnc` target, reached through the RFB baseline
-and always encoded as VP9 in the gateway from ZRLE, at 1x and without sound. A
+and always encoded as VP9 in the gateway, at 1x and without sound. The gateway
+reads the standard lossless encodings, ZRLE first, then zlib, Hextile, RRE and
+Raw, with CopyRect beside them; Tight and the other vendor or lossy ones are not
+listed. A
 wlshare server behind a plain target is read the same way: its fallback for
 ordinary VNC clients. Plain VNC stays supported, and is worked on as needed
 rather than ahead of the tiers.
