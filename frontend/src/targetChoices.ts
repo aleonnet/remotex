@@ -13,9 +13,10 @@
 // - The size a session will have is always shown, and is a choice only where
 //   there are two: see `sizeOptions`.
 // - An option the target's type does not offer has no row.
-// - One it offers that cannot be had here is greyed, with the reason: a
-//   passthrough this browser cannot take, or one that is the only way this gateway
-//   can serve the target, which is then shown ticked.
+// - One it offers that cannot be had here is greyed, with the reason: a sound
+//   this gateway cannot decode, a passthrough this browser cannot take, or one
+//   that is the only way this gateway can serve the target, which is then shown
+//   ticked.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
 
@@ -45,6 +46,11 @@ export interface TargetInfo {
   defaultSize: Points | null;
   /** Whether the remote's sound is a choice. */
   audio: boolean;
+  /**
+   * Whether this gateway cannot decode that sound: wlshare's, on a host without
+   * libFLAC.
+   */
+  audioUnavailable: boolean;
   /** The stream this target can pass, null where it has none. */
   passthrough: Passthrough | null;
   /**
@@ -274,13 +280,22 @@ export function targetOptions(
   const rows: OptionRow[] = [];
   let blocked: string | null = null;
   if (target.audio) {
-    rows.push({
-      key: "audio",
-      label: "Sound",
-      note: "Take the remote's sound and play it here.",
-      checked: remembered?.audio ?? false,
-      disabled: false,
-    });
+    const row = { key: "audio" as const, label: "Sound" };
+    rows.push(
+      target.audioUnavailable
+        ? {
+            ...row,
+            note: "This gateway cannot decode wlshare's sound. Install libFLAC on the gateway's host.",
+            checked: false,
+            disabled: true,
+          }
+        : {
+            ...row,
+            note: "Take the remote's sound and play it here.",
+            checked: remembered?.audio ?? false,
+            disabled: false,
+          },
+    );
   }
   if (target.passthrough) {
     const passed = passthroughRow(

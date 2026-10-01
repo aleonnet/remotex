@@ -204,8 +204,10 @@ pub async fn serve(instance: &Instance, claim: Claim) -> anyhow::Result<()> {
         .as_deref()
         .map(crate::hevc_wasm::HevcDecoder::load)
         .transpose()?;
-    // And a decoder `[hp_decoders]` names a folder for, which is loaded now.
+    // And a decoder `[hp_decoders]` names a folder for, which is loaded now, as
+    // is the libFLAC the package carries.
     config.hp_decoders.load()?;
+    crate::vnc_audio::load_carried()?;
 
     // Removes a Unix socket file when it is dropped, whichever way this returns.
     let listener = transport::WorkerListener::bind(&endpoint, &claim)?;

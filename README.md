@@ -564,9 +564,4 @@ change rebuilds in seconds rather than minutes. Artifacts are always built
 
 ## Licence
 
-remotex is under the MIT licence in [`LICENSE`](LICENSE). A release build also
-contains third-party software, listed with its licences in the
-`THIRD-PARTY-NOTICES.txt` every artifact carries, which packaging makes from the
-locked dependencies (see [Packaging](packaging/README.md)).
-FFmpeg, the High Performance decoder, is not in it: the gateway loads it from
-the system.
+remotex is under the MIT licence in [`LICENSE`](LICENSE).

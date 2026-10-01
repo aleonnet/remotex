@@ -1,8 +1,8 @@
 # Packaging
 
 Native packages are the release install contract. Linux ships both `.deb` and
-`.rpm`; macOS ships `.pkg`. The distro-agnostic tarball remains the layout input
-for native package and container builds. Containers replace its native binary
+`.rpm`; macOS ships `.pkg`. The distro-agnostic tarball is the layout input
+for native package and container builds, and no release asset. Containers replace its native binary
 with a build that excludes the `embedded-gateway` default feature.
 
 Every artifact carries one gateway binary with the web client compiled into it
@@ -18,7 +18,6 @@ Linux package managers own the conventional FHS paths directly:
 /usr/bin/remotex
 /usr/share/doc/remotex/remotex.example.toml
 /usr/share/doc/remotex/LICENSE
-/usr/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
 The macOS package owns the corresponding local prefix:
@@ -27,7 +26,6 @@ The macOS package owns the corresponding local prefix:
 /usr/local/bin/remotex
 /usr/local/share/doc/remotex/remotex.example.toml
 /usr/local/share/doc/remotex/LICENSE
-/usr/local/share/doc/remotex/THIRD-PARTY-NOTICES.txt
 ```
 
 By default the Windows package (`.msi`) owns the same tree under the 64-bit Program
@@ -39,25 +37,9 @@ C:\Program Files\remotex\bin\remotex.exe
 C:\Program Files\remotex\VERSION
 C:\Program Files\remotex\share\doc\remotex\remotex.example.toml
 C:\Program Files\remotex\share\doc\remotex\LICENSE
-C:\Program Files\remotex\share\doc\remotex\THIRD-PARTY-NOTICES.txt
 ```
 
-Every artifact, container images included, carries remotex's MIT
-`LICENSE` and `THIRD-PARTY-NOTICES.txt`, the notices of what a release build
-contains that remotex did not write: the C libraries linked from their prebuilt
-archives, whose licences are kept in `notices/`, the web client's packages, and
-the Rust crates cargo-about finds under `packaging/about.toml` and, for the web
-client's WebAssembly module, `packaging/about-wasm.toml`. It is a build
-output, not a file in the repository: `third-party-notices.py` writes it into the
-tree `build-tarball.sh` and `build-windows-msi.ps1` package, which takes
-`bun install` done in `frontend/` and cargo-about
-(`cargo install cargo-about --locked --features cli`). Release CI makes it once,
-in its `notices` job, and hands it to every target in
-`REMOTEX_PREBUILT_NOTICES`, as it hands over the frontend bundle. cargo-about
-refuses a crate under a licence `packaging/about.toml` does not accept, so such a
-dependency fails the packaging. It covers the default build, not
-`apple-hp-media-static`, whose
-distributor adds FFmpeg's LGPL terms.
+Every artifact, container images included, carries remotex's MIT `LICENSE`.
 
 There is no package wrapper, version directory, active-version symlink, or
 package-managed rollback. The package manager replaces and removes its files.
@@ -97,9 +79,7 @@ bash packaging/build-tarball.sh
 bash packaging/build-native-packages.sh
 ```
 
-The tarball build makes the notices unless `REMOTEX_PREBUILT_NOTICES` supplies
-them, so it needs cargo-about and uv beside the frontend's `node_modules`; the
-native-package build consumes those notices from the tarball. The frontend's
+The frontend's
 build compiles a WebAssembly module from the gateway's graphics crate
 (`frontend/wasm/egfx` around
 `crates/remotex-rdp-graphics`, the page's compositor for a passed RDP pipeline), so wherever the frontend is built — `bun run build`, or a
@@ -169,6 +149,22 @@ elsewhere the operator installs it, as
 [High Performance decoder](../docs/high-performance-decoder.md) says for each
 platform.
 
+wlshare's sound is FLAC, decoded by libFLAC, which
+[desktop-flac](https://github.com/andrewtheguy/desktop-flac) loads at run time
+and nothing links (`src/vnc_audio.rs`). Every artifact brings it, FLAC 1.5's or
+1.4's:
+
+| Artifact | libFLAC |
+|---|---|
+| `.deb` | `Depends: libflac14 \| libflac12t64`, the distribution's |
+| `.rpm` | `Requires: (libFLAC.so.14()(64bit) or libFLAC.so.12()(64bit))`, the distribution's |
+| container image | Debian's `libflac14`, installed by the `Dockerfile` |
+| `.pkg` | `/usr/local/lib/remotex/libFLAC.14.dylib`, built by `build-native-packages.sh` from FLAC's release source without Ogg, for macOS 11; building the package takes CMake |
+| `.msi` | `bin\libFLAC.dll` beside the executable, from FLAC's own Windows release |
+
+The source and the Windows release are each checked against a SHA-256 the
+script pins.
+
 The non-default `apple-hp-media-static` feature links private static archives
 instead, and is in no release artifact. No artifact holds the EXPERIMENTAL
 software HEVC decoder either, libavcodec in WebAssembly for the page: an operator
@@ -178,8 +174,8 @@ serves it when it finds it. Every release target looks for it by its release
 name in `share/remotex`, beside the `share/doc/remotex` it installs, unless
 `[hevc_wasm].archive` names another file:
 `/usr/share/remotex` for the `.deb` and `.rpm`, `/usr/local/share/remotex` for
-the `.pkg`, `share\remotex` under the `.msi`'s install directory, the unpacked
-tarball's own, and `/opt/remotex/versions/<version>/share/remotex` in the
+the `.pkg`, `share\remotex` under the `.msi`'s install directory, and
+`/opt/remotex/versions/<version>/share/remotex` in the
 container image. No package owns or makes that directory: the operator does. The
 private image `publish-full-image.sh` builds carries it there.
 `libavcodec-hevc-prebuilt` links FFmpeg's libavcodec and libavutil, configured
@@ -214,6 +210,6 @@ succeed.
 Container images take their layout from the Linux tarballs, then replace
 `bin/remotex` with the separately built container gateway. The build
 script, release smoke test, and Dockerfile all reject a binary that exposes
-`tui`, `serve-embedded`, or `check-config --embedded`. The tarballs therefore remain
-build plumbing and fallback payloads even though native packages are what users
-are directed to install.
+`tui`, `serve-embedded`, or `check-config --embedded`. The tarballs are build
+plumbing between the workflow's jobs and are not published: the native packages
+and the image are what bring the gateway everything it needs.

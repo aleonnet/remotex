@@ -671,6 +671,10 @@ struct TargetInfo {
     default_size: Option<Points>,
     /// Whether the picker offers the remote's sound as a choice.
     audio: bool,
+    /// Whether this gateway cannot decode that sound: wlshare's, which is FLAC,
+    /// on a host without libFLAC. The picker then shows the choice greyed.
+    #[serde(rename = "audioUnavailable")]
+    audio_unavailable: bool,
     /// The stream the picker offers to pass untouched, `null` where the target
     /// has none.
     passthrough: Option<crate::config::Passthrough>,
@@ -697,8 +701,8 @@ impl From<(u16, u16)> for Points {
 
 impl TargetInfo {
     /// `apple_decoders` is whether this gateway's host can decode a Mac's
-    /// picture.
-    fn of(target: &crate::config::TargetConfig, apple_decoders: bool) -> Self {
+    /// picture, and `libflac` whether it can decode wlshare's sound.
+    fn of(target: &crate::config::TargetConfig, apple_decoders: bool, libflac: bool) -> Self {
         let offers = target.offers();
         Self {
             name: target.name.clone(),
@@ -710,6 +714,7 @@ impl TargetInfo {
             size: target.size.map(Points::from),
             default_size: target.sized().then(|| crate::config::DEFAULT_SIZE.into()),
             audio: offers.audio,
+            audio_unavailable: offers.audio && target.wlshare() && !libflac,
             passthrough: offers.passthrough,
             passthrough_only: target.media_stream() && !apple_decoders,
         }
@@ -721,14 +726,17 @@ impl TargetInfo {
 /// never leave the server.
 ///
 /// The Mac's HEVC decoder is looked for here, where a High Performance target is
-/// listed, so the picker can say before Start what the engine would otherwise say
-/// after it. Asked on every listing rather than remembered: a library installed
-/// while the gateway runs is found by the next one.
+/// listed, and libFLAC where a wlshare one is, so the picker can say before Start
+/// what the engine would otherwise say after it. Asked on every listing rather
+/// than remembered: a library installed while the gateway runs is found by the
+/// next one.
 async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>> {
     let targets = &state.config.targets;
     let apple_decoders = !targets.iter().any(crate::config::TargetConfig::media_stream)
         || crate::vnc::apple_decoders().is_ok();
-    Json(targets.iter().map(|target| TargetInfo::of(target, apple_decoders)).collect())
+    let libflac =
+        !targets.iter().any(crate::config::TargetConfig::wlshare) || crate::vnc_audio::load().is_ok();
+    Json(targets.iter().map(|target| TargetInfo::of(target, apple_decoders, libflac)).collect())
 }
 
 #[derive(Deserialize)]
@@ -1444,32 +1452,38 @@ mod tests {
             target("mac", "protocol = \"vnc\"\nsubtype = \"ard\"", "192.0.2.10"),
             target("win", "protocol = \"rdp\"\nsize = \"1920x1080\"", "192.0.2.11"),
             target("fast", "protocol = \"vnc\"\nsubtype = \"ard-high-performance\"", "192.0.2.10"),
-        );
+        ) + &target("sway", "protocol = \"vnc\"\nsubtype = \"wlshare\"", "192.0.2.12");
         let targets = crate::config::ConfigFile::parse(&text).expect("the targets parse").targets;
-        let entry = |name: &str, apple_decoders| {
+        let entry_on = |name: &str, apple_decoders, libflac| {
             let target = targets.iter().find(|t| t.name == name).unwrap();
-            serde_json::to_string(&TargetInfo::of(target, apple_decoders)).unwrap()
+            serde_json::to_string(&TargetInfo::of(target, apple_decoders, libflac)).unwrap()
         };
+        let entry = |name: &str, apple_decoders| entry_on(name, apple_decoders, true);
 
         // Standard mode offers nothing: physical displays, which no session
         // sizes, no sound, no stream.
         assert_eq!(
             entry("mac", true),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"passthrough":null,"passthroughOnly":false}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"audioUnavailable":false,"passthrough":null,"passthroughOnly":false}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
             entry("win", true),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"passthrough":"rdp-graphics","passthroughOnly":false}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"audioUnavailable":false,"passthrough":"rdp-graphics","passthroughOnly":false}"#
         );
         // High Performance's sound is always carried, so it is not offered. Its
         // stream is, and is the only way in on a host without its decoders.
         let fast = entry("fast", true);
-        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"passthrough":"apple-media","passthroughOnly":false}"#), "{fast}");
+        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"audioUnavailable":false,"passthrough":"apple-media","passthroughOnly":false}"#), "{fast}");
         assert!(entry("fast", false).ends_with(r#""passthroughOnly":true}"#));
         // Which says nothing about a target with no such stream.
         assert!(entry("win", false).ends_with(r#""passthroughOnly":false}"#));
+        // wlshare's sound is offered, and is FLAC: unavailable on a host without
+        // libFLAC, which says nothing about a sound that is not wlshare's.
+        assert!(entry_on("sway", true, true).contains(r#""audio":true,"audioUnavailable":false,"#));
+        assert!(entry_on("sway", true, false).contains(r#""audio":true,"audioUnavailable":true,"#));
+        assert!(entry_on("win", true, false).contains(r#""audio":true,"audioUnavailable":false,"#));
     }
 
     /// The exact `/api/config` body. Pinned because the login screen reads the

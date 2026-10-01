@@ -805,6 +805,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktop-flac"
+version = "0.0.2"
+source = "git+https://github.com/andrewtheguy/desktop-flac?tag=v0.0.2#05960c018d49154fc67aff5a8872923a496ccec6"
+dependencies = [
+ "libloading",
+ "thiserror",
+]
+
+[[package]]
 name = "desktop-vp9"
 version = "0.0.5"
 source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.5#b4f1c659d9d48c0ee9f821de7b275ba0e854622b"
@@ -1617,12 +1626,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "lazy_static"
-version = "1.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bbd2bcb4c963f2ddae06a2efc7e9f3591312473c50c6685e1f298068316e66fe"
-
-[[package]]
 name = "libavcodec-hevc-prebuilt-sys"
 version = "0.1.0"
 source = "git+https://github.com/andrewtheguy/libavcodec-hevc-prebuilt?tag=v9.0.2-20260928041244-5fdbab1#5fdbab13fc1a63986344185565c1208847c09880"
@@ -2361,12 +2364,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "regex-lite"
-version = "0.1.9"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "cab834c73d247e67f4fae452806d17d3c7501756d98c8808d7c9c7aa7d18f973"
-
-[[package]]
 name = "regex-syntax"
 version = "0.8.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2374,7 +2371,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.311"
+version = "0.0.312"
 dependencies = [
  "aes",
  "anyhow",
@@ -2385,6 +2382,7 @@ dependencies = [
  "clap",
  "crossterm",
  "des 0.8.1",
+ "desktop-flac",
  "desktop-vp9",
  "eax",
  "env_logger",
@@ -2413,8 +2411,6 @@ dependencies = [
  "sha2",
  "socket2",
  "sspi",
- "symphonia-bundle-flac",
- "symphonia-core",
  "tar",
  "tempfile",
  "thiserror",
@@ -3070,56 +3066,6 @@ name = "subtle"
 version = "2.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "13c2bddecc57b384dee18652358fb23172facb8a2c51ccc10d74c157bdea3292"
-
-[[package]]
-name = "symphonia-bundle-flac"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "6405d5c34ff6f8f7ca08a4101efe66d21e180f7322ef9359900a0e55698a7892"
-dependencies = [
- "log",
- "symphonia-common",
- "symphonia-core",
- "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-common"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "2acc3fcc18ec9b8cdd48614e259c4cf0d27b71d41e5d9b120b42c5adab12d7c4"
-dependencies = [
- "log",
- "symphonia-core",
- "symphonia-metadata",
-]
-
-[[package]]
-name = "symphonia-core"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "01c412864d599d4750d0c3d684d7e093ec05e5309681ef5252cc1096a437f6e0"
-dependencies = [
- "bitflags 2.13.1",
- "bytemuck",
- "lazy_static",
- "log",
- "num-complex",
- "smallvec",
-]
-
-[[package]]
-name = "symphonia-metadata"
-version = "0.6.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "83713a97705d77bdef7cdbc0768fd6e5a54e4cd7e48d60a806ae85639e2c87c6"
-dependencies = [
- "lazy_static",
- "log",
- "regex-lite",
- "smallvec",
- "symphonia-core",
-]
 
 [[package]]
 name = "syn"

@@ -83,10 +83,6 @@ area's section before changing what it covers:
   package-owned live config to it.
 - Follow [Packaging](packaging/README.md) for native layouts, prebuilt dependency
   rules, and release workflow.
-- `THIRD-PARTY-NOTICES.txt` is a build output of
-  `packaging/third-party-notices.py`. Do not commit it or hold it to the
-  lockfiles. A new prebuilt C library brings its licence text to
-  `packaging/notices/` and the script's list.
 
 ## Testing and interactive QA
 
