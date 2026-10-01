@@ -10,7 +10,8 @@
 //! grants no patents, so no build carries it by default. The gateway loads the
 //! system's shared library the first time a session needs it (see [`load`]):
 //! `libfdk-aac.so.2` on Linux, `libfdk-aac.2.dylib` on macOS and
-//! `libfdk-aac-2.dll` on Windows. The `apple-hp-media-static` feature links
+//! `libfdk-aac-2.dll` on Windows, where `[hp_decoders].fdk_aac_dir` names its
+//! folder instead, loaded from at start-up. The `apple-hp-media-static` feature links
 //! `fdk-aac-prebuilt`'s private static archive instead, for a build that brings
 //! its own. Either way the six calls below are the whole interface.
 //!
@@ -152,36 +153,78 @@ const INSTALL: &str = if cfg!(target_os = "macos") {
     "install MSYS2's mingw-w64-ucrt-x86_64-fdk-aac, or put its libfdk-aac-2.dll beside \
      remotex.exe or on PATH"
 } else {
-    "install libfdk-aac2 (Debian's non-free, Ubuntu's multiverse) or your \
+    "install libfdk-aac2t64 (Debian's non-free), libfdk-aac2 (Ubuntu's universe) or your \
      distribution's fdk-aac"
 };
 
-/// fdk-aac, loaded from the system on the first call that finds it. A failure is
-/// not remembered, so a library installed while the gateway runs is found by the
-/// next session.
+/// fdk-aac, once loaded.
+#[cfg(not(feature = "apple-hp-media-static"))]
+static API: std::sync::OnceLock<fdk::Api> = std::sync::OnceLock::new();
+
+/// fdk-aac, loaded from the system on the first call that finds it, unless
+/// [`load_from`] loaded it at start-up. A failure is not remembered, so a library
+/// installed while the gateway runs is found by the next session.
 #[cfg(not(feature = "apple-hp-media-static"))]
 fn api() -> anyhow::Result<&'static fdk::Api> {
-    use anyhow::Context as _;
-
-    static API: std::sync::OnceLock<fdk::Api> = std::sync::OnceLock::new();
     if let Some(api) = API.get() {
         return Ok(api);
     }
+    match find(LIBRARY) {
+        Ok(api) => Ok(API.get_or_init(|| api)),
+        Err(refused) => anyhow::bail!(
+            "the AAC-ELD decoder, fdk-aac, is not installed: {INSTALL} ({})",
+            refused.join("; ")
+        ),
+    }
+}
+
+/// Load fdk-aac from `dir`, the folder `[hp_decoders].fdk_aac_dir` names, and from
+/// nowhere else. Called before the gateway listens, so a folder without it is a
+/// refused start.
+#[cfg(all(windows, not(feature = "apple-hp-media-static")))]
+pub fn load_from(dir: &std::path::Path) -> anyhow::Result<()> {
+    // In backslashes, as `libav::load_from` names its folder: Windows' loader
+    // wants them in a path.
+    let file = dir.join("libfdk-aac-2.dll").to_string_lossy().replace('/', "\\");
+    match find(&[&file]) {
+        // One already loaded would be the one every session uses, so the named
+        // folder's is not dropped in silence for it.
+        Ok(api) => API.set(api).map_err(|_| {
+            anyhow::anyhow!(
+                "fdk-aac was already loaded when [hp_decoders].fdk_aac_dir, {}, was read",
+                dir.display()
+            )
+        }),
+        Err(refused) => anyhow::bail!(
+            "the AAC-ELD decoder, fdk-aac, is not in [hp_decoders].fdk_aac_dir, {}: name the \
+             folder that holds libfdk-aac-2.dll ({})",
+            dir.display(),
+            refused.join("; ")
+        ),
+    }
+}
+
+/// The first of `names` that loads and has the decoder's calls, or why each was
+/// refused.
+#[cfg(not(feature = "apple-hp-media-static"))]
+fn find(names: &[&str]) -> Result<fdk::Api, Vec<String>> {
+    use anyhow::Context as _;
+
     let mut refused = Vec::new();
-    for name in LIBRARY {
+    for name in names {
         // SAFETY: fdk-aac's initialisers set up nothing but its own tables.
         match unsafe { libloading::Library::new(*name) } {
             Ok(library) => match resolve(library).with_context(|| format!("load fdk-aac from {name}")) {
-                Ok(api) => return Ok(API.get_or_init(|| api)),
+                Ok(api) => {
+                    log::info!("vnc: the AAC-ELD decoder is fdk-aac, from {name}");
+                    return Ok(api);
+                }
                 Err(e) => refused.push(format!("{e:#}")),
             },
             Err(e) => refused.push(format!("{name}: {e}")),
         }
     }
-    anyhow::bail!(
-        "the AAC-ELD decoder, fdk-aac, is not installed: {INSTALL} ({})",
-        refused.join("; ")
-    )
+    Err(refused)
 }
 
 #[cfg(not(feature = "apple-hp-media-static"))]
@@ -298,6 +341,17 @@ impl Drop for EldDecoder {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A folder the config names is the only place looked in: one without the
+    /// library is an error naming the key and the folder.
+    #[cfg(all(windows, not(feature = "apple-hp-media-static")))]
+    #[test]
+    fn a_named_folder_without_fdk_aac_is_refused() {
+        let dir = tempfile::tempdir().unwrap();
+        let err = format!("{:#}", load_from(dir.path()).expect_err("an empty folder"));
+        assert!(err.contains("[hp_decoders].fdk_aac_dir"), "{err}");
+        assert!(err.contains(&dir.path().join("libfdk-aac-2.dll").display().to_string()), "{err}");
+    }
 
     /// The configuration is accepted by the decoder that is actually linked — the
     /// one check that does not need a captured stream.

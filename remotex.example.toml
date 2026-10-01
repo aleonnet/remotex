@@ -109,6 +109,22 @@
 #[hevc_wasm]
 #archive = "/srv/remotex/hevc-wasm-v0.0.1.tar.gz"
 
+# On Windows, the folders an `ard-high-performance` target's decoders are loaded
+# from: FFmpeg's avcodec and avutil DLLs, and fdk-aac's libfdk-aac-2.dll. With
+# nothing set here the gateway looks for them when a session needs them, beside
+# remotex.exe, on PATH, and in MSYS2's C:\msys64\ucrt64\bin, which is where the
+# recommended install puts them. This table is the override for any other
+# install: each key names a folder by its whole path, and that folder is then
+# the only place its decoder is loaded from. The gateway loads
+# what is named at start-up, and refuses to start if it is not there. A key left
+# out leaves that decoder to the search. A gateway on another platform refuses
+# the table: its system loader has a search of its own. See
+# docs/high-performance-decoders.md.
+#
+#[hp_decoders]
+#ffmpeg_dir = 'C:\ffmpeg\bin'
+#fdk_aac_dir = 'C:\fdk-aac'
+
 [server]
 # Listen address for the web UI, host:port (optional; default shown). One key,
 # because it is one decision — a host without a port is half an answer.
@@ -464,11 +480,10 @@ password = "change-me"
 #
 # EXPERIMENTAL. Decoding the stream here takes the host's FFmpeg (libavcodec 60 to
 # 63) and Fraunhofer's fdk-aac, whose licence is not OSI-approved, which the
-# gateway loads when a session needs them: libavcodec61 and libfdk-aac2t64
-# (non-free; libfdk-aac2 before trixie) on Debian, `brew install ffmpeg fdk-aac` on macOS, MSYS2's ffmpeg and fdk-aac on
-# Windows. Without them a session still passes the stream under
-# `media_passthrough = true`, and refuses a browser that cannot decode it. See
-# docs/apple-vnc-889.md, "The media stream".
+# gateway loads when a session needs them. docs/high-performance-decoders.md says
+# how to install them on Linux, macOS and Windows. Without them a session still
+# passes the stream under `media_passthrough = true`, and refuses a browser that
+# cannot decode it. See docs/apple-vnc-889.md, "The media stream".
 #
 # `media_passthrough = true` sends the Mac's stream to a browser that decodes it, as
 # the Mac sent it, for a LAN of 100 Mbit/s or more: its HEVC rather than VP9 encoded
