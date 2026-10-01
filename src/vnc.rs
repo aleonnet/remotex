@@ -24,6 +24,7 @@
 
 use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use aes::Aes128;
@@ -50,7 +51,7 @@ use crate::protocol::{
 use crate::shadow::{self, Rect, Shadow};
 use crate::vnc_apple::{self, CursorCache};
 use crate::vnc_apple_media::{self, MediaStream, PassedUnit, Pictures};
-use crate::vnc_audio::{self, FrameDecoder, ServerAudio};
+use crate::vnc_audio::{self, ServerAudio};
 use crate::vnc_encodings::{Decoded, Decoders, Payload};
 use crate::vnc_apple_clipboard;
 use crate::camera::CameraSignal;
@@ -200,9 +201,10 @@ const FENCE_BLOCK_AFTER: u32 = 1 << 1;
 /// Longest fence payload the extension defines. A server sending more is malformed;
 /// the excess is consumed to keep the stream in step and left out of the echo.
 const MAX_FENCE_PAYLOAD: usize = 64;
-/// Longest FLAC frame one audio message may carry. A frame is 20 ms of the
-/// format this client asks for, 3840 bytes before compression, and FLAC never
-/// grows it by more than a few header bytes, so anything past 64 KiB is a
+/// Longest frame one audio message may carry. A frame is 20 ms of the format
+/// this client asks for, 3840 bytes before compression: FLAC never grows it by
+/// more than a few header bytes and an Opus packet is far under it, so
+/// anything past 64 KiB is a
 /// server that has lost its framing rather than one with a lot to say: its
 /// bytes are stepped over instead of allocated.
 const MAX_AUDIO_FRAME: u32 = 1 << 16;
@@ -1562,23 +1564,6 @@ async fn session(
             .await;
         return;
     }
-    // wlshare's sound is FLAC, which libFLAC decodes. Every installer brings the
-    // library, so a host without it is one built by hand. The picker says so before
-    // Start; a session started with sound all the same is told here, naming the
-    // library, before wlshare is dialled rather than at the stream's begin. A
-    // target that sends the frames on as they came decodes none.
-    if config.needs_libflac()
-        && choices.audio
-        && let Err(e) = vnc_audio::load()
-    {
-        warn!("vnc: refusing a session with wlshare's sound: {e:#}");
-        let _ = sink
-            .msg(ServerMsg::Error {
-                message: format!("This remotex cannot decode wlshare's sound: {e:#}"),
-            })
-            .await;
-        return;
-    }
     // The budget covers the RFB handshake, which can stall on a host that accepts
     // the connection and then says nothing — no socket timeout catches that. The
     // TCP connect has its own deadline inside the helper, so a slow one is
@@ -1635,7 +1620,7 @@ async fn session(
             apple,
             virtual_display,
             wlshare_audio,
-            audio_passed: config.lossless(),
+            audio_rate: config.audio_plan().bitrate_bps,
             camera,
             microphone,
             host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
@@ -1685,13 +1670,13 @@ struct Flags {
     /// physical displays and has nothing to resize.
     virtual_display: bool,
     /// The desktop's sound over wlshare's audio extension, when a `wlshare`
-    /// target asked for it: the queue the read loop feeds the samples wlshare
-    /// sends once it has announced the extension ([`vnc_audio`]). `None` on every
-    /// other target and wherever `audio` was not asked for.
+    /// target asked for it: the queue the read loop feeds the frames wlshare
+    /// sends once it has announced the extension, as they came ([`vnc_audio`]).
+    /// `None` on every other target and wherever `audio` was not asked for.
     wlshare_audio: Option<Arc<crate::audio::AudioBridge>>,
-    /// Whether that sound's FLAC frames go to the queue as they came rather than
-    /// as the samples they decode to: a target with `audio_format = "flac"`.
-    audio_passed: bool,
+    /// The rate, in bits per second, wlshare is asked to code Opus at until the
+    /// listener's walk asks for another: the target's `audio_bitrate`.
+    audio_rate: i32,
     /// The browser's camera, on a `wlshare` target that carries one: the bridge
     /// the camera socket drives, lent to wlshare once it announces its camera
     /// extension ([`vnc_camera`]). `None` on every other VNC target, which the
@@ -2028,7 +2013,8 @@ async fn rfb38_preface(
 ) -> anyhow::Result<Connected> {
     uplink.send(&set_pixel_format()).await?;
     let passthrough = if config.wlshare() {
-        let encodings = wlshare_encoding_list(config.clipboard, choices.audio, config.camera, config.microphone);
+        let audio = choices.audio.then(|| config.lossless());
+        let encodings = wlshare_encoding_list(config.clipboard, audio, config.camera, config.microphone);
         let lists = Listing::new(encodings, plan);
         let listed = if lists_wlshare_vp9((server.width, server.height)) { &lists.vp9 } else { &lists.plain };
         uplink.send(&set_encodings(listed)).await?;
@@ -2154,14 +2140,22 @@ fn rfb38_encoding_list(clipboard: bool) -> Vec<i32> {
 
 /// What a `wlshare` target lists: the generic list, and after it wlshare's own
 /// extensions. A plain target lists none of them, whatever server answers it.
-fn wlshare_encoding_list(clipboard: bool, audio: bool, camera: bool, microphone: bool) -> Vec<i32> {
+/// `audio` is `Some` on a target that asked for sound, and says whether that
+/// sound is lossless.
+fn wlshare_encoding_list(clipboard: bool, audio: Option<bool>, camera: bool, microphone: bool) -> Vec<i32> {
     let mut encodings = rfb38_encoding_list(clipboard);
-    if audio {
+    if let Some(lossless) = audio {
         // wlshare's audio extension, on a target that asked for sound. wlshare
         // announces it with a rectangle of this encoding, and a server that does
         // not speak it says nothing and the session runs in silence. See
         // [`crate::vnc_audio`].
         encodings.push(vnc_audio::ENCODING);
+        // And as Opus, which the browser decodes as it came, unless the target
+        // sends its sound lossless: wlshare's FLAC is what a list without this
+        // asks for.
+        if !lossless {
+            encodings.push(vnc_audio::ENCODING_OPUS);
+        }
     }
     if camera {
         // The wlshare camera extension, on a target that carries a camera, asked
@@ -2407,7 +2401,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         apple,
         virtual_display,
         wlshare_audio,
-        audio_passed,
+        audio_rate,
         camera,
         microphone,
         host_density,
@@ -2475,6 +2469,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         }
         None => (None, None),
     };
+    // The rates a listener's walk asks wlshare's Opus for, sent from this loop
+    // once the read loop has heard the extension announced.
+    let mut audio_rates = wlshare_audio.as_ref().map(|bridge| bridge.asked_rate());
+    let audio_announced = Arc::new(AtomicBool::new(false));
     let shared = Shared {
         uplink: Arc::clone(&uplink),
         desktop: Arc::clone(&desktop),
@@ -2484,7 +2482,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         display: Arc::clone(&display),
         hp_wake: Arc::clone(&hp_wake),
         audio: wlshare_audio,
-        audio_passed,
+        audio_rate,
+        audio_announced: Arc::clone(&audio_announced),
         camera: camera.clone(),
         microphone: microphone.clone(),
         media: media.clone(),
@@ -2567,6 +2566,17 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     if let Err(e) = sent {
                         break Err(e);
                     }
+                }
+            }
+            // The listener's walk moved the rate wlshare's Opus is coded at
+            // ([`crate::audio::AudioBridge::ask_rate`]). Named to a server that
+            // has announced the extension and to no other: the read loop sends
+            // the rate current at the announcement itself.
+            rate = asked_audio_rate(&mut audio_rates) => {
+                if audio_announced.load(Ordering::Relaxed)
+                    && let Err(e) = send(&uplink, &vnc_audio::set_bitrate(rate as u32)).await
+                {
+                    break Err(e);
                 }
             }
             // A High Performance resize has something due — see [`HpResize`].
@@ -3236,6 +3246,19 @@ async fn next_picture(apple: &mut Option<Apple>) -> FromStream {
 
 /// Resolves when a High Performance resize has something due — at
 /// [`HpResize::deadline`], re-read whenever `wake` says the read loop changed it.
+/// The next rate, in bits per second, asked of the remote's Opus. Never, on a
+/// session with no such sound or once its queue is gone.
+async fn asked_audio_rate(rates: &mut Option<tokio::sync::watch::Receiver<Option<i32>>>) -> i32 {
+    if let Some(rates) = rates {
+        while rates.changed().await.is_ok() {
+            if let Some(rate) = *rates.borrow_and_update() {
+                return rate;
+            }
+        }
+    }
+    std::future::pending().await
+}
+
 async fn hp_resize_due(desktop: &SharedDesktop, wake: &tokio::sync::Notify) {
     loop {
         let at = desktop.lock().unwrap().hp.deadline(tokio::time::Instant::now());
@@ -3285,8 +3308,12 @@ struct Shared {
     /// see [`Flags::wlshare_audio`]. `None` is a session with no sound to carry,
     /// and the extension is then neither advertised nor read.
     audio: Option<Arc<crate::audio::AudioBridge>>,
-    /// See [`Flags::audio_passed`].
-    audio_passed: bool,
+    /// See [`Flags::audio_rate`].
+    audio_rate: i32,
+    /// Whether wlshare has announced its audio extension, so that a rate may be
+    /// named to it: set by the read loop, which hears the announcement, for the
+    /// loop that hears the walk.
+    audio_announced: Arc<AtomicBool>,
     /// The browser's camera — see [`Flags::camera`]. `None` is a session with no
     /// camera to lend, and the extension is then neither advertised nor read.
     camera: Option<Arc<vnc_camera::Link>>,
@@ -3315,16 +3342,14 @@ async fn read_loop<R: AsyncRead + Unpin>(
 ) -> anyhow::Result<()> {
     let ReadFlags { clipboard: clipboard_enabled, poll } = flags;
     let Shared {
-        uplink, desktop, clipboard, display, hp_wake, audio, audio_passed, camera, microphone, media, passthrough, ..
+        uplink, desktop, clipboard, display, hp_wake, audio, audio_rate, camera, microphone, media, passthrough, ..
     } = &shared;
     // Where the audio extension stands here. `Off` on a session with no bridge
     // to feed, which is also a session that never listed the encoding, so
     // neither the announcement nor a frame can arrive.
     let mut audio_state = if audio.is_some() { Audio::Asked } else { Audio::Off };
-    // Whether a stream is running, from a begin to its end, and its FLAC
-    // decoder: none on a target whose frames are passed as they came.
+    // Whether a stream is running, from a begin to its end.
     let mut streaming = false;
-    let mut flac: Option<FrameDecoder> = None;
     let mut full_repaint: Option<FullRepaint> = None;
     let mut apple_poll_paused = false;
     let mut apple_poll_deadline: Option<tokio::time::Instant> = None;
@@ -3570,6 +3595,15 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         vnc_audio::SOURCE_FORMAT.bits_per_sample
                     );
                     send(uplink, &vnc_audio::set_format(vnc_audio::WANTED)).await?;
+                    // The rate Opus is coded at, before the stream starts: what
+                    // a listener's walk last asked for, or the target's own.
+                    // The flag goes up first, so a rate asked for from here on
+                    // is sent by the loop that hears it, and none is missed.
+                    shared.audio_announced.store(true, Ordering::Relaxed);
+                    if let Some(bridge) = audio {
+                        let rate = bridge.asked_rate().borrow().unwrap_or(*audio_rate);
+                        send(uplink, &vnc_audio::set_bitrate(rate as u32)).await?;
+                    }
                     send(uplink, &vnc_audio::enable()).await?;
                 } else if audio_state == Audio::Asked && painted {
                     // The announcement comes in an update of its own before any
@@ -3830,9 +3864,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     ServerAudio::Begin => {
                         info!("vnc: the server started the desktop's audio stream");
                         streaming = true;
-                        if !audio_passed {
-                            flac = Some(FrameDecoder::new()?);
-                        }
                         if let Some(bridge) = audio {
                             bridge.publish_format(vnc_audio::SOURCE_FORMAT);
                         }
@@ -3840,21 +3871,17 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     ServerAudio::End => {
                         info!("vnc: the server stopped the desktop's audio stream");
                         streaming = false;
-                        flac = None;
                         if let Some(bridge) = audio {
                             bridge.clear_format();
                         }
                     }
                 }
             }
-            // One FLAC frame of the running stream, decoded into the 16-bit
-            // stereo this client asked for, which is what the queue takes.
+            // One frame of the running stream, an Opus packet or a FLAC frame as
+            // the target asked: it goes to the queue as it came, for the
+            // browser to decode and to refuse, and nothing here reads it.
             // Framed by its own length, so an implausible one is read past
-            // rather than allocated, and one that does not decode costs its
-            // twenty milliseconds rather than the session: the next frame
-            // decodes on its own. On a target that sends its sound as FLAC the
-            // frame goes to the queue as it came, for the page to decode and
-            // to refuse: nothing here reads it.
+            // rather than allocated.
             vnc_audio::MSG_FRAME if audio_state != Audio::Off => {
                 let mut header = [0u8; vnc_audio::FRAME_HEADER_LEN];
                 reader.read_exact(&mut header).await?;
@@ -3865,27 +3892,15 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 } else {
                     let mut frame = vec![0u8; length as usize];
                     reader.read_exact(&mut frame).await?;
-                    match flac.as_mut() {
-                        _ if !streaming => warn!("vnc: dropped an audio frame sent outside a stream"),
-                        // A packet's length is a `u16` on the audio socket
-                        // ([`crate::protocol::audio`]), sixteen times a frame of
-                        // this format at its largest.
-                        None if frame.is_empty() || frame.len() > usize::from(u16::MAX) => {
-                            warn!("vnc: dropped a {length}-byte audio frame, which is not one to pass");
-                        }
-                        None => {
-                            if let Some(bridge) = audio {
-                                bridge.unit(frame);
-                            }
-                        }
-                        Some(decoder) => match decoder.decode(&frame) {
-                            Ok(samples) => {
-                                if let Some(bridge) = audio {
-                                    bridge.wave(samples);
-                                }
-                            }
-                            Err(e) => warn!("vnc: dropped an audio frame: {e:#}"),
-                        },
+                    if !streaming {
+                        warn!("vnc: dropped an audio frame sent outside a stream");
+                    // A packet's length is a `u16` on the audio socket
+                    // ([`crate::protocol::audio`]), sixteen times a frame of
+                    // this format at its largest.
+                    } else if frame.is_empty() || frame.len() > usize::from(u16::MAX) {
+                        warn!("vnc: dropped a {length}-byte audio frame, which is not one to pass");
+                    } else if let Some(bridge) = audio {
+                        bridge.unit(frame);
                     }
                 }
             }
@@ -6740,7 +6755,7 @@ mod tests {
         // A wlshare target's is the same list with wlshare's requests after it.
         let mut wlshare = generic;
         wlshare.extend([ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-        assert_eq!(wlshare_encoding_list(false, false, false, false), wlshare);
+        assert_eq!(wlshare_encoding_list(false, None, false, false), wlshare);
 
         // Every pixel encoding advertised is one this side can be handed. A rect
         // header alone is enough to prove it: an unrecognised encoding bails with
@@ -6753,11 +6768,11 @@ mod tests {
         // ServerCutText, the density report and the output list as their own
         // messages, and the audio announcement is an empty rectangle with no
         // pixels behind it.
-        let pixel_encodings = wlshare_encoding_list(true, true, true, true)
+        let pixel_encodings = wlshare_encoding_list(true, Some(false), true, true)
             .into_iter()
             .filter(|encoding| {
                 *encoding >= 0
-                    && ![ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS, vnc_camera::ENCODING, vnc_mic::ENCODING, vnc_audio::ENCODING]
+                    && ![ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS, vnc_camera::ENCODING, vnc_mic::ENCODING, vnc_audio::ENCODING, vnc_audio::ENCODING_OPUS]
                         .contains(encoding)
             });
         for encoding in pixel_encodings {
@@ -7042,7 +7057,7 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_DENSITY, i32::from_be_bytes(*b"WLSH"));
         assert_eq!(ENCODING_WLSHARE_OUTPUTS, i32::from_be_bytes(*b"WLSO"));
         for clipboard in [false, true] {
-            let wlshare = wlshare_encoding_list(clipboard, false, false, false);
+            let wlshare = wlshare_encoding_list(clipboard, None, false, false);
             assert_eq!(&wlshare[wlshare.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
         }
     }
@@ -7428,33 +7443,19 @@ mod tests {
         msg
     }
 
-    /// 20 ms of 48 kHz 16-bit stereo, every sample `value`, as the frame
-    /// message wlshare sends for it: type 0xE4, three bytes of padding, a
-    /// big-endian length and the FLAC frame flacenc makes of it. flacenc shares
-    /// nothing with the decoder the read loop uses.
-    fn server_frame(value: i16) -> Vec<u8> {
-        use flacenc::component::BitRepr as _;
-        use flacenc::error::Verify as _;
-        use flacenc::source::Fill as _;
-        let mut info = flacenc::component::StreamInfo::new(48_000, 2, 16).unwrap();
-        info.set_block_sizes(960, 960).unwrap();
-        let config = flacenc::config::Encoder::default().into_verified().unwrap();
-        let mut framebuf = flacenc::source::FrameBuf::with_size(2, 960).unwrap();
-        framebuf.fill_le_bytes(&frame_samples(value), 2).unwrap();
-        let frame = flacenc::encode_fixed_size_frame(&config, &framebuf, 0, &info).unwrap();
-        let mut sink = flacenc::bitsink::ByteSink::new();
-        frame.write(&mut sink).unwrap();
-        let frame = sink.into_inner();
+    /// The frame message wlshare sends for one frame of its sound, an Opus
+    /// packet or a FLAC frame: type 0xE4, three bytes of padding, a big-endian
+    /// length and the frame. Nothing here reads a frame, so any bytes are one.
+    fn server_frame(frame: &[u8]) -> Vec<u8> {
         let mut msg = vec![0xE4u8, 0, 0, 0];
         msg.extend_from_slice(&(frame.len() as u32).to_be_bytes());
-        msg.extend_from_slice(&frame);
+        msg.extend_from_slice(frame);
         msg
     }
 
-    /// The samples [`server_frame`] carries, as the queue should receive them.
-    fn frame_samples(value: i16) -> Vec<u8> {
-        value.to_le_bytes().repeat(960 * 2)
-    }
+    /// What a client answers the announcement with, byte for byte: set-format
+    /// for S16, two channels, 48 000 Hz; set-bitrate, 96 000 bit/s; enable.
+    const AUDIO_ANSWER: [u8; 22] = [255, 1, 0, 2, 3, 2, 0, 0, 0xBB, 0x80, 255, 1, 0, 3, 0, 1, 0x77, 0, 255, 1, 0, 0];
 
     /// Run one wire through the read loop with a bridge attached, and hand back
     /// what was sent, the bridge, and a listener taken *before* the loop ran —
@@ -7485,22 +7486,26 @@ mod tests {
     }
 
     /// The pseudo-encoding is asked of a wlshare target only where the target
-    /// asked for sound. QEMU's own, which promises raw samples, is never asked.
+    /// asked for sound, and as Opus unless that sound is lossless. QEMU's own,
+    /// which promises raw samples, is never asked.
     #[test]
     fn the_audio_extension_is_asked_only_where_sound_was() {
         assert_eq!(vnc_audio::ENCODING.to_be_bytes(), *b"WLSF");
         for clipboard in [false, true] {
-            let asked = wlshare_encoding_list(clipboard, true, false, false);
-            assert!(asked.contains(&vnc_audio::ENCODING));
-            assert!(!asked.contains(&-259), "QEMU's raw samples are not taken");
-            assert_eq!(
-                &asked[asked.len() - 2..],
-                &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS],
-                "the wlshare requests stay last, so audio never weighs on encoding preference"
-            );
+            for lossless in [false, true] {
+                let asked = wlshare_encoding_list(clipboard, Some(lossless), false, false);
+                assert!(asked.contains(&vnc_audio::ENCODING));
+                assert_eq!(asked.contains(&vnc_audio::ENCODING_OPUS), !lossless, "FLAC is a list without Opus");
+                assert!(!asked.contains(&-259), "QEMU's raw samples are not taken");
+                assert_eq!(
+                    &asked[asked.len() - 2..],
+                    &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS],
+                    "the wlshare requests stay last, so audio never weighs on encoding preference"
+                );
+            }
+            let silent = wlshare_encoding_list(clipboard, None, false, false);
             assert!(
-                !wlshare_encoding_list(clipboard, false, false, false)
-                    .contains(&vnc_audio::ENCODING),
+                !silent.contains(&vnc_audio::ENCODING) && !silent.contains(&vnc_audio::ENCODING_OPUS),
                 "a target without audio does not ask"
             );
         }
@@ -7512,10 +7517,10 @@ mod tests {
     #[test]
     fn the_camera_extension_is_asked_only_where_a_camera_is_carried() {
         for clipboard in [false, true] {
-            let asked = wlshare_encoding_list(clipboard, true, true, false);
+            let asked = wlshare_encoding_list(clipboard, Some(false), true, false);
             assert!(asked.contains(&vnc_camera::ENCODING));
             assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            assert!(!wlshare_encoding_list(clipboard, true, false, false).contains(&vnc_camera::ENCODING));
+            assert!(!wlshare_encoding_list(clipboard, Some(false), false, false).contains(&vnc_camera::ENCODING));
         }
     }
 
@@ -7525,99 +7530,94 @@ mod tests {
     #[test]
     fn the_microphone_extension_is_asked_only_where_a_microphone_is_carried() {
         for clipboard in [false, true] {
-            let asked = wlshare_encoding_list(clipboard, true, true, true);
+            let asked = wlshare_encoding_list(clipboard, Some(false), true, true);
             assert!(asked.contains(&vnc_mic::ENCODING));
             assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            assert!(!wlshare_encoding_list(clipboard, true, true, false).contains(&vnc_mic::ENCODING));
+            assert!(!wlshare_encoding_list(clipboard, Some(false), true, false).contains(&vnc_mic::ENCODING));
         }
     }
 
-    /// The announcement rectangle is answered with the format this client wants
-    /// and the switch that starts the stream, and the FLAC frames that follow
-    /// reach the queue as the samples they encode, one buffer a frame.
+    /// The announcement rectangle is answered with the format this client
+    /// wants, the rate Opus is to be coded at and the switch that starts the
+    /// stream, and the frames that follow reach the queue as they came, byte for
+    /// byte and one unit a frame, with nothing decoded here: garbage goes on
+    /// too, for the browser's decoder to refuse. A frame outside a stream, an
+    /// empty one and one past the audio socket's packet length do not.
     #[tokio::test]
     async fn an_announced_audio_stream_is_turned_on_and_its_frames_reach_the_queue() {
         let wire = [
             audio_announcement(),
-            server_audio(1), // begin
-            server_frame(1234),
-            server_frame(-5),
+            server_frame(&[1, 2, 3]), // before the begin
+            server_audio(1),
+            server_frame(&[0xFC, 9, 8, 7]),
+            server_frame(&[0xAB; 16]),
+            server_frame(&[]),
+            server_frame(&vec![0u8; 0x1_0000]),
+            server_audio(0),
+            server_frame(&[4, 5, 6]), // after the end
         ]
         .concat();
-        let (written, bridge, mut listener) = run_audio_wire(wire).await;
-        // Set-format then enable, byte for byte: S16, two channels, 48 000 Hz.
-        assert_eq!(written, vec![255, 1, 0, 2, 3, 2, 0, 0, 0xBB, 0x80, 255, 1, 0, 0]);
-        assert_eq!(bridge.negotiated_format(), Some(vnc_audio::SOURCE_FORMAT));
-        assert_eq!(listener.queued_wave().as_deref(), Some(frame_samples(1234).as_slice()));
-        assert_eq!(listener.queued_wave().as_deref(), Some(frame_samples(-5).as_slice()));
-        assert!(listener.queued_wave().is_none(), "one message, one buffer");
+        let (written, _bridge, mut listener) = run_audio_wire(wire).await;
+        assert_eq!(written, AUDIO_ANSWER);
+        assert_eq!(listener.queued_wave().as_deref(), Some(&[0xFC, 9, 8, 7][..]));
+        assert_eq!(listener.queued_wave().as_deref(), Some(&[0xAB; 16][..]));
+        assert!(listener.queued_wave().is_none(), "one message, one unit");
     }
 
-    /// On a target that sends its sound as FLAC the frames reach the queue as
-    /// they came, byte for byte and one unit a frame, with nothing decoded here:
-    /// garbage goes on too, for the page's decoder to refuse. A frame outside a
-    /// stream, an empty one and one past the audio socket's packet length do not.
+    /// The rate named at the announcement is the one a listener's walk last
+    /// asked for, where one has, rather than the target's own.
     #[tokio::test]
-    async fn a_passed_audio_stream_reaches_the_queue_undecoded() {
-        let frame = |bytes: &[u8]| {
-            let mut msg = vec![0xE4u8, 0, 0, 0];
-            msg.extend_from_slice(&(bytes.len() as u32).to_be_bytes());
-            msg.extend_from_slice(bytes);
-            msg
-        };
-        let good = server_frame(1234);
-        let wire = [
-            audio_announcement(),
-            frame(&[1, 2, 3]), // before the begin
-            server_audio(1),
-            good.clone(),
-            frame(&[0xAB; 16]),
-            frame(&[]),
-            frame(&vec![0u8; 0x1_0000]),
-            server_audio(0),
-            frame(&[4, 5, 6]), // after the end
-        ]
-        .concat();
+    async fn the_rate_a_walk_asked_for_is_the_one_named_at_the_announcement() {
         let (uplink, sent) = test_uplink();
         let (sink, _rx) = test_sink();
         let bridge = Arc::new(crate::audio::AudioBridge::new());
-        let mut listener = bridge.take_listener();
-        let shared = Shared {
-            audio_passed: true,
-            ..test_shared_with_audio(
-                test_shared(uplink, shared_desktop((2, 2), None, None), test_shadow((2, 2))),
-                &bridge,
-            )
-        };
-        let _ =
-            read_loop(std::io::Cursor::new(wire), shared, ReadFlags { clipboard: true, poll: false }, None, sink)
-                .await;
-        // The same set-format and enable as a decoded stream's.
-        assert_eq!(written(&sent), vec![255, 1, 0, 2, 3, 2, 0, 0, 0xBB, 0x80, 255, 1, 0, 0]);
-        assert_eq!(listener.queued_wave().as_deref(), Some(&good[8..]));
-        assert_eq!(listener.queued_wave().as_deref(), Some(&[0xAB; 16][..]));
-        assert!(listener.queued_wave().is_none());
+        bridge.ask_rate(64_000);
+        let shared = test_shared_with_audio(
+            test_shared(uplink, shared_desktop((2, 2), None, None), test_shadow((2, 2))),
+            &bridge,
+        );
+        let announced = Arc::clone(&shared.audio_announced);
+        let _ = read_loop(
+            std::io::Cursor::new(audio_announcement()),
+            shared,
+            ReadFlags { clipboard: true, poll: false },
+            None,
+            sink,
+        )
+        .await;
+        assert_eq!(written(&sent)[10..18], [255, 1, 0, 3, 0, 0, 0xFA, 0]);
+        assert!(announced.load(Ordering::Relaxed), "a later rate may be named to this server");
     }
 
-    /// A frame length past the limit is a server that lost its framing, and a
-    /// frame that does not decode is one frame's worth of sound: either is
+    /// The rates a walk asks for arrive in order, the latest standing in for
+    /// any it overtook, and never on a session with no such sound.
+    #[tokio::test]
+    async fn a_walks_rates_wake_the_loop_that_names_them() {
+        let bridge = crate::audio::AudioBridge::new();
+        let mut rates = Some(bridge.asked_rate());
+        bridge.ask_rate(96_000);
+        bridge.ask_rate(64_000);
+        assert_eq!(asked_audio_rate(&mut rates).await, 64_000);
+        bridge.ask_rate(42_000);
+        assert_eq!(asked_audio_rate(&mut rates).await, 42_000);
+        let none = tokio::time::timeout(Duration::from_millis(20), asked_audio_rate(&mut None)).await;
+        assert!(none.is_err(), "nothing to name");
+    }
+
+    /// A frame length past the limit is a server that lost its framing: it is
     /// read past, and the stream keeps its place for the frame after it.
     #[tokio::test]
-    async fn an_implausible_or_undecodable_frame_is_dropped() {
-        let mut garbage = vec![0xE4u8, 0, 0, 0];
-        garbage.extend_from_slice(&16u32.to_be_bytes());
-        garbage.extend_from_slice(&[0xAB; 16]);
+    async fn an_implausible_frame_is_dropped() {
         let wire = [
             audio_announcement(),
             server_audio(1),
             vec![0xE4, 0, 0, 0, 0x00, 0x01, 0x00, 0x01],
             vec![0u8; 0x1_0001],
-            garbage,
-            server_frame(9),
+            server_frame(&[9; 40]),
         ]
         .concat();
         let (_, _bridge, mut listener) = run_audio_wire(wire).await;
-        assert_eq!(listener.queued_wave().as_deref(), Some(frame_samples(9).as_slice()));
+        assert_eq!(listener.queued_wave().as_deref(), Some(&[9; 40][..]));
         assert!(listener.queued_wave().is_none());
     }
 
@@ -7653,7 +7653,7 @@ mod tests {
         let wire = [
             audio_announcement(),
             server_audio(1),
-            server_frame(3),
+            server_frame(&[3; 8]),
             server_audio(0), // end
         ]
         .concat();
@@ -7700,13 +7700,13 @@ mod tests {
             pixels_without_announcement(),
             audio_announcement(),
             server_audio(1),
-            server_frame(7),
+            server_frame(&[7; 8]),
         ]
         .concat();
         let (written, bridge, mut listener) = run_audio_wire(wire).await;
-        assert_eq!(written, vec![255, 1, 0, 2, 3, 2, 0, 0, 0xBB, 0x80, 255, 1, 0, 0]);
+        assert_eq!(written, AUDIO_ANSWER);
         assert_eq!(bridge.negotiated_format(), Some(vnc_audio::SOURCE_FORMAT));
-        assert_eq!(listener.queued_wave().as_deref(), Some(frame_samples(7).as_slice()));
+        assert_eq!(listener.queued_wave().as_deref(), Some(&[7; 8][..]));
     }
 
     /// The QEMU submessages share no length field, so one this client cannot
@@ -8125,7 +8125,8 @@ mod tests {
             display: Arc::new(std::sync::Mutex::new(DisplayState::default())),
             hp_wake: Arc::new(tokio::sync::Notify::new()),
             audio: None,
-            audio_passed: false,
+            audio_rate: 96_000,
+            audio_announced: Arc::new(AtomicBool::new(false)),
             camera: None,
             microphone: None,
             media: None,
@@ -8143,7 +8144,7 @@ mod tests {
             apple_media: false,
             rdp_graphics: false,
         };
-        Arc::new(Listing::new(wlshare_encoding_list(false, false, false, false), plan))
+        Arc::new(Listing::new(wlshare_encoding_list(false, None, false, false), plan))
     }
 
     /// The same, for a session that asked for the desktop's sound: the bridge
@@ -10756,7 +10757,7 @@ mod tests {
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
         let mut shared = test_shared(uplink, shared_desktop(small, None, None), test_shadow(small));
-        let encodings = wlshare_encoding_list(false, false, false, false);
+        let encodings = wlshare_encoding_list(false, None, false, false);
         let lists = Arc::new(Listing::new(encodings, plan));
         shared.passthrough = Some(Arc::clone(&lists));
         let mut wire = update(&[geometry(0, 0, big.0, big.1, ENCODING_DESKTOP_SIZE)]);

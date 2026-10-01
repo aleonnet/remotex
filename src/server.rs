@@ -671,7 +671,7 @@ struct TargetInfo {
     default_size: Option<Points>,
     /// Whether the picker offers the remote's sound as a choice.
     audio: bool,
-    /// Whether this gateway cannot carry that sound: one that needs libFLAC
+    /// Whether this gateway cannot carry that sound: an RDP host's as FLAC, which needs libFLAC
     /// ([`crate::config::TargetConfig::needs_libflac`]) on a host without it.
     /// The picker then shows the choice greyed.
     #[serde(rename = "audioUnavailable")]
@@ -736,7 +736,7 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
     let apple_decoders = !targets.iter().any(crate::config::TargetConfig::media_stream)
         || crate::vnc::apple_decoders().is_ok();
     let libflac =
-        !targets.iter().any(crate::config::TargetConfig::needs_libflac) || crate::vnc_audio::load().is_ok();
+        !targets.iter().any(crate::config::TargetConfig::needs_libflac) || crate::audio::load_libflac().is_ok();
     Json(targets.iter().map(|target| TargetInfo::of(target, apple_decoders, libflac)).collect())
 }
 
@@ -1484,13 +1484,14 @@ mod tests {
         assert!(entry("fast", false).ends_with(r#""passthroughOnly":true}"#));
         // Which says nothing about a target with no such stream.
         assert!(entry("win", false).ends_with(r#""passthroughOnly":false}"#));
-        // wlshare's sound is offered, and is FLAC: unavailable on a host without
-        // libFLAC, which says nothing about a sound that is not wlshare's.
+        // wlshare's sound is offered and passed as wlshare coded it, Opus or
+        // FLAC, so no library this host lacks makes it unavailable; nor is an
+        // RDP host's sound coded as Opus.
         assert!(entry_on("sway", true, true).contains(r#""audio":true,"audioUnavailable":false,"#));
-        assert!(entry_on("sway", true, false).contains(r#""audio":true,"audioUnavailable":true,"#));
+        assert!(entry_on("sway", true, false).contains(r#""audio":true,"audioUnavailable":false,"#));
         assert!(entry_on("win", true, false).contains(r#""audio":true,"audioUnavailable":false,"#));
-        // Sent as FLAC it is the other way round: wlshare's frames are passed
-        // and need no library, and an RDP host's PCM is coded with it.
+        // An RDP host's PCM sent as FLAC is coded with libFLAC, and is the one
+        // sound that needs it.
         assert!(entry_on("sway-flac", true, false).contains(r#""audio":true,"audioUnavailable":false,"#));
         assert!(entry_on("win-flac", true, false).contains(r#""audio":true,"audioUnavailable":true,"#));
         assert!(entry_on("win-flac", true, true).contains(r#""audio":true,"audioUnavailable":false,"#));

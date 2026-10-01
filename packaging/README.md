@@ -151,9 +151,10 @@ elsewhere the operator installs it, as
 [High Performance decoder](../docs/high-performance-decoder.md) says for each
 platform.
 
-wlshare's sound is FLAC, decoded by libFLAC, which
-[desktop-flac](https://github.com/andrewtheguy/desktop-flac) loads at run time
-and nothing links (`src/vnc_audio.rs`). Every artifact brings it, FLAC 1.5's or
+An `rdp` target with `audio_format = "flac"` has its sound coded by libFLAC,
+which [desktop-flac](https://github.com/andrewtheguy/desktop-flac) loads at run
+time and nothing links (`src/audio.rs`); wlshare's sound is passed as wlshare
+coded it and needs none. Every artifact brings it, FLAC 1.5's or
 1.4's:
 
 | Artifact | libFLAC |

@@ -1074,7 +1074,7 @@ impl SessionManager {
         // goes through (`forward_input`), so the rule this module states for itself is
         // that critical sections stay short. `audio_epoch` is what makes letting go
         // safe.
-        let (bridge, out, audio_id, epoch, plan, source_format, passed, lossless) = {
+        let (bridge, out, audio_id, epoch, plan, source_format, passed, remote_plan, lossless) = {
             let mut st = self.state.lock().unwrap();
             // Unconditional, and first: this is also how "replace the previous pump" is
             // expressed, and it is what tells a build already in flight to stand down.
@@ -1093,17 +1093,26 @@ impl SessionManager {
             // A High Performance Mac's sound is passed as it came, whichever way its
             // picture goes: the Mac's own units fill the bridge, and there is nothing
             // to encode.
-            // So are wlshare's FLAC frames on a target that sends its sound
-            // lossless, which the VNC engine then leaves undecoded.
+            // So is wlshare's, always: Opus packets, or FLAC frames on a target
+            // that sends its sound lossless, coded by wlshare as the VNC engine
+            // asked.
             let passed = st.selected.as_ref().and_then(|selected| {
                 if selected.target.media_stream() {
                     Some(crate::vnc_apple_media::PASSED_SOUND)
-                } else if selected.target.wlshare() && selected.target.lossless() {
-                    Some(crate::vnc_audio::PASSED_FLAC)
+                } else if selected.target.wlshare() {
+                    Some(crate::vnc_audio::passed(selected.target.lossless()))
                 } else {
                     None
                 }
             });
+            // wlshare's Opus is coded at a rate it can be told, so the target's
+            // plan holds for it as for an encoder here; no other passed stream
+            // has one.
+            let remote_plan = st
+                .selected
+                .as_ref()
+                .filter(|selected| selected.target.wlshare() && !selected.target.lossless())
+                .map(|selected| selected.target.audio_plan());
             // An RDP host's PCM on such a target is coded as FLAC here.
             let lossless = st.selected.as_ref().is_some_and(|selected| selected.target.lossless());
             // The target's, not a session setting: the codec and its rate are a
@@ -1114,7 +1123,7 @@ impl SessionManager {
                 .as_ref()
                 .map(|selected| (selected.target.audio_plan(), selected.target.audio_source_format()))
                 .unwrap_or((AudioPlan::default(), crate::audio::PCM_CD_QUALITY));
-            (bridge, out, audio_id, st.audio_epoch, plan, source_format, passed, lossless)
+            (bridge, out, audio_id, st.audio_epoch, plan, source_format, passed, remote_plan, lossless)
         };
 
         // The negotiated format when the remote's channel is up, and otherwise the
@@ -1128,7 +1137,11 @@ impl SessionManager {
         // visible at all — nothing branches on it.
         let encoded = if let Some(format) = passed {
             info!("session: arming audio, passing the remote's {} as it comes", format.codec);
-            bridge.take_listener().into_passed(format).boxed()
+            // A walk starts from its ceiling, and so does the remote's encoder.
+            if let Some(plan) = remote_plan {
+                bridge.ask_rate(plan.bitrate_bps);
+            }
+            bridge.take_listener().into_passed(format, remote_plan).boxed()
         } else {
             let negotiated = bridge.negotiated_format();
             info!(
@@ -1152,7 +1165,9 @@ impl SessionManager {
         };
         // The adaptive walk, when the plan asked for one. It lives in the pump —
         // the side whose sends block — and publishes through the signals the
-        // encoder reads; see [`crate::audio::AudioCongestion`].
+        // encoder reads; see [`crate::audio::AudioCongestion`]. Where the encoder
+        // is wlshare's, the pump hands what the walk asks for to the engine.
+        let remote = remote_plan.is_some().then(|| Arc::clone(&bridge));
         let mut congestion = match (encoded.signals.clone(), plan.adaptive_floor_bps) {
             (Some(signals), Some(floor)) => {
                 Some(crate::audio::AudioCongestion::new(plan.bitrate_bps, floor, signals))
@@ -1204,6 +1219,9 @@ impl SessionManager {
                     let now = tokio::time::Instant::now();
                     if let Some(bps) = congestion.observe(now - queued, now) {
                         debug!("session: the audio walk asks for {} kbit/s", bps / 1000);
+                        if let Some(bridge) = &remote {
+                            bridge.ask_rate(bps);
+                        }
                     }
                 }
             }
@@ -3025,6 +3043,50 @@ mod tests {
                 }
                 other => panic!("expected the passed unit, got {other:?}"),
             }
+        }
+    }
+
+    /// wlshare's sound is always passed, and coded by wlshare as the target's
+    /// `audio_format` says: Opus behind the head the browser's decoder takes,
+    /// or FLAC. The engine's units reach the socket as they came, and arming
+    /// the Opus one names the plan's rate for wlshare to start from.
+    #[tokio::test]
+    async fn wlshares_sound_is_passed_in_the_format_the_target_names() {
+        for (format, codec) in [(None, "opus"), (Some(crate::config::AudioFormat::Flac), "flac")] {
+            let (hook_tx, hooks) = std_mpsc::channel();
+            let spawner: EngineSpawner = Box::new(
+                move |_target, _choices, _plan, _display, input_rx, frame_tx, audio, camera, _feedback| {
+                    hook_tx.send((input_rx, frame_tx, audio, camera)).unwrap();
+                },
+            );
+            let target =
+                TargetConfig { subtype: Some(Subtype::Wlshare), audio_format: format, ..video_target("sway") };
+            let mgr = Arc::new(SessionManager::with_spawner(vec![target], spawner));
+            let token = mgr.claim(false, None).unwrap();
+            let mut att = mgr.attach(&token, None, TAKES).await.unwrap();
+            expect_picker(&mut att.events).await;
+            let choices = Choices { audio: true, ..Choices::default() };
+            mgr.connect(att.id, "sway", None, choices).await.unwrap();
+            let (_input, _frames, audio, _camera) = hooks.try_recv().unwrap();
+            let audio = audio.expect("a session with sound is given a bridge");
+            let asked = audio.asked_rate();
+
+            let mut sound = mgr.attach_audio(&token).unwrap();
+            audio.unit(vec![7; 240]);
+            match recv_audio(&mut sound.packets).await {
+                ServerMsg::AudioFormat { codec: named, sample_rate, packet_frames, head, passthrough, .. } => {
+                    assert_eq!((named, sample_rate, packet_frames), (codec, 48_000, 960));
+                    assert!(passthrough, "wlshare coded it");
+                    assert_eq!(head.is_empty(), codec == "flac", "OpusHead, or nothing for FLAC");
+                }
+                other => panic!("expected the audio format, got {other:?}"),
+            }
+            match recv_audio(&mut sound.packets).await {
+                ServerMsg::Audio(units) => assert_eq!(units, [bytes::Bytes::from(vec![7u8; 240])], "as it came"),
+                other => panic!("expected the passed unit, got {other:?}"),
+            }
+            let rate = *asked.borrow();
+            assert_eq!(rate, (codec == "opus").then_some(96_000), "the rate wlshare's Opus starts at");
         }
     }
 

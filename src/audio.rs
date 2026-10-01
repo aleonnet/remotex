@@ -11,10 +11,15 @@
 //! listener hands them on as packets with no encoder behind them
 //! ([`AudioListener::into_passed`]).
 //!
-//! A target with `audio_format = "flac"` is sent its sound lossless instead
-//! (EXPERIMENTAL): wlshare's own FLAC frames are passed the same way
-//! ([`crate::vnc_audio::PASSED_FLAC`]), and an RDP host's PCM is coded as FLAC
-//! here ([`AudioListener::into_flac`]). The page decodes either in its
+//! So is wlshare's sound, which wlshare codes itself as the target's
+//! `audio_format` asks: Opus ([`crate::vnc_audio::PASSED_OPUS`]) at the rate the
+//! plan's walk arrives at, which the queue hands back to the engine for wlshare
+//! to be told ([`AudioBridge::ask_rate`]), or FLAC
+//! ([`crate::vnc_audio::PASSED_FLAC`]).
+//!
+//! A target with `audio_format = "flac"` is sent its sound lossless
+//! (EXPERIMENTAL): wlshare's FLAC frames passed, or an RDP host's PCM coded as
+//! FLAC here ([`AudioListener::into_flac`]). The page decodes either in its
 //! WebAssembly module, and there is no rate to walk.
 
 use std::sync::Arc;
@@ -119,6 +124,10 @@ pub struct AudioBridge {
     /// way — so it is a record rather than a gate: what the log says about whether
     /// the remote's audio is set up, and what an indicator would read one day.
     format: watch::Sender<Option<PcmFormat>>,
+    /// The bitrate, in bits per second, a remote that codes its own Opus is to
+    /// hold: what the listener's walk last arrived at, `None` until one has
+    /// asked. Read by the engine, which is the side that can tell the remote.
+    rate: watch::Sender<Option<i32>>,
 }
 
 impl AudioBridge {
@@ -126,7 +135,21 @@ impl AudioBridge {
         Self {
             waves: broadcast::channel(AUDIO_QUEUE_DEPTH).0,
             format: watch::Sender::new(None),
+            rate: watch::Sender::new(None),
         }
+    }
+
+    /// Ask the remote to code its Opus at `bps` bits per second: the walk of a
+    /// passed stream's listener, whose encoder is the remote's
+    /// ([`AudioListener::into_passed`]).
+    pub fn ask_rate(&self, bps: i32) {
+        self.rate.send_replace(Some(bps));
+    }
+
+    /// The rate last asked for, and a wake-up for each one after it. For the
+    /// engine that passes the remote's own Opus.
+    pub fn asked_rate(&self) -> watch::Receiver<Option<i32>> {
+        self.rate.subscribe()
     }
 
     /// Announce the negotiated format — the endpoint's cue that audio is
@@ -373,10 +396,19 @@ impl AudioListener {
 
 impl AudioListener {
     /// Everything the client has to be told about a passed stream, and a live-only
-    /// stream of its units, each already a packet: no encoder, no walk and no
-    /// silence to shed, since what arrives is what the remote coded. Every unit
-    /// already queued when one is read goes in the same batch.
-    pub fn into_passed(self, format: PassedFormat) -> EncodedAudio<impl Stream<Item = Vec<Bytes>>> {
+    /// stream of its units, each already a packet: no encoder and no silence to
+    /// shed, since what arrives is what the remote coded. Every unit already
+    /// queued when one is read goes in the same batch.
+    ///
+    /// `plan` is a remote's that codes Opus at a rate it can be told
+    /// (wlshare's), and `None` for a stream with no rate to move. An adaptive
+    /// one gets the walk's signals, as an encoder here would: the sender
+    /// reports its sends through them, and what the walk asks for goes to the
+    /// remote ([`AudioBridge::ask_rate`]) in place of an encoder.
+    pub fn into_passed(self, format: PassedFormat, plan: Option<AudioPlan>) -> EncodedAudio<impl Stream<Item = Vec<Bytes>>> {
+        let signals = plan
+            .filter(|plan| plan.adaptive_floor_bps.is_some())
+            .map(|plan| Arc::new(AudioSignals::new(plan.bitrate_bps)));
         let stream = futures_util::stream::unfold(self.waves, |mut units| async move {
             loop {
                 match units.recv().await {
@@ -403,10 +435,28 @@ impl AudioListener {
             packet_frames: format.packet_frames,
             head: format.head.to_vec(),
             passthrough: true,
-            signals: None,
+            signals,
             packets: stream,
         }
     }
+}
+
+/// Load libFLAC, or say that the host lacks it: what a session whose sound is
+/// coded as FLAC here ([`crate::config::TargetConfig::needs_libflac`]) checks
+/// before it dials. A failure is not remembered, so a library installed while
+/// the gateway runs is found by the next session.
+pub fn load_libflac() -> anyhow::Result<()> {
+    desktop_flac::load().context("the sound is coded as FLAC, by libFLAC")
+}
+
+/// Load the libFLAC this gateway's package carries, if it carries one, before
+/// the gateway listens: a package that brought the library refuses to start
+/// without it, and codes with no other.
+pub fn load_carried_libflac() -> anyhow::Result<()> {
+    if let Some(dir) = crate::config::carried_libflac() {
+        desktop_flac::load_from(&dir).context("the libFLAC this package installs is missing; reinstall it")?;
+    }
+    Ok(())
 }
 
 /// What `audioFormat` names lossless sound as. Not a WebCodecs registration's
@@ -536,7 +586,8 @@ pub struct EncodedAudio<S> {
     pub passthrough: bool,
     /// `Some` exactly when the plan is adaptive: the sender's handle for
     /// reporting how its sends went ([`AudioCongestion`] writes through it) and
-    /// the encoder's source of truth for the rate it should be at.
+    /// the encoder's source of truth for the rate it should be at. A passed
+    /// stream's encoder is the remote's, which the sender tells itself.
     pub signals: Option<Arc<AudioSignals>>,
     pub packets: S,
 }
@@ -871,13 +922,42 @@ mod tests {
         assert_eq!(&opus.head[0..8], b"OpusHead");
     }
 
+    /// A passed stream whose remote codes Opus at a rate it can be told walks
+    /// as an encoder here does, and what the walk asks for is the remote's to
+    /// hear: the queue hands it to whoever passes the stream. A fixed plan has
+    /// no walk.
+    #[tokio::test]
+    async fn a_passed_opus_stream_walks_the_remotes_rate() {
+        let bridge = AudioBridge::new();
+        let plan = AudioPlan::default();
+        let passed = bridge.take_listener().into_passed(crate::vnc_audio::PASSED_OPUS, Some(plan));
+        assert_eq!((passed.codec, passed.sample_rate, passed.channels, passed.packet_frames), ("opus", 48_000, 2, 960));
+        assert_eq!(&passed.head[0..8], b"OpusHead");
+        assert!(passed.passthrough);
+        let signals = passed.signals.expect("an adaptive plan walks");
+        assert_eq!(signals.desired_bps(), plan.bitrate_bps);
+
+        let mut asked = bridge.asked_rate();
+        assert_eq!(*asked.borrow_and_update(), None, "nothing asked until a walk does");
+        let mut walk = AudioCongestion::new(plan.bitrate_bps, plan.adaptive_floor_bps.unwrap(), signals);
+        let now = tokio::time::Instant::now();
+        assert_eq!(walk.observe(BEHIND_SEND, now), None);
+        let lower = walk.observe(BEHIND_SEND, now).expect("two slow sends give up rate");
+        bridge.ask_rate(lower);
+        assert!(asked.has_changed().unwrap());
+        assert_eq!(*asked.borrow_and_update(), Some(64_000));
+
+        let fixed = bridge.take_listener().into_passed(crate::vnc_audio::PASSED_OPUS, Some(AudioPlan::fixed()));
+        assert!(fixed.signals.is_none(), "a fixed rate is named once and never walked");
+    }
+
     /// A passed stream is the remote's units as they came: described by the format
     /// it was handed, a packet each, batched with whatever was already queued, and
     /// with no walk behind it.
     #[tokio::test]
     async fn a_passed_stream_hands_on_the_remotes_units_untouched() {
         let bridge = AudioBridge::new();
-        let passed = bridge.take_listener().into_passed(crate::vnc_apple_media::PASSED_SOUND);
+        let passed = bridge.take_listener().into_passed(crate::vnc_apple_media::PASSED_SOUND, None);
         assert_eq!(
             (passed.codec, passed.sample_rate, passed.channels, passed.packet_frames),
             ("mp4a.40.39", 48_000, 2, 480)

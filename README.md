@@ -368,7 +368,8 @@ output changes mode and scale at once. See
 Sound is chosen at the picker on an `rdp` target and on a `wlshare` one. On
 wlshare it comes through wlshare's audio extension: the gateway lists its
 pseudo-encoding, wlshare announces so and then streams the desktop's sound on the
-RFB connection itself as lossless FLAC. While a client listens the host is
+RFB connection itself, coded there as Opus at the target's rate and passed to
+the browser as it came. While a client listens the host is
 silent: the desktop plays into a PipeWire sink of wlshare's own, whose monitor is
 what is captured. A session started without sound asks for none, and the host
 keeps playing where it did. In the session the menu's Mute and Unmute change only

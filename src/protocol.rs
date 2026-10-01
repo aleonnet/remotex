@@ -1095,8 +1095,8 @@ pub enum ServerMsg {
     /// the source in a FLAC frame.
     ///
     /// `passthrough` says the packets are the remote's own, passed as they came
-    /// — the Mac's AAC-ELD, wlshare's FLAC — rather than coded here, as Opus and
-    /// an RDP host's FLAC are. The audio counterpart of [`Self::VideoFormat`]'s,
+    /// — the Mac's AAC-ELD, wlshare's Opus or FLAC — rather than coded here, as
+    /// an RDP host's Opus and FLAC are. The audio counterpart of [`Self::VideoFormat`]'s,
     /// and like it for the session card alone.
     AudioFormat {
         codec: &'static str,
@@ -1615,7 +1615,7 @@ mod tests {
     /// a client that received them in the other order would decode nothing.
     #[test]
     fn the_audio_format_is_text_and_the_packets_are_not() {
-        let head = crate::opus_stream::opus_head(crate::audio::PCM_CD_QUALITY, 312);
+        let head = desktop_opus::Stream { rate: 48_000, channels: 2 }.head(312, 44_100).unwrap().to_vec();
         let json = (ServerMsg::AudioFormat {
             codec: "opus",
             sample_rate: 48_000,

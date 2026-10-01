@@ -274,7 +274,8 @@ pub enum ChromaChoice {
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum AudioFormat {
-    /// Encoded here, at the rate the audio keys hold.
+    /// At the rate the audio keys hold: an RDP host's PCM encoded here, or
+    /// wlshare's own Opus packets, coded there at that rate, passed as they came.
     #[default]
     Opus,
     /// EXPERIMENTAL. Lossless: wlshare's own FLAC frames passed as they came, or
@@ -421,8 +422,8 @@ pub struct Choices {
     /// How the desktop is sized.
     pub size: Sizing,
     /// Take the remote's sound. RDP negotiates it at connect (MS-RDPEA); a
-    /// `wlshare` target lists wlshare's audio extension, FLAC on the RFB connection
-    /// ([`crate::vnc_audio`]). Without it neither is asked, so the host keeps
+    /// `wlshare` target lists wlshare's audio extension, Opus or FLAC on the RFB
+    /// connection ([`crate::vnc_audio`]). Without it neither is asked, so the host keeps
     /// playing where it did. Packets are sent only while the attached browser
     /// subscribes, which is what its Mute and Unmute change.
     #[serde(default)]
@@ -727,10 +728,11 @@ pub struct TargetConfig {
     #[serde(default)]
     pub microphone: bool,
     /// EXPERIMENTAL. What this target's sound is sent to the browser as; `None`
-    /// reads as [`AudioFormat::Opus`]. `"flac"` sends it lossless: a `wlshare`
-    /// target's FLAC frames are passed as wlshare made them, so the gateway
-    /// needs no libFLAC for them, and an `rdp` target's PCM is coded as FLAC
-    /// here, by libFLAC. The page decodes either in its WebAssembly module.
+    /// reads as [`AudioFormat::Opus`]. `"flac"` sends it lossless: an `rdp`
+    /// target's PCM is coded as FLAC here, by libFLAC, and the page decodes it
+    /// in its WebAssembly module. A `wlshare` target's sound is wlshare's own
+    /// either way, coded there in the format this key names and passed as it
+    /// came, so the gateway codes none of it.
     ///
     /// A key rather than a choice at the picker while it is experimental. It is
     /// the uncompressed rate less a third or so, about a megabit a second of
@@ -758,7 +760,9 @@ pub struct TargetConfig {
     /// ceiling. While behind, wave buffers that are pure silence are shed instead
     /// of queued — silence is the one content whose loss is free, and dropping it
     /// is how the client catches up without a trimmed or resampled note anywhere
-    /// (see [`crate::audio`]).
+    /// (see [`crate::audio`]). On a `wlshare` target the walk is the same and
+    /// the encoder is wlshare's, told each rate the walk arrives at; its packets
+    /// are passed, so no silence is shed.
     ///
     /// Resolved by the accessor of the same name.
     #[serde(default)]
@@ -1024,13 +1028,10 @@ impl TargetConfig {
     }
 
     /// Whether a session with this target's sound needs libFLAC on this host: to
-    /// decode wlshare's frames for the Opus encoder, or to code an RDP host's PCM
-    /// as FLAC. wlshare's frames sent as FLAC are passed, and need none.
+    /// code an RDP host's PCM as FLAC. wlshare's sound is passed, Opus or FLAC,
+    /// and needs none.
     pub fn needs_libflac(&self) -> bool {
-        match self.protocol {
-            Protocol::Rdp => self.lossless(),
-            Protocol::Vnc => self.wlshare() && !self.lossless(),
-        }
+        self.protocol == Protocol::Rdp && self.lossless()
     }
 
     /// Whether the Opus bitrate walks with the link — on unless the operator
@@ -1061,15 +1062,15 @@ impl TargetConfig {
         AudioPlan { bitrate_bps: bitrate_kbps as i32 * 1000, adaptive_floor_bps }
     }
 
-    /// The one PCM format this target's wave buffers can be in, known before the
+    /// The one PCM format this target's sound can be in, known before the
     /// remote has said anything: what the RDP engine asks a server to redirect
     /// ([`crate::audio::PCM_CD_QUALITY`]), or what a `wlshare` target
-    /// is asked to send over wlshare's audio extension
+    /// is asked to code its sound from over wlshare's audio extension
     /// ([`crate::vnc_audio::SOURCE_FORMAT`]) — the last of which this client
     /// chooses outright, since the extension leaves the format to the client. The
-    /// session builds its encoder from this when the audio socket opens before the
-    /// remote's channel is up, so it has to be the source's — an encoder built for
-    /// the wrong rate plays every note at the wrong pitch. Callers gate on
+    /// session builds an RDP target's encoder from this when the audio socket opens
+    /// before the remote's channel is up, so it has to be the source's — an encoder
+    /// built for the wrong rate plays every note at the wrong pitch. Callers gate on
     /// [`Self::sound`], as with [`Self::audio_plan`].
     pub fn audio_source_format(&self) -> PcmFormat {
         match self.protocol {
@@ -1752,9 +1753,9 @@ impl ConfigFile {
                 target.name
             );
             // The bitrate keys and the adaptive switch tune the Opus encoder, for the
-            // sessions that take the target's sound. Sound is encoded here from two
-            // sources: MS-RDPEA on RDP and wlshare's audio extension on a `wlshare`
-            // target ([`crate::vnc_audio`]). On `ard` and on a plain `vnc` target no
+            // sessions that take the target's sound: the one here for MS-RDPEA's
+            // PCM on RDP, and wlshare's own on a `wlshare` target, which is told
+            // the rate over its audio extension ([`crate::vnc_audio`]). On `ard` and on a plain `vnc` target no
             // session has any, and `ard-high-performance`'s is passed as the Mac's
             // own AAC-ELD ([`crate::vnc_apple_media`]), so the keys could not do
             // anything there.
@@ -4125,9 +4126,9 @@ mod tests {
     }
 
     /// `audio_format` is Opus unless it says FLAC, on the two targets whose sound
-    /// is a choice. FLAC moves libFLAC from one to the other: wlshare's frames
-    /// are then passed, and an RDP host's PCM is coded with it. The Opus keys
-    /// have nothing to tune beside it.
+    /// is a choice. Only an RDP host's PCM coded as FLAC needs libFLAC: wlshare's
+    /// sound is passed in either format. The Opus keys have nothing to tune
+    /// beside FLAC.
     #[test]
     fn audio_format_selects_lossless_sound_where_there_is_sound_to_choose() {
         let wlshare = |body: &str| parse_audio_target(body).map(|cfg| cfg.targets[0].clone());
@@ -4135,7 +4136,7 @@ mod tests {
 
         for target in [wlshare("").unwrap(), wlshare("audio_format = \"opus\"").unwrap()] {
             assert!(!target.lossless());
-            assert!(target.needs_libflac(), "wlshare's FLAC is decoded here for Opus");
+            assert!(!target.needs_libflac(), "wlshare's Opus is passed");
         }
         for target in [rdp("").unwrap(), rdp("audio_format = \"opus\"").unwrap()] {
             assert!(!target.lossless());

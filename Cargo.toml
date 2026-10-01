@@ -109,7 +109,15 @@ libloading = "0.9"
 # read them, or `LIBAVCODEC_HEVC_PREBUILT_DIR`.
 # The tag pins the crate; the archives are the latest release's.
 avcodec-hevc-sys = { package = "libavcodec-hevc-prebuilt-sys", git = "https://github.com/andrewtheguy/libavcodec-hevc-prebuilt", tag = "v9.0.2-20260928041244-5fdbab1", optional = true }
-# Remote audio: resample redirected PCM and encode bare Opus packets.
+# Remote audio: resample redirected PCM and encode bare Opus packets, as wlshare
+# codes its own: desktop-opus, the one crate that codes a desktop's sound as Opus
+# for this gateway and for wlshare, its own repository pinned at a release tag by
+# both, so a passed wlshare packet and one encoded here are the same stream by
+# construction and an encoder setting changes in one place.
+desktop-opus = { git = "https://github.com/andrewtheguy/desktop-opus", tag = "v0.0.1" }
+# libopus itself, for the microphone's decoder (src/mic.rs) and for the tests
+# that read the encoder's packets back; desktop-opus links the same crate at the
+# same tag, so there is one libopus in the binary.
 #
 # `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a
 # prebuilt static archive its sys crate downloads, instead of compiling the
@@ -117,21 +125,20 @@ avcodec-hevc-sys = { package = "libavcodec-hevc-prebuilt-sys", git = "https://gi
 # CMAKE_POLICY_VERSION_MINIMUM dance the packaging scripts used to carry: there is
 # no C build on this path any more, and nothing links a system `libopus.dylib`, so
 # the binary is self-contained on every runner without any env coaxing. The lib is
-# still named `opus`, so every `use opus::…` in src/opus_stream.rs is untouched.
+# still named `opus`, so every `use opus::…` is untouched.
 opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libopus-prebuilt", tag = "v1.6.1-20260906161304-8dd83e8" }
 # There is deliberately no container. Opus packets travel as audio frames on the
 # dedicated audio WebSocket, which already delimits them, and the browser hands
 # them straight to a WebCodecs decoder — so an Ogg dependency would buy framing
-# that is already there. `OpusHead` is still built by hand in src/opus_stream.rs,
+# that is already there. `OpusHead` is still sent, built by desktop-opus,
 # because a decoder needs it wherever it arrives from.
-# FLAC, which is how wlshare carries a desktop's sound on the RFB connection
-# (src/vnc_audio.rs): lossless, so the Opus encode above stays the only lossy
-# step. `desktop-flac` is the one place libFLAC is spoken to, for wlshare's
-# encoder and for the decoder here, its own repository pinned at a release tag by
-# both. It links nothing: it loads the shared library at run time, the system's
-# on Linux and the one the macOS and Windows installers carry. Its encoder also
-# codes an RDP host's PCM for a target with `audio_format = "flac"`
-# (src/audio.rs).
+# FLAC, for an RDP target with `audio_format = "flac"`, whose PCM is coded
+# lossless here (src/audio.rs). `desktop-flac` is the one place libFLAC is spoken
+# to, for wlshare's encoder and for the one here, its own repository pinned at a
+# release tag by both. It links nothing: it loads the shared library at run
+# time, the system's on Linux and the one the macOS and Windows installers
+# carry. wlshare's own sound, FLAC or Opus, is passed as it came and needs
+# neither codec here (src/vnc_audio.rs).
 desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.2" }
 # 44100 -> 48000, because libopus accepts only 8/12/16/24/48 kHz and RDP offers
 # no 48 kHz format. Pure Rust, and it resamples deinterleaved channels — which is
@@ -272,9 +279,6 @@ name = "tui_control_plane_e2e"
 required-features = ["embedded-gateway"]
 
 [dev-dependencies]
-# FLAC frames for the audio decoder's tests, in the blocks wlshare makes them in
-# and by an encoder that shares nothing with libFLAC.
-flacenc = { version = "0.5", default-features = false }
 tokio-tungstenite = "0.29"
 # Scratch directories for the tests that need a real path on disk: an instance
 # directory to serve from, and the ones behind `Instance::origin_label`, which

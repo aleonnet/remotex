@@ -207,7 +207,7 @@ pub async fn serve(instance: &Instance, claim: Claim) -> anyhow::Result<()> {
     // And a decoder `[hp_decoders]` names a folder for, which is loaded now, as
     // is the libFLAC the package carries.
     config.hp_decoders.load()?;
-    crate::vnc_audio::load_carried()?;
+    crate::audio::load_carried_libflac()?;
 
     // Removes a Unix socket file when it is dropped, whichever way this returns.
     let listener = transport::WorkerListener::bind(&endpoint, &claim)?;
