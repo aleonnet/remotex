@@ -384,6 +384,7 @@ const BATCH_FRAME_KIND = 0x02;
 const BATCH_HEADER_LEN = 8;
 const AUDIO_FRAME_KIND = 0x03;
 const AUDIO_HEADER_LEN = 4;
+const AUDIO_FLAG_GAP = 0x01;
 const AUDIO_PACKET_HEADER_LEN = 2;
 const CAMERA_FRAME_KIND = 0x04;
 const CAMERA_KEYFRAME = 0x01;
@@ -575,23 +576,33 @@ export function binaryFrameKind(buf: ArrayBuffer): "batch" | "audio" | null {
 // `audio` in `src/protocol.rs`):
 //
 //   offset 0: u8  frame kind, always 0x03 (audio)
-//   offset 1: u8  flags, always 0
+//   offset 1: u8  flags: bit 0 a gap, and nothing else
 //   offset 2: u16 packet count
 //   offset 4: packets, each u16 length | length bytes
+//
+// A gap is a frame of no packets: the gateway dropped packets the remote had
+// coded, so the next one does not follow the last this client was sent.
 //
 // Lengths because an Opus packet does not carry its own size and one frame holds
 // nine or ten of them; a count because a truncated frame would otherwise look like a
 // complete shorter one. Returns null for anything malformed, so a bad frame is
 // dropped whole rather than decoded halfway — a decoder fed a partial packet does not
 // merely skip it, it can be left unable to decode what follows.
-export function decodeAudioFrame(buf: ArrayBuffer): Uint8Array[] | null {
+export function decodeAudioFrame(
+  buf: ArrayBuffer,
+): { gap: boolean; packets: Uint8Array[] } | null {
   if (buf.byteLength < AUDIO_HEADER_LEN) {
     return null;
   }
   const view = new DataView(buf);
-  if (view.getUint8(0) !== AUDIO_FRAME_KIND || view.getUint8(1) !== 0) {
+  const flags = view.getUint8(1);
+  if (
+    view.getUint8(0) !== AUDIO_FRAME_KIND ||
+    (flags & ~AUDIO_FLAG_GAP) !== 0
+  ) {
     return null;
   }
+  const gap = (flags & AUDIO_FLAG_GAP) !== 0;
   const count = view.getUint16(2, true);
   const packets: Uint8Array[] = [];
   let at = AUDIO_HEADER_LEN;
@@ -607,7 +618,7 @@ export function decodeAudioFrame(buf: ArrayBuffer): Uint8Array[] | null {
     packets.push(new Uint8Array(buf, start, len));
     at = start + len;
   }
-  return packets.length === count ? packets : null;
+  return packets.length === count ? { gap, packets } : null;
 }
 
 // The click count to report for a mouse event. `detail` is what the browser

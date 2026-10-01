@@ -91,6 +91,11 @@ impl Wire {
                         self.totals.audio(frame.len(), packets.len());
                         frames.push(WireFrame::Audio(frame));
                     }
+                    ServerMsg::AudioGap => {
+                        let frame = protocol::audio::gap();
+                        self.totals.audio(frame.len(), 0);
+                        frames.push(WireFrame::Audio(frame));
+                    }
                     other => log::warn!("wire: dropping {other:?}, which has no encoding"),
                 },
             }
@@ -406,6 +411,26 @@ mod tests {
             "an audio frame is a binary frame too, for the message-size ceiling"
         );
         assert_eq!(wire.totals.video, 0, "sound is not pixels");
+    }
+
+    /// A gap goes out as a frame of its own, flagged and empty, in its place
+    /// among the packets: before the first that follows what was dropped.
+    #[test]
+    fn a_gap_is_a_flagged_frame_of_no_packets_in_its_place() {
+        let mut wire = Wire::default();
+        let frames = wire
+            .encode(vec![
+                ServerMsg::Audio(vec![bytes::Bytes::from_static(&[1])]),
+                ServerMsg::AudioGap,
+                ServerMsg::Audio(vec![bytes::Bytes::from_static(&[2])]),
+            ])
+            .unwrap();
+        let binary = binary(&frames);
+        assert_eq!(binary.len(), 3);
+        assert_eq!(packets(binary[0]), vec![vec![1]]);
+        assert_eq!(binary[1][..], [protocol::audio::FRAME_KIND, protocol::audio::GAP, 0, 0]);
+        assert_eq!(packets(binary[2]), vec![vec![2]]);
+        assert_eq!(wire.totals.audio_packets, 2);
     }
 
     /// A frame with no packets is still a frame a client must be able to read

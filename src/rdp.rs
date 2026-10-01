@@ -172,7 +172,7 @@ pub async fn run(
     // with sound all the same is told here, before the host is dialled.
     if config.needs_libflac()
         && audio.is_some()
-        && let Err(e) = crate::vnc_audio::load()
+        && let Err(e) = crate::audio::load_libflac()
     {
         warn!("rdp: refusing a session with sound as FLAC: {e:#}");
         let _ = sink

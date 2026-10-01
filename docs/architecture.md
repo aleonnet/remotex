@@ -41,7 +41,7 @@ graphics pipeline is passed on for the browser to compose, which is experimental
 How a session's desktop is sized, whether it takes the remote's sound and whether
 it passes the remote's stream are chosen at the picker before it starts — see
 [What a session is started with](#what-a-session-is-started-with). Remote audio is encoded as
-Opus, save the Mac's passed AAC-ELD and a target's EXPERIMENTAL lossless FLAC
+Opus, save the Mac's passed AAC-ELD, wlshare's own Opus, passed too, and a target's EXPERIMENTAL lossless FLAC
 ([Lossless sound](#lossless-sound)), and sent on `/ws/audio`, never on the picture queue.
 The browser's camera goes the other way on `/ws/camera`: browser-encoded H.264,
 passed through to an RDP host over MS-RDPECAM, or to wlshare over its camera
@@ -247,23 +247,29 @@ that selects the stream. See
   the subscription. Do not put audio on the session socket. It is Opus encoded
   here, save a High Performance Mac's AAC-ELD, which every session passes as it
   came and the gateway never decodes; do not add a decoder for the Mac's sound.
+  A `wlshare` target's is always passed too: wlshare codes it, as Opus with the
+  encoder the gateway codes an RDP host's with (`desktop-opus`) at the rate the
+  target's audio keys and their walk arrive at, or as FLAC on a lossless target.
+  Do not decode or re-encode wlshare's sound here, and do not give wlshare a
+  codec key of its own: the format is the gateway's to ask for.
   Preserve claim-bound eviction and the source-format/resampling
   boundaries in [Audio frames](#audio-frames).
 - `audio_format = "flac"` is the one codec key, EXPERIMENTAL, and a key rather
   than a choice at the picker while it is: the target's sound is sent lossless.
-  A `wlshare` target's FLAC frames are passed as they came, undecoded, and an
-  `rdp` target's PCM is coded as FLAC here by libFLAC; the page decodes either
+  A `wlshare` target is asked for FLAC frames, passed as they came like its
+  Opus, and an `rdp` target's PCM is coded as FLAC here by libFLAC; the page
+  decodes either
   in its own WebAssembly module (`frontend/wasm/flac`), never through WebCodecs.
   It is refused on every other target: `ard-high-performance` passes the Mac's
   AAC-ELD and nothing else, and `ard` and a plain `vnc` target carry no sound.
   Do not transcode a passed frame, add a third format, or give the FLAC a rate
   to walk. See [Lossless sound](#lossless-sound).
-- VNC audio is wlshare's audio extension (FLAC frames, with the QEMU Audio
-  extension's control messages), on a `wlshare` target: a session started with
+- VNC audio is wlshare's audio extension (Opus packets or FLAC frames, with
+  the QEMU Audio extension's control messages), on a `wlshare` target: a session started with
   sound makes the gateway list it, and a server that never announces it leaves
   the session silent rather than failing it. A plain `vnc` target carries no
   sound and offers none. Do not take raw PCM from the RFB connection or add a
-  second codec to it. See
+  third codec to it. See
   [Desktop audio over VNC with wlshare](wlshare-audio.md).
 - `ard` carries no sound and offers none: the Mac's sound keeps playing where
   the Mac sends it. Do not add an AirPlay receiver or any other sound path for
@@ -367,7 +373,7 @@ experimental wherever it is named to an operator. See
 | `shadow.rs` | change detection: what the client already has |
 | `encode.rs`, `stream.rs`, `video.rs` | the ordered, paced, congestion-aware stream: its mirror, its rounds, and the picture limits |
 | `vp9.rs` | the VP9 stream over the mirror, coded by the `desktop-vp9` crate wlshare shares — the one place libvpx is spoken to for either side |
-| `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding, resampling, and the FLAC coding of a lossless target's PCM |
+| `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding by the `desktop-opus` crate wlshare codes its own sound with, resampling, the FLAC coding of a lossless target's PCM, and the passing of a remote's own stream |
 | `frontend/wasm/flac/` | the page's FLAC decoder for a lossless target's sound, a WebAssembly module of its own |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
@@ -1283,7 +1289,7 @@ and `GET /api/targets` carries it:
   be passed, the row shows it chosen, and where the browser cannot take it
   either Start is greyed and says why, before the Mac is dialled. It says as
   `audioUnavailable` where the host lacks libFLAC and the target's sound needs
-  it — to decode wlshare's for Opus, or to code an RDP host's as FLAC: the
+  it — to code an RDP host's as FLAC, and never for wlshare's, which is passed: the
   sound's row is greyed and names the library. A `connect`
   that asks for a passthrough the browser said it cannot take is refused like an
   unoffered one.
@@ -1450,9 +1456,16 @@ packets are the remote's own or coded here, which the session card's Audio row
 states — followed by binary frames:
 
 ```text
-u8 kind = 0x03 | u8 flags = 0 | u16 packet count
+u8 kind = 0x03 | u8 flags | u16 packet count
 repeated: u16 packet length | packet bytes
 ```
+
+The one flag is bit 0, a gap, on a frame of no packets. The gateway sends it
+when a listener fell behind a passed stream and units the remote had coded were
+dropped: the next packet does not follow the last one sent, so the player resets
+its decoder, an Opus or AAC-ELD one carrying state from packet to packet. Sound
+coded here needs none, since what a slow listener loses there is PCM, before the
+encoder.
 
 There is no codec byte in the binary frame; the codec is named once, out of
 band, in `audioFormat`. It is Opus encoded here: `codec` is `opus`, `sampleRate`
@@ -1524,6 +1537,13 @@ that FIFO, which would deliver stale audio faithfully.
 The client owns its playback schedule. It starts at the current audio playhead
 with no added cushion and clamps accumulated lead to 300 ms, trimming the front
 of an incoming buffer instead of turning temporary jitter into lasting latency.
+A `wlshare` target's Opus has no encoder here to walk: the pump's walk is the
+same, fed by the same sends, and each rate it arrives at goes back through the
+bridge (`AudioBridge::ask_rate`) to the VNC engine, which names it to wlshare
+as a set-bitrate; wlshare's encoder moves at its next packet. The walk starts
+from the ceiling with every listener, and so is wlshare told. Silence is not
+shed from a passed stream — its packets are a few bytes each already.
+
 The client decodes Opus and the Mac's AAC-ELD with WebCodecs and nothing of its
 own, so a codec a browser will not take surfaces as a decoder error naming it
 rather than as silence. FLAC is the one stream it decodes itself
@@ -1545,7 +1565,9 @@ refused beside it, since there is no rate to set or walk.
 | `ard-high-performance` | not supported: the Mac's AAC-ELD is passed | | |
 | any other | not supported: no sound | | |
 
-- **wlshare's frames are passed.** The VNC engine reads each frame message and
+- **wlshare's frames are passed**, as its Opus packets are on a target without
+  the key: the engine lists the audio encoding without the Opus one beside it,
+  which is how wlshare is asked for FLAC. It reads each frame message and
   queues the frame undecoded (`AudioBridge::unit`), between a begin and an end as
   ever, and the audio socket hands the units on (`vnc_audio::PASSED_FLAC`,
   `AudioListener::into_passed`). No decoder is made, so such a session needs no
@@ -1590,10 +1612,11 @@ touches the Mac's sound output either, which keeps playing where the Mac sends i
 A **`wlshare`** session started with sound has no channel to negotiate either. It
 lists wlshare's audio pseudo-encoding, and wlshare announces that it speaks it
 with an empty rectangle, at which point the gateway names the format it wants —
-48 kHz, 16-bit stereo, little-endian, which is Opus's own rate — and turns the
-stream on; the sound then
-arrives as FLAC frames on the RFB connection itself, and each is decoded into
-exactly the samples wlshare captured, in the format the queue takes. A server
+48 kHz, 16-bit stereo, little-endian, which is Opus's own rate — and the rate
+Opus is to be coded at, and turns the stream on; the sound then
+arrives on the RFB connection itself as wlshare coded it, Opus packets or the
+FLAC frames of a lossless target, and each goes to the queue and on to the
+browser as it came, with no decoder or encoder here. A server
 that announces nothing, because it is not wlshare or has its own switch off,
 gives a desktop and no sound, which is the whole of the failure mode. The extension is wlshare's
 own, its control messages borrowed from `rfbproto`'s QEMU Audio extension — see
@@ -2013,8 +2036,10 @@ output-list requests at their tail, and between them the **audio**, camera and
 microphone pseudo-encodings where the target asked for them. A plain target lists
 none of these. `src/vnc_audio.rs` is the audio wire (`WLSF`): the server announces
 support with an empty rectangle of the encoding, the client answers with the
-QEMU Audio extension's set-format and enable, and the server sends QEMU's begin,
-a run of FLAC frames in message `0xE4`, and QEMU's end. A server that never
+QEMU Audio extension's set-format, wlshare's own set-bitrate and QEMU's enable,
+and the server sends QEMU's begin, a run of frames in message `0xE4` — Opus
+packets where the client listed `WLOP` beside the encoding, FLAC frames where
+it did not — and QEMU's end. A server that never
 announces leaves the session silent rather than failing it. See
 [`wlshare-audio.md`](wlshare-audio.md).
 

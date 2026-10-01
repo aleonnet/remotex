@@ -332,17 +332,20 @@ password = "change-me"
 # is 96: well clear of where stereo Opus starts to be audibly lossy. Like
 # `video_quality` it is a ceiling, not a promise — and an average, not a packet
 # size: Opus is variable-rate, so silence costs a few bytes a packet and music
-# about this. Valid on a target whose sound is encoded here — "rdp" and
-# "wlshare" — and refused rather than ignored on one that has none, and on
-# "ard-high-performance", whose sound is passed as the Mac's own AAC-ELD.
+# about this. Valid on a target whose sound is Opus at a rate the gateway
+# chooses — "rdp", encoded here, and "wlshare", which encodes its own at the
+# rate the gateway tells it — and refused rather than ignored on one that has
+# none, and on "ard-high-performance", whose sound is passed as the Mac's own
+# AAC-ELD.
 #audio_bitrate = 96
 
 # Let that bitrate follow the audio socket's own backpressure — on by default,
 # like `render_adaptive`. Sustained slow sends walk the bitrate down toward
 # `audio_adaptive_min`, sustained clear sends walk it back up to `audio_bitrate`,
-# and silence is shed while the link is behind so old sound does not accumulate.
-# `false` holds `audio_bitrate` whatever the link does. Either value is refused
-# on a target without sound to encode.
+# and, where the sound is encoded here, silence is shed while the link is behind
+# so old sound does not accumulate; a "wlshare" target's packets are passed as
+# they came, and only the rate moves. `false` holds `audio_bitrate` whatever the
+# link does. Either value is refused on a target without such sound.
 #audio_adaptive = true
 
 # Floor for that walk in kbit/s, default 32: degraded, but continuous, which is
@@ -352,9 +355,11 @@ password = "change-me"
 #audio_adaptive_min = 32
 
 # EXPERIMENTAL. Send this target's sound lossless, as FLAC, instead of Opus.
-# A "wlshare" target's own FLAC frames are passed to the browser as they came,
-# so the gateway needs no libFLAC for them; an "rdp" target's PCM is coded as
-# FLAC here, by libFLAC. The page decodes it in a WebAssembly module of its own.
+# A "wlshare" target's sound is coded by wlshare in whichever format this names
+# and passed to the browser as it came — Opus at the rates above, which the
+# gateway tells it, or FLAC — so the gateway codes none of it; an "rdp" target's
+# PCM is coded here, as FLAC by libFLAC. The page decodes FLAC in a WebAssembly
+# module of its own.
 # Music is roughly a megabit a second, with no adaptive walk: for a link with
 # room. Refused on a target with no sound to choose a format for — a plain
 # "vnc" one and both Macs — and beside the three Opus keys above, which it

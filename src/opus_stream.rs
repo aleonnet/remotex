@@ -1,11 +1,14 @@
 //! Convert live PCM wave buffers into bare 20 ms Opus packets.
 //!
 //! The PCM arrives already deinterleaved and resampled to 48 kHz by
-//! [`crate::pcm48`]; this is only the codec. Each listener owns fresh codec state
+//! [`crate::pcm48`]; this is only the codec, and the codec is `desktop-opus`'s,
+//! the encoder wlshare codes its own sound with: music-tuned, constrained VBR
+//! around the bitrate, at full effort. Each listener owns fresh codec state
 //! downstream of the nonblocking RDP queue; quiet remotes emit nothing.
 
+use anyhow::Context as _;
 use bytes::Bytes;
-use opus::{Application, Bitrate, Channels, Encoder};
+use desktop_opus::{Encoder, Stream};
 
 use crate::audio::PcmFormat;
 use crate::pcm48::{Pcm48, SAMPLE_RATE};
@@ -19,17 +22,6 @@ pub const OPUS_CODEC: &str = "opus";
 /// of the bitrate on packet overhead, longer ones add latency for nothing here.
 pub const FRAME_FRAMES: usize = 960;
 
-/// Ceiling for one encoded packet. libopus documents 4000 bytes as the largest
-/// worth allowing for; at the default 96 kbit/s a packet is nearer 240.
-const MAX_PACKET_BYTES: usize = 4000;
-
-/// libopus's encoder effort, 0–10. The top: the encoder is one stereo stream
-/// beside a VP9 encoder of the whole desktop, and a minute of stereo at 10 took
-/// 1.9 s of one core on a loaded development box against 1.4 s at 5 — three
-/// percent of a core either way — while the quality the effort buys matters
-/// most at the adaptive floor, where every bit has to count.
-const COMPLEXITY: i32 = 10;
-
 /// Turns PCM buffers into Opus packets.
 pub struct OpusStream {
     encoder: Encoder,
@@ -37,8 +29,6 @@ pub struct OpusStream {
     pcm: Pcm48,
     /// Scratch: one 20 ms frame, interleaved, as libopus wants it.
     frame: Vec<f32>,
-    /// Scratch: one encoded packet.
-    packet: Vec<u8>,
     /// Frames encoded so far. Nothing branches on it; it is the number the
     /// per-buffer diagnostic in [`crate::audio`] compares against elapsed time,
     /// which is how a stream drifting from real time shows itself.
@@ -54,59 +44,30 @@ impl OpusStream {
     /// Fails if libopus will not encode this shape — in practice only a channel
     /// count other than 1 or 2, which the single advertised format rules out.
     pub fn new(format: PcmFormat, bitrate_bps: i32) -> Result<(Self, Vec<u8>), anyhow::Error> {
-        let channels = match format.channels {
-            1 => Channels::Mono,
-            2 => Channels::Stereo,
-            other => anyhow::bail!("opus carries 1 or 2 channels, not {other}"),
-        };
+        anyhow::ensure!((1..=2).contains(&format.channels), "opus carries 1 or 2 channels, not {}", format.channels);
         let channel_count = usize::from(format.channels);
-
-        // `Audio`, not `Voip`: desktop sound is music and effects as often as
-        // speech, and this is the mode that spends the bits on fidelity rather
-        // than intelligibility.
-        let mut encoder = Encoder::new(SAMPLE_RATE, channels, Application::Audio)
-            .map_err(|e| anyhow::anyhow!("create the opus encoder: {e}"))?;
-        // The rate is an average: constrained VBR lets silence cost a few bytes
-        // and a loud passage a little more than the number, and keeps the running
-        // rate close enough to it that the configured kbit/s is what the link
-        // sees. Written out rather than left to libopus's defaults, which happen
-        // to be the same, because the adaptive walk's arithmetic and the config's
-        // wording both depend on it. CBR would spend the same bits on silence
-        // for nothing, and unconstrained VBR would make the walk chase the sound
-        // instead of the link.
-        encoder
-            .set_vbr(true)
-            .map_err(|e| anyhow::anyhow!("set the opus rate control: {e}"))?;
-        encoder
-            .set_vbr_constraint(true)
-            .map_err(|e| anyhow::anyhow!("set the opus rate constraint: {e}"))?;
-        encoder
-            .set_bitrate(Bitrate::Bits(bitrate_bps))
-            .map_err(|e| anyhow::anyhow!("set the opus bitrate: {e}"))?;
-        encoder
-            .set_complexity(COMPLEXITY)
-            .map_err(|e| anyhow::anyhow!("set the opus complexity: {e}"))?;
+        let coded = Stream { rate: SAMPLE_RATE, channels: format.channels as u8 };
+        let bitrate = u32::try_from(bitrate_bps).context("an opus bitrate is positive")?;
+        let mut encoder = Encoder::new(coded, bitrate).context("create the opus encoder")?;
 
         let pcm = Pcm48::new(format)?;
         // The path's whole delay, in 48 kHz samples: the encoder's lookahead plus
         // the resampler's own transient. Written into `OpusHead` so a decoder
         // discards it instead of playing it as leading silence.
-        let lookahead = encoder
-            .get_lookahead()
-            .map_err(|e| anyhow::anyhow!("read the opus lookahead: {e}"))?
-            .max(0) as usize;
+        let lookahead = usize::from(encoder.pre_skip().context("read the opus lookahead")?);
         let pre_skip = u16::try_from(lookahead + pcm.output_delay())
             .expect("a lookahead and a resampler transient are a few hundred samples");
+        // The rate the audio arrived at is what the header records.
+        let head = coded.head(pre_skip, format.sample_rate).context("build OpusHead")?.to_vec();
 
         let stream = Self {
             encoder,
             pcm,
             frame: vec![0.0; FRAME_FRAMES * channel_count],
-            packet: vec![0; MAX_PACKET_BYTES],
             frames_encoded: 0,
         };
 
-        Ok((stream, opus_head(format, pre_skip)))
+        Ok((stream, head))
     }
 
     /// Encodes one PCM buffer into whatever whole Opus packets it completed.
@@ -136,9 +97,8 @@ impl OpusStream {
     /// an Opus packet carries its own coding parameters. libopus applies the new
     /// rate from the next `opus_encode` call.
     pub fn set_bitrate(&mut self, bitrate_bps: i32) -> Result<(), anyhow::Error> {
-        self.encoder
-            .set_bitrate(Bitrate::Bits(bitrate_bps))
-            .map_err(|e| anyhow::anyhow!("move the opus bitrate: {e}"))
+        let bitrate = u32::try_from(bitrate_bps).context("an opus bitrate is positive")?;
+        self.encoder.set_bitrate(bitrate).context("move the opus bitrate")
     }
 
     /// Frames encoded so far.
@@ -148,52 +108,23 @@ impl OpusStream {
 
     fn encode_one_frame(&mut self) -> Result<Bytes, anyhow::Error> {
         self.pcm.take_f32(FRAME_FRAMES, &mut self.frame);
-        let len = self
-            .encoder
-            .encode_float(&self.frame, &mut self.packet)
-            .map_err(|e| anyhow::anyhow!("encode an opus packet: {e}"))?;
+        let mut packet = Vec::new();
+        self.encoder.encode_float(&self.frame, &mut packet)?;
         self.frames_encoded += 1;
-        Ok(Bytes::copy_from_slice(&self.packet[..len]))
+        Ok(Bytes::from(packet))
     }
-}
-
-/// RFC 7845 identification header carried by `AudioFormat`.
-/// Opus decodes at 48 kHz; the input sample rate is metadata.
-pub fn opus_head(format: PcmFormat, pre_skip: u16) -> Vec<u8> {
-    let mut head = Vec::with_capacity(19);
-    head.extend_from_slice(b"OpusHead");
-    head.push(1); // version
-    head.push(format.channels as u8);
-    head.extend_from_slice(&pre_skip.to_le_bytes());
-    head.extend_from_slice(&format.sample_rate.to_le_bytes());
-    head.extend_from_slice(&0i16.to_le_bytes()); // output gain, unchanged
-    head.push(0); // channel mapping family: mono or stereo, no mapping table
-    head
 }
 
 #[cfg(test)]
 mod tests {
+    use opus::Channels;
+
     use super::*;
     use crate::audio::PCM_CD_QUALITY;
 
     /// 20 ms of 44.1 kHz stereo silence, as bytes on the queue.
     fn silence(frames: usize) -> Vec<u8> {
         vec![0u8; frames * usize::from(PCM_CD_QUALITY.block_align())]
-    }
-
-    /// The rate control the config's wording promises: variable-rate, held to
-    /// the number, at full effort. Read back from libopus rather than assumed
-    /// from its defaults, since the defaults are exactly what this must not
-    /// silently depend on.
-    #[test]
-    fn the_encoder_is_constrained_vbr_at_full_complexity() {
-        let (mut stream, _head) = OpusStream::new(PCM_CD_QUALITY, 96_000).expect("an encoder");
-        assert!(stream.encoder.get_vbr().expect("vbr"), "variable-rate, not CBR");
-        assert!(stream.encoder.get_vbr_constraint().expect("constraint"), "held near the rate");
-        assert_eq!(stream.encoder.get_complexity().expect("complexity"), COMPLEXITY);
-        assert_eq!(stream.encoder.get_bitrate().expect("bitrate"), Bitrate::Bits(96_000));
-        assert!(!stream.encoder.get_inband_fec().expect("fec"), "TCP loses nothing");
-        assert!(!stream.encoder.get_dtx().expect("dtx"), "the walk sheds silence itself");
     }
 
     /// Silence is where variable-rate shows: a packet of it costs a few bytes,

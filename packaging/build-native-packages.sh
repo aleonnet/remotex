@@ -15,8 +15,9 @@
 #   Linux: /usr/bin/remotex
 #   macOS: /usr/local/bin/remotex
 #
-# Every package brings libFLAC, which decodes wlshare's sound and is loaded at
-# run time (desktop-flac): the Linux ones depend on the distribution's, and the
+# Every package brings libFLAC, which encodes a lossless "rdp" target's sound
+# and is loaded at run time (desktop-flac): the Linux ones depend on the
+# distribution's, and the
 # macOS one, whose system has none, carries its own:
 #
 #   macOS: /usr/local/lib/remotex/libFLAC.14.dylib
@@ -171,7 +172,8 @@ mkdir -p "$deb_root/DEBIAN"
   echo "Maintainer: andrewtheguy <andrewchen5678@gmail.com>"
   echo "Section: net"
   echo "Priority: optional"
-  # libFLAC decodes wlshare's sound and is loaded at run time (desktop-flac), so
+  # libFLAC encodes a lossless "rdp" target's sound and is loaded at run time
+  # (desktop-flac), so
   # nothing reads it out of the binary: FLAC 1.5's, or 1.4's where that is the
   # one the distribution has, as on Ubuntu 24.04.
   echo "Depends: ca-certificates, libc6 (>= 2.39), libflac14 | libflac12t64"

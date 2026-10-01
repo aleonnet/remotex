@@ -332,12 +332,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "built"
-version = "0.7.7"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "56ed6191a7e78c36abdb16ab65341eefd73d64d303fffccdbb00d51e4205967b"
-
-[[package]]
 name = "bumpalo"
 version = "3.20.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -519,21 +513,6 @@ checksum = "8b2a41393f66f16b0823bb79094d54ac5fbd34ab292ddafb9a0456ac9f87d201"
 dependencies = [
  "libc",
 ]
-
-[[package]]
-name = "crc"
-version = "3.4.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "5eb8a2a1cd12ab0d987a5d5e825195d372001a4094a0376319d5a0ad71c1ba0d"
-dependencies = [
- "crc-catalog",
-]
-
-[[package]]
-name = "crc-catalog"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "217698eaf96b4a3f0bc4f3662aaa55bdf913cd54d7204591faa790070c6d0853"
 
 [[package]]
 name = "crc32fast"
@@ -814,6 +793,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "desktop-opus"
+version = "0.0.1"
+source = "git+https://github.com/andrewtheguy/desktop-opus?tag=v0.0.1#5ad2c18a5ef8e269bdfe23c0133f72094ba22867"
+dependencies = [
+ "opus-prebuilt",
+ "thiserror",
+]
+
+[[package]]
 name = "desktop-vp9"
 version = "0.0.5"
 source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.5#b4f1c659d9d48c0ee9f821de7b275ba0e854622b"
@@ -1065,21 +1053,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3e0f1c7c3a72c66fd80abe965175f7523475c0489a87d3ff9d6e8c87d87a9d2d"
 
 [[package]]
-name = "flacenc"
-version = "0.5.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "74c892c2b5fa08f967e8b5ad29121570b4762202f2402033ce08479ec65eccd0"
-dependencies = [
- "built",
- "crc",
- "heapless",
- "md-5 0.10.6",
- "num-traits",
- "rustversion",
- "seq-macro",
-]
-
-[[package]]
 name = "flate2"
 version = "1.1.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1257,15 +1230,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "hash32"
-version = "0.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "47d60b12902ba28e2730cd37e95b8c9223af2808df9e902d4df49588d1470606"
-dependencies = [
- "byteorder",
-]
-
-[[package]]
 name = "hashbrown"
 version = "0.16.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1290,16 +1254,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a596f1b20ed2cc5ecac41a164aaebc7258057060f06c0cf7a2ba3991ee7990fb"
 dependencies = [
  "hashbrown 0.17.1",
-]
-
-[[package]]
-name = "heapless"
-version = "0.8.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
-dependencies = [
- "hash32",
- "stable_deref_trait",
 ]
 
 [[package]]
@@ -1717,16 +1671,6 @@ checksum = "47e1ffaa40ddd1f3ed91f717a33c8c0ee23fff369e3aa8772b9605cc1d22f4c3"
 
 [[package]]
 name = "md-5"
-version = "0.10.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d89e7ee0cfbedfc4da3340218492196241d89eefb6dab27de5df917a6d2e78cf"
-dependencies = [
- "cfg-if",
- "digest 0.10.7",
-]
-
-[[package]]
-name = "md-5"
 version = "0.11.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "69b6441f590336821bb897fb28fc622898ccceb1d6cea3fde5ea86b090c4de98"
@@ -1992,7 +1936,7 @@ dependencies = [
  "ed25519-dalek",
  "hex",
  "inout 0.2.2",
- "md-5 0.11.0",
+ "md-5",
  "p256",
  "p384",
  "p521",
@@ -2371,7 +2315,7 @@ checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
 name = "remotex"
-version = "0.0.313"
+version = "0.0.314"
 dependencies = [
  "aes",
  "anyhow",
@@ -2383,10 +2327,10 @@ dependencies = [
  "crossterm",
  "des 0.8.1",
  "desktop-flac",
+ "desktop-opus",
  "desktop-vp9",
  "eax",
  "env_logger",
- "flacenc",
  "flate2",
  "futures-util",
  "hmac",
@@ -2394,7 +2338,7 @@ dependencies = [
  "libc",
  "libloading",
  "log",
- "md-5 0.11.0",
+ "md-5",
  "num-bigint 0.4.8",
  "opus-prebuilt",
  "png",
@@ -2733,12 +2677,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "8a7852d02fc848982e0c167ef163aaff9cd91dc640ba85e263cb1ce46fae51cd"
 
 [[package]]
-name = "seq-macro"
-version = "0.3.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "1bc711410fbe7399f390ca1c3b60ad0f53f80e95c5eb935e52268a0e2cd49acc"
-
-[[package]]
 name = "serde"
 version = "1.0.229"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3008,7 +2946,7 @@ dependencies = [
  "futures",
  "getrandom 0.3.4",
  "hmac",
- "md-5 0.11.0",
+ "md-5",
  "md4",
  "num-derive",
  "num-traits",

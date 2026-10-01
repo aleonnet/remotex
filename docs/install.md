@@ -26,8 +26,8 @@ Use the `arm64` filename on an arm64 host. The package installs:
 /usr/share/doc/remotex/LICENSE
 ```
 
-It depends on the distribution's libFLAC, which decodes a wlshare target's
-sound, and `apt` installs it with the package.
+It depends on the distribution's libFLAC, which codes an `rdp` target's sound
+where that is sent lossless, and `apt` installs it with the package.
 
 ### Fedora, RHEL, and other RPM distributions (`.rpm`)
 

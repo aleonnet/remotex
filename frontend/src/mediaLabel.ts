@@ -28,7 +28,7 @@ export interface AudioStreamInfo {
   sampleRate: number;
   channels: number;
   // The remote's own packets, passed through untouched — a High Performance
-  // Mac's AAC-ELD, wlshare's FLAC — rather than coded by the gateway.
+  // Mac's AAC-ELD, wlshare's Opus or FLAC — rather than coded by the gateway.
   passthrough: boolean;
 }
 
