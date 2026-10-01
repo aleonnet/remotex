@@ -111,9 +111,8 @@
 
 # On Windows, the folder an `ard-high-performance` target's HEVC decoder is
 # loaded from: FFmpeg's avcodec and avutil DLLs. With nothing set here the
-# gateway looks for them when a session needs them, beside remotex.exe, on PATH,
-# which is where the recommended install puts them, and in MSYS2's
-# C:\msys64\ucrt64\bin. This table is the override for any other install: the
+# gateway looks for them when a session needs them, beside remotex.exe and on
+# PATH, which is where the recommended install puts them. This table is the override for any other install: the
 # key names a folder by its whole path, and that folder is then the only place
 # the decoder is loaded from. The gateway loads it at start-up, and refuses to
 # start if it is not there. A gateway on another platform refuses the table: its

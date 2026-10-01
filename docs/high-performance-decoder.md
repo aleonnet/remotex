@@ -122,15 +122,9 @@ and says which file it tried. Only a gateway on Windows takes this table.
 
 ### Where the gateway looks by default
 
-Without `[hp_decoders]`, the gateway looks when a session needs the decoder, in
-this order, which is what finds the recommended install:
-
-1. Windows' own search: beside `remotex.exe`, then the folders on `PATH`.
-2. [MSYS2](https://www.msys2.org)'s `C:\msys64\ucrt64\bin`.
-
-MSYS2's FFmpeg, `mingw-w64-ucrt-x86_64-ffmpeg`, is a full build that brings
-more than a hundred packages and about 1.5 GB with it, which is why the step
-above takes FFmpeg from elsewhere.
+Without `[hp_decoders]`, the gateway looks when a session needs the decoder, by
+Windows' own search: beside `remotex.exe`, then the folders on `PATH`, which is
+what finds the recommended install.
 
 ## Container
 
