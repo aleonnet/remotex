@@ -1,5 +1,5 @@
 // EXPERIMENTAL: the software HEVC decoder (frontend/src/hevcWasmDecoder.ts), which
-// a gateway configured with `[hevc_wasm]` serves at /hevc/ and which the page
+// a gateway that has its release archive serves at /hevc/ and which the page
 // takes, under `?hevc_decoder=software`, for a High Performance Mac's passed stream.
 //
 // What is asserted is what the system decides: whether the page is cross-origin
@@ -13,8 +13,8 @@
 // the ack (framePainter.ts, useRemoteDesktop.ts).
 //
 // It needs a gateway whose local config has an `ard-high-performance` target with
-// `media_passthrough = true`, which only a live Mac serves, and `[hevc_wasm]` with
-// the release archive beside the config:
+// `media_passthrough = true`, which only a live Mac serves, and the release
+// archive beside the config:
 //
 //     cargo run --profile qa -- serve --config tmp/qa_hevc.toml
 //
@@ -24,7 +24,7 @@
 //     REMOTEX_PLAYWRIGHT_HEVC_TARGET=macvmhevc \
 //     bun run test:hevc
 //
-// Against a gateway without `[hevc_wasm]`, set REMOTEX_PLAYWRIGHT_HEVC_WASM=0: the
+// Against a gateway without the archive, set REMOTEX_PLAYWRIGHT_HEVC_WASM=0: the
 // same page must then find no decoder and take VP9 and Opus.
 import { expect, type Page, test } from "@playwright/test";
 
@@ -131,7 +131,7 @@ test.describe("a High Performance target under ?hevc_decoder=software", () => {
   test("with the decoder served, the passed stream is decoded in software", async ({
     page,
   }) => {
-    test.skip(!SERVES_DECODER, "the gateway has no [hevc_wasm]");
+    test.skip(!SERVES_DECODER, "the gateway has no decoder archive");
     const seen = watchSession(page);
     await logInAndConnectTo(page, HEVC_TARGET ?? "", SOFTWARE);
 
@@ -169,7 +169,7 @@ test.describe("a High Performance target under ?hevc_decoder=software", () => {
   });
 
   test("without the decoder, the page takes VP9 and Opus", async ({ page }) => {
-    test.skip(SERVES_DECODER, "the gateway has [hevc_wasm]");
+    test.skip(SERVES_DECODER, "the gateway has the decoder archive");
     const seen = watchSession(page);
     await logInAndConnectTo(page, HEVC_TARGET ?? "", SOFTWARE);
 

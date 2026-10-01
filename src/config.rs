@@ -1189,8 +1189,10 @@ pub struct ConfigFile {
     /// Top-level for [`Self::branding`]'s reason — an embedded config may set it too.
     #[serde(default)]
     pub meter: Option<MeterSection>,
-    /// The `[hevc_wasm]` table: EXPERIMENTAL, the page's software HEVC decoder.
-    /// Top-level for [`Self::branding`]'s reason.
+    /// The `[hevc_wasm]` table: EXPERIMENTAL, where the page's software HEVC
+    /// decoder is, for a gateway that keeps it outside its data directory. Absent,
+    /// the decoder is served if its archive is there. Top-level for
+    /// [`Self::branding`]'s reason.
     #[serde(default)]
     pub hevc_wasm: Option<HevcWasmSection>,
     #[serde(default)]
@@ -1201,13 +1203,10 @@ pub struct ConfigFile {
 #[derive(Clone, Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct HevcWasmSection {
-    /// Whether the decoder is served. Required, for [`MeterSection::enabled`]'s
-    /// reason.
-    pub enabled: bool,
-    /// The release archive, as downloaded. Absent is its release name in the
-    /// gateway's data directory ([`data_dir`]), and a relative path is taken from
-    /// that directory too.
-    pub archive: Option<PathBuf>,
+    /// The release archive, as downloaded. A relative path is taken from the
+    /// gateway's data directory ([`data_dir`]). A gateway told where the archive is
+    /// refuses to start without it.
+    pub archive: PathBuf,
 }
 
 /// The `[meter]` table as written. See [`crate::throughput`].
@@ -1263,8 +1262,9 @@ pub struct AppConfig {
     pub dev_hostname: Option<String>,
     /// `[meter]`, resolved. `None` records nothing.
     pub meter: Option<MeterConfig>,
-    /// `[hevc_wasm]`, resolved: the decoder's release archive, which the gateway
-    /// reads at start-up. `None` serves no decoder.
+    /// The decoder's release archive, which the gateway reads at start-up: the one
+    /// `[hevc_wasm]` names, or the one found in the data directory. `None` serves
+    /// no decoder.
     pub hevc_wasm: Option<PathBuf>,
 }
 
@@ -1359,9 +1359,9 @@ impl ConfigFile {
         }
         if let Some(hevc_wasm) = &config.hevc_wasm {
             anyhow::ensure!(
-                hevc_wasm.archive.as_ref().is_none_or(|archive| !archive.as_os_str().is_empty()),
-                "[hevc_wasm].archive is empty — name the release archive, or leave the key \
-                 out for {} in the gateway's state directory",
+                !hevc_wasm.archive.as_os_str().is_empty(),
+                "[hevc_wasm].archive is empty — name the release archive, or leave the table \
+                 out for {} in the gateway's data directory",
                 crate::hevc_wasm::archive_name()
             );
         }
@@ -1673,15 +1673,19 @@ impl ConfigFile {
         })
     }
 
-    /// The `[hevc_wasm]` table resolved, its archive placed in `data_dir`. `None`
-    /// unless the table says `enabled = true`. Only a path: the archive is read and
-    /// checked when the gateway starts ([`crate::hevc_wasm::HevcDecoder::load`]), as
-    /// `[meter]`'s database is opened then.
+    /// Where the software HEVC decoder's archive is: the file `[hevc_wasm]` names,
+    /// placed in `data_dir`, or with no table the release's own name there if such a
+    /// file exists — `None` if not, which is a gateway nobody gave the decoder to.
+    /// Only a path: the archive is read and checked when the gateway starts
+    /// ([`crate::hevc_wasm::HevcDecoder::load`]), as `[meter]`'s database is opened
+    /// then, so a named archive that is missing, and either one that is not the
+    /// pinned release, is a refused start.
     fn resolve_hevc_wasm(section: Option<HevcWasmSection>, data_dir: &Path) -> Option<PathBuf> {
-        section.filter(|section| section.enabled).map(|section| {
+        match section {
             // `join` keeps an absolute path as written.
-            data_dir.join(section.archive.unwrap_or_else(|| crate::hevc_wasm::archive_name().into()))
-        })
+            Some(section) => Some(data_dir.join(section.archive)),
+            None => Some(data_dir.join(crate::hevc_wasm::archive_name())).filter(|archive| archive.is_file()),
+        }
     }
 
     /// The `[meter]` table resolved, its database placed in `state_dir`. `None` unless
@@ -2489,13 +2493,14 @@ mod tests {
         );
     }
 
-    /// No decoder until `enabled = true`; an enabled table finds the release archive
-    /// by its release name in the data directory, not the state directory, unless it
-    /// names another. Resolving reads nothing: the gateway reads the archive when it
-    /// starts.
+    /// With no table, the decoder is the release archive found by its release name in
+    /// the data directory, not the state directory, and none where there is no such
+    /// file. A table names another, there or not: the gateway reads the archive when
+    /// it starts, and refuses one it was told of and cannot read.
     #[test]
     fn the_hevc_decoder_is_looked_for_in_the_data_directory() {
-        let data = Path::new("/usr/share/remotex");
+        let dir = tempfile::tempdir().unwrap();
+        let data = dir.path();
         let archive = |table: &str| {
             let toml = format!("{table}\n{}", minimal());
             ConfigFile::parse(&toml)
@@ -2504,24 +2509,28 @@ mod tests {
                 .unwrap()
                 .hevc_wasm
         };
-        assert_eq!(archive(""), None, "no [hevc_wasm] serves no decoder");
-        assert_eq!(archive("[hevc_wasm]\nenabled = false\narchive = \"kept.tar.gz\""), None);
+        assert_eq!(archive(""), None, "no archive serves no decoder");
         assert_eq!(
-            archive("[hevc_wasm]\nenabled = true"),
-            Some(data.join(crate::hevc_wasm::archive_name()))
+            archive("[hevc_wasm]\narchive = \"decoders/hevc.tar.gz\""),
+            Some(data.join("decoders/hevc.tar.gz"))
         );
         assert_eq!(
-            archive("[hevc_wasm]\nenabled = true\narchive = \"decoders/hevc.tar.gz\""),
-            Some(PathBuf::from("/usr/share/remotex/decoders/hevc.tar.gz"))
-        );
-        assert_eq!(
-            archive("[hevc_wasm]\nenabled = true\narchive = \"/opt/hevc.tar.gz\""),
+            archive("[hevc_wasm]\narchive = \"/opt/hevc.tar.gz\""),
             Some(PathBuf::from("/opt/hevc.tar.gz"))
         );
+        let released = data.join(crate::hevc_wasm::archive_name());
+        std::fs::write(&released, b"").unwrap();
+        assert_eq!(archive(""), Some(released), "the archive is found where the release puts it");
+        assert_eq!(
+            archive("[hevc_wasm]\narchive = \"/opt/hevc.tar.gz\""),
+            Some(PathBuf::from("/opt/hevc.tar.gz")),
+            "a named archive is the one read"
+        );
         for (bad, says) in [
-            ("archive = \"h.tar.gz\"", "enabled"),
-            ("enabled = true\narchive = \"\"", "[hevc_wasm].archive"),
-            ("enabled = true\ndir = \"/opt/hevc\"", "dir"),
+            ("", "archive"),
+            ("archive = \"\"", "[hevc_wasm].archive"),
+            ("enabled = true\narchive = \"h.tar.gz\"", "enabled"),
+            ("archive = \"h.tar.gz\"\ndir = \"/opt/hevc\"", "dir"),
         ] {
             let err = ConfigFile::parse(&format!("[hevc_wasm]\n{bad}\n{}", minimal()))
                 .expect_err(bad);

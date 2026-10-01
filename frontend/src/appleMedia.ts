@@ -26,8 +26,8 @@
 //
 // EXPERIMENTAL: a picture the browser's `VideoDecoder` refuses can still be decoded
 // in software — libavcodec's HEVC decoder compiled to WebAssembly, with SIMD128 and
-// slice threads (hevcWasmDecoder.ts) — where the gateway is configured with
-// `[hevc_wasm]`, which serves the decoder, and the browser runs shared-memory SIMD
+// slice threads (hevcWasmDecoder.ts) — where the gateway has the decoder's
+// archive, and so serves it, and the browser runs shared-memory SIMD
 // WebAssembly on the cross-origin isolated page every gateway serves, and presents
 // its pictures on a WebGL 2 canvas (hevcPicture.ts). The page asks the
 // gateway for the decoder rather than assuming it. Chrome on a GPU without HEVC

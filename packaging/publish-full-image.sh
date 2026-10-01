@@ -12,11 +12,8 @@
 # placing the archive the tag's src/hevc_wasm.rs pins, downloaded from the
 # private andrewtheguy/hevc-wasm-archives through `gh` and checked against that
 # pin, in /opt/remotex/versions/<version>/share/remotex, the release tree's data
-# directory, where the gateway looks for it (src/config.rs, data_dir). The
-# mounted config turns it on with no path:
-#
-#   [hevc_wasm]
-#   enabled = true
+# directory, where the gateway looks for it (src/config.rs, data_dir) and,
+# finding it, serves it: the mounted config says nothing of it.
 #
 # A tag whose gateway links the decoders rather than loading them, pins no
 # software decoder, or looks for it elsewhere, is refused.

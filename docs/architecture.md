@@ -78,7 +78,7 @@ area and points here; read the area's section before changing what it covers.
   `src/assets.rs` serves carries the two cross-origin isolation headers; keep
   them, and load nothing from another origin.
 - The only versioned client asset read at run time is the EXPERIMENTAL software
-  HEVC decoder's release archive, named by `[hevc_wasm]`: read once at start-up, refused unless
+  HEVC decoder's release archive, found in the data directory or named by `[hevc_wasm]`: read once at start-up, refused unless
   it is the release `src/hevc_wasm.rs` pins by SHA-256, and served from memory at
   `/hevc/`. An operator-configured path in `[branding].logo` is read per request
   and is not part of the client bundle. Do not widen the decoder input to another
@@ -615,15 +615,16 @@ Three controls with similar names therefore remain separate:
   missing from the device's list), so the "no" was right.
   A browser that decodes the sound but not the picture, as that one did, loses
   nothing by being sent both re-encoded.
-- **EXPERIMENTAL: the picture in software.** A gateway configured with
-  `[hevc_wasm]` serves [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm),
+- **EXPERIMENTAL: the picture in software.** A gateway that has its release
+  archive serves [hevc-wasm](https://github.com/andrewtheguy/hevc-wasm),
   libavcodec's HEVC decoder compiled to WebAssembly with SIMD128 and slice threads,
   at `/hevc/`; its threads share their memory through the cross-origin isolation
   every gateway serves the page with (`src/assets.rs`). No build holds the
   decoder: the operator downloads the
   release archive from the private `andrewtheguy/hevc-wasm-archives` into
   `share/remotex` in the gateway's release tree, beside `share/doc/remotex`,
-  where `[hevc_wasm]` looks unless it names another file (`config::data_dir`):
+  where the gateway looks for it and, finding it, serves it with nothing
+  configured; `[hevc_wasm].archive` names a file kept elsewhere (`config::data_dir`):
   the archive is pinned to the binary's version, so it is kept with the binary
   rather than in the state directory, which outlives versions. The
   gateway reads it once at start-up and refuses to start unless it is the release `src/hevc_wasm.rs` pins by SHA-256, since the page's
