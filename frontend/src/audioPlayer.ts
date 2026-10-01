@@ -355,21 +355,22 @@ export function createAudioPlayer(
       return;
     }
     for (const packet of packets) {
-      let planes: Float32Array<ArrayBuffer>[];
+      let buffer: AudioBuffer;
       try {
-        planes = flac.decode(packet);
+        const planes = flac.decode(packet);
+        buffer = context.createBuffer(
+          planes.length,
+          planes[0].length,
+          format.sampleRate,
+        );
+        for (const [channel, plane] of planes.entries()) {
+          buffer.copyToChannel(plane, channel);
+        }
       } catch (e) {
-        // One frame's worth of sound: the next decodes on its own.
+        // One frame's worth of sound, whether it did not decode or did not make
+        // a buffer: the next decodes on its own.
         console.warn("audio: dropped a FLAC frame", e);
         continue;
-      }
-      const buffer = context.createBuffer(
-        planes.length,
-        planes[0].length,
-        format.sampleRate,
-      );
-      for (const [channel, plane] of planes.entries()) {
-        buffer.copyToChannel(plane, channel);
       }
       schedule(buffer);
     }
