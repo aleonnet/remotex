@@ -5,10 +5,8 @@
   "version": "0.0.0",
   "type": "module",
   "scripts": {
-    "dev": "bun run build:wasm && vite",
     "build:wasm": "wasm-pack build wasm/egfx --release --target web --no-pack",
     "build": "bun run build:wasm && tsc -b && vite build",
-    "preview": "vite preview",
     "test": "bun run build:wasm && bun test src",
     "lint": "biome lint .",
     "format": "biome format --write .",

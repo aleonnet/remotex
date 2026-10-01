@@ -8,7 +8,7 @@ import { execFileSync } from "node:child_process";
 import { expect, type Page, test } from "@playwright/test";
 
 export const BASE_URL =
-  process.env.REMOTEX_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:5173/";
+  process.env.REMOTEX_PLAYWRIGHT_BASE_URL ?? "http://127.0.0.1:52380/";
 export const TARGET = process.env.REMOTEX_PLAYWRIGHT_TARGET ?? "mac";
 const USERNAME = process.env.REMOTEX_PLAYWRIGHT_USERNAME;
 const PASSWORD = process.env.REMOTEX_PLAYWRIGHT_PASSWORD;

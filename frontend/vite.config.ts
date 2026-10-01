@@ -10,28 +10,11 @@ const cargoToml = readFileSync(
 );
 const version = cargoToml.match(/^version\s*=\s*"([^"]+)"/m)?.[1] ?? "dev";
 
-// Where `cargo run -- serve` is listening. 52380 is the built-in default, but
-// a local config is free to pick another port ([server].port), and editing this
-// file to match is a change that then wants un-editing before it is committed —
-// so it is an environment variable:
-//
-//   REMOTEX_DEV_BACKEND=52675 bun run dev
-//
-// A full origin works too, for a backend on another host:
-//
-//   REMOTEX_DEV_BACKEND=http://192.168.1.10:52380 bun run dev
-const backend = process.env.REMOTEX_DEV_BACKEND ?? "52380";
-const backendUrl = /^\d+$/.test(backend)
-  ? `http://localhost:${backend}`
-  : backend;
-
-// Dev server proxies the API and the WebSocket to the Rust backend, so
-// `bun run dev` on :5173 talks to a locally running gateway.
-//
 // A standalone `bun run build` writes frontend/dist. Cargo instead sets this to
 // its private OUT_DIR, because generated files are outputs rather than inputs to
 // build.rs. Either way the one bundle is compiled into the gateway binary
-// (src/assets.rs), which serves it over HTTP from an origin root.
+// (src/assets.rs), which serves it over HTTP from an origin root. The gateway is
+// the only thing that serves the page: there is no dev server in front of it.
 const outDir = process.env.REMOTEX_FRONTEND_OUT_DIR ?? "dist";
 
 export default defineConfig({
@@ -50,21 +33,4 @@ export default defineConfig({
     emptyOutDir: true,
   },
   plugins: [react()],
-  server: {
-    // As the gateway serves the page (src/assets.rs): cross-origin isolated, for
-    // the graphics compositor's threads and the software HEVC decoder's, with the
-    // decoder, if the backend has it, at /hevc/.
-    headers: {
-      "Cross-Origin-Opener-Policy": "same-origin",
-      "Cross-Origin-Embedder-Policy": "require-corp",
-    },
-    proxy: {
-      "/api": backendUrl,
-      "/hevc": backendUrl,
-      "/ws": {
-        target: backendUrl,
-        ws: true,
-      },
-    },
-  },
 });

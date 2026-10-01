@@ -1142,7 +1142,10 @@ Authentication and desktop ownership are separate:
 
 1. `POST /api/auth/login` creates the login cookie.
 2. `POST /api/session` claims the single slot. A conflicting claim returns
-   `409` unless the request reclaims its token or forces takeover.
+   `409` unless the request reclaims its token or forces takeover. Its answer
+   and `GET /api/targets`' state the gateway's version in `X-Remotex-Version`,
+   and a page whose own differs, a tab left open across an upgrade, opens no
+   session and lists no target: it says both versions and offers a reload.
 3. `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false`
    attaches to the slot and reports the target picker, the current connected
    target, or a session this browser cannot be served. `chroma`, `apple_media`
