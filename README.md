@@ -169,7 +169,7 @@ rather than ahead of the tiers.
 
 Another RDP server, an older Windows or xrdp say, may happen to work if it
 speaks what the client implements ([The RDP client](docs/rdp-client.md)), but
-it is not a target: nothing is done to make it work. Its picture follows
+it is not a target: it is not tested against. Its picture follows
 Windows' rule, encoded as VP9 in the gateway unless the session was started with
 the pipeline passed.
 
