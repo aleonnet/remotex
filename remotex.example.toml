@@ -268,7 +268,8 @@ password = "change-me"
 # it, and a plain or wlshare VNC server is asked for it once, as soon as it
 # declares SetDesktopSize support; a server that never does, or refuses, keeps
 # its own. Refused on `subtype = "ard"` without `virtual_display`, which shows the
-# Mac's physical displays as they are.
+# Mac's physical displays as they are. A Mac's virtual display takes at most
+# "1920x1080", the points its 3840×2160 backing ceiling holds on a Retina client.
 #
 # A session that follows the client's window does not use it: that one opens at
 # the full resolution of the connecting client's own screen and then takes the

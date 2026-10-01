@@ -314,13 +314,12 @@ pub enum ClientMsg {
     /// `choices` is what was chosen under the target before Start: how the
     /// desktop is sized, whether the remote's sound is taken, and whether the
     /// target's own stream is passed. They hold for the life of the
-    /// session ([`crate::config::Choices`]); a connect that names none starts
-    /// with none.
+    /// session ([`crate::config::Choices`]). A connect without them, or without
+    /// their size, is refused: the gateway picks no size on a browser's behalf.
     Connect {
         target: String,
         #[serde(default)]
         display: Option<HostDisplay>,
-        #[serde(default)]
         choices: crate::config::Choices,
     },
     /// Tear the current session's engine down and return to the picker
@@ -1510,20 +1509,20 @@ mod tests {
         // A connect names the screen it is made from, and a probe without one
         // still connects.
         match serde_json::from_str::<ClientMsg>(
-            r#"{"type":"connect","target":"mac","display":{"w":2560,"h":1440,"scale":100}}"#,
+            r#"{"type":"connect","target":"mac","display":{"w":2560,"h":1440,"scale":100},"choices":{"size":"target"}}"#,
         )
         .unwrap()
         {
             ClientMsg::Connect { target, display, choices } => {
                 assert_eq!(target, "mac");
                 assert_eq!(display, Some(HostDisplay { w: 2560, h: 1440, scale: 100, fit: false }));
-                assert_eq!(choices, crate::config::Choices::default(), "none named, none made");
+                assert_eq!(choices, crate::config::Choices::default(), "sound and passthrough only where named");
             }
             other => panic!("unexpected: {other:?}"),
         }
-        // What was ticked under the target rides the same message, each choice
-        // false unless it is named, and one this gateway does not know is refused
-        // rather than dropped.
+        // What was chosen under the target rides the same message, sound and
+        // passthrough false unless named, and a choice this gateway does not know
+        // is refused rather than dropped.
         match serde_json::from_str::<ClientMsg>(
             r#"{"type":"connect","target":"mac","choices":{"size":"window","passthrough":true}}"#,
         )
@@ -1546,13 +1545,24 @@ mod tests {
             .is_err()
         );
         assert!(matches!(
-            serde_json::from_str::<ClientMsg>(r#"{"type":"connect","target":"mac"}"#).unwrap(),
+            serde_json::from_str::<ClientMsg>(
+                r#"{"type":"connect","target":"mac","choices":{"size":"default"}}"#
+            )
+            .unwrap(),
             ClientMsg::Connect { display: None, .. }
         ));
+        // The size is the browser's to name: no connect is given one it did not ask for.
+        for unsized_connect in [
+            r#"{"type":"connect","target":"mac"}"#,
+            r#"{"type":"connect","target":"mac","choices":{}}"#,
+            r#"{"type":"connect","target":"mac","choices":{"audio":true}}"#,
+        ] {
+            assert!(serde_json::from_str::<ClientMsg>(unsized_connect).is_err(), "{unsized_connect}");
+        }
         // A pinch-zoom client says so beside its screen; a client that says
         // nothing is a pointer client.
         match serde_json::from_str::<ClientMsg>(
-            r#"{"type":"connect","target":"mac","display":{"w":430,"h":932,"scale":300,"fit":true}}"#,
+            r#"{"type":"connect","target":"mac","display":{"w":430,"h":932,"scale":300,"fit":true},"choices":{"size":"target"}}"#,
         )
         .unwrap()
         {

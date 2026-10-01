@@ -148,6 +148,11 @@ const NOMINAL_DPI: f32 = 132.0;
 /// later resize to that initial width and height.
 const DYNAMIC_MAX_WIDTH: u32 = 3840;
 const DYNAMIC_MAX_HEIGHT: u32 = 2160;
+/// The most points a virtual display covers on every client: the ceiling at the 2x
+/// a Retina client is given. A size within it is the size at either density; one
+/// past it [`virtual_display_mode`] would shrink for such a client.
+pub const POINTS_AT_ANY_DENSITY: (u16, u16) =
+    ((DYNAMIC_MAX_WIDTH / 2) as u16, (DYNAMIC_MAX_HEIGHT / 2) as u16);
 /// Bytes of one display record in a layout payload.
 const LAYOUT_RECORD: usize = 0x38;
 /// Bytes of a layout payload before its first record, counted after the `u16`

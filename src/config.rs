@@ -399,12 +399,13 @@ pub struct Offers {
 /// the slot keeps them beside the target, and a takeover reconnects with them.
 ///
 /// Each is refused on a target that does not offer it
-/// ([`TargetConfig::accepts`]). A connect that names none starts with none.
+/// ([`TargetConfig::accepts`]). The size is always named, since which one a
+/// session has is the browser's to say and never this end's to assume; sound and
+/// passthrough are taken only where they are named.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct Choices {
     /// How the desktop is sized.
-    #[serde(default)]
     pub size: Sizing,
     /// Take the remote's sound. RDP negotiates it at connect (MS-RDPEA); a
     /// `wlshare` target lists wlshare's audio extension, FLAC on the RFB connection
@@ -1679,6 +1680,19 @@ impl ConfigFile {
                 "target {:?} sets size on subtype \"ard\", which shares the Mac's physical \
                  displays and never sizes them. Remove the key, or set virtual_display = true.",
                 target.name
+            );
+            // A virtual display opens at the client's density under a ceiling of
+            // pixels, so a size past the ceiling's points at 2x would be shrunk for
+            // a Retina client after the picker had stated it.
+            let (most_w, most_h) = crate::vnc_apple::POINTS_AT_ANY_DENSITY;
+            anyhow::ensure!(
+                !target.has_virtual_display()
+                    || target.size.is_none_or(|(w, h)| w <= most_w && h <= most_h),
+                "target {:?} sets a {} size, but a Mac's virtual display holds at most \
+                 {most_w}x{most_h} on a Retina client, which opens it at 2x — set a size \
+                 within that, or leave the key out",
+                target.name,
+                size_text(target.size)
             );
             // The graphics pipeline is RDP's alone: EGFX is an RDP channel, so on a
             // VNC target the key could only be a belief about the wrong protocol,
@@ -3508,6 +3522,22 @@ mod tests {
         for key in ["width = 1600", "height = 1000", "size = 1600"] {
             ConfigFile::parse(&vnc_toml(key)).expect_err(key);
         }
+    }
+
+    /// A virtual display opens at the client's density, so the picker's size is
+    /// one a 2x client's display can hold.
+    #[test]
+    fn a_size_a_retina_client_would_shrink_is_refused_on_a_virtual_display() {
+        let hp = "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n";
+        let virt = "subtype = \"ard\"\nvirtual_display = true\nusername = \"andrew\"\npassword = \"h\"\n";
+        for mac in [hp, virt] {
+            ConfigFile::parse(&vnc_toml(&format!("{mac}size = \"1920x1080\""))).expect("the most it holds at 2x");
+            for over in ["2560x1440", "1921x1080", "1920x1200"] {
+                let err = ConfigFile::parse(&vnc_toml(&format!("{mac}size = \"{over}\""))).unwrap_err();
+                assert!(format!("{err:#}").contains("at most 1920x1080"), "{err:#}");
+            }
+        }
+        ConfigFile::parse(&vnc_toml("size = \"2560x1440\"")).expect("no ceiling of points elsewhere");
     }
 
     /// Standard mode shows the Mac's physical displays as they are, so a size there

@@ -1225,7 +1225,12 @@ and `GET /api/targets` carries it:
   server takes a size is known only once it is dialled, which is too late for a
   picker, so it is asked once for the size it keeps and the picker says a server
   that takes none keeps its own. A Mac sharing its physical displays is shown at
-  their size and takes no `size` key.
+  their size and takes no `size` key. A Mac's virtual display takes one of at
+  most 1920×1080: it opens at the client's density under a 3840×2160 ceiling of
+  pixels, so a larger size would be shrunk for a Retina client after the picker
+  had stated it, and is refused at parse instead. A `connect` always names its
+  size: one without `choices.size` is refused, since the gateway picks no size
+  on a browser's behalf.
 - **Not offered is not shown.** An option the target type does not have has no
   row. High Performance's sound is such a one: the Mac refuses the picture
   without it, so there is nothing to choose, and the session's Mute is what a

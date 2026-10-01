@@ -60,7 +60,8 @@ async fn wait_for_vnc_port(port: u16) {
 
 /// Start the real server pointed at wlshare twice: a `wlshare` target with a
 /// camera and a microphone, and a plain `vnc` target with neither, which a plain
-/// target may not carry. The tests start their sessions on both with resize.
+/// target may not carry. The tests start the first following the window and the
+/// second at the size it keeps.
 async fn spawn_app(vnc_port: u16) -> SocketAddr {
     let wlshare = wlshare_target(vnc_port);
     let plain = TargetConfig {
@@ -277,7 +278,7 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
     // 2x: the output's mode and scale change in one configuration, and the
     // logical size stays what it was.
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"resize":true}}}}"#
+        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"size":"window"}}}}"#
     )))
     .await
     .unwrap();
@@ -342,7 +343,9 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
 /// The same server behind a plain `vnc` target is read as any VNC server is: the
 /// gateway lists nothing of wlshare's, so wlshare is never asked for its VP9 and
 /// sends ZRLE, which is encoded here; the 2x browser is shown the output at the
-/// 1x generic VNC is presented at, and no output list arrives.
+/// 1x generic VNC is presented at, and no output list arrives. Its size is the
+/// one the target keeps, asked for once through SetDesktopSize and never the
+/// browser's window.
 #[tokio::test]
 #[ignore = "requires Docker or Podman"]
 async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
@@ -355,11 +358,15 @@ async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
     let mut view = View::new();
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"{PLAIN_TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"resize":true}}}}"#
+        r#"{{"type":"connect","target":"{PLAIN_TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"size":"target"}}}}"#
     )))
     .await
     .unwrap();
-    view.until(&mut ws, "the desktop's first keyframe", |v| v.decode.is_some()).await;
+    let (w, h) = remotex::config::DEFAULT_SIZE;
+    view.until(&mut ws, "the desktop at the size the target keeps", |v| {
+        v.decode.is_some() && v.sizes.last().is_some_and(|size| (size.w, size.h) == (w.into(), h.into()))
+    })
+    .await;
 
     assert_eq!(view.passed, Some(false), "the picture is encoded here");
     assert!(
@@ -367,7 +374,7 @@ async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
         "a plain target takes no density from the server or the browser: {:?}",
         view.sizes
     );
-    assert_eq!(sway_output(&container, "HEADLESS-1"), (1024, 768, 1.0), "the output is left as it was");
+    assert_eq!(sway_output(&container, "HEADLESS-1"), (w.into(), h.into(), 1.0), "the output is at the kept size, at its own 1x");
     assert!(view.displays.is_none(), "a plain target is sent no output list");
     assert!(
         !container.logs().contains("asked for VP9"),
@@ -391,7 +398,7 @@ async fn a_420_browser_is_passed_wlshares_stream_at_420() {
     let mut ws = common::connect_ws_as(addr, &token, &cookie, "420").await;
     let mut view = View::new();
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"resize":true}}}}"#
+        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"size":"window"}}}}"#
     )))
     .await
     .unwrap();
@@ -484,7 +491,7 @@ async fn uplink_signal(ws: &mut common::Ws) -> serde_json::Value {
 /// Connect to the target and read the session socket up to `connected`, which is
 /// returned; after it the socket is only drained, so nothing backs up behind it.
 async fn open_session(ws: &mut common::Ws) -> serde_json::Value {
-    common::connect_target_with(ws, TARGET, r#"{"resize":true}"#).await;
+    common::connect_target_with(ws, TARGET, r#"{"size":"window"}"#).await;
     loop {
         if let Message::Text(text) = ws.next().await.expect("session socket open").expect("websocket receive") {
             let msg: serde_json::Value = serde_json::from_str(&text).expect("control message is JSON");

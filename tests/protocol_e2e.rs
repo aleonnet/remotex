@@ -2203,7 +2203,7 @@ async fn standard_speaks_apples_revision_on_the_physical_screen() {
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = connect_ws(addr, &token, &cookie).await;
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}}}"#
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}},"choices":{{"size":"target"}}}}"#
     )))
     .await
     .unwrap();
