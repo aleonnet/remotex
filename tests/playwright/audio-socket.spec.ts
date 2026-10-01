@@ -2,7 +2,8 @@
 // keeps it there.
 //
 // What it checks is a *system decision*, not a rendering: which socket each frame
-// arrived on, and that opening and closing the socket is the whole of the
+// arrived on, that a session started with sound opens the socket and one started
+// without it does not, and that opening and closing it is the whole of the
 // subscription. Nothing here looks at the canvas, counts packets against a clock, or
 // asserts that anything was audible — the browser cannot tell a quiet remote from a
 // broken one, and neither can a test.
@@ -21,7 +22,7 @@
 //     npx playwright test audio-socket
 import { expect, type Page, test } from "@playwright/test";
 
-import { leaveSession, logInAndConnect } from "./support";
+import { leaveSession, logInAndConnectTo } from "./support";
 
 /// The binary frame kinds, copied rather than imported: this spec is the independent
 /// check that the gateway put audio where it said it did, and reading the SPA's own
@@ -87,21 +88,32 @@ test.describe("the audio socket", () => {
     await leaveSession(page);
   });
 
+  const start = (page: Page, sound: boolean) =>
+    logInAndConnectTo(page, AUDIO_TARGET ?? "", "", { sound });
+
+  // Whether a session carries the remote's sound is chosen before it starts. One
+  // started without it asks the remote for none, so there is no socket for it and
+  // nothing in the menu to unmute.
+  test("is not opened by a session started without sound", async ({ page }) => {
+    const traffic = watchSockets(page);
+    await start(page, false);
+
+    await page.getByRole("button", { name: "Open menu" }).click();
+    await expect(page.getByRole("button", { name: "End session" })).toBeVisible();
+    await expect(page.getByRole("button", { name: /^(Mute|Unmute)$/ })).toHaveCount(0);
+    expect(traffic.map((t) => t.url)).toEqual(["/ws"]);
+  });
+
   test("carries sound, and the session socket carries none", async ({
     page,
   }) => {
     const traffic = watchSockets(page);
-    await logInAndConnect(page);
+    await start(page, true);
 
-    // Only the session socket exists until sound is asked for. Opening the audio
-    // socket *is* the request — there is no message for it — so its absence here is
-    // what says nothing was subscribed.
-    expect(traffic.map((t) => t.url)).toEqual(["/ws"]);
-
-    const menu = page.getByRole("button", { name: "Open menu" });
-    await menu.click();
-    const toggle = page.getByRole("button", { name: "Unmute", exact: true });
-    await toggle.click();
+    // A session started with sound comes up unmuted: Start's click is the gesture,
+    // and opening the audio socket *is* the subscription — there is no message for
+    // it.
+    await page.getByRole("button", { name: "Open menu" }).click();
     await expect(
       page.getByRole("button", { name: "Mute", exact: true }),
     ).toHaveAttribute("aria-pressed", "true");
@@ -134,24 +146,22 @@ test.describe("the audio socket", () => {
     ).toEqual([]);
   });
 
-  test("closes when audio is turned off, and leaves the session alone", async ({
+  test("closes on Mute, stays muted across a reload, and leaves the session alone", async ({
     page,
   }) => {
     const traffic = watchSockets(page);
-    await logInAndConnect(page);
-
-    await page.getByRole("button", { name: "Open menu" }).click();
-    await page.getByRole("button", { name: "Unmute", exact: true }).click();
+    await start(page, true);
     await expect
       .poll(() => traffic.filter((t) => t.url === "/ws/audio").length, {
         timeout: 20_000,
       })
       .toBe(1);
 
+    await page.getByRole("button", { name: "Open menu" }).click();
     await page.getByRole("button", { name: "Mute", exact: true }).click();
 
     // Closing the socket is the whole of unsubscribing, so this is the assertion
-    // that the toggle does anything at all.
+    // that the button does anything at all.
     await expect
       .poll(
         () => traffic.filter((t) => t.url === "/ws/audio").every((t) => t.closed),
@@ -160,18 +170,27 @@ test.describe("the audio socket", () => {
       .toBe(true);
     // And the desktop is untouched: a session must survive its sound ending.
     expect(only(traffic, "/ws").closed).toBe(false);
-    await expect(page.getByRole("button", { name: "Unmute", exact: true })).toBeVisible();
+    await expect(
+      page.getByRole("button", { name: "Unmute", exact: true }),
+    ).toBeVisible();
+
+    // The mute is this tab's, for this session: a reload reattaches to the session
+    // and must not start playing what was muted.
+    await page.reload();
+    await page
+      .getByRole("button", { name: "Open menu" })
+      .click({ timeout: 20_000 });
+    await expect(
+      page.getByRole("button", { name: "Unmute", exact: true }),
+    ).toBeVisible();
   });
 
-  // Headless Chromium is not WebKit, so the choice is remembered and a reload —
-  // which reattaches this tab to its session with no click at all — must ask for
-  // the sound again by itself rather than come back silent.
+  // Headless Chromium is not WebKit, so a reload — which reattaches this tab to its
+  // session with no click at all — must ask for the sound again by itself rather
+  // than come back silent.
   test("stays on across a reload", async ({ page }) => {
     const traffic = watchSockets(page);
-    await logInAndConnect(page);
-
-    await page.getByRole("button", { name: "Open menu" }).click();
-    await page.getByRole("button", { name: "Unmute", exact: true }).click();
+    await start(page, true);
     await expect
       .poll(() => traffic.filter((t) => t.url === "/ws/audio").length, {
         timeout: 20_000,

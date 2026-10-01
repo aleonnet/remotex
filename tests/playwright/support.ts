@@ -141,6 +141,16 @@ export function readRemoteClipboard(): string {
   ).replace(/\r?\n$/, "");
 }
 
+// What a spec starts its session with: the options ticked under the target at the
+// picker before Start. Each defaults to off, and every row the target shows is set
+// to what is asked rather than left as found, so a run does not depend on what an
+// earlier one left remembered in the browser.
+export interface StartChoices {
+  resize?: boolean;
+  sound?: boolean;
+  passthrough?: boolean;
+}
+
 // A picker button reads "<name> <protocol> · <host>", so a target is named by what
 // its button starts with — up to the first space, and no further.
 //
@@ -167,8 +177,11 @@ export function targetNamePattern(name: string): RegExp {
 // when its browser goes away: a run that ended on the desktop — or crashed there
 // — is reattached straight to it and never sees the picker. Requiring the picker
 // here made one abandoned run break every run after it.
-export async function logInAndConnect(page: Page): Promise<void> {
-  await landOn(page, TARGET, true);
+export async function logInAndConnect(
+  page: Page,
+  choices: StartChoices = {},
+): Promise<void> {
+  await landOn(page, TARGET, true, "", choices);
 }
 
 // Log in and land on *one named target*, whichever the run started on.
@@ -178,13 +191,46 @@ export async function logInAndConnect(page: Page): Promise<void> {
 // left running would assert against the wrong dial and read as a product failure.
 // So a session found on a desktop is handed back to the picker first, and the
 // target is then chosen by name. `search` is the page's query at load, for a spec
-// about something the page decides from its URL.
+// about something the page decides from its URL. `choices` is what its session is
+// started with.
 export async function logInAndConnectTo(
   page: Page,
   target: string,
   search = "",
+  choices: StartChoices = {},
 ): Promise<void> {
-  await landOn(page, target, false, search);
+  await landOn(page, target, false, search, choices);
+}
+
+// Open `target` at the picker, set its options to `choices` and press Start.
+//
+// The target's button opens it rather than connecting, and says whether it is open:
+// a lone target is opened by the page itself, and a second click would close it. An
+// option the target does not show is left alone when it is not asked for; one that
+// is asked for and is absent or greyed fails here, by name, rather than as a
+// session that started without it.
+async function startTarget(
+  page: Page,
+  target: string,
+  choices: StartChoices,
+): Promise<void> {
+  const row = page.getByRole("button", { name: targetNamePattern(target) });
+  if ((await row.getAttribute("aria-expanded")) !== "true") {
+    await row.click();
+  }
+  const item = page.getByRole("listitem").filter({ has: row });
+  const options: [RegExp, boolean][] = [
+    [/^Resize with this window/, choices.resize ?? false],
+    [/^Sound/, choices.sound ?? false],
+    [/^Pass /, choices.passthrough ?? false],
+  ];
+  for (const [name, wanted] of options) {
+    const option = item.getByRole("checkbox", { name });
+    if (wanted || ((await option.count()) > 0 && (await option.isEnabled()))) {
+      await option.setChecked(wanted, { timeout: LEAVE_TIMEOUT_MS });
+    }
+  }
+  await item.getByRole("button", { name: "Start", exact: true }).click();
 }
 
 // Both of the above, differing only in what they do about a session that is already
@@ -195,7 +241,8 @@ async function landOn(
   page: Page,
   target: string,
   keepRunningSession: boolean,
-  search = "",
+  search: string,
+  choices: StartChoices,
 ): Promise<void> {
   await logIn(page, search);
   const onPicker = await page
@@ -208,7 +255,7 @@ async function landOn(
     if (!onPicker) {
       await returnToPicker(page);
     }
-    await page.getByRole("button", { name: targetNamePattern(target) }).click();
+    await startTarget(page, target, choices);
   }
   await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
     timeout: 20_000,
@@ -219,7 +266,7 @@ async function landOn(
 }
 
 // The login itself, which ends on whichever of the two landings this run gets.
-async function logIn(page: Page, search = ""): Promise<void> {
+export async function logIn(page: Page, search = ""): Promise<void> {
   await page.goto(new URL(search, BASE_URL).toString());
   await expect(page.getByText(/^v\d+\.\d+\.\d+$/)).toBeVisible();
   await page

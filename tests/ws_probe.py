@@ -9,8 +9,11 @@ This is a manual probe for display selection and dynamic-resolution behavior. St
 ``remotex serve`` separately, then run, for example:
 
     REMOTEX_PROBE_PASSWORD=... uv run tests/ws_probe.py \
-        --port 52675 --target sandbox2highperf --user admin \
+        --port 52675 --target sandbox2highperf --user admin --resize \
         --viewport 1366x768 --viewport 1920x1080
+
+``--resize``, ``--sound`` and ``--passthrough`` are what the picker's Start would
+carry: the session is started with each one named, and with none otherwise.
 
 Use ``--burst`` to send every requested viewport without waiting for the preceding
 resize response.
@@ -115,6 +118,24 @@ async def main() -> int:
         help="gateway password (prefer REMOTEX_PROBE_PASSWORD)",
     )
     parser.add_argument("--seconds", type=float, default=25.0)
+    parser.add_argument(
+        "--resize",
+        action="store_true",
+        help="start the session with the window driving the desktop's size, which is "
+        "what makes it act on --viewport",
+    )
+    parser.add_argument(
+        "--sound",
+        action="store_true",
+        help="start the session with the remote's sound, on a target that offers it "
+        "as a choice (ard-high-performance always carries it)",
+    )
+    parser.add_argument(
+        "--passthrough",
+        action="store_true",
+        help="start the session with the target's own stream passed: the Mac's with "
+        "--apple-media, an RDP host's graphics pipeline with --rdp-graphics",
+    )
     parser.add_argument(
         "--audio",
         action="store_true",
@@ -240,7 +261,12 @@ async def main() -> int:
         "--apple-media",
         action="store_true",
         help="state that this client decodes a High Performance Mac's HEVC and AAC-ELD, "
-        "which a target with media_passthrough then passes it in place of VP9 and Opus",
+        "which a session started with --passthrough is served to no other",
+    )
+    parser.add_argument(
+        "--rdp-graphics",
+        action="store_true",
+        help="state that this client composes an RDP host's graphics pipeline",
     )
     parser.add_argument(
         "--records",
@@ -264,17 +290,23 @@ async def main() -> int:
     token = claim.json()["sessionId"]
     print(f"  logged in, session {token[:12]}…")
 
-    # The session socket requires the browser's decoder answers; the probe stands in
-    # for a decoder that takes VP9 profile 1, as a desktop browser does, and takes the
-    # Mac's stream only with --apple-media.
+    # The session socket requires the browser's answers about itself; the probe stands
+    # in for a decoder that takes VP9 profile 1, as a desktop browser does, takes the
+    # Mac's stream only with --apple-media and composes an RDP pipeline only with
+    # --rdp-graphics.
     apple_media = "true" if args.apple_media else "false"
-    url = f"ws://127.0.0.1:{args.port}/ws?session={token}&chroma=444&apple_media={apple_media}"
+    rdp_graphics = "true" if args.rdp_graphics else "false"
+    url = (
+        f"ws://127.0.0.1:{args.port}/ws?session={token}&chroma=444"
+        f"&apple_media={apple_media}&rdp_graphics={rdp_graphics}"
+    )
+    choices = {"resize": args.resize, "audio": args.sound, "passthrough": args.passthrough}
     # No cap on a message, as a browser has none: a keyframe of a whole desktop is
     # one batch, which a 2x screen can put past the library's 1 MiB default.
     async with websockets.connect(
         url, additional_headers={"Cookie": f"remotex_session={cookie}"}, max_size=None
     ) as socket:
-        connect = {"type": "connect", "target": args.target}
+        connect = {"type": "connect", "target": args.target, "choices": choices}
         if args.display is not None:
             connect["display"] = args.display
             print(f"  -> connect {args.target} display {args.display}")
@@ -352,7 +384,7 @@ async def main() -> int:
         # for an inbound message to be noticed.
         async def reconnect() -> None:
             await asyncio.sleep(args.reconnect_after)
-            second = {"type": "connect", "target": args.reconnect_target}
+            second = {"type": "connect", "target": args.reconnect_target, "choices": choices}
             if args.display is not None:
                 second["display"] = args.display
             print(f"  -> connect {args.reconnect_target} (no disconnect first)")
@@ -595,6 +627,7 @@ async def main() -> int:
                     elif kind == "connected":
                         print(
                             f"  connected  {data['name']}  resize={data['resize']}"
+                            f"  audio={data['audio']}  passthrough={data['passthrough']}"
                             f"  clipboard={data['clipboard']}"
                         )
                         if args.audio and audio_task is None:

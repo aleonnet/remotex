@@ -640,9 +640,10 @@ function ScreenHelp({
 }
 
 // The direct audio toggle is also the user gesture required to create a
-// playable AudioContext. Targets without audio omit the row. Its words are Mute
-// and Unmute because that is all it reaches: the remote's sound is taken when
-// the session starts, and this opens or closes the browser's subscription to it.
+// playable AudioContext. A session without sound omits the row. Its words are
+// Mute and Unmute because that is all it reaches: whether the remote's sound is
+// taken was chosen at the picker before the session started, and this opens or
+// closes the browser's subscription to it.
 function AudioSection({
   available,
   enabled,
@@ -677,8 +678,8 @@ function AudioSection({
 
 // The camera toggle is also the user gesture `getUserMedia`'s permission prompt
 // requires. Targets without a camera omit the row — the same rule as Audio's.
-// Unlike Audio there is no remembered default anywhere: this button is the one
-// and only way the camera turns on, per session, every session.
+// Unlike sound, no session is started with it: this button is the one and only
+// way the camera turns on, per session, every session.
 //
 // The row says "experimental" because the redirection behind it has no automated
 // coverage — no test carries a frame to a host — where Audio's does. The label
@@ -980,11 +981,11 @@ export default function FloatingMenu({
   renderPlan: string;
   // Why the desktop has no picture, from `oversize`.
   oversize: HoldCause | null;
-  // Whether this session can carry the remote's sound, which hides the Audio
+  // Whether this session carries the remote's sound, which hides the Audio
   // section rather than disabling it — the same rule the Display section follows
-  // and the opposite of Clipboard's. A greyed "Audio" would be explaining a
-  // feature that does not exist for this target: a plain VNC server and a Mac in
-  // Standard mode carry no sound, so there is nothing that could be switched on.
+  // and the opposite of Clipboard's. A greyed "Audio" would be explaining sound
+  // that is not there to unmute: a plain VNC server and a Mac in Standard mode
+  // carry none, and a session started without it asked the remote for none.
   //
   // `audioEnabled` is what this browser has asked for, not proof that sound is
   // arriving: a quiet remote and one that will never redirect are the same thing

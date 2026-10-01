@@ -42,8 +42,8 @@ composed it, and that a page that reloads is given a pipeline from its first
 command rather than the one that was running. A compositor that refused a command
 says so in the DOM, which is what stands in for the picture here.
 
-`software-hevc.spec.ts` is the EXPERIMENTAL software HEVC decoder, on a High
-Performance target with `media_passthrough` and the page loaded with
+`software-hevc.spec.ts` is the EXPERIMENTAL software HEVC decoder, in a High
+Performance session started with the Mac's stream passed and the page loaded with
 `?hevc_decoder=software`. Against a gateway that has the decoder's archive it
 asserts that the page is cross-origin isolated and says it decodes the Mac's
 stream, that the gateway passes the HEVC, that the page asks for the decoder and
@@ -54,9 +54,18 @@ gateway without the table it asserts the fallback: the page remains isolated,
 asks for the decoder and gets a 404, then selects VP9.
 
 `audio-socket.spec.ts` keeps sound on its dedicated `/ws/audio` connection. It
-asserts which socket receives the format and packets, and that opening and closing
-that socket is the whole subscription. The deterministic tone harness in
-`src/server.rs` supplies audio without a remote.
+asserts which socket receives the format and packets, that a session started with
+sound opens that socket and one started without it does not, and that opening and
+closing it is the whole subscription, a mute surviving a reload. The deterministic
+tone harness in `src/server.rs` supplies audio without a remote.
+
+`picker-options.spec.ts` is what a session is started with: that Start sends
+the choices ticked under the target and `connected` reports them back, that a
+target opens to the options its type offers and the browser remembers what was
+ticked, and that a second browser which cannot take the session's passthrough is
+told `unserved` and covered, with End session returning it to a picker where that
+choice is greyed. It needs an `rdp` target, the one type that offers all three
+choices, and the tone harness is one.
 
 `clipboard.spec.ts` is the live-Mac regression for the web clipboard panel. It
 proves that unsolicited remote copies still auto-sync, while opening and
@@ -70,7 +79,10 @@ and the failure it guards against — a truncated value arriving *successfully* 
 is invisible to any one of them.
 
 `support.ts` holds what the specs share: the login/target flow and the SSH hooks
-that read and write the Mac's pasteboard. Two conventions live there. Every spec
+that read and write the Mac's pasteboard. A spec names what its session is started
+with — resize, sound, the target's passthrough — and the flow sets every option the
+target shows at the picker before pressing Start, so a run does not depend on what
+an earlier one left remembered in the browser. Two conventions live there. Every spec
 hands the session back to the picker in an `afterEach` through `leaveSession`,
 because the server keeps a target session running when its browser goes away and a
 spec that failed halfway would otherwise leave it there; and `logInAndConnect`
@@ -141,8 +153,9 @@ That gateway serves the SPA compiled into its binary, so rebuild the gateway
 after a frontend change and restart it; a stale bundle is exactly what these
 specs cannot see.
 
-The passthrough spec needs a live RDP host, in a target with
-`egfx_passthrough = true`, named by `REMOTEX_PLAYWRIGHT_EGFX_TARGET`:
+The passthrough spec needs a live RDP host, in a target named by
+`REMOTEX_PLAYWRIGHT_EGFX_TARGET`, and starts its sessions with the pipeline
+passed:
 
 ```sh
 cd tests/playwright
@@ -154,7 +167,7 @@ bunx playwright test '/egfx-passthrough\.spec\.ts$'
 ```
 
 The software HEVC spec needs a gateway whose config has an
-`ard-high-performance` target with `media_passthrough = true`, with the pinned
+`ard-high-performance` target, with the pinned
 release archive beside the config (where a gateway run from a Cargo build looks
 for it), and names that target with
 `REMOTEX_PLAYWRIGHT_HEVC_TARGET`:
@@ -177,7 +190,7 @@ bun run test:hevc
 Against a gateway without the archive, add `REMOTEX_PLAYWRIGHT_HEVC_WASM=0`,
 which runs the fallback test instead.
 
-The audio spec uses the test-tone gateway instead of a live target:
+The audio and picker specs use the test-tone gateway instead of a live target:
 
 ```sh
 cargo test --lib serve_a_test_tone -- --ignored --nocapture
@@ -191,8 +204,11 @@ REMOTEX_PLAYWRIGHT_BASE_URL='http://127.0.0.1:<port>/' \
 REMOTEX_PLAYWRIGHT_USERNAME='admin' \
 REMOTEX_PLAYWRIGHT_PASSWORD='hunter2' \
 REMOTEX_PLAYWRIGHT_AUDIO_TARGET='test-tone' \
-bunx playwright test '/audio-socket\.spec\.ts$'
+REMOTEX_PLAYWRIGHT_PICKER_TARGET='test-tone' \
+bunx playwright test '/(audio-socket|picker-options)\.spec\.ts$'
 ```
+
+The picker spec also runs against a live RDP host, named the same way.
 
 `bun run test` runs all specs. `bun run test:clipboard`,
 `bun run test:oversized`, `bun run test:video` and `bun run test:hevc` run one

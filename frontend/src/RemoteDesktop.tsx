@@ -82,6 +82,100 @@ function OversizeNotice({
   );
 }
 
+// Why a session cannot be shown here, by the passthrough it was started with.
+const UNSERVED_REASON: Record<string, string> = {
+  "apple-media":
+    "It was started with the Mac's stream passed through, and this browser does not decode the Mac's HEVC and AAC-ELD.",
+  "rdp-graphics":
+    "It was started with the host's graphics pipeline passed through, and this browser cannot compose it: that needs WebGL 2 and a cross-origin isolated page.",
+};
+
+// The cover over a session this browser is not served. The session is held to what
+// it was started with, so nothing is rebuilt for this browser and nothing is tried
+// that would fail in a decoder: it says why, and End session, here and in the menu,
+// returns to the picker to start the target again with other choices. A browser
+// that can take the stream takes the session over as it is.
+function UnservedNotice({
+  passthrough,
+  onEndSession,
+}: {
+  passthrough: string;
+  onEndSession: () => void;
+}) {
+  return (
+    <div className="oversize-overlay" role="alert">
+      <span className="status">This session cannot be shown here</span>
+      <span className="status-hint">
+        {UNSERVED_REASON[passthrough] ??
+          `It was started with a passthrough (${passthrough}) this browser cannot take.`}
+      </span>
+      <span className="status-hint">
+        End it to choose again, or open it in a browser that can.
+      </span>
+      <button type="button" className="status-action" onClick={onEndSession}>
+        End session
+      </button>
+    </div>
+  );
+}
+
+// What can lie over a live session's desktop, under the menu, which stays the way
+// to another target from all three.
+function SessionCovers({
+  resizing,
+  oversize,
+  unserved,
+  size,
+  displays,
+  activeDisplayId,
+  onSelectDisplay,
+  onEndSession,
+}: {
+  resizing: boolean;
+  oversize: HoldCause | null;
+  unserved: string | null;
+  size: RemoteSize | null;
+  displays: DisplayInfo[];
+  activeDisplayId: number | null;
+  onSelectDisplay: (id: number) => void;
+  onEndSession: () => void;
+}) {
+  return (
+    <>
+      {/* A High Performance resize that has not settled: the Mac's intermediate
+          modes and repaints stay behind this, as they do behind Apple's own
+          client's. It takes no input and sits below the menu, so the menu stays
+          reachable; the gateway says when it comes down. */}
+      {resizing && (
+        <output className="resize-overlay">
+          <span className="status">Resizing…</span>
+        </output>
+      )}
+
+      {/* A desktop past what video carries: no picture comes, and the session stays
+          up for the one way out, a smaller desktop from the remote. Choosing one of
+          its displays is that way for a Mac on All Displays, so they are offered
+          here and not only in the menu. It takes the pointer, since the remote
+          under it is not on screen. */}
+      {oversize && size && (
+        <OversizeNotice
+          cause={oversize}
+          size={size}
+          displays={displays}
+          activeDisplayId={activeDisplayId}
+          onSelectDisplay={onSelectDisplay}
+        />
+      )}
+
+      {/* A session started with a passthrough this browser cannot take: covered
+          like a desktop past the ceiling, with the way out on it. */}
+      {unserved && (
+        <UnservedNotice passthrough={unserved} onEndSession={onEndSession} />
+      )}
+    </>
+  );
+}
+
 export default function RemoteDesktop({
   branding,
   onLogout,
@@ -128,8 +222,7 @@ export default function RemoteDesktop({
     micEnabled,
     micError,
     micStreaming,
-    audioByDefault,
-    setAudioByDefault,
+    unserved,
     displays,
     activeDisplayId,
     remoteClipboard,
@@ -183,8 +276,10 @@ export default function RemoteDesktop({
 
   // The status overlay covers the connection lifecycle (connecting/reconnecting)
   // and the claim conflicts (busy/takenOver); in the desktop it also covers the
-  // gap before the first frame. The picker owns the screen once connected.
-  const showStatus = status !== "connected" || (mode === "desktop" && !size);
+  // gap before the first frame, which a session this browser is not served never
+  // ends. The picker owns the screen once connected.
+  const showStatus =
+    status !== "connected" || (mode === "desktop" && !size && !unserved);
 
   return (
     /* screen-touch swaps native scrolling for the gesture transform
@@ -299,8 +394,6 @@ export default function RemoteDesktop({
           connect={connect}
           pendingTarget={pendingTarget}
           connectError={connectError}
-          audioByDefault={audioByDefault}
-          onAudioByDefaultChange={setAudioByDefault}
           onLogout={onLogout}
           onUnauthorized={onUnauthorized}
         />
@@ -317,29 +410,16 @@ export default function RemoteDesktop({
         </div>
       )}
 
-      {/* A High Performance resize that has not settled: the Mac's intermediate
-          modes and repaints stay behind this, as they do behind Apple's own
-          client's. It takes no input and sits below the menu, so the menu stays
-          reachable; the gateway says when it comes down. */}
-      {remoteResizing && mode === "desktop" && !showStatus && (
-        <output className="resize-overlay">
-          <span className="status">Resizing…</span>
-        </output>
-      )}
-
-      {/* A desktop past what video carries: no picture comes, and the session stays
-          up for the one way out, a smaller desktop from the remote. Choosing one of
-          its displays is that way for a Mac on All Displays, so they are offered
-          here and not only in the menu. It takes the pointer, since the remote
-          under it is not on screen, and sits below the menu, which stays
-          reachable for switching target instead. */}
-      {oversize && mode === "desktop" && !showStatus && size && (
-        <OversizeNotice
-          cause={oversize}
+      {mode === "desktop" && !showStatus && (
+        <SessionCovers
+          resizing={remoteResizing}
+          oversize={oversize}
+          unserved={unserved}
           size={size}
           displays={displays}
           activeDisplayId={activeDisplayId}
           onSelectDisplay={selectDisplay}
+          onEndSession={switchTarget}
         />
       )}
 

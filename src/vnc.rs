@@ -38,7 +38,7 @@ use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _, Bu
 use tokio::net::tcp::{OwnedReadHalf, OwnedWriteHalf};
 use tokio::sync::{Mutex, mpsc};
 
-use crate::config::{RenderPlan, Subtype, TargetConfig};
+use crate::config::{Choices, RenderPlan, Subtype, TargetConfig};
 use crate::encode::{Oversize, VideoSink};
 use crate::engine::{self, clamp_u16, host_port};
 use crate::keymap;
@@ -1494,6 +1494,7 @@ type SharedClipboard = Arc<std::sync::Mutex<ClipboardState>>;
 #[allow(clippy::too_many_arguments)]
 pub async fn run(
     config: TargetConfig,
+    choices: Choices,
     plan: RenderPlan,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
@@ -1505,27 +1506,36 @@ pub async fn run(
 ) {
     // A desktop past the video ceiling holds the session open without a picture,
     // on a session the window does not size: only the remote can bring it back
-    // within, as a Mac on All Displays does when one display is chosen. With
-    // `resize` the gateway asks for every size and holds each under the ceiling,
-    // and a remote that answers past it is refused. So is High Performance's,
-    // whose virtual display is held under the ceiling too.
-    let oversize = if config.resize || config.media_stream() {
+    // within, as a Mac on All Displays does when one display is chosen. Started
+    // with resize, the gateway asks for every size and holds each under the
+    // ceiling, and a remote that answers past it is refused. So is High
+    // Performance's, whose virtual display is held under the ceiling too.
+    let oversize = if choices.resize || config.media_stream() {
         Oversize::Refuse
     } else {
         Oversize::Hold
     };
     // Every browser is sent wlshare's own VP9 as it comes when the server is wlshare,
     // asked for at the plan's chroma, dial and walk; any other server is encoded here
-    // from ZRLE. A browser that decodes the Mac's stream is sent its HEVC, on a
-    // target that passes it.
+    // from ZRLE. A session started with the Mac's stream passed is sent its HEVC.
     let sink = VideoSink::new("vnc", frame_tx, plan, feedback, oversize);
-    session(config, display, plan, input_rx, audio, camera, microphone, &sink).await;
+    session(config, choices, display, plan, input_rx, audio, camera, microphone, &sink).await;
     sink.finish().await;
+}
+
+/// Load the two decoders a High Performance Mac's stream needs to become VP9 and
+/// Opus, or say which the host lacks. What `/api/targets` reports for the picker
+/// and what a session without the passthrough needs before it dials the Mac. A
+/// failure is not remembered, so a library installed while the gateway runs is
+/// found by the next call.
+pub fn apple_decoders() -> anyhow::Result<()> {
+    crate::libav::load().and_then(|()| crate::aac_eld::load())
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn session(
     config: TargetConfig,
+    choices: Choices,
     display: Option<HostDisplay>,
     plan: RenderPlan,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
@@ -1534,19 +1544,21 @@ async fn session(
     microphone: Option<Arc<crate::mic::MicBridge>>,
     sink: &VideoSink,
 ) {
-    // A gateway whose host lacks the decoders' libraries has nothing to send a
-    // browser that cannot take the Mac's stream, and says so, naming the library,
-    // before dialling the Mac rather than after its offer.
+    // A gateway whose host lacks the decoders' libraries can only pass the Mac's
+    // stream. The picker says so before Start; a session started without the
+    // passthrough all the same is told here, naming the library, before the Mac
+    // is dialled rather than after its offer.
     if config.media_stream()
         && !plan.apple_media
-        && let Err(e) = crate::libav::load().and_then(|()| crate::aac_eld::load())
+        && let Err(e) = apple_decoders()
     {
-        warn!("vnc: refusing a browser that does not decode the Mac's stream: {e:#}");
+        warn!("vnc: refusing a session that does not pass the Mac's stream: {e:#}");
         let _ = sink
             .msg(ServerMsg::Error {
                 message: format!(
-                    "This browser does not decode the Mac's HEVC and AAC-ELD, and this \
-                     remotex cannot decode them to send VP9 and Opus instead: {e:#}"
+                    "This remotex cannot decode the Mac's HEVC and AAC-ELD to send VP9 and \
+                     Opus, so the Mac's stream can only be passed through, to a browser that \
+                     decodes it: {e:#}"
                 ),
             })
             .await;
@@ -1562,7 +1574,7 @@ async fn session(
         &dest,
         engine::HANDSHAKE_TIMEOUT,
         sink,
-        |stream| connect(&config, display, plan, stream),
+        |stream| connect(&config, choices, display, plan, stream),
     )
     .await
     else {
@@ -1601,7 +1613,7 @@ async fn session(
         (width, height),
         Flags {
             macos,
-            resize: config.resize,
+            resize: choices.resize,
             clipboard: config.clipboard,
             default_size: config.default_size(),
             pinned: (!apple).then(|| config.pinned_size()).flatten(),
@@ -1762,6 +1774,7 @@ impl ServerInit {
 /// handshake that ran long, not as a live session with a blank canvas.
 async fn connect(
     config: &TargetConfig,
+    choices: Choices,
     display: Option<HostDisplay>,
     plan: RenderPlan,
     stream: tokio::net::TcpStream,
@@ -1810,7 +1823,7 @@ async fn connect(
             read_security_result(&mut downlink).await?;
             uplink.send(&[dialect.client_init()]).await?;
             let server = read_server_init(&mut downlink).await?;
-            rfb38_preface(downlink, uplink, server, macos, config, plan).await
+            rfb38_preface(downlink, uplink, server, macos, config, choices, plan).await
         }
         Dialect::Apple889 => {
             let Secured::Apple(wrap_key) = secured else {
@@ -2004,11 +2017,12 @@ async fn rfb38_preface(
     server: ServerInit,
     macos: bool,
     config: &TargetConfig,
+    choices: Choices,
     plan: RenderPlan,
 ) -> anyhow::Result<Connected> {
     uplink.send(&set_pixel_format()).await?;
     let passthrough = if config.wlshare() {
-        let encodings = wlshare_encoding_list(config.clipboard, config.audio, config.camera, config.microphone);
+        let encodings = wlshare_encoding_list(config.clipboard, choices.audio, config.camera, config.microphone);
         let lists = Listing::new(encodings, plan);
         let listed = if lists_wlshare_vp9((server.width, server.height)) { &lists.vp9 } else { &lists.plain };
         uplink.send(&set_encodings(listed)).await?;
@@ -8252,8 +8266,8 @@ mod tests {
         let (uplink, wire) = test_uplink();
         let (sink, _rx) = test_sink();
         let screen = Screen { id: 9, flags: 1 };
-        // What `active_loop` builds for `width = 1440`, `height = 900`,
-        // `resize = false` against a server whose desktop is 1920x1080.
+        // What `active_loop` builds for `width = 1440`, `height = 900` and a
+        // session without resize, against a server whose desktop is 1920x1080.
         let desktop = shared_desktop((1920, 1080), None, Some((1440, 900)));
         desktop.lock().unwrap().resize = false;
 

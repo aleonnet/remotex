@@ -3,16 +3,18 @@
 //!
 //! Four endpoints, all presenting the claim token from `POST /api/session`.
 //!
-//! `/ws?session=<token>&chroma=420|444&apple_media=true|false` is the session: it attaches
-//! to the single slot ([`crate::session::SessionManager`]). The URL also names what
-//! only this browser knows about itself — its screen (`w`/`h`/`scale`/`fit`, the
-//! same values `connect` carries) and, required, what its `VideoDecoder` takes: the
-//! most colour, and whether a High Performance Mac's picture and sound, HEVC and
-//! AAC-ELD — so an attach that finds
-//! a target whose engine a claim change ended can reconnect it for *this* browser
-//! rather than for the previous one. `chroma` and `apple_media` are required because that
-//! reconnect happens at attach, before any message this client could send; a socket
-//! that does not name them is refused at the upgrade.
+//! `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false`
+//! is the session: it attaches to the single slot
+//! ([`crate::session::SessionManager`]). The URL also names what only this browser
+//! knows about itself — its screen (`w`/`h`/`scale`/`fit`, the same values `connect`
+//! carries) and, required, what it can take: the most colour its `VideoDecoder`
+//! decodes, whether it decodes a High Performance Mac's picture and sound, HEVC and
+//! AAC-ELD, and whether it composes an RDP host's graphics pipeline — so an attach
+//! that finds a target whose engine a claim change ended can reconnect it for *this*
+//! browser rather than for the previous one, or tell it the session was started
+//! with a passthrough it cannot take. The three are required because that happens
+//! at attach, before any message this client could send; a socket that does not
+//! name them is refused at the upgrade.
 //! Inbound `ClientMsg` split two ways —
 //! session-control messages (`connect` to pick a target from the post-login picker,
 //! `disconnect` to switch back to it) act on the slot; everything else is engine
@@ -755,9 +757,14 @@ pub struct SessionParams {
     chroma: Chroma,
     /// Whether this browser decodes a High Performance Mac's media stream — its
     /// `VideoDecoder` the HEVC and its `AudioDecoder` the AAC-ELD — asked once at
-    /// page load like [`Self::chroma`] and required for the same reason: a
-    /// `media_passthrough` target passes the stream only to a browser that said yes.
+    /// page load like [`Self::chroma`] and required for the same reason: a session
+    /// that passes the stream is served only to a browser that said yes.
     apple_media: bool,
+    /// Whether this browser composes an RDP host's graphics pipeline: a
+    /// cross-origin isolated page with shared memory for the compositor's threads
+    /// and a WebGL 2 canvas for its picture. Asked and required as
+    /// [`Self::apple_media`] is.
+    rdp_graphics: bool,
 }
 
 pub async fn handler(
@@ -777,7 +784,11 @@ pub async fn handler(
             state.sessions,
             params.session,
             display,
-            Decoders { chroma: params.chroma, apple_media: params.apple_media },
+            Decoders {
+                chroma: params.chroma,
+                apple_media: params.apple_media,
+                rdp_graphics: params.rdp_graphics,
+            },
             HEARTBEAT_TIMINGS,
             Arc::clone(&state.throughput.meters),
         )
@@ -1407,8 +1418,8 @@ async fn session(
                 // Session-control messages act on the slot, not an engine: pick a
                 // target from the picker, or tear the session down and go back to
                 // it ("End session").
-                Ok(ClientMsg::Connect { target, display }) => {
-                    if let Err(e) = sessions.connect(attach_id, &target, display).await {
+                Ok(ClientMsg::Connect { target, display, choices }) => {
+                    if let Err(e) = sessions.connect(attach_id, &target, display, choices).await {
                         warn!("ws: connect to {target:?} refused: {e}");
                     }
                 }
@@ -1482,11 +1493,12 @@ mod tests {
     use crate::protocol::ServerMsg;
     use crate::session::SessionManager;
 
-    /// The session socket states the chroma its decoder takes and whether it takes the Mac's HEVC, and one that does not
+    /// The session socket states the chroma its decoder takes, whether it takes the
+    /// Mac's stream and whether it composes an RDP pipeline, and one that does not
     /// is refused at the upgrade — there is no default to fall back to, because a
-    /// gateway guessing at a browser's decoder is exactly what the parameter
-    /// replaces for a `render_chroma = "auto"` target. The media sockets are asked
-    /// nothing of the kind: they carry the claim and stop there.
+    /// gateway guessing at a browser is exactly what the parameters replace. The
+    /// media sockets are asked nothing of the kind: they carry the claim and stop
+    /// there.
     #[test]
     fn the_session_socket_names_its_decoders_and_the_media_sockets_do_not() {
         use axum::extract::Query;
@@ -1495,25 +1507,37 @@ mod tests {
             Query::<SessionParams>::try_from_uri(&format!("/ws?{query}").parse::<Uri>().unwrap())
                 .map(|Query(p)| p)
         };
-        let full = parse("session=t&chroma=444&apple_media=true").expect("a browser that takes profile 1");
+        let full = parse("session=t&chroma=444&apple_media=true&rdp_graphics=false")
+            .expect("a browser that takes profile 1");
         assert_eq!(full.chroma, Chroma::Full);
         assert!(full.apple_media);
+        assert!(!full.rdp_graphics);
         assert_eq!(full.session.as_deref(), Some("t"));
-        let subsampled = parse("session=t&w=430&h=932&scale=300&fit=true&chroma=420&apple_media=false")
-            .expect("a browser that does not, naming its screen too");
+        let subsampled =
+            parse("session=t&w=430&h=932&scale=300&fit=true&chroma=420&apple_media=false&rdp_graphics=true")
+                .expect("a browser that does not, naming its screen too");
         assert_eq!(subsampled.chroma, Chroma::Subsampled);
         assert!(!subsampled.apple_media);
+        assert!(subsampled.rdp_graphics);
         assert_eq!(
             (subsampled.w, subsampled.h, subsampled.scale, subsampled.fit),
             (Some(430), Some(932), Some(300), Some(true))
         );
         assert!(parse("session=t").is_err(), "a socket that does not say is not a client");
-        assert!(parse("session=t&chroma=444").is_err(), "nor one that does not say whether it takes the Mac's stream");
+        assert!(
+            parse("session=t&chroma=444&rdp_graphics=true").is_err(),
+            "nor one that does not say whether it takes the Mac's stream"
+        );
+        assert!(
+            parse("session=t&chroma=444&apple_media=true").is_err(),
+            "nor one that does not say whether it composes a pipeline"
+        );
         // `auto` is a *target's* answer, not a browser's: a decoder takes one of two
         // profiles, and a client that named a question would leave the gateway
         // resolving one question with another.
-        assert!(parse("session=t&chroma=auto&apple_media=false").is_err(), "the browser answers, it does not ask");
-        assert!(parse("session=t&chroma=422&apple_media=false").is_err(), "there are two profiles");
+        let rest = "apple_media=false&rdp_graphics=false";
+        assert!(parse(&format!("session=t&chroma=auto&{rest}")).is_err(), "the browser answers, it does not ask");
+        assert!(parse(&format!("session=t&chroma=422&{rest}")).is_err(), "there are two profiles");
 
         let media = Query::<WsParams>::try_from_uri(&"/ws/audio?session=t".parse::<Uri>().unwrap())
             .expect("the media sockets carry the token alone");
@@ -1990,10 +2014,11 @@ mod tests {
         assert_eq!(paint.past_window, 1);
     }
 
-    fn fake_target(audio: bool) -> TargetConfig {
+    /// A target that offers sound, for the tests that start a session with it.
+    fn fake_target() -> TargetConfig {
         TargetConfig {
             name: "fake".to_owned(),
-            protocol: Protocol::Vnc,
+            protocol: Protocol::Rdp,
             subtype: None,
             host: "127.0.0.1".to_owned(),
             port: 1,
@@ -2003,18 +2028,13 @@ mod tests {
             domain: None,
             width: Some(1),
             height: Some(1),
-            resize: false,
             egfx: None,
             clipboard: false,
-            audio_key: None,
-            audio,
             camera: false,
             microphone: false,
             video_quality: None,
             render_chroma: None,
             render_adaptive: None,
-            media_passthrough: false,
-            egfx_passthrough: false,
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,
@@ -2026,8 +2046,8 @@ mod tests {
     async fn paint_feedback_stops_at_the_websocket_bridge() {
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(SessionManager::with_test_spawner(
-            vec![fake_target(false)],
-            move |_target, input_rx, frame_tx, _audio, _camera| {
+            vec![fake_target()],
+            move |_target, _choices, input_rx, frame_tx, _audio, _camera| {
                 engine_tx.send((input_rx, frame_tx)).unwrap();
             },
         ));
@@ -2115,11 +2135,11 @@ mod tests {
     /// replacement must not wait for the stale socket's heartbeat to get them back.
     #[tokio::test]
     async fn a_superseded_socket_lets_go_of_the_engines_queue_at_once() {
-        let target = fake_target(false);
+        let target = fake_target();
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![target],
-            move |_target, input_rx, frame_tx, _audio, _camera| {
+            move |_target, _choices, input_rx, frame_tx, _audio, _camera| {
                 engine_tx.send((input_rx, frame_tx)).unwrap();
             },
         ));
@@ -2211,11 +2231,11 @@ mod tests {
 
     #[tokio::test]
     async fn unanswered_websocket_pings_expire_the_session_engine() {
-        let target = fake_target(false);
+        let target = fake_target();
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![target],
-            move |_target, input_rx, frame_tx, _audio, _camera| {
+            move |_target, _choices, input_rx, frame_tx, _audio, _camera| {
                 engine_tx.send((input_rx, frame_tx)).unwrap();
             },
         ));
@@ -2301,11 +2321,11 @@ mod tests {
     #[tokio::test]
     #[ignore = "slow: sends for twice the 1.5 s heartbeat timeout"]
     async fn a_browser_that_sends_anything_is_not_expired_for_want_of_a_pong() {
-        let target = fake_target(false);
+        let target = fake_target();
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(SessionManager::with_test_spawner(
             vec![target],
-            move |_target, input_rx, frame_tx, _audio, _camera| {
+            move |_target, _choices, input_rx, frame_tx, _audio, _camera| {
                 engine_tx.send((input_rx, frame_tx)).unwrap();
             },
         ));
@@ -2364,8 +2384,8 @@ mod tests {
     async fn unanswered_audio_pings_close_the_audio_socket_and_leave_the_engine_alone() {
         let (engine_tx, mut engine_rx) = mpsc::unbounded_channel();
         let sessions = Arc::new(SessionManager::with_test_spawner(
-            vec![fake_target(true)],
-            move |_target, input_rx, frame_tx, audio, _camera| {
+            vec![fake_target()],
+            move |_target, _choices, input_rx, frame_tx, audio, _camera| {
                 engine_tx.send((input_rx, frame_tx, audio)).unwrap();
             },
         ));
@@ -2377,9 +2397,10 @@ mod tests {
             att.events.recv().await,
             Some(AttachEvent::Msg(ServerMsg::Picker))
         ));
-        sessions.connect(att.id, "fake", None).await.unwrap();
+        let sound = crate::config::Choices { audio: true, ..Default::default() };
+        sessions.connect(att.id, "fake", None, sound).await.unwrap();
         let (input_rx, _frame_tx, bridge) = engine_rx.recv().await.unwrap();
-        let bridge = bridge.expect("an audio target's engine is given a bridge");
+        let bridge = bridge.expect("a session with sound is given a bridge");
 
         let timings = HeartbeatTimings {
             interval: Duration::from_secs(1),

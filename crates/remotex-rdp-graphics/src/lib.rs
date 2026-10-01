@@ -6,9 +6,9 @@
 //!
 //! - **The gateway**, whose session (`src/rdp_client`) feeds it what arrives on the
 //!   connection and encodes the framebuffer it fills.
-//! - **The page**, for a target with `egfx_passthrough`: the gateway passes the
-//!   graphics pipeline's commands on instead of composing them, and the page
-//!   composes them with this crate built to WebAssembly (`frontend/wasm/egfx`).
+//! - **The page**, in a session started with the pipeline passed: the gateway
+//!   passes the graphics pipeline's commands on instead of composing them, and the
+//!   page composes them with this crate built to WebAssembly (`frontend/wasm/egfx`).
 //!
 //! One implementation, so the two cannot read a command differently.
 //!

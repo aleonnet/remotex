@@ -2,14 +2,17 @@
 // sound: the second question about its decoders the gateway is told, asked once,
 // before the client mounts, beside the chroma (videoChroma.ts).
 //
-// A target with `media_passthrough` passes the Mac's stream to a browser that says yes
-// — its HEVC instead of VP9 encoded from decoded pictures, its AAC-ELD instead of Opus
-// encoded from decoded sound — and a browser that says no is sent VP9 and Opus as from
-// any other target. One answer covers both halves. Every browser measured that decodes
+// A session started with the Mac's stream passed sends it as it came — its HEVC
+// instead of VP9 encoded from decoded pictures, its AAC-ELD instead of Opus encoded
+// from decoded sound. The picker offers that choice only to a browser that says yes
+// here, and greys it for one that says no, which starts the target with VP9 and Opus
+// as from any other. One answer covers both halves. Every browser measured that decodes
 // the picture decodes the sound too (Chrome and Safari, on macOS and iOS), and one that
 // decodes only the sound (Chrome on a GPU without HEVC Range Extensions) loses nothing
 // by being sent both re-encoded. Firefox decodes neither. The answer rides every session
-// socket this page opens (`gateway.ts`), for the same reason the chroma does.
+// socket this page opens (`gateway.ts`), for the same reason the chroma does: a gateway
+// holding a session another browser started with the stream passed covers a page that
+// said no instead of sending it what it cannot decode.
 //
 // The two halves are asked differently:
 // - The picture, HEVC Range Extensions 4:4:4: `VideoDecoder.isConfigSupported`, which
@@ -34,10 +37,10 @@
 // Range Extensions then says yes, decoding the sound itself and the picture here. `?hevc_decoder=software` in the page's URL takes the
 // software decoder even where the browser's own would do, to try it.
 //
-// Selection, as with the chroma — but the other way round on a doubt. VP9 and Opus are
-// what every browser here decodes, so only a definite "yes" asks for the Mac's stream,
-// and anything that throws reads as "no". The one refusal it can lead to is the
-// gateway's: a build without the `apple-hp-media` decoders has nothing else to send.
+// The other way round from the chroma on a doubt. VP9 and Opus are what every browser
+// here decodes, so only a definite "yes" offers the Mac's stream, and anything that
+// throws reads as "no". The one target it can leave unstartable is a Mac on a gateway
+// whose host lacks the decoders' libraries, which has nothing else to send.
 
 import { hevcDecoderUrl } from "./gateway.ts";
 

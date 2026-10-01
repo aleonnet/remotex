@@ -1,7 +1,7 @@
 # The graphics half of the gateway's RDP client: the codecs a host draws with, the
 # graphics pipeline's compositor, and the framebuffer they fill. A crate of its own
 # because two things run it — the gateway, under src/rdp_client, and the page, which
-# composes a passed pipeline (`egfx_passthrough`) with the same code built to
+# composes a passed pipeline with the same code built to
 # WebAssembly (frontend/wasm/egfx). It therefore builds for
 # `wasm32-unknown-unknown`: no I/O, no clock, and no dependency that needs one. Its
 # threads are rayon's, which the page starts as workers and a build without them

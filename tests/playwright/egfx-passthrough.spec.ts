@@ -1,6 +1,7 @@
-// What an `egfx_passthrough` target puts on the session socket, and what the page
-// says it did with it: an RDP host's graphics pipeline, passed for the browser to
-// compose, where every other target's picture is a video stream.
+// What a session started with the graphics pipeline passed puts on the session
+// socket, and what the page says it did with it: an RDP host's graphics pipeline,
+// passed for the browser to compose, where every other session's picture is a video
+// stream.
 //
 // Everything asserted is decided by the system and not by a machine's timing: the
 // render the gateway resolved, the order of `graphicsStart` and the records behind
@@ -10,8 +11,9 @@
 // a pixel. A GRAPHICS record is a header this
 // file parses for itself, and what is inside one is the host's.
 //
-// It needs a gateway whose local config names a live RDP host with the key. Keep
-// that gitignored file under `tmp/`, for example `tmp/qa_egfx.toml`:
+// It needs a gateway whose local config names a live RDP host, and ticks the
+// passthrough under it at the picker. Keep that gitignored file under `tmp/`, for
+// example `tmp/qa_egfx.toml`:
 //
 //     cargo run -- serve --config tmp/qa_egfx.toml
 //
@@ -26,6 +28,9 @@ import { leaveSession, logInAndConnectTo, returnToPicker } from "./support";
 
 /// The opt-in, and the target name in one, as the video spec has it.
 const EGFX_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_TARGET;
+
+/// What every session here is started with: the pipeline passed, and nothing else.
+const PASSED = { passthrough: true };
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA.
 const BATCH_FRAME_KIND = 0x02;
@@ -186,7 +191,7 @@ const runs = (seen: Session): number[] => seen.batches.flatMap((b) => b.runs);
 test.describe("a target that passes its graphics pipeline", () => {
   test.skip(
     !EGFX_TARGET,
-    "set REMOTEX_PLAYWRIGHT_EGFX_TARGET=<target> against a gateway with a live RDP host and egfx_passthrough",
+    "set REMOTEX_PLAYWRIGHT_EGFX_TARGET=<target> against a gateway with a live RDP host",
   );
 
   // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.
@@ -198,7 +203,7 @@ test.describe("a target that passes its graphics pipeline", () => {
     page,
   }) => {
     const seen = watchSession(page);
-    await logInAndConnectTo(page, EGFX_TARGET ?? "");
+    await logInAndConnectTo(page, EGFX_TARGET ?? "", "", PASSED);
 
     await expect
       .poll(() => runs(seen).length, { timeout: 20_000 })
@@ -277,7 +282,7 @@ test.describe("a target that passes its graphics pipeline", () => {
     page,
   }) => {
     const seen = watchSession(page);
-    await logInAndConnectTo(page, EGFX_TARGET ?? "");
+    await logInAndConnectTo(page, EGFX_TARGET ?? "", "", PASSED);
     await expect
       .poll(() => seen.acknowledged.length, { timeout: 20_000 })
       .toBeGreaterThan(0);

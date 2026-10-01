@@ -1,6 +1,6 @@
 //! The page's compositor for an RDP host's graphics pipeline.
 //!
-//! On a target with `egfx_passthrough` the gateway passes the pipeline's commands
+//! In a session started with the pipeline passed the gateway passes its commands
 //! to the browser instead of composing them and encoding the picture. This is what
 //! composes them there: the gateway's own compositor and codecs, which are the
 //! `remotex-rdp-graphics` crate both are built with, behind the few calls the paint

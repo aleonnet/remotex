@@ -58,9 +58,9 @@ async fn wait_for_vnc_port(port: u16) {
     .expect("wlshare never sent an RFB greeting");
 }
 
-/// Start the real server pointed at wlshare twice: a `wlshare` target with
-/// `resize`, a camera and a microphone, and a plain `vnc` target with `resize`
-/// alone, which is all a plain target may carry.
+/// Start the real server pointed at wlshare twice: a `wlshare` target with a
+/// camera and a microphone, and a plain `vnc` target with neither, which a plain
+/// target may not carry. The tests start their sessions on both with resize.
 async fn spawn_app(vnc_port: u16) -> SocketAddr {
     let wlshare = wlshare_target(vnc_port);
     let plain = TargetConfig {
@@ -103,18 +103,13 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         domain: None,
         width: None,
         height: None,
-        resize: true,
         egfx: None,
         clipboard: false,
-        audio_key: None,
-        audio: false,
         camera: true,
         microphone: true,
         video_quality: None,
         render_chroma: None,
         render_adaptive: None,
-        media_passthrough: false,
-        egfx_passthrough: false,
         virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,
@@ -283,7 +278,7 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
     // 2x: the output's mode and scale change in one configuration, and the
     // logical size stays what it was.
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}}}}"#
+        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"resize":true}}}}"#
     )))
     .await
     .unwrap();
@@ -361,7 +356,7 @@ async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
     let mut view = View::new();
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"{PLAIN_TARGET}","display":{{"w":1728,"h":1117,"scale":200}}}}"#
+        r#"{{"type":"connect","target":"{PLAIN_TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"resize":true}}}}"#
     )))
     .await
     .unwrap();
@@ -397,7 +392,7 @@ async fn a_420_browser_is_passed_wlshares_stream_at_420() {
     let mut ws = common::connect_ws_as(addr, &token, &cookie, "420").await;
     let mut view = View::new();
     ws.send(Message::text(format!(
-        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}}}}"#
+        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"resize":true}}}}"#
     )))
     .await
     .unwrap();
@@ -490,7 +485,7 @@ async fn uplink_signal(ws: &mut common::Ws) -> serde_json::Value {
 /// Connect to the target and read the session socket up to `connected`, which is
 /// returned; after it the socket is only drained, so nothing backs up behind it.
 async fn open_session(ws: &mut common::Ws) -> serde_json::Value {
-    common::connect_target(ws, TARGET).await;
+    common::connect_target_with(ws, TARGET, r#"{"resize":true}"#).await;
     loop {
         if let Message::Text(text) = ws.next().await.expect("session socket open").expect("websocket receive") {
             let msg: serde_json::Value = serde_json::from_str(&text).expect("control message is JSON");

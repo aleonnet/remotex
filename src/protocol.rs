@@ -256,7 +256,7 @@ pub enum ClientMsg {
     /// [`ServerMsg::Resize`] first would have nothing to multiply by right after
     /// a (re)connect, and a report in pixels at a scale the engine had already
     /// moved past asked for half a desktop. Applied by any engine the target
-    /// opted into resize for, and dropped by every other. A desktop client
+    /// started with resize, and dropped by every other. A desktop client
     /// sends one when it connects and on every window change after
     /// [`ServerMsg::Connected`] says `resize`; the backend simply applies each
     /// valid report it receives.
@@ -272,8 +272,8 @@ pub enum ClientMsg {
     /// error. Its density is a ratio the client *has*; what a remote is asked
     /// to render at is [`render_density`] of it.
     ///
-    /// Mid-session it is a *density* report, and only targets with `resize`
-    /// act on it — a density is a resize. RDP asks the host for twice the
+    /// Mid-session it is a *density* report, and only sessions started with
+    /// resize act on it — a density is a resize. RDP asks the host for twice the
     /// pixels at 200% UI scaling, quantized at a midpoint; a High Performance
     /// Apple virtual display re-renders the same points at the new density.
     /// Both report what they got back through [`ServerMsg::Resize`]. The
@@ -312,10 +312,18 @@ pub enum ClientMsg {
     /// the opening size has already been asked of the remote (for a High
     /// Performance Mac it has already shaped the window layout). Optional so
     /// a probe with no screen can still connect.
+    ///
+    /// `choices` is what was ticked under the target before Start: whether the
+    /// window drives the desktop's size, whether the remote's sound is taken, and
+    /// whether the target's own stream is passed. They hold for the life of the
+    /// session ([`crate::config::Choices`]); a connect that names none starts
+    /// with none.
     Connect {
         target: String,
         #[serde(default)]
         display: Option<HostDisplay>,
+        #[serde(default)]
+        choices: crate::config::Choices,
     },
     /// Tear the current session's engine down and return to the picker
     /// ("End session"). Handled by the session layer, never forwarded to an
@@ -951,12 +959,13 @@ pub enum ServerMsg {
     /// to an idle slot, on disconnect ("End session"), and when an engine
     /// ends (the remote hung up, or a connect failure after its `Error`).
     Picker,
-    /// A live target and its client-visible capabilities. `audio` reports
-    /// capability, not whether sound is arriving.
+    /// A live target, what its session was started with and its client-visible
+    /// capabilities. `audio` says the session carries the remote's sound, not
+    /// whether any is arriving.
     ///
     /// `resize` means the window drives the remote's size, continuously and on
-    /// every engine alike — the operator's one switch. The client carries no
-    /// mode of its own: true is auto-follow (and the mobile one-shot), false is
+    /// every engine alike — what the session was started with. The client carries
+    /// no mode of its own: true is auto-follow (and the mobile one-shot), false is
     /// a session whose size was settled at open.
     Connected {
         name: String,
@@ -976,9 +985,13 @@ pub enum ServerMsg {
         resize: bool,
         clipboard: bool,
         audio: bool,
+        /// The remote's own stream this session passes untouched, by
+        /// [`crate::config::Passthrough::name`], or `None` for a desktop encoded
+        /// here.
+        passthrough: Option<&'static str>,
         /// Whether this target redirects the browser's camera to the remote.
-        /// Capability only, like `audio` — enabling is the client's move, made
-        /// afresh each session by opening `/ws/camera`, and never remembered.
+        /// Capability only — enabling is the client's move, made afresh each
+        /// session by opening `/ws/camera`, and never remembered.
         camera: bool,
         /// Whether this target redirects the browser's microphone to the remote. The
         /// camera's twin: enabled afresh each session by opening `/ws/mic`.
@@ -992,6 +1005,19 @@ pub enum ServerMsg {
         /// this slow" began with reading the operator's config file, which the person
         /// looking at the screen generally does not have.
         render: String,
+    },
+    /// A session this browser cannot be served: it was started, here or by the
+    /// browser this one took over from, with a passthrough this one cannot take
+    /// (`passthrough`, by [`crate::config::Passthrough::name`]). No engine runs
+    /// for it and none is rebuilt with other choices. The session stays selected,
+    /// so the client covers the desktop with the reason and its End session
+    /// ([`ClientMsg::Disconnect`]) returns to the picker to choose again, while a
+    /// browser that can take the stream takes the session over as it was started.
+    Unserved {
+        name: String,
+        protocol: &'static str,
+        subtype: Option<&'static str>,
+        passthrough: &'static str,
     },
     /// The remote's displays and which one is being shared, whenever either
     /// changes. Pushed, never requested: a client holds no display state of its
@@ -1187,9 +1213,16 @@ enum ControlMsg<'a> {
         resize: bool,
         clipboard: bool,
         audio: bool,
+        passthrough: Option<&'a str>,
         camera: bool,
         microphone: bool,
         render: &'a str,
+    },
+    Unserved {
+        name: &'a str,
+        protocol: &'a str,
+        subtype: Option<&'a str>,
+        passthrough: &'a str,
     },
     RemoteOs { macos: bool },
     TouchReady,
@@ -1298,6 +1331,7 @@ impl ServerMsg {
                 resize,
                 clipboard,
                 audio,
+                passthrough,
                 camera,
                 microphone,
                 render,
@@ -1308,10 +1342,14 @@ impl ServerMsg {
                 resize: *resize,
                 clipboard: *clipboard,
                 audio: *audio,
+                passthrough: *passthrough,
                 camera: *camera,
                 microphone: *microphone,
                 render,
             }),
+            ServerMsg::Unserved { name, protocol, subtype, passthrough } => {
+                control(&ControlMsg::Unserved { name, protocol, subtype: *subtype, passthrough })
+            }
             ServerMsg::CameraStart {
                 width,
                 height,
@@ -1484,12 +1522,33 @@ mod tests {
         )
         .unwrap()
         {
-            ClientMsg::Connect { target, display } => {
+            ClientMsg::Connect { target, display, choices } => {
                 assert_eq!(target, "mac");
                 assert_eq!(display, Some(HostDisplay { w: 2560, h: 1440, scale: 100, fit: false }));
+                assert_eq!(choices, crate::config::Choices::default(), "none named, none made");
             }
             other => panic!("unexpected: {other:?}"),
         }
+        // What was ticked under the target rides the same message, each choice
+        // false unless it is named, and one this gateway does not know is refused
+        // rather than dropped.
+        match serde_json::from_str::<ClientMsg>(
+            r#"{"type":"connect","target":"mac","choices":{"resize":true,"passthrough":true}}"#,
+        )
+        .unwrap()
+        {
+            ClientMsg::Connect { choices, .. } => assert_eq!(
+                choices,
+                crate::config::Choices { resize: true, audio: false, passthrough: true }
+            ),
+            other => panic!("unexpected: {other:?}"),
+        }
+        assert!(
+            serde_json::from_str::<ClientMsg>(
+                r#"{"type":"connect","target":"mac","choices":{"camera":true}}"#
+            )
+            .is_err()
+        );
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(r#"{"type":"connect","target":"mac"}"#).unwrap(),
             ClientMsg::Connect { display: None, .. }
@@ -1683,6 +1742,7 @@ mod tests {
             resize: false,
             clipboard: true,
             audio: false,
+            passthrough: None,
             camera: false,
             microphone: false,
             render: "video q90 4:4:4 · adaptive".to_owned(),
@@ -1691,9 +1751,25 @@ mod tests {
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"camera":false,"microphone":false,"render":"video q90 4:4:4 · adaptive"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 4:4:4 · adaptive"}"#
             ),
             None => panic!("connected must be a text frame"),
+        }
+        // A session held for a browser that can take it: what it is, and which
+        // stream this browser could not.
+        match (ServerMsg::Unserved {
+            name: "mac".to_owned(),
+            protocol: "vnc",
+            subtype: Some("ard-high-performance"),
+            passthrough: "apple-media",
+        })
+        .text_frame()
+        {
+            Some(json) => assert_eq!(
+                json,
+                r#"{"type":"unserved","name":"mac","protocol":"vnc","subtype":"ard-high-performance","passthrough":"apple-media"}"#
+            ),
+            None => panic!("unserved must be a text frame"),
         }
         // A subtype-less target: null rather than absent, because RDP has no subtype
         // and a key that comes and goes is one a client has to test for two ways.
@@ -1704,13 +1780,17 @@ mod tests {
             resize: true,
             clipboard: false,
             audio: false,
+            passthrough: Some("rdp-graphics"),
             camera: false,
             microphone: false,
-            render: "video q60".to_owned(),
+            render: "the host's graphics pipeline, passed through".to_owned(),
         })
         .text_frame()
         {
-            Some(json) => assert!(json.contains(r#""subtype":null"#), "{json}"),
+            Some(json) => {
+                assert!(json.contains(r#""subtype":null"#), "{json}");
+                assert!(json.contains(r#""passthrough":"rdp-graphics""#), "{json}");
+            }
             None => panic!("connected must be a text frame"),
         }
         // How to decode the stream, which is the message a client cannot work out for

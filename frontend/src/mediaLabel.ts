@@ -31,7 +31,7 @@ export interface AudioStreamInfo {
 
 /** Everything the Audio row is derived from. See `useRemoteDesktop`. */
 export interface AudioRow {
-  /** The target offered sound at all (`audio` on `connected`). */
+  /** The session carries sound at all (`audio` on `connected`). */
   available: boolean;
   /** This browser asked for it. Never proof that any is arriving. */
   enabled: boolean;
@@ -75,13 +75,13 @@ function streamLabel(stream: AudioStreamInfo): string {
  */
 export function audioLabel(row: AudioRow): string {
   if (!row.available) {
-    return "Not offered by this target";
+    return "None in this session";
   }
   if (row.error) {
     return `Stopped — ${row.error}`;
   }
   if (!row.enabled) {
-    return "Available, not playing";
+    return "Muted";
   }
   // Enabled is a click; the format is a round trip later, and the gap is real on a
   // remote that has to arm its audio bridge first.

@@ -492,12 +492,12 @@ body {
   gap: 0.5rem;
 }
 
-/* Each target is a full-width button showing the name and its endpoint. */
+/* Each target is a full-width button showing the name and its endpoint, which
+   opens the target's options under it. */
 .picker-target {
   display: flex;
-  flex-direction: column;
-  align-items: flex-start;
-  gap: 0.15rem;
+  align-items: center;
+  gap: 0.7rem;
   width: 100%;
   padding: 0.7rem 0.9rem;
   font: inherit;
@@ -519,6 +519,21 @@ body {
   cursor: default;
 }
 
+/* Whether the target is open: closed points at it, open points at its options. */
+.picker-chevron {
+  flex: none;
+  width: 0.8rem;
+  color: #8b949e;
+  text-align: center;
+}
+
+.picker-target-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  min-width: 0;
+}
+
 .picker-target-name {
   font-size: 0.95rem;
   font-weight: 600;
@@ -529,31 +544,78 @@ body {
   font-size: 0.8rem;
 }
 
-/* The two remembered "… if compatible" defaults, above Log out. Quiet, and
-   left-aligned rather than centred like the button below: they read as settings,
-   not as an action. */
-.picker-defaults {
+/* An open target's options and its Start, hung under the target's button and
+   indented to its text. */
+.picker-options {
   display: flex;
   flex-direction: column;
-  gap: 0.4rem;
-  align-self: stretch;
-  margin-top: 0.5rem;
-  padding-top: 0.75rem;
-  border-top: 1px solid #21262d;
+  gap: 0.55rem;
+  padding: 0.7rem 0.9rem 0.8rem 2.4rem;
 }
 
-.picker-default {
+.picker-option {
   display: flex;
-  align-items: center;
-  gap: 0.5rem;
+  align-items: flex-start;
+  gap: 0.55rem;
   font-size: 0.85rem;
   color: #c9d1d9;
   cursor: pointer;
 }
 
-.picker-default input {
+.picker-option input {
+  flex: none;
+  margin-top: 0.2rem;
   accent-color: #2f81f7;
   cursor: pointer;
+}
+
+.picker-option-text {
+  display: flex;
+  flex-direction: column;
+  gap: 0.1rem;
+}
+
+.picker-option-note {
+  color: #8b949e;
+  font-size: 0.78rem;
+}
+
+/* Offered by the target, and not to be had here: greyed, with its note saying
+   why. */
+.picker-option-unavailable {
+  color: #6e7681;
+  cursor: default;
+}
+
+.picker-option-unavailable input {
+  cursor: default;
+}
+
+.picker-options .picker-error {
+  margin: 0;
+  text-align: left;
+}
+
+.picker-start {
+  align-self: flex-start;
+  padding: 0.4rem 1.4rem;
+  font: inherit;
+  font-size: 0.85rem;
+  font-weight: 600;
+  color: #fff;
+  background: #1f6feb;
+  border: 1px solid #388bfd;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.picker-start:hover:not(:disabled) {
+  background: #388bfd;
+}
+
+.picker-start:disabled {
+  opacity: 0.5;
+  cursor: default;
 }
 
 .picker-logout {

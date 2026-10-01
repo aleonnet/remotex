@@ -40,10 +40,13 @@ export function gatewayFetch(
 ///
 /// The session socket also names what only this window knows about itself: its
 /// `screen` (the same numbers `connect` carries), the chroma its video decoder
-/// takes, and whether that decoder takes a High Performance Mac's HEVC. All are here for one reason — a gateway holding a target whose engine a
-/// claim change ended reconnects it at attach time, before any message this client
-/// could send, and it must build that session for this browser rather than the
-/// previous one. The media sockets carry the claim and nothing else.
+/// takes, whether it decodes a High Performance Mac's stream, and whether it
+/// composes an RDP host's graphics pipeline. All are here for one reason — a
+/// gateway holding a target whose engine a claim change ended reconnects it at
+/// attach time, before any message this client could send, and it must build that
+/// session for this browser rather than the previous one, or cover it where the
+/// session was started with a stream this one cannot take. The media sockets carry
+/// the claim and nothing else.
 export function gatewaySocketUrl(
   path: string,
   session: string,
@@ -51,6 +54,7 @@ export function gatewaySocketUrl(
     screen: { w: number; h: number; scale: number; fit: boolean };
     chroma: VideoChroma;
     appleMedia: boolean;
+    rdpGraphics: boolean;
   },
 ): string {
   const url = new URL(gatewayUrl(path));
@@ -63,6 +67,7 @@ export function gatewaySocketUrl(
     url.searchParams.set("fit", String(client.screen.fit));
     url.searchParams.set("chroma", client.chroma);
     url.searchParams.set("apple_media", String(client.appleMedia));
+    url.searchParams.set("rdp_graphics", String(client.rdpGraphics));
   }
   return url.toString();
 }

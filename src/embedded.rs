@@ -410,12 +410,12 @@ mod tests {
     }
 
     /// The whole point of `check`: it refuses what the gateway would refuse to
-    /// start on, not merely what fails to parse. `audio` on a Mac is well-formed
-    /// TOML and a refused config — a Mac's sound is not the target's to switch.
+    /// start on, not merely what fails to parse. `camera` on a Mac is well-formed
+    /// TOML and a refused config — Screen Sharing has nowhere to send one.
     #[test]
     fn checking_goes_as_far_as_starting_would() {
-        let text = "[[targets]]\nname = \"box\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\nhost = \"::1\"\nusername = \"a\"\npassword = \"b\"\naudio = true\n";
-        let error = check(text).expect_err("audio is refused on a Mac");
-        assert!(format!("{error:#}").contains("audio"), "{error:#}");
+        let text = "[[targets]]\nname = \"box\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\nhost = \"::1\"\nusername = \"a\"\npassword = \"b\"\ncamera = true\n";
+        let error = check(text).expect_err("a camera is refused on a Mac");
+        assert!(format!("{error:#}").contains("camera"), "{error:#}");
     }
 }

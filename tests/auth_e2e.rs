@@ -35,18 +35,13 @@ async fn spawn_app() -> SocketAddr {
             domain: None,
             width: Some(1280),
             height: Some(800),
-            resize: false,
             egfx: None,
             clipboard: false,
-            audio_key: None,
-            audio: false,
             camera: false,
             microphone: false,
             video_quality: None,
             render_chroma: None,
             render_adaptive: None,
-            media_passthrough: false,
-            egfx_passthrough: false,
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,
@@ -156,7 +151,7 @@ async fn login_sets_the_session_cookie_and_grants_access() {
 async fn websocket_upgrade_without_a_login_fails_with_401() {
     let addr = spawn_app().await;
 
-    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?session=whatever&chroma=444&apple_media=false"))
+    let err = tokio_tungstenite::connect_async(format!("ws://{addr}/ws?session=whatever&chroma=444&apple_media=false&rdp_graphics=false"))
         .await
         .expect_err("the unauthenticated upgrade must be refused");
     match err {

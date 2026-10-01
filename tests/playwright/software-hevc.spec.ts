@@ -12,9 +12,9 @@
 // page has its banner up and has sent any repaint request before the gateway reads
 // the ack (framePainter.ts, useRemoteDesktop.ts).
 //
-// It needs a gateway whose local config has an `ard-high-performance` target with
-// `media_passthrough = true`, which only a live Mac serves, and the release
-// archive beside the config:
+// It needs a gateway whose local config has an `ard-high-performance` target, which
+// only a live Mac serves, and the release archive beside the config. The session is
+// started with the Mac's stream passed, where the picker offers that:
 //
 //     cargo run --profile qa -- serve --config tmp/qa_hevc.toml
 //
@@ -122,7 +122,7 @@ function watchSession(page: Page): Session {
 test.describe("a High Performance target under ?hevc_decoder=software", () => {
   test.skip(
     !HEVC_TARGET,
-    "set REMOTEX_PLAYWRIGHT_HEVC_TARGET=<target> against a gateway with a media_passthrough target",
+    "set REMOTEX_PLAYWRIGHT_HEVC_TARGET=<target> against a gateway with an ard-high-performance target",
   );
   test.afterEach(async ({ page }) => {
     await leaveSession(page);
@@ -133,7 +133,9 @@ test.describe("a High Performance target under ?hevc_decoder=software", () => {
   }) => {
     test.skip(!SERVES_DECODER, "the gateway has no decoder archive");
     const seen = watchSession(page);
-    await logInAndConnectTo(page, HEVC_TARGET ?? "", SOFTWARE);
+    await logInAndConnectTo(page, HEVC_TARGET ?? "", SOFTWARE, {
+      passthrough: true,
+    });
 
     expect(await page.evaluate(() => globalThis.crossOriginIsolated)).toBe(true);
     expect(seen.appleMedia, "the page said it decodes the Mac's stream").toBe(
@@ -171,6 +173,8 @@ test.describe("a High Performance target under ?hevc_decoder=software", () => {
   test("without the decoder, the page takes VP9 and Opus", async ({ page }) => {
     test.skip(SERVES_DECODER, "the gateway has the decoder archive");
     const seen = watchSession(page);
+    // The passthrough is greyed at the picker for a page that cannot decode the
+    // stream, so the session starts without it.
     await logInAndConnectTo(page, HEVC_TARGET ?? "", SOFTWARE);
 
     // Isolated as every page is, so the page asks, and is told no.

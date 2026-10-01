@@ -54,7 +54,9 @@ import {
   type RemoteClipboard,
   wheelUnitFromEvent,
 } from "./protocol.ts";
+import { composesRdpGraphics } from "./rdpGraphics.ts";
 import { tabletGuestSize } from "./tabletGuestSize.ts";
+import type { Choices } from "./targetChoices.ts";
 import {
   attachTouchGestures,
   MAX_ZOOM,
@@ -111,15 +113,13 @@ export const SESSION_KEY = "remotex.sessionId";
 // than sessionStorage: unlike the session identity this is a lasting choice about
 // how this machine's keyboard behaves, and it should survive a new tab.
 const MAC_KEYS_KEY = "remotex.macKeyboardOverrides";
-// The "sound by default" preference, off unless set — remembered like the
-// Mac-keys one, and for the same reason: a lasting choice, not per-tab session
-// state. Applied to a new connection only where the target carries audio, and
-// toggling the live control in the desktop menu writes the same value back, so
-// there is one setting with two places to set it. Not in a browser that needs a
-// gesture for every AudioContext (AUDIO_NEEDS_GESTURE): nothing there can honour a
-// remembered choice, so there is none — no picker checkbox, nothing read or written,
-// and sound is a click on Audio after every connect and every reload.
-const AUDIO_KEY = "remotex.audioByDefault";
+// Whether this tab muted the session it is on. Whether a session carries the
+// remote's sound is chosen at the picker and held by the gateway; this is only
+// whether this tab is listening to it, which the menu's Mute and Unmute change.
+// sessionStorage, like the session identity: it belongs to this tab's session, so
+// a reload or a dropped socket comes back as it was left, and every Start clears
+// it.
+const MUTED_KEY = "remotex.muted";
 // The touchscreen preference: fingers forwarded to the remote as touch contacts
 // rather than read as trackpad gestures. Remembered like the Mac-keys one, and
 // for the same reason — it describes the device in hand, not a session — and
@@ -146,14 +146,32 @@ function readMacKeyOverridesPreference(): boolean {
     return true; // storage disabled or blocked; the default is still the default
   }
 }
-// Both default off — an unset key is a target the user has not asked to reshape
-// or to hear, which is the safe reading of silence for either. So `=== "on"`,
-// where the Mac-keys default-on reader above is `!== "off"`.
+// Default off — an unset key is a device nobody has said has a touchscreen worth
+// forwarding. So `=== "on"`, where the Mac-keys default-on reader above is
+// `!== "off"`.
 function readOnByKey(key: string): boolean {
   try {
     return localStorage.getItem(key) === "on";
   } catch {
     return false; // storage disabled or blocked; the default is still the default
+  }
+}
+function readMuted(): boolean {
+  try {
+    return sessionStorage.getItem(MUTED_KEY) === "on";
+  } catch {
+    return false; // storage disabled or blocked; a session then starts unmuted
+  }
+}
+function writeMuted(muted: boolean): void {
+  try {
+    if (muted) {
+      sessionStorage.setItem(MUTED_KEY, "on");
+    } else {
+      sessionStorage.removeItem(MUTED_KEY);
+    }
+  } catch {
+    // Storage blocked: the mute still holds for this page.
   }
 }
 // Touch clients keep a fixed guest size and use fit-to-width plus pinch zoom.
@@ -460,13 +478,13 @@ export function useRemoteDesktop(
   // True when the connected target opted into the clipboard bridge, which is
   // what enables the floating menu's Clipboard button.
   const [canClipboard, setCanClipboard] = useState(false);
-  // Whether this target offers remote audio; this says nothing about activity.
+  // Whether this session carries the remote's sound, which it was started with or
+  // without; this says nothing about activity.
   const [canAudio, setCanAudio] = useState(false);
-  // Whether this browser has asked for the sound, per attachment. Every connect and
-  // reattach seeds it from the remembered default where the target carries audio
-  // (`seedAudioForAttachment`), except in a browser that needs a click for every
-  // AudioContext, where it starts off each time and only the Audio toggle turns it
-  // on.
+  // Whether this browser is listening to it, per attachment. A session started
+  // with sound comes up unmuted and stays as the menu's Mute and Unmute leave it
+  // (`seedAudioForAttachment`), except that a browser that needs a click for every
+  // AudioContext comes back muted from anything but that Start.
   const [audioEnabled, setAudioEnabled] = useState(false);
   // Why there is no sound, when there should be. One string, and what is behind it is
   // a decoder that refused or failed — this browser having no WebCodecs at all is not
@@ -523,8 +541,13 @@ export function useRemoteDesktop(
   // encodes, or All Displays over too many screens. Null in the picker and at
   // every `connected`, until the gateway says otherwise.
   const [oversize, setOversize] = useState<HoldCause | null>(null);
+  // The passthrough this session was started with that this browser cannot take,
+  // from `unserved`: the gateway serves it no engine and rebuilds none, so the
+  // desktop is covered with the reason and End session is the way on. Null in the
+  // picker and in every session this browser is served.
+  const [unserved, setUnserved] = useState<string | null>(null);
   // Whether it is held at all, which is what input and focus follow.
-  const held = oversize !== null;
+  const held = oversize !== null || unserved !== null;
   // What this session is speaking, from `connected`: the protocol and the target's
   // subtype where it has one. Empty in the picker, and read only by the card — no
   // behaviour hangs off it, because every capability that varies by subtype already
@@ -571,14 +594,6 @@ export function useRemoteDesktop(
   // included — and the clipboard bridge lets go of the browser's own, which is
   // the only moment there is something on it that did not come from the remote.
   const [viewOnly, setViewOnly] = useState(false);
-  // The remembered "sound by default" preference, edited from the picker and
-  // from the desktop menu alike (see AUDIO_KEY). Applied to a compatible
-  // connection in `handleConnected`, and read there through a ref so the
-  // connection effect never re-subscribes when it changes.
-  const [audioByDefault, setAudioByDefault] = useState(
-    () => !AUDIO_NEEDS_GESTURE && readOnByKey(AUDIO_KEY),
-  );
-  const audioByDefaultRef = useRef(audioByDefault);
   // All three conditions, which the toolbar shows and the input effect obeys: a
   // Mac keyboard to translate from, a guest that is not a Mac to translate for,
   // and the user's consent. Off on a non-Mac host means the physical `code` goes
@@ -653,21 +668,6 @@ export function useRemoteDesktop(
     viewOnlyRef.current = viewOnly;
   }, [viewOnly]);
 
-  // Mirror the "by default" preference into its ref (the connection effect reads
-  // it there) and persist it, whatever set it — the picker's toggle or the
-  // desktop menu's live control.
-  useEffect(() => {
-    audioByDefaultRef.current = audioByDefault;
-    if (AUDIO_NEEDS_GESTURE) {
-      return;
-    }
-    try {
-      localStorage.setItem(AUDIO_KEY, audioByDefault ? "on" : "off");
-    } catch {
-      // Storage blocked: the preference still holds for this tab.
-    }
-  }, [audioByDefault]);
-
   // Settle everyone waiting on a fetch. `null` means "no answer came".
   const settleClipboardWaiters = useCallback(
     (snapshot: ClipboardSnapshot | null) => {
@@ -716,7 +716,7 @@ export function useRemoteDesktop(
   // Lets the takeOver/retry callbacks reach into the connection driver that
   // lives inside the effect below.
   const startRef = useRef<((force: boolean) => void) | null>(null);
-  // Whether this window drives the remote's size — the target's `resize`, off
+  // Whether this window drives the remote's size — the session's `resize`, off
   // on a pinch-zoom device whatever the target allows (see CAN_PINCH_ZOOM).
   // There is no client-side mode beside it: the gateway names the policy on
   // `connected` and this client obeys. A ref because the viewport sender lives
@@ -1145,6 +1145,7 @@ export function useRemoteDesktop(
           screen: hostDisplayMsg(),
           chroma: videoChroma(),
           appleMedia: decodesAppleMedia(),
+          rdpGraphics: composesRdpGraphics(),
         }),
       );
       const generation = advancePaintGeneration(paintGenerationRef);
@@ -1479,18 +1480,18 @@ export function useRemoteDesktop(
     };
 
     // Audio belongs to one attachment: whatever was playing was on a socket that
-    // is gone, so a subscription has to be asked for again. Sound comes up already
-    // on when the user wants it by default and the target actually carries audio —
-    // on a picker connect, a reattach after a dropped socket and a reload alike, so
-    // the choice is not lost to whichever of them happened. Where `connect` primed
-    // a context inside the picker click, `startAudio` adopts it; otherwise it
-    // builds one with no gesture, which is why a browser that needs a gesture for
-    // every context never gets here with the default on (AUDIO_NEEDS_GESTURE) and
-    // always starts silent. Anything else (a target with no sound, the default
-    // off) starts silent too.
+    // is gone, so a subscription has to be asked for again. A session that
+    // carries sound comes up unmuted — from the picker's Start, a reattach after a
+    // dropped socket, a reload and a takeover alike — unless this tab muted it.
+    // Where `connect` primed a context inside the Start click, `startAudio` adopts
+    // it; otherwise it builds one with no gesture, which a browser that needs a
+    // gesture for every context (AUDIO_NEEDS_GESTURE) would leave suspended, so
+    // there anything but a Start comes up muted and Unmute is the click. A
+    // session without sound is silent.
     const seedAudioForAttachment = (hasAudio: boolean) => {
       setAudioError(null);
-      if (audioByDefaultRef.current && hasAudio) {
+      const playable = audioContextRef.current !== null || !AUDIO_NEEDS_GESTURE;
+      if (hasAudio && playable && !readMuted()) {
         setAudioEnabled(true);
         openAudioSocket();
       } else {
@@ -1511,10 +1512,11 @@ export function useRemoteDesktop(
       setCanClipboard(msg.clipboard);
       setCanTouch(false);
       setRemoteResizing(false);
+      setUnserved(null);
       setCanAudio(msg.audio);
       seedAudioForAttachment(msg.audio);
-      // Nothing here turns a camera on: unlike sound there is no "by default"
-      // to seed from — enabling is explicit, every time. A target without one
+      // Nothing here turns a camera on: unlike sound, the session is not started
+      // with one — enabling is explicit, every time. A target without one
       // ends any camera still offered. One with a camera leaves it alone: an
       // owner's reattach resumes the same engine, whose camera socket the
       // gateway keeps, and every new engine or claim change has already closed
@@ -1536,9 +1538,6 @@ export function useRemoteDesktop(
       // refusing it, once, with the configuration in hand.
       setRenderPlan(msg.render);
       setOversize(null);
-      // The operator's QA overlay, stated per session like everything else on
-      // `connected`: this browser holds no preference for it and offers no
-      // toggle, the same way it offers none for `resize`.
       setConnection(connectionLabel(msg.protocol, msg.subtype));
       lastViewport = null;
       if (CAN_PINCH_ZOOM) {
@@ -1547,19 +1546,19 @@ export function useRemoteDesktop(
         // it would resize to is the one this client deliberately does not ask
         // the remote to be.
         //
-        // The one-shot is still gated on the target's `resize`, because there is
+        // The one-shot is still gated on the session's `resize`, because there is
         // nothing to say otherwise: an engine drops the request without it.
         followWindowRef.current = false;
         if (msg.resize) {
           sendMobileSize();
         }
       } else {
-        // The gateway's one switch: `resize` means this window drives the
-        // remote's size, and there is nothing to toggle beside it. Report at
-        // once rather than waiting for the next window resize — the remote
-        // opened at this screen's full resolution, and "follows this window"
-        // that starts by not matching it would read as broken. The dedupe makes
-        // it free when it already matches.
+        // The session's one switch, chosen before it started: `resize` means
+        // this window drives the remote's size, and there is nothing to toggle
+        // beside it. Report at once rather than waiting for the next window
+        // resize — the remote opened at this screen's full resolution, and
+        // "follows this window" that starts by not matching it would read as
+        // broken. The dedupe makes it free when it already matches.
         followWindowRef.current = msg.resize;
         sendViewport();
       }
@@ -1568,6 +1567,62 @@ export function useRemoteDesktop(
       lastHostDisplay = null;
       sharedDisplay = null;
       sendHostDisplay();
+    };
+
+    // Everything a live desktop put on this page, taken back off: what the picker
+    // and a session this browser is not served both start from.
+    const endDesktop = () => {
+      // No engine to resize: the next target states its own policy.
+      followWindowRef.current = false;
+      setCanClipboard(false);
+      // No engine, so no queue to subscribe to: the row goes away rather than
+      // offering a control that would be answered with a warning in the log.
+      setCanAudio(false);
+      releaseAudio();
+      closeAudioSocket();
+      setAudioEnabled(false);
+      setAudioError(null);
+      // The camera goes with the session it was enabled for.
+      setCanCamera(false);
+      stopCamera();
+      setCameraError(null);
+      setCanMic(false);
+      stopMic();
+      setMicError(null);
+      // The stream itself goes with `clearDesktop` below; what has to be said
+      // here is that the complaint goes too. Whatever this browser could not
+      // decode is no longer on the screen, and the next target may not send
+      // video at all.
+      setVideoError(null);
+      setRenderPlan("");
+      setOversize(null);
+      // Back to the default rather than left as the last target's answer: the
+      // next one may not report at all, and inheriting "the remote is a Mac"
+      // would silently stop translating Command for a Windows guest.
+      setRemoteIsMac(false);
+      setCanTouch(false);
+      setRemoteResizing(false);
+      setDisplays([]);
+      setActiveDisplayId(null);
+      sharedDisplay = null;
+      setRemoteClipboard(null);
+      lastFromRemoteRef.current = null;
+      lastToRemoteRef.current = null;
+      // No engine left to answer a fetch that is still in flight.
+      settleClipboardWaiters(null);
+      clearDesktop();
+    };
+
+    // A session this browser cannot be served: nothing of a desktop is on the
+    // page, and the mode is still the desktop's, so the menu and its End session
+    // are there over the cover that says why.
+    const handleUnserved = (msg: Extract<ControlMsg, { type: "unserved" }>) => {
+      setConnectError(null);
+      setPendingTarget(null);
+      endDesktop();
+      setMode("desktop");
+      setConnection(connectionLabel(msg.protocol, msg.subtype));
+      setUnserved(msg.passthrough);
     };
 
     const mirrorRemoteClipboard = (text: string) => {
@@ -1624,6 +1679,9 @@ export function useRemoteDesktop(
           break;
         case "connected":
           handleConnected(msg);
+          break;
+        case "unserved":
+          handleUnserved(msg);
           break;
         case "audioFormat":
           startAudio(msg);
@@ -1700,46 +1758,9 @@ export function useRemoteDesktop(
           // connect starts from a clean "waiting for the desktop" state.
           setPendingTarget(null);
           setMode("picker");
-          // No engine to resize: the next target states its own policy.
-          followWindowRef.current = false;
-          setCanClipboard(false);
-          // No engine, so no queue to subscribe to: the row goes away rather than
-          // offering a control that would be answered with a warning in the log.
-          setCanAudio(false);
-          releaseAudio();
-          closeAudioSocket();
-          setAudioEnabled(false);
-          setAudioError(null);
-          // The camera goes with the session it was enabled for.
-          setCanCamera(false);
-          stopCamera();
-          setCameraError(null);
-          setCanMic(false);
-          stopMic();
-          setMicError(null);
-          // The stream itself goes with `clearDesktop` below; what has to be said
-          // here is that the complaint goes too. Whatever this browser could not
-          // decode is no longer on the screen, and the next target may not send
-          // video at all.
-          setVideoError(null);
-          setRenderPlan("");
-          setOversize(null);
+          setUnserved(null);
           setConnection("");
-          // Back to the default rather than left as the last target's answer: the
-          // next one may not report at all, and inheriting "the remote is a Mac"
-          // would silently stop translating Command for a Windows guest.
-          setRemoteIsMac(false);
-          setCanTouch(false);
-          setRemoteResizing(false);
-          setDisplays([]);
-          setActiveDisplayId(null);
-          sharedDisplay = null;
-          setRemoteClipboard(null);
-          lastFromRemoteRef.current = null;
-          lastToRemoteRef.current = null;
-          // No engine left to answer a fetch that is still in flight.
-          settleClipboardWaiters(null);
-          clearDesktop();
+          endDesktop();
           break;
       }
     };
@@ -1861,23 +1882,26 @@ export function useRemoteDesktop(
   /// `takeOver`: nothing here is holding the slot, so there is nobody to evict.
   const retry = useCallback(() => startRef.current?.(false), []);
 
-  // Pick a target from the picker: start its session over the live socket. The
-  // server answers `connected` (→ desktop) or `error` (shown on the picker).
+  // Start a target from the picker, with what was ticked under it: its session
+  // is started over the live socket. The server answers `connected` (→ desktop)
+  // or `error` (shown on the picker). `sound` is whether that session will carry
+  // the remote's sound.
   const connect = useCallback(
-    (target: string) => {
+    (target: string, choices: Choices, sound: boolean) => {
       setConnectError(null);
       setPendingTarget(target);
-      // If the user wants sound by default, spend this click's gesture on an
+      // A new session starts unmuted: a mute was the last one's.
+      writeMuted(false);
+      // Where the session will carry sound, spend this click's gesture on an
       // AudioContext now — the only moment one is playable (see setAudio). The
-      // `connected` that decides whether the target actually carries audio arrives
-      // a round trip later, long past any gesture, so it cannot make one then:
-      // `handleConnected` either adopts this primed context or, when the target has
-      // no audio or the default is off, releases it. Primed without asking whether
-      // this browser can decode: that depends on the target's codec, which the
-      // `audioFormat` a round trip later is the first thing to say — and a context
-      // that turns out unusable is released there at no cost.
-      if (audioByDefaultRef.current) {
-        releaseAudio();
+      // `connected` that confirms it arrives a round trip later, long past any
+      // gesture, so it cannot make one then: `handleConnected` adopts this primed
+      // context. Primed without asking whether this browser can decode: that
+      // depends on the target's codec, which the `audioFormat` a round trip later
+      // is the first thing to say — and a context that turns out unusable is
+      // released there at no cost.
+      releaseAudio();
+      if (sound) {
         audioContextRef.current = createAudioContext();
       }
       // The connect names this window's screen, so a target with no pinned
@@ -1889,6 +1913,7 @@ export function useRemoteDesktop(
         type: "connect",
         target,
         display: { w, h, scale, fit },
+        choices,
       });
     },
     [releaseAudio],
@@ -1908,7 +1933,8 @@ export function useRemoteDesktop(
     sendRef.current({ type: "selectDisplay", id });
   }, []);
 
-  // Start or stop the remote's sound (the floating menu's Audio button).
+  // Mute or unmute the remote's sound (the floating menu's Audio button), in a
+  // session that was started with it.
   //
   // **Must be called from a click**, and the AudioContext is why: a context created
   // inside a user gesture may play, and one created outside it is suspended on iOS
@@ -1922,16 +1948,9 @@ export function useRemoteDesktop(
   // with nothing to send simply sends nothing on a socket that stays open.
   const setAudio = useCallback(
     (enabled: boolean) => {
-      // The live control also writes the remembered default, so a choice made
-      // mid-session is the one the next connect, reattach or reload starts from —
-      // the same single value the picker's toggle edits. Recorded as the intent
-      // whether or not this browser can decode: the picker's checkbox then honestly
-      // reflects what was asked for, and a capable browser later in the same
-      // profile obeys it. Never where every context needs its own click: there is
-      // no default there to follow.
-      if (!AUDIO_NEEDS_GESTURE) {
-        setAudioByDefault(enabled);
-      }
+      // Remembered for this tab's session, so a reattach or a reload comes back
+      // as it was left rather than unmuting a session somebody muted.
+      writeMuted(!enabled);
       setAudioError(null);
       setAudioEnabled(enabled);
       releaseAudio();
@@ -2655,10 +2674,6 @@ export function useRemoteDesktop(
     micEnabled,
     micError,
     micStreaming,
-    // The remembered "by default" preference and its setter, for the picker's
-    // toggle.
-    audioByDefault,
-    setAudioByDefault,
     displays,
     activeDisplayId,
     remoteClipboard,
@@ -2675,6 +2690,8 @@ export function useRemoteDesktop(
     touchEnabled,
     touchActive,
     setTouchEnabled,
+    // The passthrough this browser cannot take, in a session it is not served.
+    unserved,
     // The cover over a settling High Performance resize.
     remoteResizing,
     viewOnly,

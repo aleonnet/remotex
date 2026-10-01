@@ -93,18 +93,13 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             // `defaultSize` request resolves to.
             width: Some(DEFAULT_W as u16),
             height: Some(DEFAULT_H as u16),
-            resize: true,             // exercise the dynamic resize path
             egfx: None,
             clipboard: true,          // exercise the clipboard bridge
-            audio_key: None,
-            audio: false,             // VNC has no audio channel at all
             camera: false,
             microphone: false,
             video_quality: None,
             render_chroma: None,
             render_adaptive: None,
-            media_passthrough: false,
-            egfx_passthrough: false,
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,
@@ -204,7 +199,8 @@ async fn vnc_session_streams_the_full_desktop_and_resizes() {
     let token = common::claim_session(addr, &cookie).await;
     let mut ws = common::connect_ws(addr, &token, &cookie).await;
     // The fresh attach lands on the picker; pick the target to start the engine.
-    common::connect_target(&mut ws, "tigervnc-dummy").await;
+    // Started with resize, to exercise the dynamic resize path.
+    common::connect_target_with(&mut ws, "tigervnc-dummy", r#"{"resize":true}"#).await;
 
     let mut got_resize = false;
     let mut pinned = false;

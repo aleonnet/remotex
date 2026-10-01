@@ -62,15 +62,17 @@ export type ClientMsg =
   // for it. It does not affect canvas layout.
   | { type: "hostDisplay"; w: number; h: number; scale: number; fit: boolean }
   // Session control (handled by the server's session slot, not an engine):
-  // pick a target from the post-login picker, or tear the session down and
+  // start a target from the post-login picker, or tear the session down and
   // switch back to it. The connect names this window's screen so a target
   // with no pinned config size opens at its full resolution — by the time a
   // hostDisplay message could arrive, the opening size has already been
-  // asked of the remote.
+  // asked of the remote. `choices` is what was ticked under the target before
+  // Start, held for the life of the session (targetChoices.ts).
   | {
       type: "connect";
       target: string;
       display: { w: number; h: number; scale: number; fit: boolean };
+      choices: { resize: boolean; audio: boolean; passthrough: boolean };
     }
   | { type: "disconnect" }
   // Clipboard bridge. The backend owns the clipboard data: "clipboard" puts
@@ -206,12 +208,12 @@ export type ControlMsg =
   | { type: "error"; message: string }
   | { type: "picker" }
   // `resize` means this window drives the remote's size, continuously and on
-  // every engine alike — the operator's one switch, with no client-side mode.
-  // True is auto-follow (and the mobile one-shot); false is a session whose
-  // size was settled at open.
+  // every engine alike — what the session was started with, with no client-side
+  // mode. True is auto-follow (and the mobile one-shot); false is a session
+  // whose size was settled at open.
   // `protocol` ("rdp"/"vnc") is carried for the status line. `clipboard` is
-  // whether this target opted into the clipboard bridge. `audio` advertises
-  // capability, not current activity.
+  // whether this target opted into the clipboard bridge. `audio` says the
+  // session carries the remote's sound, not that any is arriving.
   | {
       type: "connected";
       name: string;
@@ -226,9 +228,12 @@ export type ControlMsg =
       resize: boolean;
       clipboard: boolean;
       audio: boolean;
+      // The remote's own stream this session passes untouched — "rdp-graphics"
+      // or "apple-media" — or null for a desktop the gateway encodes.
+      passthrough: string | null;
       // Whether this target redirects the browser's camera to the remote.
-      // Capability only, like `audio` — enabling is this client's move, made
-      // afresh each session by opening /ws/camera, never persisted.
+      // Capability only — enabling is this client's move, made afresh each
+      // session by opening /ws/camera, never persisted.
       camera: boolean;
       // Whether this target redirects the browser's microphone to the remote. The
       // camera's twin: enabled afresh each session by opening /ws/mic.
@@ -238,6 +243,19 @@ export type ControlMsg =
       // keys, which the reader may not have: defaults and the browser's own chroma
       // are already applied.
       render: string;
+    }
+  // A session this browser cannot be served: it was started with a passthrough
+  // this one said it cannot take (`passthrough`, as on `connected`). The gateway
+  // runs no engine for it and rebuilds none with other choices, so the desktop is
+  // covered with the reason, and End session returns to the picker to choose
+  // again. A browser that can take the stream takes the session over as it was
+  // started.
+  | {
+      type: "unserved";
+      name: string;
+      protocol: string;
+      subtype: string | null;
+      passthrough: string;
     }
   // How to play the audio frames that follow, sent once when audio is enabled and
   // always before the first packet — a decoder configured afterwards has already

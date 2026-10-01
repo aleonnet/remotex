@@ -60,9 +60,7 @@ pub const INSTANCE_TEMPLATE: &str = r#"# A remotex local instance.
 # username = "andrew"
 # password = "…"
 # domain = "CORP"
-# resize = true
 # clipboard = true
-# audio = true
 
 # [[targets]]
 # name = "pi"
@@ -716,14 +714,7 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
             ),
         },
     ));
-    lines.push(spec(
-        "resize",
-        if target.resize {
-            "the client's window drives the remote size"
-        } else {
-            "fixed for the session"
-        },
-    ));
+    lines.push(spec("picker", &describe_offers(target)));
 
     if target.protocol == Protocol::Rdp {
         lines.push(spec("security", "nla — the credentials are checked before the session"));
@@ -752,11 +743,33 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
     lines
 }
 
-/// A target's audio as it will sound on the wire. Kilobits because the config
-/// speaks kilobits, and the codec named the way `ServerMsg::AudioFormat` names it.
+/// What whoever starts a session on this target chooses at the picker, which is
+/// its type's to offer and not a key of the file.
+fn describe_offers(target: &TargetConfig) -> String {
+    let offers = target.offers();
+    let mut choices = Vec::new();
+    if offers.resize {
+        choices.push("resize".to_owned());
+    }
+    if offers.audio {
+        choices.push("sound".to_owned());
+    }
+    if let Some(passthrough) = offers.passthrough {
+        choices.push(format!("{} passed through", passthrough.stream()));
+    }
+    if choices.is_empty() {
+        "nothing to choose".to_owned()
+    } else {
+        format!("offers {}", choices.join(", "))
+    }
+}
+
+/// A target's audio as it will sound on the wire, in a session that takes it.
+/// Kilobits because the config speaks kilobits, and the codec named the way
+/// `ServerMsg::AudioFormat` names it.
 fn describe_audio(target: &TargetConfig) -> String {
-    if !target.audio {
-        return "off".to_owned();
+    if !target.carries_sound() {
+        return "none".to_owned();
     }
     let plan = target.audio_plan();
     let ceiling = plan.bitrate_bps / 1000;
@@ -1684,10 +1697,10 @@ mod tests {
             instance.config_path(),
             "[branding]\ntext = \"work laptop\"\n\n\
              [[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nhost = \"192.168.1.20\"\n\
-             username = \"andrew\"\npassword = \"hunter2\"\nresize = true\n\
+             username = \"andrew\"\npassword = \"hunter2\"\n\
              video_quality = 70\n\n\
              [[targets]]\nname = \"desk\"\nprotocol = \"vnc\"\nsubtype = \"wlshare\"\n\
-             host = \"192.168.1.21\"\naudio = true\n",
+             host = \"192.168.1.21\"\n",
         )
         .unwrap();
 
@@ -1704,6 +1717,17 @@ mod tests {
             "an unset dial is named at its defaults, walk included: {page}"
         );
         assert!(page.contains("video q70"), "the render plan describes itself: {page}");
+        assert!(
+            page.contains(&spec(
+                "picker",
+                "offers resize, sound, the host's graphics pipeline passed through"
+            )),
+            "what a session's starter chooses is the type's to offer: {page}"
+        );
+        assert!(
+            page.lines().any(|line| line == spec("picker", "offers resize, sound")),
+            "a wlshare target's picture is not a choice: {page}"
+        );
 
         // A config the gateway would refuse says so, instead of a page of
         // defaults for a start that will not happen.
