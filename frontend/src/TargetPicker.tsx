@@ -68,21 +68,22 @@ export default function TargetPicker({
     let cancelled = false;
     gatewayFetch("/api/targets")
       .then((res) => {
-        if (res.status === 401) {
-          onUnauthorized();
-          return null;
-        }
-        if (!res.ok) {
-          throw new Error(`HTTP ${res.status}`);
-        }
         // Another gateway than this page's: its targets are not listed, because
         // nothing this page would start on them is that gateway's to answer.
+        // Asked of its 401 too, and first: the reload comes before the login.
         const mismatch = versionMismatch(res);
         if (mismatch) {
           if (!cancelled) {
             setStale(mismatch);
           }
           return null;
+        }
+        if (res.status === 401) {
+          onUnauthorized();
+          return null;
+        }
+        if (!res.ok) {
+          throw new Error(`HTTP ${res.status}`);
         }
         return res.json() as Promise<TargetInfo[]>;
       })

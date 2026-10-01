@@ -284,9 +284,16 @@ pub(crate) fn router_with_sessions(
             Router::new()
                 .route("/targets", get(targets_handler))
                 .route("/session", post(claim_handler))
+                .route_layer(require_auth.clone())
                 // Both state the gateway's version, which the page holds its
                 // own against before it lists a target or opens a session.
-                .route_layer(middleware::map_response(state_version))
+                // Outside the guard, so its 401 states it too: a page left open
+                // across an upgrade lost its login to the same restart, and is
+                // told to reload rather than to log in.
+                .route_layer(middleware::map_response(state_version)),
+        )
+        .merge(
+            Router::new()
                 .route("/throughput", get(throughput_handler))
                 .route("/throughput/live", get(throughput_live_handler))
                 .route_layer(require_auth.clone()),
@@ -1505,6 +1512,10 @@ mod tests {
         let cookie = set_cookie.split(';').next().unwrap().to_owned();
 
         for (method, uri, body) in [("GET", "/api/targets", ""), ("POST", "/api/session", "{}")] {
+            // Refused or answered: a page that lost its login is told the same.
+            let refused = app.clone().oneshot(request(method, uri, None, body)).await.unwrap();
+            assert_eq!(refused.status(), StatusCode::UNAUTHORIZED, "{uri}");
+            assert_eq!(refused.headers().get(VERSION_HEADER).unwrap(), env!("CARGO_PKG_VERSION"), "{uri}");
             let response = app.clone().oneshot(request(method, uri, Some(&cookie), body)).await.unwrap();
             assert_eq!(response.status(), StatusCode::OK, "{uri}");
             assert_eq!(

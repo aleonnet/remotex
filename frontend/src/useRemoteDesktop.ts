@@ -402,7 +402,7 @@ type ClaimFailure = { reason: string; retryable: boolean; stale?: true };
 // outcome, and its own message says what happened far better than "network error"
 // would — including the cases that are not the network at all.
 //
-// A claim granted by a gateway of another version is a failure too, found here
+// A claim answered by a gateway of another version is a failure too, found here
 // before the token is kept or a socket opened with it: a session is not started
 // on a gateway this page was not built for.
 async function postClaim(
@@ -417,7 +417,9 @@ async function postClaim(
         sessionId: sessionStorage.getItem(SESSION_KEY) ?? undefined,
       }),
     });
-    const mismatch = res.ok ? versionMismatch(res) : null;
+    // Before a 409 or a 401 is read: a stale page is offered neither a takeover
+    // nor the login, only the reload.
+    const mismatch = versionMismatch(res);
     return mismatch
       ? { failure: { reason: mismatch, retryable: false, stale: true } }
       : res;
