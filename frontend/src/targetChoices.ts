@@ -285,7 +285,7 @@ export function targetOptions(
       target.audioUnavailable
         ? {
             ...row,
-            note: "This gateway cannot decode wlshare's sound. Install libFLAC on the gateway's host.",
+            note: "This gateway cannot carry this target's sound. Install libFLAC on the gateway's host.",
             checked: false,
             disabled: true,
           }

@@ -252,6 +252,8 @@ export type ControlMsg =
   // `codec` is `opus`, with the base64 `OpusHead` in `head` and `sampleRate` the
   // 48 kHz the gateway resampled to. `packetFrames` is the samples in one packet
   // at `sampleRate` — 960 — and is the one thing a client cannot derive for itself.
+  // `passthrough` says the packets are the remote's own rather than coded by the
+  // gateway, for the session card.
   | {
       type: "audioFormat";
       codec: string;
@@ -259,6 +261,7 @@ export type ControlMsg =
       channels: number;
       packetFrames: number;
       head: string;
+      passthrough: boolean;
     }
   // How to decode one video stream, sent before its first VIDEO record and again
   // whenever it changes — a decoder configured afterwards has already thrown away the

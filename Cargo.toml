@@ -13,16 +13,17 @@
 # it. It is a default member beside the gateway, so a plain `cargo clippy` and
 # `cargo test` check it on every platform. The binding is not a member: it builds for
 # `wasm32-unknown-unknown` alone, with its own profile and lockfile, from the
-# frontend's build.
+# frontend's build. Neither is frontend/wasm/flac, the page's own decoder for a
+# lossless target's sound, which shares no crate with the gateway.
 [workspace]
 resolver = "3"
 members = ["crates/remotex-rdp-graphics"]
 default-members = [".", "crates/remotex-rdp-graphics"]
-exclude = ["frontend/wasm/egfx"]
+exclude = ["frontend/wasm/egfx", "frontend/wasm/flac"]
 
 [package]
 name = "remotex"
-version = "0.0.312"
+version = "0.0.313"
 license = "MIT"
 edition = "2024"
 
@@ -128,7 +129,9 @@ opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libop
 # step. `desktop-flac` is the one place libFLAC is spoken to, for wlshare's
 # encoder and for the decoder here, its own repository pinned at a release tag by
 # both. It links nothing: it loads the shared library at run time, the system's
-# on Linux and the one the macOS and Windows installers carry.
+# on Linux and the one the macOS and Windows installers carry. Its encoder also
+# codes an RDP host's PCM for a target with `audio_format = "flac"`
+# (src/audio.rs).
 desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.2" }
 # 44100 -> 48000, because libopus accepts only 8/12/16/24/48 kHz and RDP offers
 # no 48 kHz format. Pure Rust, and it resamples deinterleaved channels — which is

@@ -671,8 +671,9 @@ struct TargetInfo {
     default_size: Option<Points>,
     /// Whether the picker offers the remote's sound as a choice.
     audio: bool,
-    /// Whether this gateway cannot decode that sound: wlshare's, which is FLAC,
-    /// on a host without libFLAC. The picker then shows the choice greyed.
+    /// Whether this gateway cannot carry that sound: one that needs libFLAC
+    /// ([`crate::config::TargetConfig::needs_libflac`]) on a host without it.
+    /// The picker then shows the choice greyed.
     #[serde(rename = "audioUnavailable")]
     audio_unavailable: bool,
     /// The stream the picker offers to pass untouched, `null` where the target
@@ -701,7 +702,7 @@ impl From<(u16, u16)> for Points {
 
 impl TargetInfo {
     /// `apple_decoders` is whether this gateway's host can decode a Mac's
-    /// picture, and `libflac` whether it can decode wlshare's sound.
+    /// picture, and `libflac` whether it has libFLAC, for the sound that needs it.
     fn of(target: &crate::config::TargetConfig, apple_decoders: bool, libflac: bool) -> Self {
         let offers = target.offers();
         Self {
@@ -714,7 +715,7 @@ impl TargetInfo {
             size: target.size.map(Points::from),
             default_size: target.sized().then(|| crate::config::DEFAULT_SIZE.into()),
             audio: offers.audio,
-            audio_unavailable: offers.audio && target.wlshare() && !libflac,
+            audio_unavailable: offers.audio && target.needs_libflac() && !libflac,
             passthrough: offers.passthrough,
             passthrough_only: target.media_stream() && !apple_decoders,
         }
@@ -726,7 +727,7 @@ impl TargetInfo {
 /// never leave the server.
 ///
 /// The Mac's HEVC decoder is looked for here, where a High Performance target is
-/// listed, and libFLAC where a wlshare one is, so the picker can say before Start
+/// listed, and libFLAC where a target's sound needs it, so the picker can say before Start
 /// what the engine would otherwise say after it. Asked on every listing rather
 /// than remembered: a library installed while the gateway runs is found by the
 /// next one.
@@ -735,7 +736,7 @@ async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>>
     let apple_decoders = !targets.iter().any(crate::config::TargetConfig::media_stream)
         || crate::vnc::apple_decoders().is_ok();
     let libflac =
-        !targets.iter().any(crate::config::TargetConfig::wlshare) || crate::vnc_audio::load().is_ok();
+        !targets.iter().any(crate::config::TargetConfig::needs_libflac) || crate::vnc_audio::load().is_ok();
     Json(targets.iter().map(|target| TargetInfo::of(target, apple_decoders, libflac)).collect())
 }
 
@@ -1086,6 +1087,7 @@ mod tests {
                 audio_bitrate: None,
                 audio_adaptive: None,
                 audio_adaptive_min: None,
+                audio_format: None,
             }],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(
@@ -1328,6 +1330,7 @@ mod tests {
             audio_bitrate: None,
             audio_adaptive: None,
             audio_adaptive_min: None,
+            audio_format: None,
         };
 
         // The scripted engine: announce a desktop size so the SPA leaves its
@@ -1452,7 +1455,9 @@ mod tests {
             target("mac", "protocol = \"vnc\"\nsubtype = \"ard\"", "192.0.2.10"),
             target("win", "protocol = \"rdp\"\nsize = \"1920x1080\"", "192.0.2.11"),
             target("fast", "protocol = \"vnc\"\nsubtype = \"ard-high-performance\"", "192.0.2.10"),
-        ) + &target("sway", "protocol = \"vnc\"\nsubtype = \"wlshare\"", "192.0.2.12");
+        ) + &target("sway", "protocol = \"vnc\"\nsubtype = \"wlshare\"", "192.0.2.12")
+            + &target("sway-flac", "protocol = \"vnc\"\nsubtype = \"wlshare\"\naudio_format = \"flac\"", "192.0.2.12")
+            + &target("win-flac", "protocol = \"rdp\"\naudio_format = \"flac\"", "192.0.2.11");
         let targets = crate::config::ConfigFile::parse(&text).expect("the targets parse").targets;
         let entry_on = |name: &str, apple_decoders, libflac| {
             let target = targets.iter().find(|t| t.name == name).unwrap();
@@ -1484,6 +1489,11 @@ mod tests {
         assert!(entry_on("sway", true, true).contains(r#""audio":true,"audioUnavailable":false,"#));
         assert!(entry_on("sway", true, false).contains(r#""audio":true,"audioUnavailable":true,"#));
         assert!(entry_on("win", true, false).contains(r#""audio":true,"audioUnavailable":false,"#));
+        // Sent as FLAC it is the other way round: wlshare's frames are passed
+        // and need no library, and an RDP host's PCM is coded with it.
+        assert!(entry_on("sway-flac", true, false).contains(r#""audio":true,"audioUnavailable":false,"#));
+        assert!(entry_on("win-flac", true, false).contains(r#""audio":true,"audioUnavailable":true,"#));
+        assert!(entry_on("win-flac", true, true).contains(r#""audio":true,"audioUnavailable":false,"#));
     }
 
     /// The exact `/api/config` body. Pinned because the login screen reads the

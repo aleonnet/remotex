@@ -80,10 +80,12 @@ bash packaging/build-native-packages.sh
 ```
 
 The frontend's
-build compiles a WebAssembly module from the gateway's graphics crate
+build compiles two WebAssembly modules: one from the gateway's graphics crate
 (`frontend/wasm/egfx` around
-`crates/remotex-rdp-graphics`, the page's compositor for a passed RDP pipeline), so wherever the frontend is built — `bun run build`, or a
-Cargo build without `REMOTEX_PREBUILT_FRONTEND` — the module is built by the nightly
+`crates/remotex-rdp-graphics`, the page's compositor for a passed RDP pipeline),
+and the page's FLAC decoder for a lossless target's sound (`frontend/wasm/flac`),
+which the stable toolchain builds. So wherever the frontend is built — `bun run build`, or a
+Cargo build without `REMOTEX_PREBUILT_FRONTEND` — the compositor's module is built by the nightly
 toolchain `frontend/wasm/egfx/rust-toolchain.toml` pins, which its threads need and
 nothing else is built with. rustup installs it on the first build, unless
 `RUSTUP_AUTO_INSTALL=0` turns that off; `rustup toolchain install` in that

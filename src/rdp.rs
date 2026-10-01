@@ -167,6 +167,20 @@ pub async fn run(
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = VideoSink::new("rdp", frame_tx, plan, feedback, Oversize::Refuse);
+    // A target that sends its sound as FLAC codes the host's PCM with libFLAC.
+    // The picker says so before Start where the host lacks it; a session started
+    // with sound all the same is told here, before the host is dialled.
+    if config.needs_libflac()
+        && audio.is_some()
+        && let Err(e) = crate::vnc_audio::load()
+    {
+        warn!("rdp: refusing a session with sound as FLAC: {e:#}");
+        let _ = sink
+            .msg(ServerMsg::Error { message: format!("This remotex cannot code the host's sound as FLAC: {e:#}") })
+            .await;
+        sink.finish().await;
+        return;
+    }
     session(config, choices.size, plan.rdp_graphics, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }

@@ -229,7 +229,7 @@ impl std::fmt::Display for Totals {
             "{} binary frames / {} bytes carrying {} video records / {} bytes \
              and {} graphics records / {} bytes, \
              {} text frames / {} bytes, largest binary {} bytes, \
-             {} audio frames / {} bytes carrying {} opus packets",
+             {} audio frames / {} bytes carrying {} audio packets",
             self.binary_frames,
             self.binary_bytes,
             self.video,

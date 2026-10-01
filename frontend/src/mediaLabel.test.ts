@@ -13,7 +13,7 @@ const OPUS = {
   codec: "opus",
   sampleRate: 48_000,
   channels: 2,
-  packetFrames: 960,
+  passthrough: false,
 };
 
 test("a session without sound says so rather than offering nothing", () => {
@@ -47,12 +47,25 @@ test("enabling is a click and the format is a round trip later", () => {
   );
 });
 
-test("an encoded stream names its codec, its shape and its packet length", () => {
-  // 960 samples at 48 kHz is 20 ms, which is the figure worth reading; the frame
-  // count it was derived from is not.
+test("an encoded stream names its codec, its shape and whose it is", () => {
   assert.equal(
     audioLabel({ available: true, enabled: true, error: null, stream: OPUS }),
-    "opus · 48 kHz stereo · 20 ms packets",
+    "opus · 48 kHz stereo · encoded by the gateway",
+  );
+});
+
+test("a lossless stream says whether it is the remote's own or coded here", () => {
+  const row = (stream: typeof OPUS) =>
+    audioLabel({ available: true, enabled: true, error: null, stream });
+  // wlshare's frames, passed as they came.
+  assert.equal(
+    row({ ...OPUS, codec: "flac", passthrough: true }),
+    "flac · 48 kHz stereo · passthrough from the remote",
+  );
+  // An RDP host's PCM, coded as FLAC by the gateway at the host's own rate.
+  assert.equal(
+    row({ ...OPUS, codec: "flac", sampleRate: 44_100 }),
+    "flac · 44.1 kHz stereo · encoded by the gateway",
   );
 });
 
@@ -64,7 +77,7 @@ test("a channel count that is neither mono nor stereo still names itself", () =>
       error: null,
       stream: { ...OPUS, channels: 1 },
     }),
-    "opus · 48 kHz mono · 20 ms packets",
+    "opus · 48 kHz mono · encoded by the gateway",
   );
   assert.equal(
     audioLabel({
@@ -73,7 +86,7 @@ test("a channel count that is neither mono nor stereo still names itself", () =>
       error: null,
       stream: { ...OPUS, channels: 6 },
     }),
-    "opus · 48 kHz 6 channels · 20 ms packets",
+    "opus · 48 kHz 6 channels · encoded by the gateway",
   );
 });
 

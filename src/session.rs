@@ -1074,7 +1074,7 @@ impl SessionManager {
         // goes through (`forward_input`), so the rule this module states for itself is
         // that critical sections stay short. `audio_epoch` is what makes letting go
         // safe.
-        let (bridge, out, audio_id, epoch, plan, source_format, passed) = {
+        let (bridge, out, audio_id, epoch, plan, source_format, passed, lossless) = {
             let mut st = self.state.lock().unwrap();
             // Unconditional, and first: this is also how "replace the previous pump" is
             // expressed, and it is what tells a build already in flight to stand down.
@@ -1093,11 +1093,19 @@ impl SessionManager {
             // A High Performance Mac's sound is passed as it came, whichever way its
             // picture goes: the Mac's own units fill the bridge, and there is nothing
             // to encode.
-            let passed = st
-                .selected
-                .as_ref()
-                .is_some_and(|selected| selected.target.media_stream())
-                .then_some(crate::vnc_apple_media::PASSED_SOUND);
+            // So are wlshare's FLAC frames on a target that sends its sound
+            // lossless, which the VNC engine then leaves undecoded.
+            let passed = st.selected.as_ref().and_then(|selected| {
+                if selected.target.media_stream() {
+                    Some(crate::vnc_apple_media::PASSED_SOUND)
+                } else if selected.target.wlshare() && selected.target.lossless() {
+                    Some(crate::vnc_audio::PASSED_FLAC)
+                } else {
+                    None
+                }
+            });
+            // An RDP host's PCM on such a target is coded as FLAC here.
+            let lossless = st.selected.as_ref().is_some_and(|selected| selected.target.lossless());
             // The target's, not a session setting: the codec and its rate are a
             // property of the link to this desktop, which is what the operator
             // configured them from.
@@ -1106,7 +1114,7 @@ impl SessionManager {
                 .as_ref()
                 .map(|selected| (selected.target.audio_plan(), selected.target.audio_source_format()))
                 .unwrap_or((AudioPlan::default(), crate::audio::PCM_CD_QUALITY));
-            (bridge, out, audio_id, st.audio_epoch, plan, source_format, passed)
+            (bridge, out, audio_id, st.audio_epoch, plan, source_format, passed, lossless)
         };
 
         // The negotiated format when the remote's channel is up, and otherwise the
@@ -1128,8 +1136,14 @@ impl SessionManager {
                 if negotiated.is_some() { "up" } else { "not up yet" }
             );
             let format = negotiated.unwrap_or(source_format);
-            match bridge.take_listener().into_packets(format, plan) {
-                Ok(encoded) => encoded.boxed(),
+            let listener = bridge.take_listener();
+            let encoded = if lossless {
+                listener.into_flac(format).map(crate::audio::EncodedAudio::boxed)
+            } else {
+                listener.into_packets(format, plan).map(crate::audio::EncodedAudio::boxed)
+            };
+            match encoded {
+                Ok(encoded) => encoded,
                 Err(e) => {
                     warn!("session: no audio will be sent: {e:#}");
                     return;
@@ -1163,6 +1177,7 @@ impl SessionManager {
                 channels: encoded.channels,
                 packet_frames: encoded.packet_frames,
                 head: encoded.head,
+                passthrough: encoded.passthrough,
             };
             // Sent before any packet, and awaited rather than tried: a decoder
             // configured *after* the audio it was meant to decode has already thrown
@@ -1778,6 +1793,7 @@ mod tests {
             virtual_display: false,
             audio_adaptive: None,
             audio_adaptive_min: None,
+            audio_format: None,
         }
     }
 
@@ -2905,6 +2921,7 @@ mod tests {
                 channels,
                 packet_frames,
                 head,
+                ..
             } => {
                 // The *stream's* rate, not the 44100 the remote negotiated: an
                 // encoded stream is resampled to 48 kHz on the way in.

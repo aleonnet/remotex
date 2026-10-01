@@ -33,6 +33,10 @@
 //! ([`STREAM`]). The decoder is libFLAC, as wlshare's encoder is, both through
 //! `desktop-flac`, which loads the library at run time.
 //!
+//! A target with `audio_format = "flac"` (EXPERIMENTAL) decodes nothing here:
+//! the frames go to the bridge as they came ([`PASSED_FLAC`]) and the page
+//! decodes them, so that session needs no libFLAC.
+//!
 //! wlshare is the server this was built against; see docs/wlshare-audio.md.
 //! Apple's dialects are not asked: neither Screen Sharing subtype speaks this
 //! extension.
@@ -206,11 +210,23 @@ pub const STREAM: Stream = Stream {
     block: BLOCK_FRAMES,
 };
 
-/// Load libFLAC, or say that the host lacks it: what a session with wlshare's
-/// sound needs before it dials. A failure is not remembered, so a library
+/// A stream's frames as the browser is told of them where they are passed as
+/// they came (`audio_format = "flac"`): [`SOURCE_FORMAT`] in blocks of
+/// [`BLOCK_FRAMES`], with no head, since each frame states its own shape and the
+/// page's decoder holds it to this one.
+pub const PASSED_FLAC: crate::audio::PassedFormat = crate::audio::PassedFormat {
+    codec: crate::audio::FLAC_CODEC,
+    sample_rate: SOURCE_FORMAT.sample_rate,
+    channels: SOURCE_FORMAT.channels,
+    packet_frames: BLOCK_FRAMES as u32,
+    head: &[],
+};
+
+/// Load libFLAC, or say that the host lacks it: what a session whose sound needs
+/// it ([`crate::config::TargetConfig::needs_libflac`]) checks before it dials. A failure is not remembered, so a library
 /// installed while the gateway runs is found by the next session.
 pub fn load() -> anyhow::Result<()> {
-    desktop_flac::load().context("wlshare's sound is FLAC, decoded by libFLAC")
+    desktop_flac::load().context("the sound is FLAC, coded by libFLAC")
 }
 
 /// Load the libFLAC this gateway's package carries, if it carries one, before

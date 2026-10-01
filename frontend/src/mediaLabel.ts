@@ -16,7 +16,8 @@
 import type { HoldCause } from "./protocol.ts";
 
 /**
- * The wire fields of `audioFormat`, minus the `OpusHead` bytes.
+ * The wire fields of `audioFormat`, minus the `OpusHead` bytes and the samples in
+ * a packet.
  *
  * Only the decoder wants those; this describes the stream to a person, and the
  * client keeps exactly what it can show rather than parking a `Uint8Array` in React
@@ -26,7 +27,9 @@ export interface AudioStreamInfo {
   codec: string;
   sampleRate: number;
   channels: number;
-  packetFrames: number;
+  // The remote's own packets, passed through untouched — a High Performance
+  // Mac's AAC-ELD, wlshare's FLAC — rather than coded by the gateway.
+  passthrough: boolean;
 }
 
 /** Everything the Audio row is derived from. See `useRemoteDesktop`. */
@@ -56,15 +59,15 @@ function channelsLabel(count: number): string {
 }
 
 /**
- * The stream itself: codec, rate, channels, and how much sound is in one packet.
- *
- * The packet length is given in milliseconds rather than as `packetFrames`,
- * because that is the figure a person can compare to what they are hearing.
+ * The stream itself: codec, rate, channels, and whose stream it is, as the Video
+ * row says of the picture.
  */
 function streamLabel(stream: AudioStreamInfo): string {
   const shape = `${rateLabel(stream.sampleRate)} ${channelsLabel(stream.channels)}`;
-  const ms = (stream.packetFrames / stream.sampleRate) * 1000;
-  return `${stream.codec} · ${shape} · ${Number(ms.toFixed(1))} ms packets`;
+  const whose = stream.passthrough
+    ? "passthrough from the remote"
+    : "encoded by the gateway";
+  return `${stream.codec} · ${shape} · ${whose}`;
 }
 
 /**

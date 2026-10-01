@@ -351,6 +351,16 @@ password = "change-me"
 # lower. Refused beside `audio_adaptive = false`.
 #audio_adaptive_min = 32
 
+# EXPERIMENTAL. Send this target's sound lossless, as FLAC, instead of Opus.
+# A "wlshare" target's own FLAC frames are passed to the browser as they came,
+# so the gateway needs no libFLAC for them; an "rdp" target's PCM is coded as
+# FLAC here, by libFLAC. The page decodes it in a WebAssembly module of its own.
+# Music is roughly a megabit a second, with no adaptive walk: for a link with
+# room. Refused on a target with no sound to choose a format for — a plain
+# "vnc" one and both Macs — and beside the three Opus keys above, which it
+# leaves nothing to tune. The default is "opus".
+#audio_format = "flac"
+
 # Camera redirection: offer the remote a virtual webcam whose frames are this
 # browser's, over MS-RDPECAM on "rdp" — or, on a "wlshare" target, over
 # wlshare's camera extension, which makes it a PipeWire camera on the wlroots

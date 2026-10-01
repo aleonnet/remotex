@@ -2038,6 +2038,7 @@ mod tests {
             audio_bitrate: None,
             audio_adaptive: None,
             audio_adaptive_min: None,
+            audio_format: None,
         }
     }
 
