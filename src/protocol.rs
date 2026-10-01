@@ -318,7 +318,7 @@ pub enum ClientMsg {
         display: Option<HostDisplay>,
     },
     /// Tear the current session's engine down and return to the picker
-    /// ("switch target"). Handled by the session layer, never forwarded to an
+    /// ("End session"). Handled by the session layer, never forwarded to an
     /// engine.
     Disconnect,
     /// Put `text` on the remote's clipboard (the clipboard panel's "Send", or
@@ -948,7 +948,7 @@ pub enum ServerMsg {
     /// returns to the picker, so the browser shows this against the picker.
     Error { message: String },
     /// No target is selected: show the post-login target picker. Sent on attach
-    /// to an idle slot, on disconnect ("switch target"), and when an engine
+    /// to an idle slot, on disconnect ("End session"), and when an engine
     /// ends (the remote hung up, or a connect failure after its `Error`).
     Picker,
     /// A live target and its client-visible capabilities. `audio` reports

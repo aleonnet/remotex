@@ -191,8 +191,8 @@ site_passwd = ""
 name = "example"
 protocol = "rdp"           # required: "rdp" or "vnc"
 # Which flavour of that protocol the far end is, where a protocol has more than
-# one. Only "vnc" has any, and both are macOS Screen Sharing: "ard" and
-# "ard-high-performance" (see the Mac targets below).
+# one. Only "vnc" has any: "wlshare" for a wlshare server, and "ard" and
+# "ard-high-performance" for macOS Screen Sharing (see the targets below).
 #subtype = "ard"
 host = "192.0.2.10"
 # Default: the protocol's standard port (3389 rdp, 5900 vnc).
@@ -294,9 +294,9 @@ password = "change-me"
 # floating menu's Audio button. An "rdp" target negotiates sound redirection
 # (MS-RDPEA) when it connects, as 44100 Hz 16-bit stereo PCM; without the key the
 # host's own audio settings are left untouched and the session has no audio device.
-# A Windows host sends nothing on the channel until something plays. A plain
-# "vnc" target asks the server for wlshare's audio extension, and one that never
-# announces it gives a silent session. On every Apple subtype the key is refused.
+# A Windows host sends nothing on the channel until something plays. A "wlshare"
+# target lists wlshare's audio extension. A plain "vnc" target carries no sound
+# and is refused the key, and so is every Apple subtype.
 # An "ard-high-performance" target always carries sound, which the Mac sends
 # beside its picture — EXPERIMENTAL. An "ard" target carries none: Standard mode
 # leaves the Mac's sound output alone, playing on the Mac or to whatever AirPlay
@@ -309,8 +309,7 @@ password = "change-me"
 # Nothing here depends on how the page is reached: the client refuses to start at
 # all without a secure context and a pair of WebCodecs decoders, so by the time a
 # target is picked, sound works wherever the target carries it — an "rdp" target,
-# a plain "vnc" server that speaks wlshare's extension, or an
-# "ard-high-performance" Mac.
+# a "wlshare" target, or an "ard-high-performance" Mac.
 #
 # Off leaves the remote's sound where it is.
 #audio = false
@@ -338,10 +337,9 @@ password = "change-me"
 #audio_adaptive_min = 32
 
 # Camera redirection: offer the remote a virtual webcam whose frames are this
-# browser's, over MS-RDPECAM on "rdp" — or, on a generic "vnc" target, over
+# browser's, over MS-RDPECAM on "rdp" — or, on a "wlshare" target, over
 # wlshare's camera extension, which makes it a PipeWire camera on the wlroots
-# desktop; any other VNC server says nothing and the camera is never plugged (see
-# docs/wlshare-camera.md). The rest of this note is about RDP.
+# desktop (see docs/wlshare-camera.md). The rest of this note is about RDP.
 # EXPERIMENTAL. The socket's rules, its messages, and both channel wires are
 # checked, and the wlshare path has container coverage. Only a Windows host that
 # creates the camera enumeration channel has anywhere to test the RDP path: a
@@ -354,45 +352,49 @@ password = "change-me"
 # floating menu — explicitly, per session, never remembered — and is unplugged
 # when that client closes it, the session changes hands, or the engine ends. The
 # browser encodes H.264 and the gateway passes it through untranscoded, so there
-# is no codec key beside this one. Apple's Screen Sharing has nowhere to put a
-# camera, so an Apple target refuses the key rather than
-# ignoring it. A Windows Server without the
+# is no codec key beside this one. Apple's Screen Sharing and a plain "vnc"
+# server have nowhere to put a camera, so those targets refuse the key rather
+# than ignoring it. A Windows Server without the
 # RDSH role never creates the enumeration channel, so an enabled camera against
 # one is simply never asked for a frame.
 #camera = false
 
 # Microphone redirection: offer the remote this browser's microphone over
-# MS-RDPEAI on "rdp" — or, on a generic "vnc" target, over wlshare's microphone
-# extension, which makes it a PipeWire audio source on the wlroots desktop; any
-# other VNC server says nothing and the microphone is never plugged (see
+# MS-RDPEAI on "rdp" — or, on a "wlshare" target, over wlshare's microphone
+# extension, which makes it a PipeWire audio source on the wlroots desktop (see
 # docs/wlshare-microphone.md). EXPERIMENTAL, like `camera`. Capability only: the recording
 # device is fed when a client turns the microphone on from the floating menu —
 # per session, never remembered. The browser sends mono speech Opus at a fixed
 # low bitrate and the gateway decodes it to the PCM the host records in, so there
 # is no codec or quality key beside this one. The host starts recording only
-# once an application on it does. An Apple target refuses the key.
+# once an application on it does. An Apple target and a plain "vnc" target
+# refuse the key.
 #microphone = false
 
-# A VNC target needs host and, usually, one of the two passwords; domain is
+# A plain VNC target needs host and, usually, one of the two passwords; domain is
 # refused, and width/height follow the opening-size rules above.
 # `vnc_password` is the server's own password and is all a server without user
-# accounts takes.
+# accounts takes. It is the RFB baseline: the picture comes as ZRLE and is encoded
+# here, shown at 1x, with no sound, camera or microphone.
 # [[targets]]
 # name = "workstation-vnc"
 # protocol = "vnc"
 # host = "10.0.0.2"
 # vnc_password = "change-me"
 
-# A wlroots-based Wayland desktop behind the wlshare VNC server is a plain "vnc"
-# target. Every plain target asks its server for wlshare's pixel-density
-# extension, so a `scale 2` output is shown at 2x and a resizing window is asked
-# for in points × scale; a server that does not answer is shown at 1x. With a
-# username and password, wlshare checks the account it runs as through PAM over
-# RSA-AES, encrypting the session; a password_file on the server is its VNC
-# password instead, which goes in vnc_password. See docs/wlshare-density.md.
+# A wlroots-based Wayland desktop behind the wlshare VNC server says so with
+# `subtype = "wlshare"`, which makes the gateway list wlshare's extensions: its own
+# VP9 stream, passed to the browser untouched; its pixel density, so a `scale 2`
+# output is shown at 2x and a resizing window is asked for in points × scale; its
+# output list; and, with the keys above, sound, the camera and the microphone.
+# Without the subtype the same server is a plain target, read as any VNC server
+# is. With a username and password, wlshare checks the account it runs as through
+# PAM over RSA-AES, encrypting the session; a password_file on the server is its
+# VNC password instead, which goes in vnc_password. See docs/wlshare-density.md.
 # [[targets]]
 # name = "workstation-wayland"
 # protocol = "vnc"
+# subtype = "wlshare"
 # host = "127.0.0.1"
 # username = "me"
 # password = "that-account's-password"

@@ -1179,7 +1179,7 @@ mod tests {
     /// cleared around the gaps the way a real host's channel opening and closing
     /// does. That is deliberate: the behaviour worth checking in a browser is no
     /// longer only "does it play" but "does it *start on its own*, stop, and start
-    /// again" — so enable audio during a quiet phase and then touch nothing.
+    /// again" — so unmute during a quiet phase and then touch nothing.
     ///
     /// `#[ignore]`d and in-crate on purpose: it needs
     /// [`SessionManager::with_test_spawner`], and it must add nothing a real
@@ -1350,7 +1350,7 @@ mod tests {
 
         // println! rather than log: this is the test's whole user interface.
         println!("\n  Open  http://{addr}/   (admin / hunter2)");
-        println!("  Pick \"test-tone\", then ☰ → Enable audio. 440 Hz for 5s, quiet for 5s.");
+        println!("  Pick \"test-tone\", then ☰ → Unmute. 440 Hz for 5s, quiet for 5s.");
         println!("  Press it during a quiet phase and then close the drawer: the tone");
         println!("  must arrive on its own, go away, and come back, untouched.");
         println!("  Serving Opus through WebCodecs. A line under the button instead");

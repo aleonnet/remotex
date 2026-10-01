@@ -10,14 +10,15 @@ belong in the linked documentation.
   of Windows and macOS: Windows' own Remote Desktop over RDP, and macOS's
   built-in Screen Sharing in both of its modes (`ard`, `ard-high-performance`).
   On Linux it prioritizes [wlshare](https://github.com/andrewtheguy/wlshare), our
-  own wlroots VNC server (`../wlshare`).
+  own wlroots VNC server (`../wlshare`), reached as `subtype = "wlshare"`.
 - Design, QA and optimization start from these three. Behavior specific to one
   of them is welcome, and when work for them competes with work for other
   servers, they come first. Other RDP and VNC servers remain supported through
   each protocol's baseline.
 - Because wlshare is ours, what generic VNC lacks can be added to it as an
-  extension the gateway discovers on the connection, as density, outputs, audio,
-  camera, microphone and its VP9 stream were.
+  extension a `wlshare` target lists, as density, outputs, audio, camera,
+  microphone and its VP9 stream were. A plain `vnc` target lists none of them and
+  reads any server, wlshare included, through the RFB baseline.
 
 ## Workflow
 

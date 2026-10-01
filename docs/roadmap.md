@@ -8,6 +8,71 @@ is the only place they can be read in context.
 
 ## Planned
 
+### Resize, sound and passthrough chosen at the picker
+
+Whether the window drives the desktop's size, whether the remote's sound is
+taken, and whether the remote's own stream is passed are an operator's keys
+today: `resize`, `audio`, `media_passthrough` and `egfx_passthrough`. The plan
+is to make them the choice of whoever starts the session, made before it starts,
+and to remove the four keys.
+
+Picking a target opens it instead of connecting. Its options appear under it
+with a Start button, and Start is what connects, carrying the choices in
+`connect`. They hold for the life of the session. The browser remembers them per
+target in its local storage, which replaces the one "Play the remote's sound, if
+compatible" checkbox the picker has now.
+
+Which options a target shows is its type's to say:
+
+| Target | Resize | Sound | Passthrough |
+|---|---|---|---|
+| `rdp` | shown | shown | shown: the graphics pipeline, experimental |
+| `vnc` | shown | hidden | hidden |
+| `vnc`, `wlshare` | shown | shown | hidden: its VP9 is the subtype's picture |
+| `vnc`, `ard` | hidden | hidden | hidden |
+| `vnc`, `ard` with `virtual_display` | shown | hidden | hidden |
+| `vnc`, `ard-high-performance` | shown | hidden: always carried | shown: the Mac's media stream |
+
+- **Not offered is not shown.** An option the target type does not have has no
+  row. High Performance's sound is such a one: the Mac refuses the picture
+  without it, so there is nothing to choose, and the session's Mute is what a
+  person has. An `rdp` target with `egfx = false` has no pipeline, so neither
+  resize nor the pipeline's row.
+- **Offered but unavailable is greyed, with the reason.** A passthrough is
+  greyed before the session starts wherever the gateway or the browser cannot do
+  it: a browser that decodes neither the Mac's HEVC nor its AAC-ELD, one that
+  cannot load the pipeline's compositor (no WebGL 2, or a page that is not
+  cross-origin isolated), a gateway with no HEVC decoder archive to serve a
+  browser that needs it. A gateway whose host lacks FFmpeg or fdk-aac cannot
+  decode a Mac's stream at all: there the stream can only be passed, and where
+  the browser cannot take it either the target cannot start, which Start says
+  before the Mac is dialled rather than the engine after.
+- **The choice reaches the remote.** A session started without sound asks for
+  none: RDP names no sound channel and a `wlshare` target lists no audio
+  extension, so the host keeps playing where it did. The session's audio button
+  only ever opened and closed the browser's subscription, which is why it now
+  reads Mute and Unmute. Start's click is the gesture a browser needs for an
+  audio context; in Safari and on iOS a reload has none, and comes back muted.
+- **A session is held to its choices.** A reattach resumes it and a takeover
+  reconnects its target with the choices the first browser made. A browser that
+  cannot do what the session was started with, a passed stream it cannot decode
+  or a compositor it cannot load, is not served a rebuilt engine or a decoder
+  error: the desktop stays covered, as it is while a High Performance display
+  resizes, with the reason and the menu's End session, which returns it to the
+  picker to choose again.
+
+Done ahead of it: `subtype = "wlshare"`, so the picker can tell a wlshare target
+from a plain one before connecting, and the two labels, Mute / Unmute and End
+session. What remains is the picker itself and what carries it. `/api/targets`
+has to say which options a target has and whether the gateway can decode a Mac's
+stream, which today it learns only when a session needs the decoders. `connect`
+carries the choices, the session slot keeps them beside its target, and
+`connected` reports the passthrough in force. The `audio_*` dials, refused today
+on a target without `audio`, need a rule that does not read a removed key. The
+[Constraints](architecture.md#constraints) that say there is no client resize
+toggle, that the key alone selects the pipeline, and that the browser's two
+answers select a stream and never refuse one are rewritten with it.
+
 ### What the RDP client does not carry yet
 
 The client carries the desktop, the pointer, keyboard, mouse, resize, the

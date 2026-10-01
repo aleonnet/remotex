@@ -1894,7 +1894,7 @@ export function useRemoteDesktop(
     [releaseAudio],
   );
 
-  // Switch target: tear the current session down and return to the picker. The
+  // End session: tear the current session down and return to the picker. The
   // server answers `picker`, which flips `mode` back.
   const switchTarget = useCallback(() => {
     sendRef.current({ type: "disconnect" });

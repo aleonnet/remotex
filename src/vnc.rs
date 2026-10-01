@@ -1,7 +1,7 @@
 //! VNC client, in two dialects that share everything below the handshake.
 //!
-//! **RFB 3.8**, for every server a target names no subtype for: classic VNC,
-//! RSA-AES or no authentication, and the extensions a generic server announces.
+//! **RFB 3.8**, for a plain target and a `wlshare` one: classic VNC, RSA-AES or
+//! no authentication, and for `wlshare` the extensions that server carries.
 //!
 //! **RFB 003.889**, Apple's own revision, which both Apple subtypes speak, as
 //! Apple's viewer does: Apple's DH authentication, then the same RFB messages
@@ -136,10 +136,8 @@ const MSG_END_OF_CONTINUOUS_UPDATES: u8 = 150;
 const MSG_FENCE: u8 = 248;
 
 /// The wlshare density extension's pseudo-encoding, the ASCII bytes `WLSH`. Listed
-/// in `SetEncodings` on every plain `vnc` target, the way ContinuousUpdates and
-/// Fence are: wlshare answers it with an [`MSG_WLSHARE_DENSITY`] report before
-/// its first update, and any other server ignores it like any encoding it does
-/// not know, which is how the extension is discovered. See
+/// in `SetEncodings` on a `wlshare` target alone: wlshare answers it with an
+/// [`MSG_WLSHARE_DENSITY`] report before its first update. See
 /// docs/wlshare-density.md.
 const ENCODING_WLSHARE_DENSITY: i32 = 0x574c_5348;
 /// The extension's one message type, used in both directions: the server's
@@ -148,10 +146,9 @@ const ENCODING_WLSHARE_DENSITY: i32 = 0x574c_5348;
 const MSG_WLSHARE_DENSITY: u8 = 0xE0;
 
 /// The wlshare outputs extension's pseudo-encoding, the ASCII bytes `WLSO`.
-/// Listed beside the density request on every plain `vnc` target and discovered
-/// the same way: wlshare answers it with an [`MSG_WLSHARE_OUTPUTS`] list of the
-/// compositor's outputs, and every other server ignores an encoding it does not
-/// know. It is what fills the display picker on a generic target — one
+/// Listed beside the density request on a `wlshare` target: wlshare answers it
+/// with an [`MSG_WLSHARE_OUTPUTS`] list of the compositor's outputs. It is what
+/// fills the display picker on such a target — one
 /// framebuffer is one output, so a two-monitor desktop has to be asked which one
 /// to send. See docs/wlshare-outputs.md.
 const ENCODING_WLSHARE_OUTPUTS: i32 = 0x574c_534f;
@@ -159,9 +156,9 @@ const ENCODING_WLSHARE_OUTPUTS: i32 = 0x574c_534f;
 /// desktop, a `u32` length and one frame of a single VP9 stream — the stream this
 /// gateway would encode from the same pixels, coded by the same crate at the chroma,
 /// dial and walk the plan resolves to, which it then passes through untouched
-/// ([`VideoSink::pass`]). Listed for every browser on a generic target. wlshare
-/// sends it in place of ZRLE wherever it is listed and announces nothing; any other
-/// server ignores it and sends what it always did.
+/// ([`VideoSink::pass`]). Listed for every browser on a `wlshare` target and on
+/// no other. wlshare sends it in place of ZRLE wherever it is listed and announces
+/// nothing; unlisted, as on a plain target, it sends ZRLE as to any VNC client.
 const ENCODING_WLSHARE_VP9: i32 = 0x574c_5356;
 /// Listed beside [`ENCODING_WLSHARE_VP9`], asks wlshare for its stream at 4:2:0 in
 /// place of 4:4:4: `WLS0`. What the plan is to be rides the encoding list as
@@ -228,7 +225,8 @@ type Reader = BufReader<OwnedReadHalf>;
 /// decided by which preface function ran, not by re-asking this.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum Dialect {
-    /// RFB 3.8, used by generic VNC.
+    /// RFB 3.8, used by generic VNC: a plain target, and a `wlshare` one, which
+    /// lists wlshare's extensions on it ([`rfb38_preface`]).
     Rfb38,
     /// Apple's RFB 003.889 and the record layer that goes up after ServerInit,
     /// used by both Apple subtypes. Apple's viewer answers every Mac with this
@@ -241,7 +239,7 @@ impl Dialect {
     fn of(subtype: Option<Subtype>) -> Self {
         match subtype {
             Some(Subtype::Ard | Subtype::ArdHighPerformance) => Dialect::Apple889,
-            None => Dialect::Rfb38,
+            None | Some(Subtype::Wlshare) => Dialect::Rfb38,
         }
     }
 
@@ -878,20 +876,20 @@ impl HpResize {
 }
 
 /// The wlshare density extension's state on one connection — see
-/// [`ENCODING_WLSHARE_DENSITY`] and docs/wlshare-density.md. The extension is
-/// discovered, not configured: every plain `vnc` target asks, and the server's
-/// first update decides whether it was answered.
+/// [`ENCODING_WLSHARE_DENSITY`] and docs/wlshare-density.md. A `wlshare` target
+/// asks, and the server's first update decides whether it was answered.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Density {
-    /// An Apple dialect: the pseudo-encoding was never sent, because Apple's
-    /// display layout carries the density its own way.
+    /// The pseudo-encoding was never sent: an Apple dialect, whose display
+    /// layout carries the density its own way, or a plain target, which is
+    /// generic RFB at [`UNSCALED`] and has no report to wait for.
     Off,
     /// Sent, unanswered so far. Resize requests wait here, because a request in
     /// the wrong pixels is a desktop redrawn twice. Pixels arriving in this
     /// state settle it: see [`DesktopState::first_update`].
     Asked,
-    /// The server sent pixels before any report, so it does not speak the
-    /// extension: generic RFB, presented at [`UNSCALED`]. A report arriving
+    /// The server sent pixels before any report, so it is not the wlshare the
+    /// target said it was: generic RFB, presented at [`UNSCALED`]. A report arriving
     /// after all is still taken, since the label is the wire's word.
     Unanswered,
     /// The server answered at least once: [`DesktopState::wire_scale`] is set.
@@ -1266,8 +1264,8 @@ impl DisplayState {
     const COMBINED: u32 = u32::MAX;
 
     /// The message that tells a client the list and the selection, or `None` while
-    /// the server has listed nothing — a generic server without the outputs
-    /// extension, or one that has not answered yet. A list that emptied is sent
+    /// the server has listed nothing — a plain target, which is never asked, or
+    /// a wlshare that has not answered yet. A list that emptied is sent
     /// empty: wlshare lists nothing once the compositor has no output left, and a
     /// browser told nothing would keep offering the outputs it last saw.
     fn displays_msg(&self) -> Option<ServerMsg> {
@@ -1589,7 +1587,7 @@ async fn session(
     }
 
     let virtual_display = config.has_virtual_display();
-    // A generic server is asked for wlshare's audio extension on the connection
+    // A `wlshare` target lists wlshare's audio extension on the connection
     // itself ([`vnc_audio`]). High Performance's media stream carries the Mac's
     // sound beside its picture ([`vnc_apple_media`]). Standard mode never touches
     // the Mac's sound, on a virtual display or not.
@@ -1672,15 +1670,15 @@ struct Flags {
     /// which is what a resize replaces the mode of. Plain `ard` shares the
     /// physical displays and has nothing to resize.
     virtual_display: bool,
-    /// The desktop's sound over wlshare's audio extension, when a generic target
-    /// asked for it: the queue the read loop feeds the samples a server that
-    /// announces the extension then sends ([`vnc_audio`]). `None` on every
-    /// Apple target and wherever `audio` was not asked for.
+    /// The desktop's sound over wlshare's audio extension, when a `wlshare`
+    /// target asked for it: the queue the read loop feeds the samples wlshare
+    /// sends once it has announced the extension ([`vnc_audio`]). `None` on every
+    /// other target and wherever `audio` was not asked for.
     wlshare_audio: Option<Arc<crate::audio::AudioBridge>>,
-    /// The browser's camera, on a generic target that carries one: the bridge the
-    /// camera socket drives, lent to a server that announces the wlshare camera
-    /// extension ([`vnc_camera`]). `None` on every Apple target, which the config
-    /// file refuses `camera` on, and wherever the key is absent.
+    /// The browser's camera, on a `wlshare` target that carries one: the bridge
+    /// the camera socket drives, lent to wlshare once it announces its camera
+    /// extension ([`vnc_camera`]). `None` on every other VNC target, which the
+    /// config file refuses `camera` on, and wherever the key is absent.
     camera: Option<Arc<crate::camera::CameraBridge>>,
     /// The browser's microphone, on the same terms: the bridge the mic socket drives,
     /// lent to a server that announces the wlshare microphone extension
@@ -1729,10 +1727,10 @@ struct Connected {
     /// up ([`vnc_apple_media`]), and the pictures it decodes: every High
     /// Performance session has one, and every other session `None`.
     media: Option<(MediaStream, Pictures)>,
-    /// The encodings listed beside [`ENCODING_WLSHARE_VP9`] when the preface listed it,
-    /// for a browser that decodes 4:4:4 on a generic server: what the read loop lists
-    /// on its own while the desktop is past the video ceiling, and with it again once
-    /// it is back. `None` where it was not listed.
+    /// The encodings a `wlshare` target lists, with and without
+    /// [`ENCODING_WLSHARE_VP9`]: what the read loop lists on its own while the
+    /// desktop is past the video ceiling, and with it again once it is back.
+    /// `None` on every other target, which lists nothing of wlshare's.
     passthrough: Option<Arc<Listing>>,
 }
 
@@ -1995,8 +1993,11 @@ fn encoding_label(encoding: i32) -> String {
     if encoding > 0 { format!("{encoding} ({encoding:#x})") } else { encoding.to_string() }
 }
 
-/// The RFB 3.8 tail: force our pixel format and the encoding set — with wlshare's
-/// VP9 and the plan it is asked for at their head, for a desktop within the ceiling.
+/// The RFB 3.8 tail: force our pixel format and the encoding set. A `wlshare`
+/// target's has wlshare's extensions in it, with its VP9 and the plan it is asked
+/// for at their head for a desktop within the ceiling. A plain target's has none
+/// of them, so a wlshare server reached as one serves it as it serves any VNC
+/// client: ZRLE, encoded here.
 async fn rfb38_preface(
     downlink: Downlink,
     mut uplink: Uplink,
@@ -2006,10 +2007,16 @@ async fn rfb38_preface(
     plan: RenderPlan,
 ) -> anyhow::Result<Connected> {
     uplink.send(&set_pixel_format()).await?;
-    let encodings = rfb38_encoding_list(config.clipboard, config.audio, config.camera, config.microphone);
-    let lists = Listing::new(encodings, plan);
-    let listed = if lists_wlshare_vp9((server.width, server.height)) { &lists.vp9 } else { &lists.plain };
-    uplink.send(&set_encodings(listed)).await?;
+    let passthrough = if config.wlshare() {
+        let encodings = wlshare_encoding_list(config.clipboard, config.audio, config.camera, config.microphone);
+        let lists = Listing::new(encodings, plan);
+        let listed = if lists_wlshare_vp9((server.width, server.height)) { &lists.vp9 } else { &lists.plain };
+        uplink.send(&set_encodings(listed)).await?;
+        Some(Arc::new(lists))
+    } else {
+        uplink.send(&set_encodings(&rfb38_encoding_list(config.clipboard))).await?;
+        None
+    };
 
     Ok(Connected {
         downlink,
@@ -2020,7 +2027,7 @@ async fn rfb38_preface(
         apple: false,
         poll: true,
         media: None,
-        passthrough: Some(Arc::new(lists)),
+        passthrough,
     })
 }
 
@@ -2068,7 +2075,7 @@ fn with_wlshare_vp9(encodings: &[i32], plan: RenderPlan) -> Vec<i32> {
     listed
 }
 
-fn rfb38_encoding_list(clipboard: bool, audio: bool, camera: bool, microphone: bool) -> Vec<i32> {
+fn rfb38_encoding_list(clipboard: bool) -> Vec<i32> {
     // A preference order, because a server reads it as one: it encodes with the
     // first entry it supports and keeps that choice for the session.
     //
@@ -2093,8 +2100,7 @@ fn rfb38_encoding_list(clipboard: bool, audio: bool, camera: bool, microphone: b
     // that is asked for where a SetDesktopSize is decided, by the window under
     // `resize` and once at session-open under a pinned size. A server whose size
     // changes under a client that listed neither has no way to say so and hangs
-    // up, which is what a wlshare output switch to a differently sized monitor
-    // would do.
+    // up.
     //
     // ContinuousUpdates and Fence are unconditional and go together. The first asks
     // the server to send updates for the whole desktop as it changes instead of once
@@ -2123,18 +2129,23 @@ fn rfb38_encoding_list(clipboard: bool, audio: bool, camera: bool, microphone: b
         // in use.
         encodings.push(vnc_clipboard::ENCODING);
     }
+    encodings
+}
+
+/// What a `wlshare` target lists: the generic list, and after it wlshare's own
+/// extensions. A plain target lists none of them, whatever server answers it.
+fn wlshare_encoding_list(clipboard: bool, audio: bool, camera: bool, microphone: bool) -> Vec<i32> {
+    let mut encodings = rfb38_encoding_list(clipboard);
     if audio {
-        // wlshare's audio extension, on a target that asked for sound. Discovery
-        // again, and by the same shape as the density request: a server that
-        // speaks it announces so with a rectangle of this encoding, and one that
-        // does not says nothing and the session runs in silence. See
+        // wlshare's audio extension, on a target that asked for sound. wlshare
+        // announces it with a rectangle of this encoding, and a server that does
+        // not speak it says nothing and the session runs in silence. See
         // [`crate::vnc_audio`].
         encodings.push(vnc_audio::ENCODING);
     }
     if camera {
         // The wlshare camera extension, on a target that carries a camera, asked
-        // the way audio is: wlshare answers that it takes one, and any other
-        // server says nothing and the browser's camera is never plugged. See
+        // the way audio is: wlshare answers that it takes one. See
         // [`crate::vnc_camera`].
         encodings.push(vnc_camera::ENCODING);
     }
@@ -2143,14 +2154,13 @@ fn rfb38_encoding_list(clipboard: bool, audio: bool, camera: bool, microphone: b
         // microphone, the same way. See [`crate::vnc_mic`].
         encodings.push(vnc_mic::ENCODING);
     }
-    // The density request, asked of every generic server after everything that
-    // decides pixels so it never weighs on encoding preference. Its answer, when
-    // it comes, is the scale every framebuffer from then on is labelled with; a
-    // Mac reports its densities in its display layout and is not asked.
+    // The density request, after everything that decides pixels so it never
+    // weighs on encoding preference. Its answer is the scale every framebuffer
+    // from then on is labelled with.
     encodings.push(ENCODING_WLSHARE_DENSITY);
-    // The output list, on the same terms and for the same reason: a Mac sends its
-    // screens in that layout, and this is the one way a generic server says it has
-    // more than one to offer.
+    // The output list, on the same terms: the one way wlshare says it has more
+    // than one output to offer, and why a switch to a differently sized one
+    // needs the size pseudo-encodings above.
     encodings.push(ENCODING_WLSHARE_OUTPUTS);
     encodings
 }
@@ -2400,7 +2410,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         // already replayed on that declaration — see [`Flags::pinned`].
         pending: pinned,
         viewport: None,
-        density: if apple { Density::Off } else { Density::Asked },
+        // Only a wlshare target listed the density request, and it is the one
+        // whose listing came back from the preface.
+        density: if passthrough.is_some() { Density::Asked } else { Density::Off },
         wire_scale: None,
         resize,
         following: false,
@@ -2611,7 +2623,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 let ask = match input {
                     ClientMsg::Viewport { w, h } => Some(ResizeAsk::Viewport((w, h))),
                     ClientMsg::DefaultSize => Some(ResizeAsk::Points(default_size)),
-                    // On a generic target the report is forwarded as the client's
+                    // On a wlshare target the report is forwarded as the client's
                     // declared density, once the server has shown it listens
                     // and not while an earlier declaration is unanswered — see
                     // [`DesktopState::host_density_changed`]. Decided and
@@ -2834,7 +2846,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     // pure function of the input and has no way to record what was
                     // asked for. Two engines can act on it: a Mac, which accepts
                     // the extension on both supported transports, and wlshare,
-                    // whose outputs extension is the one way a generic server says
+                    // whose outputs extension is the one way an RFB 3.8 server says
                     // it has more than one screen to send.
                     let known = display.lock().unwrap().displays.iter().any(|d| d.id == id);
                     if !known {
@@ -3250,7 +3262,7 @@ struct Shared {
     /// Wakes the input loop's High Performance resize timer when the read loop
     /// changes what it waits on — a layout arrived, or media setup finished.
     hp_wake: Arc<tokio::sync::Notify>,
-    /// Where the desktop's sound goes on a generic target that asked for it —
+    /// Where the desktop's sound goes on a `wlshare` target that asked for it —
     /// see [`Flags::wlshare_audio`]. `None` is a session with no sound to carry,
     /// and the extension is then neither advertised nor read.
     audio: Option<Arc<crate::audio::AudioBridge>>,
@@ -3767,16 +3779,17 @@ async fn read_loop<R: AsyncRead + Unpin>(
             // the server has stopped pushing; polling resumes and one request is sent
             // to restart the cycle it had replaced.
             // The wlshare OutputScale report: the framebuffer's density, from the one
-            // generic server that can say. Only a session that asked reads it; on
-            // the Apple dialects, 0xE0 is as unknown as it was.
+            // server that can say. Only a session that asked reads it; on a plain
+            // target and on the Apple dialects, 0xE0 is as unknown as it was.
             MSG_WLSHARE_DENSITY if desktop.lock().unwrap().density != Density::Off => {
                 read_output_scale(&mut reader, uplink, desktop, &shared.shadow, &sink).await?;
             }
             // The wlshare OutputList: which outputs the compositor has and which
-            // one it is sending. Read only on a generic target, the only kind
-            // that listed the encoding; on the Apple dialects 0xE1 is as unknown
-            // as it was, and a Mac's screens arrive in its display layout.
-            MSG_WLSHARE_OUTPUTS if apple.is_none() => {
+            // one it is sending. Read only on a wlshare target, the only kind
+            // that listed the encoding; on a plain target and on the Apple
+            // dialects 0xE1 is as unknown as it was, and a Mac's screens arrive in
+            // its display layout.
+            MSG_WLSHARE_OUTPUTS if shared.passthrough.is_some() => {
                 read_output_list(&mut reader, uplink, desktop, display, &sink).await?;
             }
             // The QEMU message type, which wlshare's audio extension borrows for
@@ -4573,7 +4586,7 @@ async fn read_rect<R: AsyncRead + Unpin>(
             return Ok(RectEffect::NOTHING);
         }
         // wlshare's audio announcement: an empty rectangle of the
-        // pseudo-encoding this session listed, and the only way a generic server
+        // pseudo-encoding this session listed, and the only way an RFB 3.8 server
         // ever says it can carry sound ([`vnc_audio`]). It has no body —
         // the announcement is the rectangle — so there is nothing to read past.
         // Only a session that asked can see one: the encoding was advertised
@@ -5668,8 +5681,8 @@ fn translate_input(
         // Intercepted by the input loop, which is where the requested screen is
         // checked — see the `SelectDisplay` branch there. The Apple extension
         // supplies the selectable list on either transport, and wlshare's outputs
-        // extension supplies it on a generic one; a server with neither never
-        // sends a list, so no id ever names anything.
+        // extension supplies it on a `wlshare` target; a plain target is never
+        // sent a list, so no id ever names anything.
         ClientMsg::SelectDisplay { .. } => Vec::new(),
         // RFB has no touch: a contact is a thing only MS-RDPEI carries, and the
         // client offers the mode only after the RDP engine's `touchReady`,
@@ -5958,7 +5971,7 @@ fn choose_security(
     // credentials are a macOS account's, and there is nothing else on the list that
     // could carry them. The subtype names itself in the refusal, since the two are
     // configured differently and the reader needs to know which one they wrote.
-    if let Some(subtype) = subtype.filter(|s| s.apple_authentication()) {
+    if let Some(subtype) = subtype.filter(|s| s.apple()) {
         anyhow::ensure!(
             types.contains(&SECURITY_ARD),
             "the target is subtype {:?}, whose authentication (type 30) this server \
@@ -6669,25 +6682,25 @@ mod tests {
     /// one is a promise to decode it.
     #[tokio::test]
     async fn the_generic_encoding_list_is_in_preference_order() {
-        assert_eq!(
-            rfb38_encoding_list(false, false, false, false),
-            vec![
-                ENCODING_COPY_RECT,
-                ENCODING_ZRLE,
-                ENCODING_ZLIB,
-                ENCODING_HEXTILE,
-                ENCODING_RRE,
-                ENCODING_RAW,
-                ENCODING_CURSOR,
-                ENCODING_CURSOR_WITH_ALPHA,
-                ENCODING_CONTINUOUS_UPDATES,
-                ENCODING_FENCE,
-                ENCODING_EXTENDED_DESKTOP_SIZE,
-                ENCODING_DESKTOP_SIZE,
-                ENCODING_WLSHARE_DENSITY,
-                ENCODING_WLSHARE_OUTPUTS,
-            ]
-        );
+        let generic = vec![
+            ENCODING_COPY_RECT,
+            ENCODING_ZRLE,
+            ENCODING_ZLIB,
+            ENCODING_HEXTILE,
+            ENCODING_RRE,
+            ENCODING_RAW,
+            ENCODING_CURSOR,
+            ENCODING_CURSOR_WITH_ALPHA,
+            ENCODING_CONTINUOUS_UPDATES,
+            ENCODING_FENCE,
+            ENCODING_EXTENDED_DESKTOP_SIZE,
+            ENCODING_DESKTOP_SIZE,
+        ];
+        assert_eq!(rfb38_encoding_list(false), generic);
+        // A wlshare target's is the same list with wlshare's requests after it.
+        let mut wlshare = generic;
+        wlshare.extend([ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
+        assert_eq!(wlshare_encoding_list(false, false, false, false), wlshare);
 
         // Every pixel encoding advertised is one this side can be handed. A rect
         // header alone is enough to prove it: an unrecognised encoding bails with
@@ -6700,7 +6713,7 @@ mod tests {
         // ServerCutText, the density report and the output list as their own
         // messages, and the audio announcement is an empty rectangle with no
         // pixels behind it.
-        let pixel_encodings = rfb38_encoding_list(true, true, true, true)
+        let pixel_encodings = wlshare_encoding_list(true, true, true, true)
             .into_iter()
             .filter(|encoding| {
                 *encoding >= 0
@@ -6981,16 +6994,37 @@ mod tests {
 
     /// The two wlshare requests, checked byte by byte against
     /// docs/wlshare-density.md and docs/wlshare-outputs.md rather than through
-    /// the encoder's own eyes. Both are asked of every generic server, after
+    /// the encoder's own eyes. Both are asked of a `wlshare` target, after
     /// every encoding that decides pixels, and of no Mac (see
     /// `a_mac_is_asked_for_its_layout_and_zrle_and_no_generic_extension`).
     #[test]
-    fn the_wlshare_extensions_are_asked_of_every_generic_server() {
+    fn the_wlshare_extensions_are_asked_of_a_wlshare_target() {
         assert_eq!(ENCODING_WLSHARE_DENSITY, i32::from_be_bytes(*b"WLSH"));
         assert_eq!(ENCODING_WLSHARE_OUTPUTS, i32::from_be_bytes(*b"WLSO"));
         for clipboard in [false, true] {
-            let generic = rfb38_encoding_list(clipboard, false, false, false);
-            assert_eq!(&generic[generic.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
+            let wlshare = wlshare_encoding_list(clipboard, false, false, false);
+            assert_eq!(&wlshare[wlshare.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
+        }
+    }
+
+    /// A plain target lists nothing of wlshare's, so a wlshare server reached as
+    /// one is read as any VNC server is: no stream of its own, no density, no
+    /// output list, no sound, camera or microphone.
+    #[test]
+    fn a_plain_target_lists_no_wlshare_extension() {
+        for clipboard in [false, true] {
+            let plain = rfb38_encoding_list(clipboard);
+            for encoding in [
+                ENCODING_WLSHARE_VP9,
+                ENCODING_WLSHARE_DENSITY,
+                ENCODING_WLSHARE_OUTPUTS,
+                vnc_audio::ENCODING,
+                vnc_camera::ENCODING,
+                vnc_mic::ENCODING,
+            ] {
+                assert!(!plain.contains(&encoding), "{encoding:#x}");
+            }
+            assert!(plain.contains(&ENCODING_ZRLE));
         }
     }
 
@@ -7410,13 +7444,13 @@ mod tests {
         (written(&sent), bridge, listener)
     }
 
-    /// The pseudo-encoding is asked of a generic server only where the target
+    /// The pseudo-encoding is asked of a wlshare target only where the target
     /// asked for sound. QEMU's own, which promises raw samples, is never asked.
     #[test]
     fn the_audio_extension_is_asked_only_where_sound_was() {
         assert_eq!(vnc_audio::ENCODING.to_be_bytes(), *b"WLSF");
         for clipboard in [false, true] {
-            let asked = rfb38_encoding_list(clipboard, true, false, false);
+            let asked = wlshare_encoding_list(clipboard, true, false, false);
             assert!(asked.contains(&vnc_audio::ENCODING));
             assert!(!asked.contains(&-259), "QEMU's raw samples are not taken");
             assert_eq!(
@@ -7425,36 +7459,36 @@ mod tests {
                 "the wlshare requests stay last, so audio never weighs on encoding preference"
             );
             assert!(
-                !rfb38_encoding_list(clipboard, false, false, false)
+                !wlshare_encoding_list(clipboard, false, false, false)
                     .contains(&vnc_audio::ENCODING),
                 "a target without audio does not ask"
             );
         }
     }
 
-    /// The camera extension is asked of a generic server exactly where the target
+    /// The camera extension is asked of a wlshare target exactly where the target
     /// carries a camera, and — like every wlshare request — without weighing on
     /// encoding preference: the density and outputs requests stay last.
     #[test]
     fn the_camera_extension_is_asked_only_where_a_camera_is_carried() {
         for clipboard in [false, true] {
-            let asked = rfb38_encoding_list(clipboard, true, true, false);
+            let asked = wlshare_encoding_list(clipboard, true, true, false);
             assert!(asked.contains(&vnc_camera::ENCODING));
             assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            assert!(!rfb38_encoding_list(clipboard, true, false, false).contains(&vnc_camera::ENCODING));
+            assert!(!wlshare_encoding_list(clipboard, true, false, false).contains(&vnc_camera::ENCODING));
         }
     }
 
-    /// The microphone extension on the same terms: asked of a generic server exactly
+    /// The microphone extension on the same terms: asked of a wlshare target exactly
     /// where the target carries a microphone, and never ahead of the density and
     /// outputs requests.
     #[test]
     fn the_microphone_extension_is_asked_only_where_a_microphone_is_carried() {
         for clipboard in [false, true] {
-            let asked = rfb38_encoding_list(clipboard, true, true, true);
+            let asked = wlshare_encoding_list(clipboard, true, true, true);
             assert!(asked.contains(&vnc_mic::ENCODING));
             assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            assert!(!rfb38_encoding_list(clipboard, true, true, false).contains(&vnc_mic::ENCODING));
+            assert!(!wlshare_encoding_list(clipboard, true, true, false).contains(&vnc_mic::ENCODING));
         }
     }
 
@@ -7541,8 +7575,8 @@ mod tests {
         assert_eq!(bridge.negotiated_format(), None);
     }
 
-    /// wayvnc and every other generic server: pixels arrive with nothing
-    /// announced in front of them, and the session runs on in silence. Nothing
+    /// A server that is not the wlshare its target said it was: pixels arrive with
+    /// nothing announced in front of them, and the session runs on in silence. Nothing
     /// is sent, because there is nothing to enable.
     #[tokio::test]
     async fn a_server_that_announces_nothing_is_never_asked_to_start() {
@@ -8022,7 +8056,7 @@ mod tests {
             apple_media: false,
             rdp_graphics: false,
         };
-        Arc::new(Listing::new(rfb38_encoding_list(false, false, false, false), plan))
+        Arc::new(Listing::new(wlshare_encoding_list(false, false, false, false), plan))
     }
 
     /// The same, for a session that asked for the desktop's sound: the bridge
@@ -8645,7 +8679,7 @@ mod tests {
         body
     }
 
-    /// A generic target holds its first resize until the server has said what
+    /// A `wlshare` target holds its first resize until the server has said what
     /// scale it draws at. The report labels the framebuffer, and the held window
     /// goes out with the browser's density, in points × that density, as one
     /// declaration; its answer, naming those pixels, asks nothing more.
@@ -10625,7 +10659,7 @@ mod tests {
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
         let mut shared = test_shared(uplink, shared_desktop(small, None, None), test_shadow(small));
-        let encodings = rfb38_encoding_list(false, false, false, false);
+        let encodings = wlshare_encoding_list(false, false, false, false);
         let lists = Arc::new(Listing::new(encodings, plan));
         shared.passthrough = Some(Arc::clone(&lists));
         let mut wire = update(&[geometry(0, 0, big.0, big.1, ENCODING_DESKTOP_SIZE)]);

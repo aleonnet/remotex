@@ -44,7 +44,7 @@ import {
 } from "./useRemoteDesktop.ts";
 
 // The floating chrome — a draggable ☰ button that toggles a toolbar drawer. The
-// drawer carries this project's controls, a Switch target button that returns to
+// drawer carries this project's controls, an End session button that returns to
 // the post-login picker, and Log out, which ends the web login. Three of its
 // buttons open a panel instead of acting: Soft keyboard — which is where every
 // key, modifier and browser-swallowed combo now lives — Clipboard, only for
@@ -640,7 +640,9 @@ function ScreenHelp({
 }
 
 // The direct audio toggle is also the user gesture required to create a
-// playable AudioContext. Targets without audio omit the row.
+// playable AudioContext. Targets without audio omit the row. Its words are Mute
+// and Unmute because that is all it reaches: the remote's sound is taken when
+// the session starts, and this opens or closes the browser's subscription to it.
 function AudioSection({
   available,
   enabled,
@@ -665,7 +667,7 @@ function AudioSection({
         aria-pressed={enabled}
         title="Play the remote's sound in this browser"
       >
-        {enabled ? "Disable audio" : "Enable audio"}
+        {enabled ? "Mute" : "Unmute"}
       </button>
       {/* Quiet remotes have no distinct client-visible state. */}
       {error && <p className="audio-note">{error}</p>}
@@ -942,7 +944,7 @@ export default function FloatingMenu({
   onLogout: () => void;
   // The throughput read came back 401: the login expired. See ThroughputPanel.
   onUnauthorized: () => void;
-  // Return to the post-login target picker ("switch target"): disconnects the
+  // Return to the post-login target picker ("End session"): disconnects the
   // current session without ending the login. See useRemoteDesktop.
   onSwitchTarget: () => void;
   sendKeyCombo: (codes: string[]) => void;
@@ -981,8 +983,8 @@ export default function FloatingMenu({
   // Whether this session can carry the remote's sound, which hides the Audio
   // section rather than disabling it — the same rule the Display section follows
   // and the opposite of Clipboard's. A greyed "Audio" would be explaining a
-  // feature that does not exist for this target: audio is RDP-only, so on VNC
-  // there is nothing that could be switched on.
+  // feature that does not exist for this target: a plain VNC server and a Mac in
+  // Standard mode carry no sound, so there is nothing that could be switched on.
   //
   // `audioEnabled` is what this browser has asked for, not proof that sound is
   // arriving: a quiet remote and one that will never redirect are the same thing
@@ -998,7 +1000,7 @@ export default function FloatingMenu({
   videoStream: VideoStreamInfo | null;
   onAudioChange: (enabled: boolean) => void;
   // The camera, under Audio's hide-don't-disable rule: `camera = true` is
-  // RDP's and generic VNC's (wlshare's camera extension) alone, so on every other
+  // RDP's and a wlshare target's (wlshare's camera extension) alone, so on every other
   // target there is nothing that could be switched on. `cameraEnabled` is per
   // session and never remembered — see
   // useRemoteDesktop — and `cameraStreaming` is whether the remote is
@@ -1009,7 +1011,7 @@ export default function FloatingMenu({
   cameraStreaming: boolean;
   onCameraChange: (enabled: boolean) => void;
   // The microphone, under the camera's rules: `microphone = true` is RDP's and
-  // generic VNC's (wlshare's microphone extension) alone, enabled per session, and
+  // a wlshare target's (wlshare's microphone extension) alone, enabled per session, and
   // `micStreaming` is whether the remote records.
   canMic: boolean;
   micEnabled: boolean;
@@ -1491,7 +1493,7 @@ export default function FloatingMenu({
               onClick={onSwitchTarget}
               title="Disconnect and return to the target picker"
             >
-              Switch target
+              End session
             </button>
             <button
               type="button"

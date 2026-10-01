@@ -10,7 +10,7 @@
 //!
 //! Nothing here names an engine. The engine side registers a [`CameraControl`]
 //! and publishes [`CameraSignal`]s; RDP's adapter is [`crate::rdp_camera`] over
-//! MS-RDPECAM, and generic VNC's is [`crate::vnc_camera`] over wlshare's private
+//! MS-RDPECAM, and a wlshare target's is [`crate::vnc_camera`] over wlshare's private
 //! extension.
 
 use std::sync::{Arc, Mutex};

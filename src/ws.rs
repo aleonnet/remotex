@@ -1406,7 +1406,7 @@ async fn session(
             Some(Ok(Message::Text(text))) => match serde_json::from_str::<ClientMsg>(&text) {
                 // Session-control messages act on the slot, not an engine: pick a
                 // target from the picker, or tear the session down and go back to
-                // it ("switch target").
+                // it ("End session").
                 Ok(ClientMsg::Connect { target, display }) => {
                     if let Err(e) = sessions.connect(attach_id, &target, display).await {
                         warn!("ws: connect to {target:?} refused: {e}");

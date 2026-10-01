@@ -2556,7 +2556,7 @@ mod tests {
         expect_connected(&mut att.events, "fake").await;
         let engine = hooks.try_recv().unwrap();
 
-        // Switch target: the engine is torn down (its input channel closes) and
+        // End session: the engine is torn down (its input channel closes) and
         // the browser lands back on the picker without dropping the socket.
         mgr.disconnect(att.id);
         expect_picker(&mut att.events).await;
@@ -3200,7 +3200,7 @@ mod tests {
     async fn ending_the_engine_ends_the_audio_but_not_the_socket() {
         #[allow(clippy::type_complexity)]
         let ways: [(&str, Box<dyn Fn(&Arc<SessionManager>, u64)>); 2] = [
-            ("switch target", Box::new(|mgr: &Arc<SessionManager>, id| mgr.disconnect(id))),
+            ("end session", Box::new(|mgr: &Arc<SessionManager>, id| mgr.disconnect(id))),
             (
                 "heartbeat expiry",
                 Box::new(|mgr: &Arc<SessionManager>, id| mgr.expire_attachment(id)),

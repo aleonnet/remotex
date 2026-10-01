@@ -191,7 +191,7 @@ test("clipboard panel reads require explicit Copy while pushes still auto-sync",
 
   await page.getByRole("button", { name: "Close clipboard" }).click();
   await page.getByRole("button", { name: "Open menu" }).click();
-  await page.getByRole("button", { name: "Switch target" }).click();
+  await page.getByRole("button", { name: "End session" }).click();
   await expect(
     page.getByRole("heading", { name: "Pick a target" }),
   ).toBeVisible();

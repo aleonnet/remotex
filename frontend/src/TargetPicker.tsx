@@ -19,9 +19,10 @@ import ThroughputPanel, { useThroughputAvailable } from "./ThroughputPanel.tsx";
 interface TargetInfo {
   name: string;
   protocol: string;
-  // The target's `subtype` where it has one, null otherwise. Shown because three
-  // entries in this list can say `vnc` and mean a plain server, a Mac sharing its
-  // physical displays, and a Mac on one virtual display it will disable them for —
+  // The target's `subtype` where it has one, null otherwise. Shown because four
+  // entries in this list can say `vnc` and mean a plain server, a wlshare one, a
+  // Mac sharing its physical displays, and a Mac on one virtual display it will
+  // disable them for —
   // which is a difference somebody is choosing between here, not discovering after
   // connecting. See connectionLabel.ts.
   subtype: string | null;

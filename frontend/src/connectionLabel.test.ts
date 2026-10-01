@@ -1,6 +1,6 @@
 // What the "This session" card says about the connection.
 //
-// The case that matters is the one where `protocol` alone is not an answer: three
+// The case that matters is the one where `protocol` alone is not an answer: four
 // targets say `vnc`, and what a person notices about them — a display list, a
 // target that follows its window or keeps a fixed display, a path that is reverse
 // engineered — differs by subtype and by nothing else on the wire.
@@ -26,6 +26,12 @@ test("the two Apple modes say which one they are, in the config's own spelling",
     connectionLabel("vnc", "ard-high-performance"),
     "VNC · Apple Screen Sharing, High Performance (ard-high-performance)",
   );
+});
+
+test("a wlshare target says so in the config's spelling, which is its name", () => {
+  // No prose beside it: unlike `ard`, the key is the server's own name.
+  assert.equal(connectionLabel("vnc", "wlshare"), "VNC · wlshare");
+  assert.equal(connectionShortLabel("vnc", "wlshare"), "VNC · wlshare");
 });
 
 test("the picker's row keeps the spelling and drops the prose", () => {

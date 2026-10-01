@@ -239,7 +239,7 @@ export default function RemoteDesktop({
         </div>
       )}
 
-      {/* The floating menu is desktop-only; its Switch target button returns to
+      {/* The floating menu is desktop-only; its End session button returns to
           the picker (see FloatingMenu.tsx), and Log out ends the login. */}
       {mode === "desktop" && (
         <FloatingMenu
