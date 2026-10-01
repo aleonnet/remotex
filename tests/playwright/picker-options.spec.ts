@@ -77,7 +77,7 @@ function watchSession(page: Page): Session {
   return seen;
 }
 
-/// Open the target at the picker, unless the page already has, and return its
+/// Open the target at the picker, unless it is open already, and return its
 /// item: the row and the options under it.
 async function openTarget(page: Page): Promise<Locator> {
   const row = page.getByRole("button", {
@@ -128,6 +128,15 @@ test.describe("the picker's options", () => {
   }) => {
     await logInAndConnectTo(page, PICKER_TARGET ?? "", "", { sound: true });
     await returnToPicker(page);
+
+    // A target starts closed, a gateway's only one included: nothing starts a
+    // session until it is opened and Start is pressed.
+    await expect(
+      page.getByRole("button", { name: targetNamePattern(PICKER_TARGET ?? "") }),
+    ).toHaveAttribute("aria-expanded", "false");
+    await expect(
+      page.getByRole("button", { name: "Start", exact: true }),
+    ).toHaveCount(0);
 
     // An rdp target offers all three, and what was ticked is how it comes back.
     const item = await openTarget(page);

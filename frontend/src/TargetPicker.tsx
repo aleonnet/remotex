@@ -19,7 +19,8 @@ import {
 // GET /api/targets. Picking one opens it rather than connecting: what the
 // session is started with — resize, sound, a passthrough — is chosen under it,
 // and Start is what connects (targetChoices.ts has the rules for which options
-// a target shows and which are greyed).
+// a target shows and which are greyed). Every target starts closed, a gateway's
+// only one included, so starting a session is the same two steps everywhere.
 //
 // `connect` sends the Start over the live socket with the choices; `sound` tells
 // it the session will carry the remote's sound, so the click is spent on an audio
@@ -72,10 +73,6 @@ export default function TargetPicker({
       .then((list) => {
         if (!cancelled && list) {
           setTargets(list);
-          // Nothing to pick between: its options are what there is to look at.
-          if (list.length === 1) {
-            setOpenTarget(list[0].name);
-          }
         }
       })
       .catch(() => {

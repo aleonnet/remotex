@@ -205,7 +205,8 @@ export async function logInAndConnectTo(
 // Open `target` at the picker, set its options to `choices` and press Start.
 //
 // The target's button opens it rather than connecting, and says whether it is open:
-// a lone target is opened by the page itself, and a second click would close it. An
+// one left open by an earlier Start on this picker would be closed by a second
+// click. An
 // option the target does not show is left alone when it is not asked for; one that
 // is asked for and is absent or greyed fails here, by name, rather than as a
 // session that started without it.
