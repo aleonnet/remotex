@@ -1093,12 +1093,18 @@ pub enum ServerMsg {
     /// `packet_frames` is the one thing a client cannot work out for itself: 960
     /// samples in a 20 ms Opus packet, 480 in a 10 ms AAC-ELD unit, and 20 ms of
     /// the source in a FLAC frame.
+    ///
+    /// `passthrough` says the packets are the remote's own, passed as they came
+    /// — the Mac's AAC-ELD, wlshare's FLAC — rather than coded here, as Opus and
+    /// an RDP host's FLAC are. The audio counterpart of [`Self::VideoFormat`]'s,
+    /// and like it for the session card alone.
     AudioFormat {
         codec: &'static str,
         sample_rate: u32,
         channels: u16,
         packet_frames: u32,
         head: Vec<u8>,
+        passthrough: bool,
     },
     /// One wave buffer's worth of audio packets, framed by [`audio::frame`].
     ///
@@ -1238,6 +1244,7 @@ enum ControlMsg<'a> {
         /// base64: a text frame cannot carry bytes, and this is tens of them
         /// once a session.
         head: String,
+        passthrough: bool,
     },
     VideoFormat {
         decode: &'a str,
@@ -1358,12 +1365,14 @@ impl ServerMsg {
                 channels,
                 packet_frames,
                 head,
+                passthrough,
             } => control(&ControlMsg::AudioFormat {
                 codec,
                 sample_rate: *sample_rate,
                 channels: *channels,
                 packet_frames: *packet_frames,
                 head: base64::engine::general_purpose::STANDARD.encode(head),
+                passthrough: *passthrough,
             }),
             ServerMsg::Mosaic { regions, resize } => {
                 control(&ControlMsg::Mosaic { regions, resize: *resize })
@@ -1613,12 +1622,13 @@ mod tests {
             channels: 2,
             packet_frames: 960,
             head: head.clone(),
+            passthrough: false,
         })
         .text_frame()
         .expect("the format must be a text frame");
         assert_eq!(
             json,
-            r#"{"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,"packetFrames":960,"head":"T3B1c0hlYWQBAjgBRKwAAAAAAA=="}"#
+            r#"{"type":"audioFormat","codec":"opus","sampleRate":48000,"channels":2,"packetFrames":960,"head":"T3B1c0hlYWQBAjgBRKwAAAAAAA==","passthrough":false}"#
         );
         // And the base64 is really OpusHead, not a placeholder that happens to
         // decode: a client configures a decoder from these bytes.

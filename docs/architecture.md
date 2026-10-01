@@ -1444,7 +1444,9 @@ socket's: 401 before the upgrade without a login, close code 4000 for a token th
 not the current claim, 4001 on eviction.
 
 The gateway answers with `audioFormat` — the codec string, the decoder
-configuration, and the samples in one packet — followed by binary frames:
+configuration, the samples in one packet, and as `passthrough` whether the
+packets are the remote's own or coded here, which the session card's Audio row
+states — followed by binary frames:
 
 ```text
 u8 kind = 0x03 | u8 flags = 0 | u16 packet count

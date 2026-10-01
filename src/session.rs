@@ -1177,6 +1177,7 @@ impl SessionManager {
                 channels: encoded.channels,
                 packet_frames: encoded.packet_frames,
                 head: encoded.head,
+                passthrough: encoded.passthrough,
             };
             // Sent before any packet, and awaited rather than tried: a decoder
             // configured *after* the audio it was meant to decode has already thrown
@@ -2920,6 +2921,7 @@ mod tests {
                 channels,
                 packet_frames,
                 head,
+                ..
             } => {
                 // The *stream's* rate, not the 44100 the remote negotiated: an
                 // encoded stream is resampled to 48 kHz on the way in.

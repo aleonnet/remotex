@@ -1422,7 +1422,7 @@ export function useRemoteDesktop(
           codec: msg.codec,
           sampleRate: msg.sampleRate,
           channels: msg.channels,
-          packetFrames: msg.packetFrames,
+          passthrough: msg.passthrough,
         });
       } catch (e) {
         releaseAudio();

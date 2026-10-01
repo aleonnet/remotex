@@ -364,6 +364,7 @@ impl AudioListener {
             channels: format.channels,
             packet_frames,
             head,
+            passthrough: false,
             signals,
             packets: stream,
         })
@@ -401,6 +402,7 @@ impl AudioListener {
             channels: format.channels,
             packet_frames: format.packet_frames,
             head: format.head.to_vec(),
+            passthrough: true,
             signals: None,
             packets: stream,
         }
@@ -481,6 +483,7 @@ impl AudioListener {
             channels: format.channels,
             packet_frames: u32::from(stream.block),
             head: Vec::new(),
+            passthrough: false,
             signals: None,
             packets,
         })
@@ -528,6 +531,9 @@ pub struct EncodedAudio<S> {
     /// The decoder's configuration: `OpusHead`, or a passed stream's
     /// [`PassedFormat::head`].
     pub head: Vec<u8>,
+    /// Whether the packets are the remote's own, passed as they came, rather
+    /// than coded here: what the session card says of the stream.
+    pub passthrough: bool,
     /// `Some` exactly when the plan is adaptive: the sender's handle for
     /// reporting how its sends went ([`AudioCongestion`] writes through it) and
     /// the encoder's source of truth for the rate it should be at.
@@ -545,6 +551,7 @@ impl<S: Stream<Item = Vec<Bytes>> + Send + 'static> EncodedAudio<S> {
             channels: self.channels,
             packet_frames: self.packet_frames,
             head: self.head,
+            passthrough: self.passthrough,
             signals: self.signals,
             packets: futures_util::StreamExt::boxed(self.packets),
         }
@@ -858,6 +865,7 @@ mod tests {
             .into_packets(PCM_CD_QUALITY, AudioPlan::fixed())
             .expect("opus");
         assert_eq!(opus.codec, "opus");
+        assert!(!opus.passthrough);
         assert_eq!(opus.sample_rate, crate::pcm48::SAMPLE_RATE);
         assert_eq!(opus.packet_frames, 960);
         assert_eq!(&opus.head[0..8], b"OpusHead");
@@ -876,6 +884,7 @@ mod tests {
         );
         assert_eq!(passed.head, [0xf8, 0xe6, 0x50, 0x00], "the Mac's AudioSpecificConfig");
         assert!(passed.signals.is_none(), "a passed stream has no bitrate to walk");
+        assert!(passed.passthrough);
         let mut stream = Box::pin(passed.packets);
 
         bridge.unit(vec![1, 2, 3]);
@@ -908,6 +917,7 @@ mod tests {
             ("flac", 44_100, 2, 882)
         );
         assert!(flac.head.is_empty(), "a frame states its own shape");
+        assert!(!flac.passthrough, "coded here, from the host's PCM");
         assert!(flac.signals.is_none(), "lossless has no bitrate to walk");
         let mut stream = Box::pin(flac.packets);
 
