@@ -17,7 +17,7 @@ The gateway loads them when a session needs them, and looks again at every
 session until it finds them. So they can be installed while the gateway runs:
 the next session uses them. A Windows gateway whose config names their folders
 loads them from there when it starts instead: see
-[Decoders kept in a folder of their own](#decoders-kept-in-a-folder-of-their-own).
+[Installed somewhere else](#installed-somewhere-else).
 
 - [Debian](#debian)
 - [Ubuntu](#ubuntu)
@@ -98,11 +98,19 @@ On macOS the loaded libavcodec decodes through VideoToolbox.
 
 ## Windows
 
-The two come from different places, both from PowerShell 7 (`pwsh`).
+The steps below are the recommended install, not the only one. Any shared
+build of FFmpeg 6.1 to 9 and any `libfdk-aac-2.dll` serve, from wherever they
+are installed: the gateway finds the recommended install by itself, and
+`[hp_decoders]` tells it where any other is. See
+[Installed somewhere else](#installed-somewhere-else).
+
+The recommended two come from different places, both from PowerShell 7
+(`pwsh`).
 
 ### FFmpeg
 
-Install a shared build of FFmpeg 9.0, a download of about 80 MB:
+Recommended: a shared build of FFmpeg 9.0 from winget, a download of about
+80 MB:
 
 ```powershell
 winget install BtbN.FFmpeg.LGPL.Shared.9.0
@@ -115,7 +123,7 @@ has to be restarted to see the new `PATH`.
 
 ### fdk-aac
 
-It comes from [MSYS2](https://www.msys2.org), as one small package with no
+Recommended: [MSYS2](https://www.msys2.org)'s package, a small one with no
 dependencies:
 
 1. Install MSYS2 into its default folder, `C:\msys64`:
@@ -140,12 +148,12 @@ dependencies:
 The gateway finds `libfdk-aac-2.dll` in `C:\msys64\ucrt64\bin` with nothing to
 configure. `PATH` does not need that folder.
 
-### Decoders kept in a folder of their own
+### Installed somewhere else
 
-`[hp_decoders]` in the gateway's config names the folders, for DLLs that are
-not on `PATH`: a shared FFmpeg build unzipped somewhere, an MSYS2 outside
-`C:\msys64`, or a gateway run by another user than the one winget installed
-for.
+A decoder installed any other way, or in any other folder, works too. Tell the
+gateway where it is with `[hp_decoders]` in its config. That covers a shared
+FFmpeg build unzipped by hand, an MSYS2 outside `C:\msys64`, and a gateway run
+by another user than the one winget installed for.
 
 ```toml
 [hp_decoders]
@@ -165,10 +173,10 @@ loads it when it starts: one that does not find the decoder there refuses to
 start, and says which file it tried. Only a gateway on Windows takes this
 table.
 
-### Where the gateway looks without it
+### Where the gateway looks by default
 
 For a decoder `[hp_decoders]` names no folder for, the gateway looks when a
-session needs it, in this order:
+session needs it, in this order, which is what finds the recommended install:
 
 1. Windows' own search: beside `remotex.exe`, then the folders on `PATH`.
 2. MSYS2's `C:\msys64\ucrt64\bin`.
