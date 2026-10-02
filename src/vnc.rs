@@ -421,13 +421,24 @@ impl HeldMotion {
                     WheelUnit::Page => (1, Wheel::PAGE_LINES),
                     WheelUnit::Notch => (2, 1.0),
                 };
-                let max = Wheel::MAX_PX / Wheel::pixels(1.0, Self::UNITS[slot]);
-                let add = |held: f32, delta: f32| {
+                // One cap for the units together: each is re-sent as an event of
+                // its own, and a hand that went from trackpad to wheel must not
+                // be owed an event's worth for each.
+                let px = Wheel::pixels(1.0, Self::UNITS[slot]);
+                let others = |axis: fn(&(f32, f32)) -> f32| -> f32 {
+                    (self.wheel.iter().zip(Self::UNITS).enumerate())
+                        .filter(|&(i, _)| i != slot)
+                        .map(|(_, (held, unit))| Wheel::pixels(axis(held), unit).abs())
+                        .sum()
+                };
+                let room = (others(|held| held.0), others(|held| held.1));
+                let add = |held: f32, delta: f32, room: f32| {
+                    let max = (Wheel::MAX_PX - room).max(0.0) / px;
                     let sum = held + delta * scale;
                     if sum.is_finite() { sum.clamp(-max, max) } else { held }
                 };
                 let held = &mut self.wheel[slot];
-                *held = (add(held.0, dx), add(held.1, dy));
+                *held = (add(held.0, dx, room.0), add(held.1, dy, room.1));
             }
             other => return Some(other),
         }
@@ -10528,8 +10539,8 @@ mod tests {
         assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 2.0, unit: WheelUnit::Line }).is_none());
         assert!(held.hold(ClientMsg::Wheel { dx: -4.0, dy: -12.0, unit: WheelUnit::Pixel }).is_none());
         assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 1.0, unit: WheelUnit::Page }).is_none());
-        assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 1.0, unit: WheelUnit::Notch }).is_none());
-        assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 2.0, unit: WheelUnit::Notch }).is_none());
+        assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 0.25, unit: WheelUnit::Notch }).is_none());
+        assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 0.75, unit: WheelUnit::Notch }).is_none());
         assert!(!held.is_empty());
 
         // The position first: the scroll lands where the pointer is.
@@ -10547,7 +10558,7 @@ mod tests {
         ));
         assert!(matches!(
             out[3],
-            ClientMsg::Wheel { dx, dy, unit: WheelUnit::Notch } if dx == 0.0 && dy == 3.0
+            ClientMsg::Wheel { dx, dy, unit: WheelUnit::Notch } if dx == 0.0 && dy == 1.0
         ));
         assert_eq!(out.len(), 4);
         assert!(held.is_empty(), "taken is no longer held");
@@ -10567,6 +10578,26 @@ mod tests {
             out[..],
             [ClientMsg::Wheel { dx, dy, .. }] if dx == 0.0 && dy == Wheel::MAX_PX
         ));
+
+        // The cap is the units' together: a hand that changed from trackpad to
+        // wheel behind the link is still owed one event's worth, not one each.
+        held.hold(ClientMsg::Wheel { dx: 0.0, dy: 200.0, unit: WheelUnit::Pixel });
+        held.hold(ClientMsg::Wheel { dx: 0.0, dy: -1.0, unit: WheelUnit::Notch });
+        for unit in [WheelUnit::Line, WheelUnit::Page, WheelUnit::Notch, WheelUnit::Pixel] {
+            for _ in 0..50 {
+                held.hold(ClientMsg::Wheel { dx: 0.0, dy: 300.0, unit });
+            }
+        }
+        let out: Vec<ClientMsg> = held.take().collect();
+        assert_eq!(out.len(), 3, "a unit each");
+        let owed: f32 = out
+            .iter()
+            .map(|msg| match msg {
+                ClientMsg::Wheel { dy, unit, .. } => Wheel::pixels(*dy, *unit).abs(),
+                _ => panic!("only scroll was held"),
+            })
+            .sum();
+        assert!((owed - Wheel::MAX_PX).abs() < 0.01, "{owed}");
 
         let key = ClientMsg::Key { code: "KeyA".into(), pressed: true, caps: false };
         assert!(matches!(held.hold(key), Some(ClientMsg::Key { .. })));

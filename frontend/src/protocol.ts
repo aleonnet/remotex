@@ -662,7 +662,9 @@ const WHEEL_DELTA_NOTCH = 120;
 // deltaX/deltaY), or null if this axis did not come from one. A wheel's legacy
 // delta is whole notches of 120 whatever the pixels beside it, where a
 // trackpad's follows its pixels — three times them, on macOS, which is the one
-// way a glide lands on 120 and is told apart here.
+// way a glide lands on 120 and is told apart here. The legacy delta is a whole
+// number and the pixels need not be, so three times them is matched to within
+// the one that rounding or truncating it takes off.
 function axisNotches(delta: number, legacy: number | undefined): number | null {
   if (legacy === undefined || !Number.isFinite(legacy)) {
     return null;
@@ -670,7 +672,7 @@ function axisNotches(delta: number, legacy: number | undefined): number | null {
   if (legacy === 0) {
     return delta === 0 ? 0 : null;
   }
-  if (legacy % WHEEL_DELTA_NOTCH !== 0 || legacy === -3 * delta) {
+  if (legacy % WHEEL_DELTA_NOTCH !== 0 || Math.abs(legacy + 3 * delta) < 1) {
     return null;
   }
   return -legacy / WHEEL_DELTA_NOTCH;

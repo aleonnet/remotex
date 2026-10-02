@@ -170,6 +170,20 @@ test("a glide stays the distance it is", () => {
     }),
     { dx: 0, dy: 40, unit: "pixel" },
   );
+  // The legacy delta is a whole number, so a fraction of a pixel either side
+  // of 40 lands on 120 as well.
+  for (const deltaY of [39.7, 40.1, 40.3]) {
+    assert.deepEqual(
+      wheelFromEvent({
+        deltaX: 0,
+        deltaY,
+        deltaMode: 0,
+        wheelDeltaX: 0,
+        wheelDeltaY: -120,
+      }),
+      { dx: 0, dy: deltaY, unit: "pixel" },
+    );
+  }
   // One axis off a notch is no wheel.
   assert.deepEqual(
     wheelFromEvent({
