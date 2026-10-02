@@ -214,8 +214,8 @@ pub fn enable_inbound_record_decryption() -> Vec<u8> {
     vec![0x12, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00]
 }
 
-/// The least time between two updates the Mac pushes unasked once
-/// [`auto_framebuffer_update`] has armed it, in microseconds: one video frame of
+/// The shortest interval [`auto_framebuffer_update`] arms, in microseconds: the
+/// least time between two updates the Mac pushes unasked, and one video frame of
 /// this gateway's, which shows no more than that however often the Mac pushes.
 ///
 /// The Mac counts the interval from the end of its last update, so anything above
@@ -226,22 +226,85 @@ pub fn enable_inbound_record_decryption() -> Vec<u8> {
 /// screen moves. A long interval costs the picture instead: Standard mode on a
 /// physical display answers an incremental request late, as seldom as the next
 /// push comes, and at a second a scroll arrives a frame a second.
-const AUTO_UPDATE_INTERVAL_US: u32 = 33_333;
+pub const PUSH_INTERVAL_US: u32 = 33_333;
 
-/// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates, paced by
-/// `AUTO_UPDATE_INTERVAL_US`.
+/// The longest interval [`PushPace`] arms: the second that starves a physical
+/// display's picture, which a gateway that far behind is not showing anyway.
+const PUSH_INTERVAL_CEILING_US: u32 = 1_000_000;
+
+/// How far the interval a session wants must be from the one armed before it is
+/// armed again, as a ratio either way, so a cost that wavers does not re-arm the
+/// Mac at every update.
+const PUSH_REARM_RATIO: f64 = 1.5;
+
+/// The least time between two re-armings.
+const PUSH_REARM_GAP: std::time::Duration = std::time::Duration::from_millis(500);
+
+/// The interval a Standard session arms the Mac's pushes with, following what
+/// each update costs this gateway to take: the time to read it off the
+/// connection, decode it and hand it to the video stream, the browser's link
+/// included where that holds the stream.
+///
+/// Apple's viewer arms zero and leaves the pacing to the Mac, which throttles
+/// itself by how fast the connection drains, and that holds its sender, and the
+/// input behind it, for as long as the connection is full. This keeps the gap
+/// after each update at least as long as the update took to take, so the
+/// connection is empty and the Mac is reading input before the next one starts:
+/// [`PUSH_INTERVAL_US`] while the gateway keeps up, and wider as it falls behind.
+///
+/// Pure state with the clock passed in.
+#[derive(Debug)]
+pub struct PushPace {
+    armed: u32,
+    /// The smoothed cost of an update, in microseconds.
+    cost: f64,
+    changed: Option<std::time::Instant>,
+}
+
+impl Default for PushPace {
+    fn default() -> Self {
+        Self { armed: PUSH_INTERVAL_US, cost: 0.0, changed: None }
+    }
+}
+
+impl PushPace {
+    /// One update carrying pixels took `cost` to take. Returns the interval to
+    /// arm when it has moved far enough from the one armed.
+    ///
+    /// The cost is smoothed over a handful of updates, so one whole-screen repaint
+    /// in a quick run widens the gap little and briefly.
+    pub fn observe(&mut self, cost: std::time::Duration, now: std::time::Instant) -> Option<u32> {
+        let cost = cost.as_secs_f64() * 1e6;
+        self.cost += (cost - self.cost) * 0.2;
+        let wanted = self.cost.clamp(f64::from(PUSH_INTERVAL_US), f64::from(PUSH_INTERVAL_CEILING_US));
+        let armed = f64::from(self.armed);
+        let moved = wanted >= armed * PUSH_REARM_RATIO
+            || wanted <= armed / PUSH_REARM_RATIO
+            || (wanted <= f64::from(PUSH_INTERVAL_US) && self.armed != PUSH_INTERVAL_US);
+        if !moved || self.changed.is_some_and(|at| now.duration_since(at) < PUSH_REARM_GAP) {
+            return None;
+        }
+        // In range by the clamp above.
+        self.armed = wanted as u32;
+        self.changed = Some(now);
+        Some(self.armed)
+    }
+}
+
+/// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates, at most
+/// one each `interval_us`.
 ///
 /// Cursor shapes above all depend on this arming across a login, lock or
 /// fast-user-switch, so it is re-sent for the full framebuffer whenever the
 /// display layout changes.
-pub fn auto_framebuffer_update((w, h): (u16, u16)) -> Vec<u8> {
+pub fn auto_framebuffer_update(interval_us: u32, (w, h): (u16, u16)) -> Vec<u8> {
     let mut msg = Vec::with_capacity(16);
     msg.push(0x09);
     msg.push(0);
     msg.extend_from_slice(&1u16.to_be_bytes()); // version
     // The update interval. This is not a display id: `SetDisplayMessage` is the
     // one and only place a screen is selected.
-    msg.extend_from_slice(&AUTO_UPDATE_INTERVAL_US.to_be_bytes());
+    msg.extend_from_slice(&interval_us.to_be_bytes());
     for value in [0, 0, w, h] {
         msg.extend_from_slice(&value.to_be_bytes());
     }
@@ -1106,8 +1169,47 @@ mod tests {
     }
 
     #[test]
+    fn the_push_interval_follows_what_an_update_costs() {
+        use std::time::{Duration, Instant};
+        let start = Instant::now();
+        let at = |ms: u64| start + Duration::from_millis(ms);
+        let mut pace = PushPace::default();
+
+        // A gateway that keeps up stays at one frame and re-arms nothing.
+        for ms in 0..20 {
+            assert_eq!(pace.observe(Duration::from_millis(10), at(ms * 40)), None);
+        }
+
+        // One slow update among quick ones is not enough to move it.
+        assert_eq!(pace.observe(Duration::from_millis(100), at(900)), None);
+
+        // A run of them widens the gap towards what they cost, and a run of very
+        // slow ones no further than the ceiling.
+        let mut widened = Vec::new();
+        for step in 0..40 {
+            widened.extend(pace.observe(Duration::from_millis(200), at(1000 + step * 200)));
+        }
+        assert!(widened.windows(2).all(|pair| pair[1] > pair[0]), "{widened:?}");
+        assert!((150_000..=200_000).contains(widened.last().expect("a wider gap")), "{widened:?}");
+        let mut slowest = None;
+        for step in 0..40 {
+            slowest = pace.observe(Duration::from_secs(30), at(10_000 + step * 600)).or(slowest);
+        }
+        assert_eq!(slowest, Some(PUSH_INTERVAL_CEILING_US));
+
+        // Quick updates narrow it again, in steps, and it ends at one frame exactly.
+        let mut narrowed = Vec::new();
+        for step in 0..200 {
+            narrowed.extend(pace.observe(Duration::from_millis(5), at(40_000 + step * 100)));
+        }
+        assert!(narrowed.len() > 1, "in steps: {narrowed:?}");
+        assert!(narrowed.windows(2).all(|pair| pair[1] < pair[0]), "{narrowed:?}");
+        assert_eq!(narrowed.last(), Some(&PUSH_INTERVAL_US));
+    }
+
+    #[test]
     fn arming_display_selection_and_server_scaling_are_fixed_shapes() {
-        let arm = auto_framebuffer_update((3840, 2160));
+        let arm = auto_framebuffer_update(PUSH_INTERVAL_US, (3840, 2160));
         assert_eq!(arm.len(), 16);
         assert_eq!(arm[0], 0x09);
         assert_eq!(be16(&arm, 2), 1);

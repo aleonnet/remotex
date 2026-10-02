@@ -158,7 +158,7 @@ Both modes connect the same way until the record layer is up.
 6. **The mode.** High Performance sends `SetDisplayConfiguration`, both modes send
    `SetPixelFormat` and the same `SetEncodings`, and High Performance then arms
    `AutoFrameBufferUpdate`. Standard arms it when the first layout names the
-   screen being sent. Both arm it for one push a video frame (see
+   screen being sent. Both arm it for one push a video frame at most (see
    [Other messages](#other-messages)).
 
 ### Other login types
@@ -620,9 +620,15 @@ rectangle.
   window drew 2–9 updates a second with the Mac silent for a second at a time,
   where the same scroll on a virtual display drew 20–30. With the interval at 0
   the physical display is smooth.
-- **Remotex arms with 33,333,** one frame of its video stream, in every Apple
-  session. It shows no more than a frame in that time however often the Mac
-  pushes, and the gap after each update is when the Mac reads its input (below).
+- **Remotex arms with 33,333 or more.** 33,333 is one frame of its video stream:
+  it shows no more than a frame in that time however often the Mac pushes, and
+  the gap after each update is when the Mac reads its input (below). A Standard
+  session widens the gap as it falls behind. It arms again with what an update
+  costs it to take — the time to read it, decode it and hand it to the video
+  stream, the browser's link included where that holds the stream — smoothed over
+  a few updates, up to 1,000,000, and comes back to 33,333 as the cost falls. It
+  arms again only when the interval moves by half, and at most twice a second.
+  High Performance stays at 33,333: its picture is the media stream.
 - **`0xffffffff` turns the pushes off.** The daemon records whether the word is
   the all-ones value and pushes nothing while it is. A published description reads
   the word as a screen id, with all-ones meaning all displays. It is not one:
@@ -649,6 +655,10 @@ scrolling window on the Mac and the pointer sweeping, sampled once a second:
 | 0 | 47 | 41,616 bytes | 4.8 Mpx/s |
 | 33,333 | 4 | 1,190 bytes | 4.7 Mpx/s |
 | 1,000,000 | 2 | 2,856 bytes | 1.4 Mpx/s |
+| following the cost | 3 | 3,230 bytes | 4.1 Mpx/s |
+
+Following the cost, that gateway armed between 50,000 and 240,000. Unheld, it
+never left 33,333.
 
 Arming the full framebuffer at setup and after every layout is still required,
 because it keeps cursor updates alive across logins and locks. Its rectangle is
