@@ -1244,6 +1244,13 @@ the same ports, under a new SSRC, with an IDR at the new size. Remotex offers on
 the display has settled, and the resize's cover stays up until that IDR is on its
 way to the browser.
 
+An offer's two replies come in either order: message 1, which names the ports,
+ahead of message 2, the answer, or behind it. Remotex once read ports behind the
+answer as the unasked announcement above, took the stream down and offered
+again; the Mac answered that offer with no ports, having named them once, and
+the session ended ten seconds later. In eleven High Performance sessions opened
+right after a mirror session, the Mac sent the answer first in two.
+
 ### The stream on the physical displays
 
 Measured on 2026-10-02 against macOS 27, on a Mac mini with one 1600×900 display
