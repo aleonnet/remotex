@@ -217,8 +217,7 @@ announces late is still taken.
   3840 bytes of samples before compression, and FLAC adds a few header bytes at
   worst, so anything larger is a server that has lost its framing.
 
-So the gateway needs no codec for wlshare's sound, and no library on its host:
-a `wlshare` target's Sound is never greyed at the picker for the want of one.
+So the gateway needs no codec for wlshare's sound.
 wlshare's FLAC encoder is libFLAC, through
 [desktop-flac](https://github.com/andrewtheguy/desktop-flac), which the gateway
 pins too, for the FLAC it codes of an RDP host's sound.

@@ -39,7 +39,6 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     size: null,
     defaultSize: DEFAULT_SIZE,
     audio: false,
-    losslessUnavailable: false,
     passthrough: null,
     passthroughOnly: false,
     ...offers,
@@ -169,7 +168,6 @@ test("nothing is ticked until somebody ticks it", () => {
   assert.equal(options.sound, false);
   assert.ok(options.rows.every((row) => !row.checked && !row.disabled));
   assert.equal(options.soundRow?.checked, false);
-  assert.ok(options.soundRow?.formats.every((format) => !format.disabled));
 });
 
 test("what was chosen last time is what Start sends", () => {
@@ -231,39 +229,6 @@ test("a passthrough this browser cannot take is greyed, with the reason", () => 
     assert.equal(options.choices.passthrough, false);
     assert.equal(options.blocked, null, "the target still starts, encoded");
   }
-});
-
-test("a lossless sound the gateway cannot code is greyed, with the reason", () => {
-  const without = { ...RDP, losslessUnavailable: true };
-  // Chosen last time, on a gateway that could code it.
-  const options = targetOptions(without, { audio: "flac" }, ABLE);
-  const lossless = options.soundRow?.formats.find(
-    (format) => format.value === "flac",
-  );
-  assert.ok(lossless);
-  assert.equal(lossless.disabled, true);
-  assert.match(lossless.note, /libFLAC/);
-  assert.equal(options.choices.audio, "off");
-  assert.equal(options.soundRow?.checked, false);
-  assert.equal(options.sound, false);
-  assert.equal(options.blocked, null, "the target still starts, without sound");
-  // Opus is coded by the gateway itself, and is still a choice.
-  assert.equal(
-    options.soundRow?.formats.find((format) => format.value === "opus")
-      ?.disabled,
-    false,
-  );
-  assert.equal(
-    targetOptions(without, { audio: "opus" }, ABLE).choices.audio,
-    "opus",
-  );
-
-  const able = targetOptions(RDP, { audio: "flac" }, ABLE);
-  assert.equal(
-    able.soundRow?.formats.find((format) => format.value === "flac")?.disabled,
-    false,
-  );
-  assert.equal(able.choices.audio, "flac");
 });
 
 test("a gateway that cannot decode the Mac's picture can only pass it", () => {

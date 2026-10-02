@@ -1290,10 +1290,7 @@ and `GET /api/targets` carries it:
   also says, as `passthroughOnly`, where a gateway's host lacks FFmpeg
   and so cannot decode a Mac's picture at all: there the picture can only
   be passed, the row shows it chosen, and where the browser cannot take it
-  either Start is greyed and says why, before the Mac is dialled. It says as
-  `losslessUnavailable` where the host lacks libFLAC and the target's lossless
-  sound needs it — to code an RDP host's as FLAC, and never for wlshare's, which
-  is passed: Lossless is greyed and names the library, and Opus stays a choice.
+  either Start is greyed and says why, before the Mac is dialled.
   A `connect`
   that asks for a passthrough the browser said it cannot take is refused like an
   unoffered one.
@@ -1358,7 +1355,7 @@ one. Both appear on the client's session card, which
 (`mediaLabel.ts`).
 
 `GET /api/targets` carries `subtype` too, beside the options each target offers
-(`resize`, `audio`, `losslessUnavailable`, `passthrough` and `passthroughOnly`) and the sizes it keeps
+(`resize`, `audio`, `passthrough` and `passthroughOnly`) and the sizes it keeps
 (`size`, the configured one, and `defaultSize`), so the picker names it one step
 earlier — the difference between two Macs in that list is a choice being made,
 not something to discover after connecting. The row uses the config spelling
@@ -1568,20 +1565,19 @@ milliseconds of it, and each packet is one FLAC frame. It is a choice at the pic
 `rdp` or a `wlshare` target, and not a config key; the target's Opus keys do
 nothing in such a session, since there is no rate to set or walk.
 
-| Target | What the gateway does | `audioFormat` | libFLAC on the host |
-|---|---|---|---|
-| `wlshare` | passes wlshare's frames as they came | 48 kHz, 960 frames | not needed |
-| `rdp` | codes the host's PCM as FLAC | 44.1 kHz, 882 frames | needed |
-| `ard-high-performance` | not supported: the Mac's AAC-ELD is passed | | |
-| any other | not supported: no sound | | |
+| Target | What the gateway does | `audioFormat` |
+|---|---|---|
+| `wlshare` | passes wlshare's frames as they came | 48 kHz, 960 frames |
+| `rdp` | codes the host's PCM as FLAC | 44.1 kHz, 882 frames |
+| `ard-high-performance` | not supported: the Mac's AAC-ELD is passed | |
+| any other | not supported: no sound | |
 
 - **wlshare's frames are passed**, as its Opus packets are in a session started
   with Opus: the engine lists the audio encoding without the Opus one beside it,
   which is how wlshare is asked for FLAC. It reads each frame message and
   queues the frame undecoded (`AudioBridge::unit`), between a begin and an end as
   ever, and the audio socket hands the units on (`vnc_audio::PASSED_FLAC`,
-  `AudioListener::into_passed`). No decoder is made, so such a session needs no
-  libFLAC and Lossless at the picker is never greyed for the want of it. Nothing
+  `AudioListener::into_passed`). No decoder is made. Nothing
   here checks a frame but its length, which must fit the socket's 16-bit packet
   length: the page's decoder is what refuses a bad one.
 - **An RDP host's PCM is coded here.** `AudioListener::into_flac` takes the wave
@@ -1589,9 +1585,8 @@ nothing in such a session, since there is no rate to set or walk.
   way, and makes a frame of every 882, each a FLAC stream of its own as
   wlshare's are (`desktop-flac`'s encoder). What does not fill a block waits for
   the next buffer, and is dropped with a buffer the queue dropped, so no frame
-  joins samples that were never neighbours. It needs libFLAC: the picker greys
-  Lossless where the host has none, and a session started with it all the same
-  ends before the host is dialled.
+  joins samples that were never neighbours. libFLAC is linked into the gateway
+  statically, so the host needs none installed.
 - **The page decodes in a module of its own.** `frontend/wasm/flac` is a Rust
   FLAC frame decoder built to WebAssembly, loaded by the first FLAC stream
   (`frontend/src/flacDecoder.ts`). WebCodecs is not asked: what travels is bare
