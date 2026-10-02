@@ -205,7 +205,7 @@ pub enum Chroma {
 
 /// The encoder's own word for it: the config's chroma is a key and a wire answer, the
 /// crate's is a VP9 profile, and this is the one place the first becomes the second.
-impl From<Chroma> for desktop_vp9::Chroma {
+impl From<Chroma> for screen_vp9::Chroma {
     fn from(chroma: Chroma) -> Self {
         match chroma {
             Chroma::Subsampled => Self::Subsampled,

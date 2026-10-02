@@ -25,7 +25,7 @@ use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use desktop_vp9::walk::{LAG_CLEAR, QualityWalk};
+use screen_vp9::walk::{LAG_CLEAR, QualityWalk};
 
 use crate::config::{Chroma, RenderPlan};
 use crate::feedback::LinkFeedback;

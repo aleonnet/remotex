@@ -1640,7 +1640,7 @@ mod tests {
     /// a client that received them in the other order would decode nothing.
     #[test]
     fn the_audio_format_is_text_and_the_packets_are_not() {
-        let head = desktop_opus::Stream { rate: 48_000, channels: 2 }.head(312, 44_100).unwrap().to_vec();
+        let head = sound_opus::Stream { rate: 48_000, channels: 2 }.head(312, 44_100).unwrap().to_vec();
         let json = (ServerMsg::AudioFormat {
             codec: "opus",
             sample_rate: 48_000,

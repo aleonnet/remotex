@@ -47,7 +47,7 @@ pub const AUDIO_QUEUE_DEPTH: usize = 16;
 
 /// How long sending one packet batch to the audio socket may block before it
 /// counts as one the link could not keep up with — the audio walk's analogue of
-/// the video walk's `BEHIND_BLOCK` (`desktop_vp9::walk`), and the same reasoning: the socket's queue
+/// the video walk's `BEHIND_BLOCK` (`screen_vp9::walk`), and the same reasoning: the socket's queue
 /// is deliberately two deep ([`crate::session::AUDIO_SOCKET_BUFFER`]), so this
 /// stays at zero while the link has room and becomes obvious the moment it does
 /// not.
@@ -478,7 +478,7 @@ impl AudioListener {
     /// bytes a frame already. Fails for a format FLAC does not carry.
     pub fn into_flac(self, format: PcmFormat) -> anyhow::Result<EncodedAudio<impl Stream<Item = Vec<Bytes>>>> {
         struct State {
-            encoder: desktop_flac::Encoder,
+            encoder: sound_flac::Encoder,
             waves: broadcast::Receiver<Bytes>,
             /// Samples not yet a whole block's worth, as the engine gave them.
             pending: Vec<u8>,
@@ -490,13 +490,13 @@ impl AudioListener {
             format.bits_per_sample == 16 && (1..=2).contains(&format.channels),
             "cannot carry {format:?} as FLAC: the page decodes 16-bit mono or stereo"
         );
-        let stream = desktop_flac::Stream {
+        let stream = sound_flac::Stream {
             rate: format.sample_rate,
             channels: format.channels as u8,
             bits: 16,
             block: (format.sample_rate / 50) as u16,
         };
-        let encoder = desktop_flac::Encoder::new(stream).with_context(|| format!("cannot carry {format:?} as FLAC"))?;
+        let encoder = sound_flac::Encoder::new(stream).with_context(|| format!("cannot carry {format:?} as FLAC"))?;
         let block_bytes = stream.samples() * 2;
 
         let state = State { encoder, waves: self.waves, pending: Vec::new(), block: Vec::new() };
@@ -661,7 +661,7 @@ impl AudioSignals {
     }
 }
 
-/// What the audio link will bear — the video walk (`desktop_vp9::walk`) for sound,
+/// What the audio link will bear — the video walk (`screen_vp9::walk`) for sound,
 /// owned by whatever task sends the packets, with the verdicts published
 /// through [`AudioSignals`].
 ///
@@ -1047,7 +1047,7 @@ mod tests {
         assert_eq!(frames.len(), 3);
 
         let mut decoder =
-            desktop_flac::Decoder::new(desktop_flac::Stream { rate: 44_100, channels: 2, bits: 16, block: 882 })
+            sound_flac::Decoder::new(sound_flac::Stream { rate: 44_100, channels: 2, bits: 16, block: 882 })
                 .unwrap();
         let mut samples = Vec::new();
         let mut decoded = Vec::new();

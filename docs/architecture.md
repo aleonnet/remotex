@@ -168,9 +168,9 @@ area and points here; read the area's section before changing what it covers.
 
 A session's picture reaches the browser one of two ways, both ordinary:
 - **Encoded here** as VP9 by the gateway's one video encoder, the
-  `desktop-vp9` crate wlshare codes its own stream with, pinned by release tag
+  `screen-vp9` crate wlshare codes its own stream with, pinned by release tag
   in `Cargo.toml`. A libvpx setting, the conversion in front of it, the codec
-  string or the quality walk changes in the desktop-vp9 repository and reaches
+  string or the quality walk changes in the screen-vp9 repository and reaches
   here as a pin bump.
 - **Passed untouched**, as the remote made it, for the browser to decode or
   compose: today wlshare's VP9 on a `wlshare` target, and in a session started
@@ -251,7 +251,7 @@ that selects the stream. See
   here, save a High Performance Mac's AAC-ELD, which every session passes as it
   came and the gateway never decodes; do not add a decoder for the Mac's sound.
   A `wlshare` target's is always passed too: wlshare codes it, as Opus with the
-  encoder the gateway codes an RDP host's with (`desktop-opus`) at the rate the
+  encoder the gateway codes an RDP host's with (`sound-opus`) at the rate the
   target's audio keys and their walk arrive at, or as FLAC in a lossless session.
   Do not decode or re-encode wlshare's sound here, and do not give wlshare a
   codec key of its own: the format is the gateway's to ask for.
@@ -375,8 +375,8 @@ experimental wherever it is named to an operator. See
 | `camera.rs`, `mic.rs` | browser camera and microphone bridges into the active engine |
 | `shadow.rs` | change detection: what the client already has |
 | `encode.rs`, `stream.rs`, `video.rs` | the ordered, paced, congestion-aware stream: its mirror, its rounds, and the picture limits |
-| `vp9.rs` | the VP9 stream over the mirror, coded by the `desktop-vp9` crate wlshare shares — the one place libvpx is spoken to for either side |
-| `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding by the `desktop-opus` crate wlshare codes its own sound with, resampling, the FLAC coding of a lossless target's PCM, and the passing of a remote's own stream |
+| `vp9.rs` | the VP9 stream over the mirror, coded by the `screen-vp9` crate wlshare shares — the one place libvpx is spoken to for either side |
+| `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding by the `sound-opus` crate wlshare codes its own sound with, resampling, the FLAC coding of a lossless target's PCM, and the passing of a remote's own stream |
 | `frontend/wasm/flac/` | the page's FLAC decoder for a session's lossless sound, a WebAssembly module of its own |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
@@ -522,7 +522,7 @@ decoder: no browser's hardware VP9 path takes profile 1 — Intel's media engine
 from Ice Lake on decode it, but Chromium's D3D11 and VA-API decoders advertise
 profiles 0 and 2 only — so it always decodes in software, and a browser with no software VP9 at all, which is iOS and
 iPadOS, refuses the configuration by name the way it would refuse any other.
-`a_444_stream_keeps_the_colour_420_averages_away` in `desktop-vp9` is the round
+`a_444_stream_keeps_the_colour_420_averages_away` in `screen-vp9` is the round
 trip that pins the difference, through the archive's own decoder.
 
 #### Past the ceiling
@@ -570,7 +570,7 @@ and its stream starts from an announcement and a keyframe.
 wlshare has a VP9 encoding of its own, `WLSV` (`0x574c5356`), made for its desktop
 clients and for this gateway: every update one rectangle over the whole desktop, a
 `u32` length and one frame of a single stream. That stream is the one this gateway
-would encode from the same pixels — coded by the same `desktop-vp9` crate at the
+would encode from the same pixels — coded by the same `screen-vp9` crate at the
 same speed, screen tuning and dial, 8-bit at either chroma, BT.601 at studio swing
 declared in its keyframes, so the two are one stream by construction — so on a
 `wlshare` target the gateway lists it for every browser, tells wlshare what the
@@ -977,7 +977,7 @@ saturated colour a little off. Nothing on the wire carries it; the decoder reads
 from the bitstream.
 
 The dial is a **ceiling**, and that framing is what makes adaptation tractable here.
-The walk is shared with wlshare — `QualityWalk` in the `desktop-vp9` crate, the one walk both
+The walk is shared with wlshare — `QualityWalk` in the `screen-vp9` crate, the one walk both
 run, driven from `src/encode.rs`. It watches one local signal — how long queueing an
 access unit blocked — and walks the 1–100 dial down to its floor of 20 when the link is
 behind, then the frame rate, and back up towards the configured quality when it is
@@ -1120,7 +1120,7 @@ would not take.
 #### The codec
 
 The gateway **encodes VP9 only** (`src/vp9.rs`), and there is no codec key: one
-encoder is one to maintain. The encoder is the `desktop-vp9` crate, its own
+encoder is one to maintain. The encoder is the `screen-vp9` crate, its own
 repository pinned by release tag here and in wlshare, and the one place libvpx is
 spoken to for this gateway and for wlshare's own stream: the quantizer pinned to the dial, screen-content
 tuning, no lag, no dropped frames, no keyframe unasked, the colour declared in the
@@ -1583,7 +1583,7 @@ nothing in such a session, since there is no rate to set or walk.
 - **An RDP host's PCM is coded here.** `AudioListener::into_flac` takes the wave
   buffers as they come, at the 44.1 kHz the host sends with no resampler in the
   way, and makes a frame of every 882, each a FLAC stream of its own as
-  wlshare's are (`desktop-flac`'s encoder). What does not fill a block waits for
+  wlshare's are (`sound-flac`'s encoder). What does not fill a block waits for
   the next buffer, and is dropped with a buffer the queue dropped, so no frame
   joins samples that were never neighbours. libFLAC is linked into the gateway
   statically, so the host needs none installed.

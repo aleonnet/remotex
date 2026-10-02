@@ -1,14 +1,14 @@
 //! Convert live PCM wave buffers into bare 20 ms Opus packets.
 //!
 //! The PCM arrives already deinterleaved and resampled to 48 kHz by
-//! [`crate::pcm48`]; this is only the codec, and the codec is `desktop-opus`'s,
+//! [`crate::pcm48`]; this is only the codec, and the codec is `sound-opus`'s,
 //! the encoder wlshare codes its own sound with: music-tuned, constrained VBR
 //! around the bitrate, at full effort. Each listener owns fresh codec state
 //! downstream of the nonblocking RDP queue; quiet remotes emit nothing.
 
 use anyhow::Context as _;
 use bytes::Bytes;
-use desktop_opus::{Encoder, Stream};
+use sound_opus::{Encoder, Stream};
 
 use crate::audio::PcmFormat;
 use crate::pcm48::{Pcm48, SAMPLE_RATE};
