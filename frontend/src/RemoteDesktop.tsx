@@ -189,7 +189,6 @@ export default function RemoteDesktop({
     touchActive,
     setTouchEnabled,
     remoteResizing,
-    viewOnly,
     setViewOnly,
     onLocalShortcut,
     takeOver,
@@ -271,19 +270,6 @@ export default function RemoteDesktop({
             by default, and decorative, so it carries no alt text. */}
         <img ref={pointerRef} className="remote-pointer" alt="" />
       </div>
-
-      {/* The menu is over the desktop, so the desktop is a picture of itself for
-          as long as that lasts: it keeps painting and takes no input at all (see
-          useRemoteDesktop), and says which of the two it is doing. Takes the
-          pointer rather than passing it through — the surface underneath hides the
-          browser's own cursor, and a menu is no place to be without one. */}
-      {viewOnly && (
-        <div className="view-only">
-          <span className="view-only-label">
-            View only while the menu is open
-          </span>
-        </div>
-      )}
 
       {/* The floating menu is desktop-only; its End session button returns to
           the picker (see FloatingMenu.tsx), and Log out ends the login. */}

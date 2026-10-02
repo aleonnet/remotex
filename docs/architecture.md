@@ -2305,8 +2305,8 @@ to the remote — because for as long as the menu is up that clipboard holds wha
 copied off this page rather than anything the remote sent. The surface keeps
 painting, under a dimmed layer that says which of the two it is doing. Every way
 back out hands the keyboard to the surface as it goes, because the key listeners
-live there: the ✕, the chord that hides the menu, a drawer button that closed the
-drawer behind it. The soft keyboard is the one control in this menu that is itself
+live there: the ✕, a click on the dimmed layer, the chord that hides the menu, a
+drawer button that closed the drawer behind it. The soft keyboard is the one control in this menu that is itself
 keyboard input, so a key pressed there takes the drawer down as it sends — the
 label never stands over a remote being typed on.
 

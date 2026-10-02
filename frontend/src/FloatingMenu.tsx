@@ -339,6 +339,7 @@ function useViewOnly(
     report(true);
     return () => report(false);
   }, [anythingUp, report]);
+  return anythingUp;
 }
 
 function usePanel() {
@@ -1359,10 +1360,27 @@ export default function FloatingMenu({
         };
   }, [resolvedPosition, viewport, floor]);
 
-  useViewOnly(open, hidden, modal, onViewOnlyChange);
+  const viewOnly = useViewOnly(open, hidden, modal, onViewOnlyChange);
+  const closeDrawer = useCallback(() => setOpen(false), []);
 
   return (
     <>
+      {/* The menu is over the desktop, so the desktop is a picture of itself for
+          as long as that lasts: it keeps painting and takes no input at all (see
+          useRemoteDesktop), and says which of the two it is doing. Takes the
+          pointer rather than passing it through — the surface underneath hides the
+          browser's own cursor, and a menu is no place to be without one — and a
+          click on it closes the drawer, as one beside any menu does. */}
+      {viewOnly && (
+        // biome-ignore lint/a11y/useKeyWithClickEvents: click-outside dismiss; the ✕ covers keyboard users
+        // biome-ignore lint/a11y/noStaticElementInteractions: the cover behind the drawer
+        <div className="view-only" onClick={closeDrawer}>
+          <span className="view-only-label">
+            View only while the menu is open
+          </span>
+        </div>
+      )}
+
       {/* The button and its drawer go together: a toolbar anchored to a button
           that isn't there reads as a bug. Both keep their state while hidden, so
           the chord brings back exactly what was on screen. Docked panels are left
