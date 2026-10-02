@@ -16,10 +16,11 @@
 //                         zoomed view with it), moving in parallel scrolls,
 //                         axis-locked (vertical or horizontal wheel) in the
 //                         natural direction, where content follows the fingers
+//                         at the scale the desktop is shown at
 //
 // The state machine keeps its thresholds local to this file. The output layer
 // sends remotex ClientMsg JSON (a scroll tick is one wheel message carrying the
-// finger travel it stands for), and the view transform is owned by
+// remote distance it stands for, in points), and the view transform is owned by
 // useRemoteDesktop's applyCanvasCss, reached through GestureDeps.
 
 import type { ClientMsg } from "./protocol.ts";
@@ -58,6 +59,10 @@ const TWO_FINGER_TAP_MAX_DURATION_MS = 260;
 // a two-finger tap still. That same travel names the scroll axis and counts as
 // the scroll's own first movement, so recognising a scroll costs it nothing.
 const TWO_FINGER_CLASSIFY_PX = 12;
+// One scroll tick, in points of the remote desktop: the distance the fingers
+// covered on the desktop as it is shown, not on the glass. A phone shows a
+// desktop several times smaller than it is, and travel counted on the glass
+// scrolled it that many times slower than the fingers moved.
 const SCROLL_STEP_PX = 32;
 
 export interface Point {
@@ -75,8 +80,10 @@ export interface GestureView {
 
 export interface GestureDeps {
   send(msg: ClientMsg): void;
-  // The remote framebuffer size; null before the first resize message.
-  remoteSize(): { w: number; h: number } | null;
+  // The remote framebuffer size, and how many of its pixels the remote draws
+  // per point of its desktop (absent means one); null before the first resize
+  // message.
+  remoteSize(): { w: number; h: number; scale?: number } | null;
   // The current view transform, after clamping.
   view(): GestureView;
   // Clamp the requested zoom/pan and restyle the canvas.
@@ -184,7 +191,7 @@ function getTouchById(touches: TouchList, touchId: number): Touch | null {
   return null;
 }
 
-// Drain accumulated finger travel into wheel ticks, one per 32px step, and
+// Drain accumulated remote travel, in points, into wheel ticks, one per 32px step, and
 // return the leftover carry.
 function drainScrollCarry(carry: number, tick: (dir: 1 | -1) => void): number {
   let rest = carry;
@@ -221,6 +228,12 @@ export function attachTouchGestures(
 
   function remoteSize(): { w: number; h: number } {
     return deps.remoteSize() ?? { w: 1, h: 1 };
+  }
+
+  // CSS pixels per point of the remote desktop, the unit a scroll is sent in —
+  // what a wheel event's own pixels are on a desktop shown at 100%.
+  function pointScale(): number {
+    return effectiveScale() * (deps.remoteSize()?.scale ?? 1);
   }
 
   function effectiveScale(): number {
@@ -328,12 +341,13 @@ export function attachTouchGestures(
     });
   }
 
-  // One scroll step at the cursor, carrying the finger travel it stands for.
+  // One scroll step at the cursor, carrying the remote distance it stands for.
   //
   // Pixels, because that is what the deltas are: a step is a step's worth of
-  // finger movement. RDP spends the distance as proportional wheel rotation and
-  // an Apple VNC target as as many wheel pulses as it is worth there; generic
-  // VNC reads only the sign, so a step is a notch there.
+  // the desktop passing under the fingers. RDP spends the distance as proportional wheel rotation and
+  // an Apple VNC target as as many wheel pulses as it is worth there, and
+  // wlshare is sent it as a distance; generic VNC reads only the sign, so a
+  // step is a notch there.
   function sendScrollTick(dx: number, dy: number): void {
     const c = currentCursor();
     deps.send({ type: "mouseMove", x: c.x, y: c.y });
@@ -708,8 +722,10 @@ export function attachTouchGestures(
     });
   }
 
-  // One scroll frame: every 32px the midpoint travels along the locked axis
-  // drains into one wheel tick.
+  // One scroll frame: every 32 remote points the midpoint travels along the
+  // locked axis drains into one wheel tick. The travel goes through the scale
+  // the desktop is shown at, as the cursor's does, so zooming in slows the
+  // scroll with the view.
   function applyScrollMove(
     gesture: TwoFingerGesture,
     axis: ScrollAxis,
@@ -717,8 +733,9 @@ export function attachTouchGestures(
     second: Touch,
   ): void {
     const midpoint = getTouchMidpoint(first, second);
-    const stepX = midpoint.x - gesture.lastMidX;
-    const stepY = midpoint.y - gesture.lastMidY;
+    const scale = pointScale();
+    const stepX = (midpoint.x - gesture.lastMidX) / scale;
+    const stepY = (midpoint.y - gesture.lastMidY) / scale;
     gesture.lastMidX = midpoint.x;
     gesture.lastMidY = midpoint.y;
 
