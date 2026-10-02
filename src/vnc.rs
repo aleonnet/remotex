@@ -49,7 +49,7 @@ use crate::protocol::{
     clipboard_fits,
 };
 use crate::shadow::{self, Rect, Shadow};
-use crate::vnc_apple::{self, CursorCache};
+use crate::vnc_apple::{self, CursorCache, Pushes};
 use crate::vnc_apple_media::{self, MediaStream, PassedUnit, Pictures};
 use crate::vnc_audio::{self, ServerAudio};
 use crate::vnc_encodings::{Decoded, Decoders, Payload};
@@ -2328,9 +2328,10 @@ async fn apple_preface(
     if virtual_display {
         // Arm the server's sender. Cursor shapes above all depend on it across a
         // login or lock, which is why the full region is re-sent on every layout
-        // too, and which is when Standard on the physical displays first arms it.
+        // too, and which is when Standard on the physical displays first arms it,
+        // for every frame rather than paced — see [`Pushes`].
         uplink
-            .send(&vnc_apple::auto_framebuffer_update(server.size()))
+            .send(&vnc_apple::auto_framebuffer_update(Pushes::Paced, server.size()))
             .await?;
     }
 
@@ -3115,7 +3116,7 @@ async fn hp_resize_step(
                 let size = desktop.lock().unwrap().size;
                 send_all(
                     uplink,
-                    &[vnc_apple::auto_framebuffer_update(size), update_request(false, size).to_vec()],
+                    &[vnc_apple::auto_framebuffer_update(Pushes::Paced, size), update_request(false, size).to_vec()],
                 )
                 .await?;
             }
@@ -3175,7 +3176,7 @@ async fn show_picture(
         info!("vnc: the picture now comes from the Mac's HEVC media stream");
         // The armed region too, or the Mac would go on pushing ZRLE for every
         // change on screen — and it reads nothing from this side while it writes.
-        send(&shared.uplink, &vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST)).await?;
+        send(&shared.uplink, &vnc_apple::auto_framebuffer_update(Pushes::Paced, HP_HOLD_REQUEST)).await?;
     }
     uncover(shared, sink);
     blit_picture(&shared.shadow, picture, sink).await
@@ -3235,7 +3236,7 @@ async fn pass_unit(shared: &Shared, unit: PassedUnit, sink: &VideoSink, media: &
     if first {
         info!("vnc: the picture is now the Mac's HEVC media stream, passed to the browser");
         // As in `show_picture`: the Mac would otherwise go on pushing ZRLE.
-        send(&shared.uplink, &vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST)).await?;
+        send(&shared.uplink, &vnc_apple::auto_framebuffer_update(Pushes::Paced, HP_HOLD_REQUEST)).await?;
     }
     let (w, h) = unit.size;
     let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe };
@@ -3413,6 +3414,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
     // that keeps talking. The flag is BlockAfter, which stops the reading until that
     // fence is echoed.
     let mut held_fences: VecDeque<(tokio::time::Instant, bool, Vec<u8>)> = VecDeque::new();
+    let mut cycle = UpdateCycle::new();
     loop {
         // Raced against the next message rather than awaited on its own, so a paced
         // video stream still hands over pixels the mirror is holding when the remote
@@ -3575,6 +3577,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
         match msg_type {
             // FramebufferUpdate
             0 => {
+                cycle.arrived();
                 reader.read_u8().await?; // padding
                 desktop.lock().unwrap().first_update();
                 // `0xffff` here means "as many as it takes, ended by a LastRect" —
@@ -3601,6 +3604,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     full_repaint_owed |= effect.full_repaint_owed;
                     audio_announced |= effect.audio_announced;
                     painted |= effect.pixels.is_some();
+                    cycle.rect(effect.pixels);
                     if let (Some(repaint), Some(rect)) = (&mut full_repaint, effect.pixels) {
                         repaint.accept(rect);
                     }
@@ -3646,7 +3650,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // protocol offers, and where a video stream is told to encode what it
                 // has. After the loop rather than inside it, so a `LastRect` breaking
                 // out still reaches it.
+                cycle.read();
                 sink.frame().await?;
+                cycle.framed();
                 // wlshare's VP9 is a picture of the whole desktop, which past the
                 // ceiling is not video: off the list there, so wlshare does not code
                 // a stream nothing sends, and back on the list within it,
@@ -3699,7 +3705,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         (request, drained, d.hp.holds_pixels() || d.media_live)
                     };
                     if let Some(msg) = request {
-                        send_all(uplink, &[vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST), msg])
+                        send_all(uplink, &[vnc_apple::auto_framebuffer_update(Pushes::Paced, HP_HOLD_REQUEST), msg])
                             .await?;
                     }
                     if drained {
@@ -3765,6 +3771,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         }
                     }
                 }
+                cycle.finished();
             }
             // SetColourMapEntries — can't happen for the true-colour format we
             // set, but consume it correctly rather than desyncing the stream.
@@ -4418,6 +4425,105 @@ async fn extended_cut_text(
         }
     }
     Ok(false)
+}
+
+/// Where the read loop's time goes between one framebuffer update and the next,
+/// logged once a second at `debug`: how long the server took to answer, how long
+/// its rectangles took to read and decode, and how long the video sink held the
+/// loop. On a polled session the next request leaves only after all three, so the
+/// largest of them is what bounds the update rate.
+struct UpdateCycle {
+    mark: std::time::Instant,
+    since: std::time::Instant,
+    updates: u32,
+    rects: u32,
+    pixels: u64,
+    waited: Duration,
+    waited_most: Duration,
+    read: Duration,
+    read_most: Duration,
+    framed: Duration,
+    framed_most: Duration,
+}
+
+impl UpdateCycle {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            mark: now,
+            since: now,
+            updates: 0,
+            rects: 0,
+            pixels: 0,
+            waited: Duration::ZERO,
+            waited_most: Duration::ZERO,
+            read: Duration::ZERO,
+            read_most: Duration::ZERO,
+            framed: Duration::ZERO,
+            framed_most: Duration::ZERO,
+        }
+    }
+
+    fn lap(&mut self) -> Duration {
+        let now = std::time::Instant::now();
+        let lap = now - self.mark;
+        self.mark = now;
+        lap
+    }
+
+    /// An update's first byte arrived: the time since the last one ended was the
+    /// server's.
+    fn arrived(&mut self) {
+        let lap = self.lap();
+        self.waited += lap;
+        self.waited_most = self.waited_most.max(lap);
+    }
+
+    fn rect(&mut self, pixels: Option<Rect>) {
+        self.rects += 1;
+        if let Some(rect) = pixels {
+            self.pixels += u64::from(rect.w()) * u64::from(rect.h());
+        }
+    }
+
+    /// The update's rectangles are all read and decoded.
+    fn read(&mut self) {
+        let lap = self.lap();
+        self.read += lap;
+        self.read_most = self.read_most.max(lap);
+    }
+
+    /// The video sink has returned.
+    fn framed(&mut self) {
+        let lap = self.lap();
+        self.framed += lap;
+        self.framed_most = self.framed_most.max(lap);
+    }
+
+    /// The update is answered and the next request, if one is owed, is out.
+    fn finished(&mut self) {
+        self.updates += 1;
+        self.mark = std::time::Instant::now();
+        let span = self.mark - self.since;
+        if span < Duration::from_secs(1) {
+            return;
+        }
+        debug!(
+            "vnc: {:.1} updates/s, {} rects, {:.1} Mpx/s; waiting on the server {} ms (longest {}), \
+             reading {} ms (longest {}), video sink {} ms (longest {}), over {} ms",
+            f64::from(self.updates) / span.as_secs_f64(),
+            self.rects,
+            self.pixels as f64 / 1e6 / span.as_secs_f64(),
+            self.waited.as_millis(),
+            self.waited_most.as_millis(),
+            self.read.as_millis(),
+            self.read_most.as_millis(),
+            self.framed.as_millis(),
+            self.framed_most.as_millis(),
+            span.as_millis(),
+        );
+        *self = Self::new();
+    }
 }
 
 /// Coverage of one non-incremental framebuffer request.
@@ -5451,7 +5557,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         "vnc: arming auto framebuffer updates for {}x{}",
         armed.0, armed.1
     );
-    uplink.send(&vnc_apple::auto_framebuffer_update(armed)).await?;
+    uplink.send(&vnc_apple::auto_framebuffer_update(Pushes::of(virtual_display), armed)).await?;
     Ok(resized)
 }
 
@@ -10272,7 +10378,7 @@ mod tests {
             before_idle.extend_from_slice(&client_fence(0, b"idle"));
             if repaint_pending {
                 server.write_all(&apple_layout_update(Some(11), (2, 2))).await.unwrap();
-                before_idle.extend_from_slice(&vnc_apple::auto_framebuffer_update((2, 2)));
+                before_idle.extend_from_slice(&vnc_apple::auto_framebuffer_update(Pushes::EveryFrame, (2, 2)));
                 before_idle.extend_from_slice(&update_request(false, (2, 2)));
             }
             let mut observed = vec![0; before_idle.len()];
@@ -11134,7 +11240,7 @@ mod tests {
         )
         .await;
 
-        let mut expected = vnc_apple::auto_framebuffer_update((2, 2));
+        let mut expected = vnc_apple::auto_framebuffer_update(Pushes::EveryFrame, (2, 2));
         expected.extend_from_slice(&update_request(false, (2, 2)));
         expected.extend_from_slice(&update_request(false, (2, 2)));
         expected.extend_from_slice(&update_request(false, (2, 2)));
@@ -11167,7 +11273,7 @@ mod tests {
         )
         .await;
 
-        let mut expected = vnc_apple::auto_framebuffer_update((2, 2));
+        let mut expected = vnc_apple::auto_framebuffer_update(Pushes::EveryFrame, (2, 2));
         for _ in 0..FULL_REPAINT_UPDATE_BUDGET {
             expected.extend_from_slice(&update_request(false, (2, 2)));
         }
@@ -11298,7 +11404,7 @@ mod tests {
         // update loop sends the paired full request after it has consumed every
         // rectangle in this FramebufferUpdate.
         let mut expected = vnc_apple::set_server_scaling(0.5);
-        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update((3840, 2160)));
+        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update(Pushes::EveryFrame, (3840, 2160)));
         assert_eq!(written(&sent), expected);
     }
 

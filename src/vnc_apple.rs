@@ -214,31 +214,56 @@ pub fn enable_inbound_record_decryption() -> Vec<u8> {
     vec![0x12, 0x00, 0x00, 0x02, 0x00, 0x01, 0x00, 0x00]
 }
 
-/// The least time between two updates the Mac pushes unasked once
-/// [`auto_framebuffer_update`] has armed it, in microseconds.
-///
-/// Zero lets it push every frame it captures while the screen changes — a playing
-/// video drew 60–90 updates a second. Its sender holds the viewer's lock while it
-/// writes each one, and reading this client's next message needs the same lock, so
-/// a gateway that drains more slowly than the Mac pushes has its clicks, keys and
-/// display changes left unread for as long as the video plays. Pixels come from
-/// polling instead; this leaves the push path at one update a second.
-const AUTO_UPDATE_INTERVAL_US: u32 = 1_000_000;
+/// How often the Mac may push an update nobody asked for, once
+/// [`auto_framebuffer_update`] has armed it.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Pushes {
+    /// Every frame the Mac captures while the screen changes, which is what
+    /// Apple's viewer arms a running session with. Standard mode on the physical
+    /// displays depends on it: there an incremental request alone is answered
+    /// late, as seldom as the next push comes, and a scroll arrives a frame a
+    /// second.
+    EveryFrame,
+    /// One a second at most, for a session on a virtual display. Unpaced, a
+    /// playing video drew 60–90 updates a second there. The Mac's sender holds
+    /// the viewer's lock while it writes each one, and reading this client's
+    /// next message needs the same lock, so a gateway that drains more slowly
+    /// than the Mac pushes has its clicks, keys and display changes left unread
+    /// for as long as the video plays. A virtual display answers requests
+    /// promptly, so pixels come from polling instead.
+    Paced,
+}
 
-/// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates, paced by
-/// `AUTO_UPDATE_INTERVAL_US`.
+impl Pushes {
+    /// The pushes a session arms: paced on a virtual display, every frame on
+    /// the physical ones.
+    pub fn of(virtual_display: bool) -> Self {
+        if virtual_display { Self::Paced } else { Self::EveryFrame }
+    }
+
+    /// The least time between two pushes, in microseconds.
+    fn interval_us(self) -> u32 {
+        match self {
+            Self::EveryFrame => 0,
+            Self::Paced => 1_000_000,
+        }
+    }
+}
+
+/// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates, as often
+/// as `pushes` allows.
 ///
 /// Cursor shapes above all depend on this arming across a login, lock or
 /// fast-user-switch, so it is re-sent for the full framebuffer whenever the
 /// display layout changes.
-pub fn auto_framebuffer_update((w, h): (u16, u16)) -> Vec<u8> {
+pub fn auto_framebuffer_update(pushes: Pushes, (w, h): (u16, u16)) -> Vec<u8> {
     let mut msg = Vec::with_capacity(16);
     msg.push(0x09);
     msg.push(0);
     msg.extend_from_slice(&1u16.to_be_bytes()); // version
     // The update interval. This is not a display id: `SetDisplayMessage` is the
     // one and only place a screen is selected.
-    msg.extend_from_slice(&AUTO_UPDATE_INTERVAL_US.to_be_bytes());
+    msg.extend_from_slice(&pushes.interval_us().to_be_bytes());
     for value in [0, 0, w, h] {
         msg.extend_from_slice(&value.to_be_bytes());
     }
@@ -1104,11 +1129,14 @@ mod tests {
 
     #[test]
     fn arming_display_selection_and_server_scaling_are_fixed_shapes() {
-        let arm = auto_framebuffer_update((3840, 2160));
+        let arm = auto_framebuffer_update(Pushes::Paced, (3840, 2160));
         assert_eq!(arm.len(), 16);
         assert_eq!(arm[0], 0x09);
         assert_eq!(be16(&arm, 2), 1);
         assert_eq!(be32(&arm, 4), 1_000_000, "one unasked update a second at most");
+        let every = auto_framebuffer_update(Pushes::of(false), (3840, 2160));
+        assert_eq!(be32(&every, 4), 0, "every frame on the physical displays");
+        assert_eq!(Pushes::of(true), Pushes::Paced);
         assert_eq!(be16(&arm, 12), 3840);
         assert_eq!(be16(&arm, 14), 2160);
 
