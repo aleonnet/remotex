@@ -845,7 +845,7 @@ struct ClaimResponse {
 
 /// Claim the single session slot. Returns the token the WebSocket
 /// must present as
-/// `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false`;
+/// `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`;
 /// 409 while another browser is attached (retry with `force` to take over). The media sockets
 /// present the token alone — `chroma`, the most colour this browser's video
 /// decoder takes, is the session socket's and is required there
@@ -1068,6 +1068,7 @@ mod tests {
                 domain: None,
                 size: Some((1280, 800)),
                 egfx: None,
+                egfx_h264: false,
                 camera: false,
                 microphone: false,
                 video_quality: None,
@@ -1309,6 +1310,7 @@ mod tests {
             domain: None,
             size: Some((640, 480)),
             egfx: None,
+            egfx_h264: false,
             camera: false,
             microphone: false,
             video_quality: None,

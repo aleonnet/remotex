@@ -145,8 +145,12 @@ cache, and version 10 with the small cache and `AVC_DISABLED`, so the host never
 sends H.264. A host that may send it hands the parts of the desktop that move like
 video to it, and a lossy video codec loses detail before the gateway ever encodes
 the picture; the client takes the desktop as the pipeline's other codecs carry it
-instead. `THINCLIENT` is deliberately not set. The host confirms one set and then
-draws.
+instead, and has no H.264 decoder. `THINCLIENT` is deliberately not set. The host
+confirms one set and then draws.
+
+One session advertises otherwise: a pipeline that is passed on with
+`Connect::h264`, for a caller that decodes H.264 itself
+([The pipeline, passed on](#the-pipeline-passed-on)).
 
 Every PDU the host sends on the channel is wrapped in RDP 8 bulk compression
 (`proto/zgfx.rs`), a port of FreeRDP's decoder: a fixed Huffman table over
@@ -231,6 +235,31 @@ unacknowledged, and the host's count fills with those; at that many, one is
 acknowledged for each composed; below it, two; and once nothing waits,
 everything is. A caller that keeps up is acknowledged at once, and no
 acknowledgement outlasts the frames in front of it.
+
+With `Connect::h264` the session tells the host it takes H.264, which nothing
+here decodes: the advertise is every set from version 8 to 10.4, and 10.7, none
+with `AVC_DISABLED`. 10.5 and 10.6 are left out and 10.7 carries
+`SCALEDMAP_DISABLE`, since from 10.5 a host may map a surface through the scaled
+mappings, which this client ignores, and only 10.7 has a flag to say so. Version
+10.1's capability data is sixteen reserved bytes where every other set's is four
+bytes of flags, in the advertise and in a confirmation of it. `AVC_THINCLIENT`,
+which asks for the whole desktop in AVC444, is not set. Measured against a
+Windows 11 host without a GPU: it confirms 10.7 and goes on drawing with
+ClearCodec, Progressive and the caches, and draws what moves like video with
+AVC420 in the same frames — a Main-profile stream for the surface, about fifteen
+access units a second, Annex B with the parameter sets at each keyframe, each
+unit behind a metablock naming the rectangles of the picture to show
+(`proto/avc.rs`). With `AVC_THINCLIENT` the same host drew the whole desktop
+with AVC444v2 and nothing else, every unit a luma view alone.
+
+The access units ride in the commands handed on, and the caller composes a run
+that has any in three steps (`avc.rs`): `avc::scan` finds the units and the
+surfaces whose streams have ended, the caller decodes each unit through its
+surface's decoder and supplies the picture (`Compositor::supply`), and the run is
+composed, painting the masked rectangles from those samples as full-range BT.709.
+A unit whose picture was not supplied leaves its rectangles as they were.
+`a_real_host_draws_video_with_h264` in `tests/rdp_client_probe.rs` checks what is
+passed against a host playing a video.
 
 `Compositor` (`compositor.rs`) is the other half: the same compositor, fed the
 commands that were passed. The page's WebAssembly module is a binding around it

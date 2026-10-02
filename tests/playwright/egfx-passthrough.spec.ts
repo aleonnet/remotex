@@ -22,12 +22,22 @@
 //     REMOTEX_PLAYWRIGHT_PASSWORD=… \
 //     REMOTEX_PLAYWRIGHT_EGFX_TARGET=win \
 //     bunx playwright test '/egfx-passthrough\.spec\.ts$'
+//
+// EXPERIMENTAL: a target with `egfx_h264 = true` is told it may draw with H.264,
+// which the page decodes. That is a second opt-in, naming such a target, and it
+// needs the host to be playing a video when the spec runs: a host draws H.264
+// only for what moves like one.
+//
+//     REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET=win-h264 \
+//     bunx playwright test '/egfx-passthrough\.spec\.ts$'
 import { expect, type Page, test } from "@playwright/test";
 
 import { leaveSession, logInAndConnectTo, returnToPicker } from "./support";
 
 /// The opt-in, and the target name in one, as the video spec has it.
 const EGFX_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_TARGET;
+/// The same for a target whose pipeline may carry H.264.
+const EGFX_H264_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET;
 
 /// What every session here is started with: the pipeline passed, and nothing else.
 const PASSED = { passthrough: true };
@@ -39,6 +49,10 @@ const OP_GRAPHICS = 0x04;
 const GRAPHICS_HEADER_LEN = 5;
 /// `RDPGFX_HEADER`, [MS-RDPEGFX] 2.2.1.5: the command, its flags, the PDU's length.
 const RDPGFX_HEADER_LEN = 8;
+/// `RDPGFX_WIRE_TO_SURFACE_PDU_1`, [MS-RDPEGFX] 2.2.2.1, whose body starts with the
+/// surface and then the codec, and the three codecs that are H.264.
+const CMD_WIRE_TO_SURFACE_1 = 0x0001;
+const H264_CODECS = [0x000b, 0x000e, 0x000f];
 
 interface Batch {
   flags: number;
@@ -52,6 +66,29 @@ interface Batch {
   badOp?: number;
   /** Whether every run was whole commands, by the headers' own lengths. */
   whole: boolean;
+  /** How many of its commands draw with H.264. */
+  h264: number;
+}
+
+/// How many commands of `run`, taken as whole PDUs, draw with H.264.
+function h264Commands(run: Buffer): number {
+  let found = 0;
+  let at = 0;
+  while (at + RDPGFX_HEADER_LEN <= run.length) {
+    const length = run.readUInt32LE(at + 4);
+    if (length < RDPGFX_HEADER_LEN) {
+      break;
+    }
+    if (
+      run.readUInt16LE(at) === CMD_WIRE_TO_SURFACE_1 &&
+      at + RDPGFX_HEADER_LEN + 4 <= run.length &&
+      H264_CODECS.includes(run.readUInt16LE(at + RDPGFX_HEADER_LEN + 2))
+    ) {
+      found += 1;
+    }
+    at += length;
+  }
+  return found;
 }
 
 /// Whether `run` is whole PDUs end to end: each header's length taken at its word.
@@ -76,6 +113,7 @@ function parseBatch(payload: Buffer): Batch {
   let at = BATCH_HEADER_LEN;
   let exact = true;
   let whole = true;
+  let h264 = 0;
   let badOp: number | undefined;
   while (at < payload.length) {
     const op = payload.readUInt8(at);
@@ -95,6 +133,7 @@ function parseBatch(payload: Buffer): Batch {
       break;
     }
     whole &&= wholeCommands(payload.subarray(start, start + length));
+    h264 += h264Commands(payload.subarray(start, start + length));
     runs.push(length);
     at = start + length;
   }
@@ -106,6 +145,7 @@ function parseBatch(payload: Buffer): Batch {
     exact: exact && at === payload.length,
     badOp,
     whole,
+    h264,
   };
 }
 
@@ -123,6 +163,8 @@ interface Session {
   unannounced: number;
   /** The sequences the page acknowledged, as it sent them. */
   acknowledged: number[];
+  /** Whether the page said on its session socket that it decodes H.264. */
+  decodesH264?: string | null;
 }
 
 /// Watch the session socket. Registered before navigation, so nothing is missed.
@@ -135,9 +177,11 @@ function watchSession(page: Page): Session {
     acknowledged: [],
   };
   page.on("websocket", (ws) => {
-    if (new URL(ws.url()).pathname !== "/ws") {
+    const url = new URL(ws.url());
+    if (url.pathname !== "/ws") {
       return;
     }
+    seen.decodesH264 = url.searchParams.get("rdp_h264");
     // Whether this session's pipeline has been announced: a socket's own, and a
     // session's own on it, so the one before cannot answer for the one after.
     let started = false;
@@ -306,6 +350,56 @@ test.describe("a target that passes its graphics pipeline", () => {
       "runs that arrived before their session's graphicsStart",
     ).toBe(0);
     expect(seen.batches[0]?.sequence).toBe(1);
+    await expect(page.getByRole("alert")).toHaveCount(0);
+    await expect(page.locator("canvas.graphics")).toBeVisible();
+
+    await returnToPicker(page);
+  });
+});
+
+test.describe("a target whose passed pipeline may carry H.264", () => {
+  test.skip(
+    !EGFX_H264_TARGET,
+    "set REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET=<target> against a gateway with a live RDP host that is playing a video",
+  );
+
+  test.afterEach(async ({ page }) => {
+    await leaveSession(page);
+  });
+
+  test("is sent the host's H.264, and composes the batches that carry it", async ({
+    page,
+  }) => {
+    const seen = watchSession(page);
+    await logInAndConnectTo(page, EGFX_H264_TARGET ?? "", "", PASSED);
+
+    // The host is told it may draw with H.264 only for a page that said it
+    // decodes it, and the session says which it is.
+    await expect.poll(() => seen.connected?.render, { timeout: 20_000 }).toBe(
+      "the host's graphics pipeline with H.264, passed through",
+    );
+    expect(seen.decodesH264).toBe("true");
+
+    // A batch that carries H.264 is acknowledged only once every access unit in
+    // it has been decoded and its run composed: a decoder that gave no picture
+    // ends the pipeline instead, and says so where the desktop is.
+    const carried = () => seen.batches.find((batch) => batch.h264 > 0);
+    await expect
+      .poll(() => carried()?.sequence, {
+        timeout: 30_000,
+        message: "the host drew nothing with H.264: is a video playing on it?",
+      })
+      .toBeGreaterThan(0);
+    const sequence = carried()?.sequence ?? 0;
+    await expect
+      .poll(() => seen.acknowledged.includes(sequence), { timeout: 20_000 })
+      .toBe(true);
+    for (const batch of seen.batches) {
+      expect(batch.exact, "records must exactly fill the frame").toBe(true);
+      expect(batch.whole, "a run is whole commands, never part of one").toBe(
+        true,
+      );
+    }
     await expect(page.getByRole("alert")).toHaveCount(0);
     await expect(page.locator("canvas.graphics")).toBeVisible();
 

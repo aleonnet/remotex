@@ -24,7 +24,7 @@ EGFX is in, as [The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
 describes; what is left of it
 beyond the decoders is under
 [H.264 in the RDP graphics pipeline](#h264-in-the-rdp-graphics-pipeline)
-rather than here, because that payoff is a transcode removed, not a control
+rather than here, because that payoff is a picture's cost, not a control
 restored.
 
 #### Licensing on a Remote Desktop Session Host
@@ -129,23 +129,27 @@ a replay of the backlog.
 
 ### H.264 in the RDP graphics pipeline
 
-The one codec a current Windows host offers that the RDP client refuses. It could
-remove upstream bytes, but takes a new decoder and accepts a lossy source, and it
-is not near-term. It is here so that "why not this one" has an answer rather than
-being rediscovered.
+A host draws with H.264 only on a passed pipeline, for the page to decode, behind
+a target's experimental `egfx_h264` key
+([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)).
+What is not done:
 
-The RDP client carries the pipeline — the channel, ZGFX, the surface compositor
-with its caches and copies, the frame marks, and the decoders a current Windows
-host draws with: ClearCodec with NSCodec inside it, RemoteFX Progressive, planar
-and uncompressed ([The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
-describes each). H.264, which a host hands the parts of the desktop that move
-like video, is refused with `AVC_DISABLED` on purpose: a lossy video codec loses
-detail before the gateway ever encodes the picture, and the source is to stay
-lossless. Supporting it would add an H.264 decoder per surface to the shared
-compositor used in both the gateway and the page. Even on a passed pipeline it is
-not a standalone video stream: the host masks each picture by rectangles and
-mixes it with the other codecs and drawing commands on one surface. It is not
-taken up without the operator accepting a lossy source.
+- **The gateway does not decode it, and is not going to.** A pipeline composed
+  here refuses H.264 with `AVC_DISABLED` on purpose: a lossy video codec loses
+  detail before the gateway ever encodes the picture, and decoding it only to
+  encode VP9 is a second lossy pass. It is here so that "why not this one" has an
+  answer rather than being rediscovered.
+- **A choice at the picker.** It is a config key while it is experimental. Once
+  it is not, whether a session takes a lossy source is the kind of thing the
+  picker asks.
+- **AVC444 against a host.** Both layouts are implemented and tested from the
+  specification's tables. The one host tried sent AVC420 by region, and with
+  `AVC_THINCLIENT`, which this client does not set, luma views alone.
+- **Large video.** Every decoded picture is copied into the compositor's memory
+  and converted there, which was measured at a 1280×800 desktop and not above,
+  and from a hardware decoder that copy is a readback off the GPU. Presenting a
+  decoded picture on the GPU, and reading it back only when a later command
+  copies from it, is the step after that if a large one proves slow.
 
 ### Two streams for Apple's All Displays
 
@@ -232,8 +236,9 @@ through is what a `wlshare` target has.
 ### `THINCLIENT` in the graphics capability advertise
 
 `caps_advertise` in the graphics crate's `proto/gfx.rs` sends versions 8 and 10 with the small cache
-and, on version 10, `AVC_DISABLED`, and leaves `RDPGFX_CAPS_FLAG_THINCLIENT`
-unset. A current Windows host, the only host this client targets, ignores the
+and, on version 10, `AVC_DISABLED` — or, for a passed pipeline that takes H.264,
+every set to 10.7 without it — and leaves `RDPGFX_CAPS_FLAG_THINCLIENT`
+unset either way. A current Windows host, the only host this client targets, ignores the
 flag; the hosts that acted on it, choosing the classic RemoteFX codec over the
 progressive form, are not supported, so there is nothing for the flag to change.
 The decision is recorded in

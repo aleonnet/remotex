@@ -137,7 +137,9 @@ The host's own stream, passed through to the browser for a LAN:
   by the gateway's own compositor built to WebAssembly, which takes nearly all of
   the picture's work off the gateway. It is **experimental**: run against one
   Windows 11 host, with sound and the clipboard beside it, and not yet with the
-  camera or the microphone.
+  camera or the microphone. A target with `egfx_h264 = true`, more experimental
+  still, lets the host draw video with H.264 on that pipeline, which the browser
+  decodes; without the key what is passed is lossless.
 - **macOS Screen Sharing's High Performance mode** (`ard-high-performance`), in a
   session started with the passthrough: the Mac's HEVC picture, to a browser
   that decodes it (Chrome and Safari; not Firefox). Its AAC-ELD sound is passed

@@ -18,11 +18,14 @@
 //!   the codecs, and the reader and writer every PDU is spelled with.
 //! - [`gfx`] — the pipeline's state: surfaces, the bitmap cache, and the frames
 //!   that carry them to the framebuffer.
+//! - [`avc`] — the H.264 a passed pipeline may carry: its access units found for
+//!   whoever decodes them, and the pictures that come back put into colour.
 //! - [`framebuffer`] — the desktop as composed, and the rectangles of it that
 //!   changed.
 //! - [`compositor`] — the pipeline and a framebuffer together, fed commands that
 //!   were passed on.
 
+pub mod avc;
 pub mod compositor;
 pub mod framebuffer;
 pub mod gfx;

@@ -60,6 +60,7 @@ import {
   wheelFromEvent,
 } from "./protocol.ts";
 import { composesRdpGraphics } from "./rdpGraphics.ts";
+import { decodesRdpH264 } from "./rdpH264.ts";
 import { tabletGuestSize } from "./tabletGuestSize.ts";
 import type { Choices } from "./targetChoices.ts";
 import {
@@ -1175,6 +1176,7 @@ export function useRemoteDesktop(
           chroma: videoChroma(),
           appleMedia: decodesAppleMedia(),
           rdpGraphics: composesRdpGraphics(),
+          rdpH264: decodesRdpH264(),
         }),
       );
       const generation = advancePaintGeneration(paintGenerationRef);

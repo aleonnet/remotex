@@ -199,3 +199,138 @@ test("a command that does not decode is thrown, with the reason", async () => {
   );
   compositor.close();
 });
+
+// `RFX_AVC420_BITMAP_STREAM` in a WireToSurface1: the mask's rectangles, a
+// quantization and a quality for each, and one access unit ([MS-RDPEGFX] 2.2.4.4).
+const AVC420 = 0x000b;
+const avc420 = (id: number, mask: number[][], unit: number[]) => {
+  const stream = [
+    ...u32(mask.length),
+    ...mask.flat(),
+    ...mask.flatMap(() => [20, 100]),
+    ...unit,
+  ];
+  return pdu(0x0001, [
+    ...u16(id),
+    ...u16(AVC420),
+    XRGB,
+    ...rect(0, 0, 8, 4),
+    ...u32(stream.length),
+    ...stream,
+  ]);
+};
+/** A keyframe as a host sends one: parameter sets naming Main 3.2, an IDR slice. */
+const KEY_UNIT = [0, 0, 0, 1, 0x67, 0x4d, 0x40, 0x20, 0, 0, 1, 0x65, 0x88];
+const DELTA_UNIT = [0, 0, 0, 1, 0x41, 0x9a];
+
+/**
+ * A decoded picture of one colour, as a hardware decoder hands one back: the
+ * chroma interleaved, and each luma row padded past its samples.
+ */
+function flatFrame(yuv: number[], copies: { rect?: DOMRectInit }[]) {
+  const layout = (width: number, height: number) => {
+    const stride = width + 2;
+    const chromaRows = Math.ceil(height / 2);
+    const chromaStride = Math.ceil(width / 2) * 2;
+    return {
+      planes: [
+        { offset: 0, stride },
+        { offset: stride * height, stride: chromaStride },
+      ],
+      size: stride * height + chromaStride * chromaRows,
+    };
+  };
+  const size = (options?: VideoFrameCopyToOptions) => {
+    const { width, height } = options?.rect ?? {};
+    assert.ok(width && height, "a part of the picture was asked for");
+    return layout(width, height);
+  };
+  return {
+    format: "NV12" as const,
+    visibleRect: { x: 0, y: 0, width: 8, height: 4 } as DOMRectReadOnly,
+    allocationSize: (options?: VideoFrameCopyToOptions) => size(options).size,
+    copyTo(
+      destination: AllowSharedBufferSource,
+      options?: VideoFrameCopyToOptions,
+    ) {
+      copies.push({ rect: options?.rect });
+      const { planes, size: bytes } = size(options);
+      const out = destination as Uint8Array;
+      assert.equal(out.length, bytes);
+      out.fill(yuv[0], 0, planes[1].offset);
+      for (let at = planes[1].offset; at < bytes; at += 2) {
+        out[at] = yuv[1];
+        out[at + 1] = yuv[2];
+      }
+      return Promise.resolve(planes);
+    },
+  };
+}
+
+test("H.264 is found for the page to decode, and painted from the pictures it supplies", async () => {
+  const compositor = (await loadEgfx(module))();
+  compositor.compose(
+    run(resetGraphics(8, 4), createSurface(1, 8, 4), mapToOutput(1, 0, 0)),
+  );
+  const frame = run(
+    createSurface(2, 8, 4),
+    startFrame(1),
+    avc420(1, [rect(3, 1, 7, 3)], KEY_UNIT),
+    avc420(1, [], DELTA_UNIT),
+    endFrame(1),
+  );
+  const found = compositor.scan(frame);
+  assert.equal(found.length, 3);
+  assert.deepEqual(found[0], { gone: 2 });
+  const [first, second] = found.slice(1).map((item) => {
+    assert.ok("unit" in item);
+    return item;
+  });
+  assert.equal(first.number, 0);
+  assert.equal(first.unit.surface, 1);
+  assert.equal(first.unit.key, true);
+  assert.equal(first.unit.codec, "avc1.4d4020");
+  assert.deepEqual(first.unit.window, { left: 3, top: 1, right: 7, bottom: 3 });
+  assert.deepEqual(
+    [...frame.subarray(first.unit.start, first.unit.end)],
+    KEY_UNIT,
+  );
+  // An empty mask shows nothing; its unit is still one of its stream's.
+  assert.equal(second.number, 1);
+  assert.deepEqual(
+    [second.unit.key, second.unit.codec, second.unit.window],
+    [false, null, null],
+  );
+  assert.deepEqual(
+    [...frame.subarray(second.unit.start, second.unit.end)],
+    DELTA_UNIT,
+  );
+
+  // The picture of the first: only the part its mask shows is copied, widened to
+  // whole chroma samples, and nothing is copied for a unit that shows nothing.
+  const copies: { rect?: DOMRectInit }[] = [];
+  const picture = flatFrame([140, 90, 170], copies);
+  await compositor.supply(first.number, first.unit.window, picture);
+  await compositor.supply(second.number, second.unit.window, picture);
+  assert.deepEqual(copies, [{ rect: { x: 2, y: 0, width: 6, height: 4 } }]);
+
+  const composed = compositor.compose(frame);
+  assert.deepEqual([...composed.painted], [3, 1, 4, 2]);
+  // Full-range BT.709, whatever the browser would have drawn the frame as.
+  assert.deepEqual(pixel(composed, 3, 1), [206, 127, 69, 0]);
+  assert.deepEqual(pixel(composed, 6, 2), [206, 127, 69, 0]);
+  assert.deepEqual(pixel(composed, 2, 1), [0, 0, 0, 0], "outside the mask");
+  assert.deepEqual(pixel(composed, 3, 3), [0, 0, 0, 0], "outside the mask");
+
+  // A unit with no picture supplied paints nothing, and a picture laid out in a
+  // way the compositor does not read is refused.
+  const unsupplied = compositor.compose(
+    run(startFrame(2), avc420(1, [rect(0, 0, 2, 2)], DELTA_UNIT), endFrame(2)),
+  );
+  assert.deepEqual([...unsupplied.painted], []);
+  await assert.rejects(
+    compositor.supply(0, "whole", { ...picture, format: "I444" }),
+    /pictures are I444/,
+  );
+  compositor.close();
+});

@@ -312,6 +312,18 @@ password = "change-me"
 # `camera` and `microphone` beside it have not been tried.
 #egfx = true
 
+# EXPERIMENTAL. Let the host draw with H.264 on a pipeline that is passed to the
+# browser. A Windows host then hands the parts of the desktop that move like
+# video — a player, a scrolling page — to H.264 and draws the rest as before,
+# which is its own trade of detail for bitrate on those parts: without this key
+# everything a passed pipeline carries is lossless. The gateway decodes nothing;
+# the browser decodes the video with its own decoder and paints it through the
+# same compositor. It reaches only a session started with the passthrough, in a
+# browser that decodes H.264: any other session is as it was without the key.
+# Checked against one Windows 11 host without a GPU. RDP only, and refused beside
+# `egfx = false`.
+#egfx_h264 = true
+
 # The clipboard has no key: every target shares its clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
 # back whenever the tab regains focus — where the browser permits it, which

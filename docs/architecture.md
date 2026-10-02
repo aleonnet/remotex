@@ -183,13 +183,16 @@ The gateway keeps to one encoder: whatever it transcodes goes to VP9, and a
 second encoder (H.264, AV1 or any other), a codec probe, or a codec key that
 selects one is not added as a side effect of other work.
 
-#### The browser's three answers
+#### The browser's four answers
 
-The browser is asked three questions, each once at page load and stated on the
+The browser is asked four questions, each once at page load and stated on the
 session socket: which VP9 profile its decoder takes (for
 `render_chroma = "auto"`), whether it decodes a High Performance Mac's HEVC,
-and whether it composes an RDP host's graphics pipeline. The
+whether it composes an RDP host's graphics pipeline, and whether it decodes the
+H.264 such a pipeline may carry. The
 gateway *selects* a chroma on the first and never refuses a client for it. The
+last refuses nobody either: it decides only whether a passed pipeline's host is
+told it may draw with H.264, on a target whose `egfx_h264` key allows it. The
 other two say which passthrough the browser can take. They grey the choice at
 the picker, where a browser that says no starts the target encoded here; they
 refuse a `connect` that asks for the passthrough all the same; and they end the
@@ -338,9 +341,18 @@ not write a second one there. The page, which already carries a software HEVC
 decoder of its own, may decode, compose or present the pipeline its own way
 (on the GPU, say) where that brings a measured gain. The host answers a
 repaint out of its caches, so a reattach starts such a session over; do not
-resume one on a repaint. H.264 stays refused in the capability advertise, and
-a host that draws with bitmap updates is encoded here as VP9. Call it
-experimental wherever it is named to an operator. See
+resume one on a repaint. A host that draws with bitmap updates is encoded here
+as VP9. Call it experimental wherever it is named to an operator.
+
+H.264 stays refused in the capability advertise of every pipeline the gateway
+composes: a host would hand the parts of the desktop that move like video to a
+lossy codec before the gateway encodes the picture, and the gateway has no
+decoder for it. Do not give it one. A passed pipeline may carry it, behind the
+target's experimental `egfx_h264` key and only to a page that said it decodes
+it: the access units ride inside the pipeline's commands, the page decodes them
+with the browser's `VideoDecoder`, and the compositor paints the pictures. It is
+a target key and not a row at the picker while it is experimental; it adds no
+wire format, no record and no second stream. See
 [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
 
 #### Camera and microphone
@@ -430,7 +442,7 @@ sends the Mac's HEVC, or the RDP host's pipeline, as it came.
 
 The engines never see the config keys. They and the session's choices collapse
 to one `RenderPlan` (`quality`, `adaptive`, `chroma`, `apple_media`,
-`rdp_graphics`) at the config boundary in
+`rdp_graphics`, `rdp_h264`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
@@ -841,8 +853,52 @@ the pipeline.
   `RDPGFX` PDUs, headers and all, in order, each run ending at a frame's end or
   where the host's own packet did, and naming the frame it ends. The engine
   queues each as a `GRAPHICS` record, which takes its share of `QUEUE_BUDGET`
-  like an access unit. H.264 stays refused in the capability advertise, passed
-  or composed.
+  like an access unit.
+- **H.264, where the target's key allows it** (`egfx_h264 = true`,
+  EXPERIMENTAL). Without the key the host is told its client takes none, passed
+  or composed, and every pipeline is lossless. With it, a passed session whose
+  page said it decodes H.264 advertises the capability sets that take it
+  (`caps_advertise` in the graphics crate's `proto/gfx.rs`), and a Windows host
+  then draws what moves like video with AVC420, in the same frames as the other
+  codecs: one H.264 stream for each surface, each access unit behind a mask of
+  the rectangles it shows. The gateway does nothing with them: they are bytes in
+  the commands it passes. The page says whether it can on its session socket,
+  `rdp_h264=true|false` (`frontend/src/rdpH264.ts`), and finds out by doing it
+  when it loads: three access units of a stream of its own, shaped like a Windows
+  host's, go through the decoders a session uses, and each has to give its
+  picture before the next unit is handed over, laid out as the compositor reads
+  it, and copy into shared memory. A decoder that holds a picture back for the
+  units after it gives none in time, which is a no: a run cannot wait on units
+  the host has not sent. A page that says no is not turned away; its host is told
+  to send none.
+
+  A run that carries H.264 is composed in three steps, and its batch is
+  acknowledged after the third, so the host is still paced by what the page has
+  drawn. The compositor scans the run for its access units (`avc::scan`). Each is
+  decoded by its surface's own `VideoDecoder` (`frontend/src/egfxVideo.ts`), as
+  the host sent it — Annex B, parameter sets inline, the codec string made from
+  the stream's own profile and level — and its picture awaited: the decoder is
+  asked for low latency, and the page's answer is that it then gives one picture
+  for one unit. The part of the picture the
+  unit's mask shows is copied into the compositor's memory, and the run is then
+  composed, painting those rectangles from the samples
+  (`crates/remotex-rdp-graphics/src/avc.rs`). The conversion to RGB is the
+  compositor's, full-range BT.709 as MS-RDPEGFX has it, and never the browser's:
+  measured, Chrome labels this stream BT.601 from its software decoder and
+  limited-range BT.709 from a hardware one. Which decoder is the browser's
+  choice, as it is for the desktop's own stream ([The codec](#the-codec)): the
+  configuration states no `hardwareAcceleration`. A hardware decoder's picture
+  is read back from the GPU to be composed: measured on an Intel GPU at
+  1280×800, that copy took 6 to 9 ms where the decode itself took half a
+  millisecond. A decoder
+  that fails or gives no picture ends the pipeline, as a command that does not
+  decode does: the host sends no keyframe on request.
+
+  Checked against one Windows 11 host without a GPU, whose stream is Main
+  profile, AVC420 by region. AVC444 and AVC444v2, which a host policy selects for
+  the whole desktop, are implemented from the specification and tested against
+  pictures built from its tables; no host has been seen to send both of their
+  views.
 - **The page paces the host.** A frame is acknowledged to the host when the
   page has composed it, not when the gateway read it. Nothing between the host
   and the page can drop a frame — every command is state the next one draws
@@ -1157,10 +1213,12 @@ any fault anywhere near the path — a serde field-name mismatch, for one — su
 as an accusation against the browser and sent the reader to the wrong half of the
 system.
 
-What survives of asking is three questions. One selects rather than refuses: how
+What survives of asking is four questions. One selects rather than refuses: how
 much colour this decoder takes, for `render_chroma = "auto"` to resolve against
 ([choosing a chroma](#choosing-a-chroma)). A wrong answer to it costs a picture,
-not a desktop. The other two say which passthrough the browser can take: a High
+not a desktop. One decides what a host is told and nothing else: whether this
+browser decodes the H.264 a passed RDP pipeline may carry. The other two say
+which passthrough the browser can take: a High
 Performance Mac's HEVC, and an RDP host's graphics pipeline. They
 decide what the picker offers before a session starts, where a "no" starts the
 target encoded here, and they keep a session started with a passthrough from
@@ -1183,12 +1241,13 @@ Authentication and desktop ownership are separate:
    and `GET /api/targets`' state the gateway's version in `X-Remotex-Version`,
    and a page whose own differs, a tab left open across an upgrade, opens no
    session and lists no target: it says both versions and offers a reload.
-3. `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false`
+3. `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`
    attaches to the slot and reports the target picker or the current connected
-   target. `chroma`, `apple_media`
-   and `rdp_graphics` are required: the most colour this browser's video decoder
-   takes, whether it decodes a High Performance Mac's HEVC, and
-   whether it composes an RDP host's graphics pipeline; see
+   target. `chroma`, `apple_media`, `rdp_graphics`
+   and `rdp_h264` are required: the most colour this browser's video decoder
+   takes, whether it decodes a High Performance Mac's HEVC,
+   whether it composes an RDP host's graphics pipeline, and whether it decodes
+   the H.264 such a pipeline may carry; see
    [Choosing a chroma](#choosing-a-chroma),
    [Apple's media stream, passed through](#apples-media-stream-passed-through) and
    [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
@@ -1977,7 +2036,8 @@ not made the end of the session. H.264 is refused in the capability advertise: a
 host would hand the parts of the desktop that move like video to it, and a lossy
 video codec would lose detail before the gateway ever encodes the picture. In a
 session started with the passthrough the same channel is answered and acknowledged here and
-composed in the browser
+composed in the browser, which also decodes the H.264 a target with the
+experimental `egfx_h264` key lets the host draw with
 ([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)).
 `egfx = false` is the bitmap path: the
 server draws with bitmap updates, damage is flushed on the 16 ms guess because those
