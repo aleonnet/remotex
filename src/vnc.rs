@@ -5509,7 +5509,8 @@ enum Wheel {
     Apple { pending: (f32, f32) },
     /// The distance itself, in whole pixels, for a delta in pixels, and whole
     /// notches as pulses for one that is not, holding the remainder of each per
-    /// axis between events.
+    /// axis between events. The two remainders are apart: a reversal starts
+    /// over only the one its own unit spends, and the other's fraction stays.
     Wlshare { pending: (f32, f32), notches: (f32, f32) },
 }
 
