@@ -3413,6 +3413,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
     // that keeps talking. The flag is BlockAfter, which stops the reading until that
     // fence is echoed.
     let mut held_fences: VecDeque<(tokio::time::Instant, bool, Vec<u8>)> = VecDeque::new();
+    let mut cycle = UpdateCycle::new();
     loop {
         // Raced against the next message rather than awaited on its own, so a paced
         // video stream still hands over pixels the mirror is holding when the remote
@@ -3575,6 +3576,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
         match msg_type {
             // FramebufferUpdate
             0 => {
+                cycle.arrived();
                 reader.read_u8().await?; // padding
                 desktop.lock().unwrap().first_update();
                 // `0xffff` here means "as many as it takes, ended by a LastRect" —
@@ -3601,6 +3603,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     full_repaint_owed |= effect.full_repaint_owed;
                     audio_announced |= effect.audio_announced;
                     painted |= effect.pixels.is_some();
+                    cycle.rect(effect.pixels);
                     if let (Some(repaint), Some(rect)) = (&mut full_repaint, effect.pixels) {
                         repaint.accept(rect);
                     }
@@ -3646,7 +3649,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // protocol offers, and where a video stream is told to encode what it
                 // has. After the loop rather than inside it, so a `LastRect` breaking
                 // out still reaches it.
+                cycle.read();
                 sink.frame().await?;
+                cycle.framed();
                 // wlshare's VP9 is a picture of the whole desktop, which past the
                 // ceiling is not video: off the list there, so wlshare does not code
                 // a stream nothing sends, and back on the list within it,
@@ -3765,6 +3770,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         }
                     }
                 }
+                cycle.finished();
             }
             // SetColourMapEntries — can't happen for the true-colour format we
             // set, but consume it correctly rather than desyncing the stream.
@@ -4418,6 +4424,108 @@ async fn extended_cut_text(
         }
     }
     Ok(false)
+}
+
+/// Where the read loop's time goes between one framebuffer update and the next,
+/// logged once a second at `debug`: how long passed between the end of one update
+/// and the start of the next, how long its rectangles took to read and decode, and
+/// how long the video sink held the loop. The first is mostly the server's time to
+/// answer, but it also holds whatever the loop did meanwhile: other server
+/// messages, a paced video flush, a fence echo. On a polled session the next
+/// request leaves only after all three, so the largest of them is what bounds the
+/// update rate.
+struct UpdateCycle {
+    mark: std::time::Instant,
+    since: std::time::Instant,
+    updates: u32,
+    rects: u32,
+    pixels: u64,
+    waited: Duration,
+    waited_most: Duration,
+    read: Duration,
+    read_most: Duration,
+    framed: Duration,
+    framed_most: Duration,
+}
+
+impl UpdateCycle {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            mark: now,
+            since: now,
+            updates: 0,
+            rects: 0,
+            pixels: 0,
+            waited: Duration::ZERO,
+            waited_most: Duration::ZERO,
+            read: Duration::ZERO,
+            read_most: Duration::ZERO,
+            framed: Duration::ZERO,
+            framed_most: Duration::ZERO,
+        }
+    }
+
+    fn lap(&mut self) -> Duration {
+        let now = std::time::Instant::now();
+        let lap = now - self.mark;
+        self.mark = now;
+        lap
+    }
+
+    /// An update's first byte arrived: the time since the last one ended, the
+    /// server's wait and the loop's other work together.
+    fn arrived(&mut self) {
+        let lap = self.lap();
+        self.waited += lap;
+        self.waited_most = self.waited_most.max(lap);
+    }
+
+    fn rect(&mut self, pixels: Option<Rect>) {
+        self.rects += 1;
+        if let Some(rect) = pixels {
+            self.pixels += u64::from(rect.w()) * u64::from(rect.h());
+        }
+    }
+
+    /// The update's rectangles are all read and decoded.
+    fn read(&mut self) {
+        let lap = self.lap();
+        self.read += lap;
+        self.read_most = self.read_most.max(lap);
+    }
+
+    /// The video sink has returned.
+    fn framed(&mut self) {
+        let lap = self.lap();
+        self.framed += lap;
+        self.framed_most = self.framed_most.max(lap);
+    }
+
+    /// The update is answered and the next request, if one is owed, is out.
+    fn finished(&mut self) {
+        self.updates += 1;
+        self.mark = std::time::Instant::now();
+        let span = self.mark - self.since;
+        if span < Duration::from_secs(1) {
+            return;
+        }
+        debug!(
+            "vnc: {:.1} updates/s, {} rects, {:.1} Mpx/s; between updates {} ms (longest {}), \
+             reading {} ms (longest {}), video sink {} ms (longest {}), over {} ms",
+            f64::from(self.updates) / span.as_secs_f64(),
+            self.rects,
+            self.pixels as f64 / 1e6 / span.as_secs_f64(),
+            self.waited.as_millis(),
+            self.waited_most.as_millis(),
+            self.read.as_millis(),
+            self.read_most.as_millis(),
+            self.framed.as_millis(),
+            self.framed_most.as_millis(),
+            span.as_millis(),
+        );
+        *self = Self::new();
+    }
 }
 
 /// Coverage of one non-incremental framebuffer request.

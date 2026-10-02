@@ -217,16 +217,15 @@ pub fn enable_inbound_record_decryption() -> Vec<u8> {
 /// The least time between two updates the Mac pushes unasked once
 /// [`auto_framebuffer_update`] has armed it, in microseconds.
 ///
-/// Zero lets it push every frame it captures while the screen changes — a playing
-/// video drew 60–90 updates a second. Its sender holds the viewer's lock while it
-/// writes each one, and reading this client's next message needs the same lock, so
-/// a gateway that drains more slowly than the Mac pushes has its clicks, keys and
-/// display changes left unread for as long as the video plays. Pixels come from
-/// polling instead; this leaves the push path at one update a second.
-const AUTO_UPDATE_INTERVAL_US: u32 = 1_000_000;
+/// Zero lets it push every frame it captures while the screen changes, which is
+/// what Apple's viewer arms a running session with in both of its modes. Standard
+/// mode on the physical displays depends on it: there an incremental request
+/// alone is answered late, as seldom as the next push comes, and a scroll arrives
+/// a frame a second.
+const AUTO_UPDATE_INTERVAL_US: u32 = 0;
 
-/// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates, paced by
-/// `AUTO_UPDATE_INTERVAL_US`.
+/// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates for every
+/// frame — see `AUTO_UPDATE_INTERVAL_US`.
 ///
 /// Cursor shapes above all depend on this arming across a login, lock or
 /// fast-user-switch, so it is re-sent for the full framebuffer whenever the
@@ -1108,7 +1107,7 @@ mod tests {
         assert_eq!(arm.len(), 16);
         assert_eq!(arm[0], 0x09);
         assert_eq!(be16(&arm, 2), 1);
-        assert_eq!(be32(&arm, 4), 1_000_000, "one unasked update a second at most");
+        assert_eq!(be32(&arm, 4), 0, "every frame, as Apple's viewer arms a running session");
         assert_eq!(be16(&arm, 12), 3840);
         assert_eq!(be16(&arm, 14), 2160);
 
