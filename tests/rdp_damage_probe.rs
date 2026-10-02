@@ -58,8 +58,8 @@ fn connect() -> (Session, Receiver<Event>) {
     // Everything the picker offers for the target, chosen.
     let offers = target.offers();
     println!(
-        "rdp_damage_probe: {name} ({}:{}) at {}x{}, resize {} clipboard {} audio {}",
-        target.host, target.port, SIZE.0, SIZE.1, offers.resize, target.clipboard, offers.audio
+        "rdp_damage_probe: {name} ({}:{}) at {}x{}, resize {} audio {}",
+        target.host, target.port, SIZE.0, SIZE.1, offers.resize, offers.audio
     );
     // The session the gateway would open for this target started that way, so the
     // host draws for the same client: the channels it names change what the host
@@ -76,7 +76,6 @@ fn connect() -> (Session, Receiver<Event>) {
         resize: offers.resize,
         egfx: target.egfx(),
         pass_graphics: false,
-        clipboard: target.clipboard,
         audio: offers.audio.then(|| Box::new(Silence) as Box<dyn AudioSink>),
         // A camera draws nothing, and one the browser never plugs costs the host a
         // channel and nothing else.

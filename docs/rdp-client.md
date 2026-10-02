@@ -98,9 +98,8 @@ a session that has gone out of scope has really stopped.
 Each is asked for by what the session needs: `drdynvc` for a session started with
 resize, `egfx = true`, `camera = true`, or `microphone = true`, which is the transport Display Control,
 the graphics pipeline, the camera's two channels, and the microphone's channel
-ride on; `cliprdr` for
-`clipboard = true`, and `rdpsnd` with `rdpdr` for a session started with sound — see
-[Sound](#sound-ms-rdpea). A session that wants none asks for no channel at all.
+ride on; `cliprdr` always, and `rdpsnd` with `rdpdr` for a session started with sound — see
+[Sound](#sound-ms-rdpea).
 
 `SC_NET` numbers the channels in the order `CS_NET` named them and says nothing
 else about which is which, so `connect.rs` pairs the numbers back up with the

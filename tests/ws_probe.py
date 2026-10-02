@@ -630,15 +630,15 @@ async def main() -> int:
                         how = "fetched" if data["requested"] else "pushed"
                         oversized = data["oversizedBytes"]
                         size = f"  oversizedBytes={oversized}" if oversized else ""
+                        unconfirmed = "  unconfirmed" if data["unconfirmed"] else ""
                         print(
                             f"  clipboard ({how})  changedAtMs={data['changedAtMs']}"
-                            f"{size}  text={data['text']!r}"
+                            f"{size}{unconfirmed}  text={data['text']!r}"
                         )
                     elif kind == "connected":
                         print(
                             f"  connected  {data['name']}  resize={data['resize']}"
                             f"  audio={data['audio']}  passthrough={data['passthrough']}"
-                            f"  clipboard={data['clipboard']}"
                         )
                         if args.audio and audio_task is None:
                             audio_task = asyncio.create_task(listen_audio())

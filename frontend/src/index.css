@@ -1723,6 +1723,12 @@ body {
   color: #8b949e;
 }
 
+.cb-unconfirmed {
+  margin: 0;
+  font-size: 0.75rem;
+  color: #d29922;
+}
+
 .cb-count-over {
   color: #f85149;
 }

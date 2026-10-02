@@ -47,9 +47,7 @@ fn wanted_channels(config: &Connect) -> Vec<Channel> {
     if config.resize || config.egfx || config.camera.is_some() || config.microphone.is_some() {
         channels.push(Channel::DYNAMIC);
     }
-    if config.clipboard {
-        channels.push(Channel::CLIPBOARD);
-    }
+    channels.push(Channel::CLIPBOARD);
     if config.audio.is_some() {
         // Both, because a Windows host redirects sound only to a client that named
         // device redirection too — see `proto/rdpdr.rs`.

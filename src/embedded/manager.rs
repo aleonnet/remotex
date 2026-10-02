@@ -60,7 +60,6 @@ pub const INSTANCE_TEMPLATE: &str = r#"# A remotex local instance.
 # username = "andrew"
 # password = "…"
 # domain = "CORP"
-# clipboard = true
 
 # [[targets]]
 # name = "pi"
@@ -722,14 +721,6 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
     // Beside the clipboard rather than inside the block above: sound is the
     // protocol's own question, and it is VNC that answers it today.
     lines.push(spec("audio", &describe_audio(target)));
-    lines.push(spec(
-        "clipboard",
-        if target.clipboard {
-            "the browser reads and writes the remote clipboard"
-        } else {
-            "off"
-        },
-    ));
     lines.push(spec("render", &target.render_summary()));
     lines
 }

@@ -47,8 +47,8 @@ import {
 // drawer carries this project's controls, an End session button that returns to
 // the post-login picker, and Log out, which ends the web login. Three of its
 // buttons open a panel instead of acting: Soft keyboard — which is where every
-// key, modifier and browser-swallowed combo now lives — Clipboard, only for
-// targets that opted into it (see ClipboardPanel), and Display, only for a remote
+// key, modifier and browser-swallowed combo now lives — Clipboard (see
+// ClipboardPanel), and Display, only for a remote
 // that offers more than one (see DisplayPanel).
 const FAB_SIZE = 40;
 const FAB_MARGIN = 12;
@@ -938,7 +938,6 @@ export default function FloatingMenu({
   onSwitchTarget,
   sendKeyCombo,
   onKeyboardInset,
-  canClipboard,
   remoteClipboard,
   onFetchClipboard,
   onSendClipboard,
@@ -990,9 +989,6 @@ export default function FloatingMenu({
   // it (0 when the panel closes or floats). See useRemoteDesktop. Both panels
   // share this channel, which is safe because only one is ever open.
   onKeyboardInset: (px: number) => void;
-  // Whether the connected target opted into the clipboard bridge
-  // (`clipboard = true`). False leaves the Clipboard button disabled.
-  canClipboard: boolean;
   // The last clipboard reply from the server, and the fetch actions. See
   // ClipboardPanel — the browser holds no clipboard state of its own.
   // `onFetchClipboard` resolves with the remote snapshot, or null if nothing
@@ -1453,20 +1449,14 @@ export default function FloatingMenu({
 
           <div className="toolbar-section">
             <span className="toolbar-label">Clipboard</span>
-            {/* Enabled per target (`clipboard = true`), which every protocol
-                supports; a target that didn't opt in leaves this disabled. */}
             <button
               type="button"
               className="toolbar-btn"
               onClick={onClipboard}
-              disabled={!canClipboard || clipboardPending}
+              disabled={clipboardPending}
               aria-pressed={panel === "clipboard"}
               aria-busy={clipboardPending}
-              title={
-                canClipboard
-                  ? "Read and write the remote's clipboard"
-                  : "Clipboard sync is not enabled for this target"
-              }
+              title="Read and write the remote's clipboard"
             >
               {clipboardPending
                 ? "Fetching…"

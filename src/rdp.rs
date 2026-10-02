@@ -249,11 +249,7 @@ async fn session(
     if let Err(e) = active_loop(
         &session,
         events,
-        Flags {
-            resize,
-            pass_graphics,
-            clipboard: config.clipboard,
-        },
+        Flags { resize, pass_graphics },
         (width, height),
         applied,
         input_rx,
@@ -386,7 +382,6 @@ fn connect_config(
         resize,
         egfx: config.egfx(),
         pass_graphics,
-        clipboard: config.clipboard,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
         camera: uplinks.camera.as_ref().map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
         microphone: uplinks.microphone.as_ref().map(|bridge| rdp_mic::sink(Arc::clone(bridge))),
@@ -401,11 +396,6 @@ struct Flags {
     /// Whether the host's graphics pipeline is passed to the browser rather than
     /// composed here ([`RenderPlan::rdp_graphics`]).
     pass_graphics: bool,
-    /// Whether this target bridges its clipboard ([`TargetConfig::clipboard`]), which
-    /// is what opened the channel — so a browser that sends the clipboard pair anyway
-    /// is answered as a session with no clipboard rather than as one with an empty
-    /// one.
-    clipboard: bool,
 }
 
 /// How dense a desktop this session has asked the RDP server to render.
@@ -872,6 +862,7 @@ impl ClipboardState {
             changed_at_ms: snapshot.changed_at_ms,
             requested: false,
             oversized_bytes: snapshot.oversized_bytes,
+            unconfirmed: false,
         })
         .await
     }
@@ -886,7 +877,7 @@ async fn active_loop(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    let Flags { resize, pass_graphics, clipboard: clipboard_enabled } = flags;
+    let Flags { resize, pass_graphics } = flags;
     let input = session.input();
     let framebuffer = session.framebuffer();
 
@@ -927,8 +918,7 @@ async fn active_loop(
     let mut pending_layout: Option<PendingLayout> = None;
     let mut layout_retry_at: Option<Instant> = None;
 
-    // Both ends of the clipboard bridge. Empty on a target that did not opt in, where
-    // no channel was opened and none of the events below can arrive.
+    // Both ends of the clipboard bridge.
     let mut clipboard = ClipboardState::default();
 
     // Damage accumulated toward the next flush into the mirror, and its deadline. A busy RDP
@@ -1250,29 +1240,21 @@ async fn active_loop(
                 }
                 // The clipboard pair, intercepted here for the same reason as the
                 // two above: they act on a virtual channel rather than translating to
-                // input. Both are no-ops on a target that did not opt in — the
-                // browser hides the panel then, so this is the belt to that UI's
-                // braces — except that a Fetch is still answered, because a panel
-                // that asked is waiting.
+                // input.
                 if let ClientMsg::Clipboard { text } = &msg {
-                    if clipboard_enabled {
-                        clipboard.take(input, text);
-                    }
+                    clipboard.take(input, text);
                     continue;
                 }
                 if matches!(msg, ClientMsg::ClipboardRequest) {
                     // Answered from what the channel last carried, which is empty
-                    // until the remote copies something — and on a target with no
-                    // clipboard at all, empty for the life of the session.
-                    let snapshot = match clipboard_enabled {
-                        true => clipboard.snapshot(),
-                        false => ClipboardSnapshot::unobserved(),
-                    };
+                    // until the remote copies something.
+                    let snapshot = clipboard.snapshot();
                     sink.msg(ServerMsg::Clipboard {
                         text: snapshot.text,
                         changed_at_ms: snapshot.changed_at_ms,
                         requested: true,
                         oversized_bytes: snapshot.oversized_bytes,
+                        unconfirmed: false,
                     }).await?;
                     continue;
                 }
