@@ -1,7 +1,7 @@
 # Roadmap
 
-What is merely *designed* belongs in the architecture docs; what is *planned*
-belongs here. A defect that has been fixed needs no entry anywhere — the commit
+What is merely *designed* belongs in the architecture docs; what is *planned*,
+or under consideration, belongs here. A defect that has been fixed needs no entry anywhere — the commit
 that fixed it, and the test that holds it fixed, are the record. The limitations
 imposed on us from outside are recorded beside the mechanism they constrain, which
 is the only place they can be read in context.
@@ -11,16 +11,9 @@ is the only place they can be read in context.
 ### What the RDP client does not carry yet
 
 The client carries the desktop, the pointer, keyboard, mouse, resize, the
-clipboard, sound, and the browser's camera and microphone. Touch was carried by the engine before it, from FreeRDP's
-`rdpei` plugin, and is not carried *here*: `proto` is the gateway's own now, so it
-is a channel to write rather than a dependency to configure, and it is refused
-where it would otherwise build a control with nothing behind it, by having no key
-at all — whether touch exists is the host's answer, and this client never asks.
-
-Everything on either side of the channel is already written and shipped: the
-browser's touch passthrough layer (`touchPassthrough.ts`), `ServerMsg::TouchReady`
-and `ClientMsg::Touch` are protocol-agnostic. Nothing below the wire needs
-designing for it.
+clipboard, sound, and the browser's camera and microphone. Touch is not carried,
+and is [under consideration](#touch-on-an-rdp-target-ms-rdpei) rather than
+planned.
 
 The clipboard, sound, camera, and microphone are done. Their protocol and engine
 paths are recorded in [The RDP client](rdp-client.md) rather than here;
@@ -33,22 +26,6 @@ beyond the decoders is under
 [H.264 in the RDP graphics pipeline](#h264-in-the-rdp-graphics-pipeline)
 rather than here, because that payoff is a transcode removed, not a control
 restored.
-
-#### Touch (MS-RDPEI)
-
-MS-RDPEI is a *dynamic* channel and that transport is already here:
-`proto/dvc.rs` carries Display Control over `drdynvc`, and the session answers
-every Create Request it does not want with `NO_LISTENER` (`session.rs`). Accepting a second name, the RDPEI PDUs — client ready, and a
-touch event's contact frames — and the contact state machine are the work.
-
-The rest is waiting for it. A host that opens the channel becomes
-`Event::TouchReady`, which the engine forwards as `ServerMsg::TouchReady` and
-re-sends to each client that attaches; the browser offers the passthrough toggle
-only after that, and `rdp.rs` drops a `ClientMsg::Touch` today because no engine
-can report one. Held contacts must be released when a client goes away, or the
-remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI and
-xrdp never does, which is the reason this stays an always-offered capability
-rather than a key.
 
 #### Licensing on a Remote Desktop Session Host
 
@@ -183,6 +160,60 @@ paint window order two chains, and how each stream starts over are the work.
 
 Two screens is the limit, as it is today: All Displays over three or more is held
 with the notice whatever its size.
+
+## Under consideration
+
+### Touch on an RDP target (MS-RDPEI)
+
+Taken up if the need for it shows. Touch was carried by the engine before this
+client, from FreeRDP's `rdpei` plugin, and is not carried *here*: `proto` is the
+gateway's own now, so it is a channel to write rather than a dependency to
+configure, and it is refused where it would otherwise build a control with
+nothing behind it, by having no key at all — whether touch exists is the host's
+answer, and this client never asks.
+
+Everything on either side of the channel is already written and shipped: the
+browser's touch passthrough layer (`touchPassthrough.ts`), `ServerMsg::TouchReady`
+and `ClientMsg::Touch` are protocol-agnostic. Nothing below the wire needs
+designing for it.
+
+MS-RDPEI is a *dynamic* channel and that transport is already here:
+`proto/dvc.rs` carries Display Control over `drdynvc`, and the session answers
+every Create Request it does not want with `NO_LISTENER` (`session.rs`). Accepting a second name, the RDPEI PDUs — client ready, and a
+touch event's contact frames — and the contact state machine are the work.
+
+The rest is waiting for it. A host that opens the channel becomes
+`Event::TouchReady`, which the engine forwards as `ServerMsg::TouchReady` and
+re-sends to each client that attaches; the browser offers the passthrough toggle
+only after that, and `rdp.rs` drops a `ClientMsg::Touch` today because no engine
+can report one. Held contacts must be released when a client goes away, or the
+remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI and
+xrdp never does, which is the reason this stays an always-offered capability
+rather than a key.
+
+### Not forwarding silence in a passed sound stream
+
+A quiet RDP host sends no sound, so its browser receives no packets until
+something plays. The two passed streams do not behave that way: a High
+Performance Mac and a `wlshare` target go on sending units while nothing plays,
+and the gateway forwards each one (`AudioListener::into_passed` in
+`src/audio.rs`). Holding the silent ones back would make all three alike.
+
+- **The Mac's AAC-ELD.** Silence can be told without a decoder. A quiet Mac sends
+  one unit a hundred times a second, the four bytes `00 68 34 00`: `max_sfb` 0,
+  so no band carries a coefficient, and a `global_gain` for each channel. A unit
+  whose `max_sfb` is 0, or whose every section names the zero codebook, is
+  silence by its header, read before anything Huffman-coded. That was captured
+  on macvm; a physical Mac has not been.
+- **wlshare's sound.** wlshare holds the PCM before it codes it, so the silence is
+  its to withhold rather than the gateway's to detect in Opus or FLAC.
+
+What it saves is small: the Mac's silence is 400 bytes a second of payload
+against about 320 kbit/s while it plays. What it costs is on the page, which
+must take a stop in the units as silence rather than as a stream that fell
+behind, and in a few silent units still forwarded after the sound ends, since
+AAC-ELD's window overlaps the frames before it. Whether the framing around each
+unit makes the saving worth that has not been measured.
 
 ## Not planned
 

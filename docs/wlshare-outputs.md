@@ -43,79 +43,32 @@ output it opened with.
 
 ## The wire
 
-One pseudo-encoding and one message type, private and unregistered.
+The extension is wlshare's, and its messages and their layouts are in wlshare's
+own [`docs/architecture.md`](https://github.com/andrewtheguy/wlshare/blob/main/docs/architecture.md#the-outputs-extension):
+the pseudo-encoding `WLSO` and message type `0xE1` in both directions,
+`OutputList` from the server and `SelectOutput` from the client. What the
+gateway leans on:
 
-- **Pseudo-encoding** `0x574c534f`, the ASCII bytes `WLSO`, paired with the
-  density extension's `WLSH`.
-- **Message type** `0xE1` in both directions, outside every registered client and
-  server message type.
-- **Scales** are the density extension's 16.16 unsigned fixed point.
-
-### Server → client: OutputList
-
-Sent as the answer to a `SetEncodings` carrying the pseudo-encoding — the only way
-support is announced — again whenever the compositor's outputs, one of their
-labels, or the shared one changes, and again as the answer to every
-`SelectOutput`.
-
-| Offset | Type | Field |
-|---|---|---|
-| 0 | U8 | `0xE1` |
-| 1 | U8 | padding |
-| 2 | U16 | count |
-| 4 | U32 | the shared output's id |
-
-then `count` entries:
-
-| Offset | Type | Field |
-|---|---|---|
-| 0 | U32 | id |
-| 4 | U16 | width, pixels |
-| 6 | U16 | height, pixels |
-| 8 | U32 | scale, 16.16 fixed |
-| 12 | U8 | flags — bit 0: headless |
-| 13 | U8 | name length |
-| 14 | U8[] | name, UTF-8 |
-
-The id is the output's `wl_output` global, unique for as long as the output
-exists and opaque to the client. The name is the compositor's own — `DP-2`,
-`HEADLESS-1` — which is what the person at that desk sees in their own display
-settings. Entries are ordered by name, so the menu's order does not depend on the
-order the compositor announced them, and an output whose name or mode has not
-arrived yet is not listed: it cannot be labelled, and capturing it would produce
-nothing. The headless flag marks an output the compositor made rather than a
-monitor somebody is sitting at — the only kind wlshare ever resizes or rescales.
-
-### Client → server: SelectOutput
-
-| Offset | Type | Field |
-|---|---|---|
-| 0 | U8 | `0xE1` |
-| 1 | U8[3] | padding |
-| 4 | U32 | id |
-
-Eight bytes. Honoured from the client holding the desktop, and **answered with an
-`OutputList` either way**: after the switch, or at once with the list as it stands
-when the id names an output the compositor no longer has, or the one already being
-shared. A request is never left without an answer, which is what lets the browser
-keep no display state of its own.
-
-What wlshare does with one: stop the capture, point the virtual pointer at the new
-output (`zwlr_virtual_pointer` takes its output when it is made and never again,
-so what the client holds is released and the pointer remade), take the new size
-into the framebuffer blank, report the geometry, and capture again. The client is
-sent nothing until a frame of the output it asked for has arrived — no pixels of
-the screen it just left. A different size then reaches it as an
-`ExtendedDesktopSize` rectangle with the server as the reason; a same-sized output
-carries no rectangle at all and arrives as a full repaint.
-
-That first frame is asked for outright rather than waiting on damage, and taken
-whole rather than by the rectangles the compositor reports. Both matter to a
-gateway: a screencopy that waits for damage is answered only when the new output
-changes, and the second monitor of an idle desk may not change for minutes, so
-the switch would produce no rectangle, no resize and no frames until somebody
-moved the mouse — and damage reported against the previous frame would fill only
-the parts that happened to be moving, leaving the rest of the new screen black.
+- **The list is the announcement.** It answers the `SetEncodings` that lists the
+  pseudo-encoding, and comes again whenever the compositor's outputs, one of
+  their labels, or the shared one changes.
+- **An entry is a label.** The id is opaque. The name is the compositor's own —
+  `DP-2`, `HEADLESS-1` — which is what the person at that desk sees in their own
+  display settings, and the entries are ordered by name, so the menu's order
+  does not depend on the order the compositor announced them.
+- **Every `SelectOutput` is answered with an `OutputList`**, after the switch or
+  at once with the list as it stands, which is what lets the browser keep no
+  display state of its own.
+- **A switch sends nothing of the screen left behind.** The client is sent
+  nothing until a frame of the output it asked for has arrived. A different size
+  then reaches it as an `ExtendedDesktopSize` rectangle with the server as the
+  reason; a same-sized output carries no rectangle at all and arrives as a full
+  repaint.
+- **That first frame does not wait on damage**, and is taken whole
+  ([Capture](https://github.com/andrewtheguy/wlshare/blob/main/docs/architecture.md#capture)).
+  Both matter to a gateway: the second monitor of an idle desk may not change
+  for minutes, so a switch that waited would produce no rectangle, no resize and
+  no frames until somebody moved the mouse.
 
 ## What the gateway does with it
 

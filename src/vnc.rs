@@ -7160,7 +7160,7 @@ mod tests {
     }
 
     /// The two wlshare requests, checked byte by byte against
-    /// docs/wlshare-density.md and docs/wlshare-outputs.md rather than through
+    /// wlshare's docs/architecture.md rather than through
     /// the encoder's own eyes. Both are asked of a `wlshare` target, after
     /// every encoding that decides pixels, and of no Mac (see
     /// `a_mac_is_asked_for_its_layout_and_zrle_and_no_generic_extension`).
@@ -7230,7 +7230,7 @@ mod tests {
     }
 
     /// The body of an `OutputList` after its message type, built from
-    /// docs/wlshare-outputs.md rather than from [`output_info`]'s own reading.
+    /// wlshare's docs/architecture.md rather than from [`output_info`]'s own reading.
     fn output_list_body(active: u32, outputs: &[Listed]) -> Vec<u8> {
         let mut body = vec![0u8]; // padding
         body.extend_from_slice(&(outputs.len() as u16).to_be_bytes());
