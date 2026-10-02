@@ -158,7 +158,7 @@ Both modes connect the same way until the record layer is up.
 6. **The mode.** High Performance sends `SetDisplayConfiguration`, both modes send
    `SetPixelFormat` and the same `SetEncodings`, and High Performance then arms
    `AutoFrameBufferUpdate`. Standard arms it when the first layout names the
-   screen being sent. Both arm it for every frame (see
+   screen being sent. Both arm it for one push a video frame at most (see
    [Other messages](#other-messages)).
 
 ### Other login types
@@ -605,37 +605,62 @@ rectangle.
   a second, 15–33 MB/s of zlib, for two requests. Unarmed, the same screen drew
   nothing after the update asked for.
 - **The interval paces the pushes.** At 1,000,000 the Mac pushed about one update
-  a second. The daemon pushes once the interval has passed since its last push.
+  a second. The daemon pushes once the interval has passed since its last update
+  finished, so any interval above 0 leaves its sender idle that long after each
+  one.
 - **Apple's viewer arms a running session with 0,** in both of its modes. It
   sends the all-ones value below only while the session is paused, and no
-  interval in between. Remotex arms with 0 too, in every Apple session.
+  interval in between.
+- **The Mac throttles itself, by what the connection drains.** Each time it
+  sends, the daemon estimates the link's bytes a second from how fast its socket
+  empties, and holds the next update, pushed or asked for, while more than a
+  tenth of that is still queued. The viewer does no pacing of its own.
 - **A physical display needs the pushes.** In Standard mode on a physical display
   an incremental request alone is answered late: armed at 1,000,000, a scrolling
   window drew 2–9 updates a second with the Mac silent for a second at a time,
   where the same scroll on a virtual display drew 20–30. With the interval at 0
   the physical display is smooth.
+- **Remotex arms with 33,333 or more.** 33,333 is one frame of its video stream:
+  it shows no more than a frame in that time however often the Mac pushes, and
+  the gap after each update is when the Mac reads its input (below). A Standard
+  session widens the gap as it falls behind. It arms again with what an update
+  costs it to take — the time to read it, decode it and hand it to the video
+  stream, the browser's link included where that holds the stream — smoothed over
+  a few updates, up to 1,000,000, and comes back to 33,333 as the cost falls. It
+  arms again only when the interval moves by half, and at most twice a second.
+  High Performance arms 1,000,000: its picture is the media stream and the Mac's
+  pixel updates are stepped over undecoded, so one a second is the least it can
+  be made to push before the stream is up and across a display change.
 - **`0xffffffff` turns the pushes off.** The daemon records whether the word is
   the all-ones value and pushes nothing while it is. A published description reads
   the word as a screen id, with all-ones meaning all displays. It is not one:
   `SetDisplay` selects the screen.
 
-Unpaced pushes can cost a client its input. The Mac
+Unpaced pushes cost a client its input. The Mac
 [reads nothing while it writes an update](#resizing-a-high-performance-display-as-measured),
-and pushed updates follow one another for as long as the screen changes. A client
-that drains the connection more slowly than the Mac captures — a busy gateway, a
-slow link — has its clicks, keys and display changes left unread for the length of
-the video. On a Mac playing one, input went unread for 35–104 s at a time and then
-arrived as hundreds of queued events in one second. Apple's viewer never meets
-this: in High Performance mode it takes the picture from the media stream
-(encoding `0x3f2`), and the daemon's framebuffer sender skips such a viewer.
-Remotex does too once the stream is up, and then arms and polls one pixel —
-see [RFB while the stream runs](#rfb-while-the-stream-runs). Before the stream
-is up, and in Standard mode throughout, remotex is armed as Apple's viewer is and
-shares what that viewer risks: a gateway that drains the connection more slowly
-than the Mac captures has its input read late. An interval of 1,000,000 ended
-that freeze on a virtual display, which answers requests promptly and lost
-nothing to it; it is what to go back to, for the affected mode alone, if the
-freeze returns there.
+and at interval 0 pushed updates follow one another for as long as the screen
+changes. A client that drains the connection more slowly than the Mac captures — a
+busy gateway, a slow link — has its clicks, keys and display changes left unread
+for the length of the animation. On a Mac playing a video, input went unread for
+35–104 s at a time and then arrived as hundreds of queued events in one second.
+Apple's viewer never meets this in High Performance mode: it takes the picture
+from the media stream (encoding `0x3f2`), and the daemon's framebuffer sender
+skips such a viewer. Remotex does too once the stream is up, and then arms and
+polls one pixel — see [RFB while the stream runs](#rfb-while-the-stream-runs).
+
+The interval is what keeps the input moving everywhere else. With the gateway
+held to 15% of a core, Standard mode on a display of the Mac's own, an animation and a
+scrolling window on the Mac and the pointer sweeping, sampled once a second:
+
+| Interval | Seconds with input unread, of about 53 | Most unread | Picture |
+|---|---|---|---|
+| 0 | 47 | 41,616 bytes | 4.8 Mpx/s |
+| 33,333 | 4 | 1,190 bytes | 4.7 Mpx/s |
+| 1,000,000 | 2 | 2,856 bytes | 1.4 Mpx/s |
+| following the cost | 3 | 3,230 bytes | 4.1 Mpx/s |
+
+Following the cost, that gateway armed between 50,000 and 240,000. Unheld, it
+never left 33,333.
 
 Arming the full framebuffer at setup and after every layout is still required,
 because it keeps cursor updates alive across logins and locks. Its rectangle is
