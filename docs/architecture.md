@@ -2294,8 +2294,9 @@ than the Alt. The left Option key is what it costs, and the soft keyboard still
 carries it: those chords are sent by code and never pass through the
 substitution. Neither side of this is a preference.
 
-While the floating menu has something over the desktop — its drawer, or the one
-modal card that opens from it and leaves the drawer standing — the desktop is
+While the floating menu has something over the desktop — its drawer, the one
+modal card that opens from it and leaves the drawer standing, or the clipboard
+panel — the desktop is
 **view-only**. No input listener is attached at all (`useRemoteDesktop.ts`), which
 is what gives the page back the chords the surface would otherwise take: ⌘C and
 Ctrl+C among them, so the text on a card can be copied. The automatic clipboard
