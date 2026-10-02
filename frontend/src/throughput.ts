@@ -409,6 +409,53 @@ export function appendLive(
 }
 
 /**
+ * `history` with the seconds it lacks behind its newest sample, as far back as the view
+ * keeps, taken from a report that carries the seconds that moved: what the gateway
+ * sampled before the view opened, while it was paused, or in a poll that failed. A
+ * second the report names nothing in moved nothing, and is a sample of no rates. Nothing
+ * is added past the newest sample — the report may have been read before the gateway
+ * sampled that second — so a history of no samples stays empty.
+ */
+export function seedLive(
+  history: readonly ThroughputLive[],
+  report: ThroughputReport,
+): readonly ThroughputLive[] {
+  const newest = history.at(-1);
+  if (newest === undefined || !report.hasSeconds) {
+    return history;
+  }
+  const kept = new Set(history.map((sample) => sample.at));
+  const seeded = new Map<number, LiveRate[]>();
+  for (let at = newest.at - LIVE_HISTORY_SECS + 1; at < newest.at; at++) {
+    if (!kept.has(at)) {
+      seeded.set(at, []);
+    }
+  }
+  for (const row of [...report.records, ...report.open]) {
+    for (const [offset, sentPerSec, receivedPerSec] of row.seconds) {
+      // A row names a second by where it begins, a sample by where it ends.
+      const rates = seeded.get(row.start + offset + 1);
+      if (rates === undefined) {
+        continue;
+      }
+      const rate = rates.find(
+        (r) => r.target === row.target && r.socket === row.socket,
+      );
+      if (rate === undefined) {
+        const { target, socket } = row;
+        rates.push({ target, socket, sentPerSec, receivedPerSec });
+      } else {
+        rate.sentPerSec += sentPerSec;
+        rate.receivedPerSec += receivedPerSec;
+      }
+    }
+  }
+  return [...history, ...[...seeded].map(([at, rates]) => ({ at, rates }))]
+    .sort((a, b) => a.at - b.at)
+    .slice(-LIVE_HISTORY_SECS);
+}
+
+/**
  * One direction over a range: a rate per step, oldest first, `null` for a step nothing
  * was read in; `mean`, the average rate over the seconds something moved in — the
  * range's bytes over those seconds, so an idle stretch does not pull it down; and
