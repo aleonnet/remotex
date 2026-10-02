@@ -215,17 +215,21 @@ pub fn enable_inbound_record_decryption() -> Vec<u8> {
 }
 
 /// The least time between two updates the Mac pushes unasked once
-/// [`auto_framebuffer_update`] has armed it, in microseconds.
+/// [`auto_framebuffer_update`] has armed it, in microseconds: one video frame of
+/// this gateway's, which shows no more than that however often the Mac pushes.
 ///
-/// Zero lets it push every frame it captures while the screen changes, which is
-/// what Apple's viewer arms a running session with in both of its modes. Standard
-/// mode on the physical displays depends on it: there an incremental request
-/// alone is answered late, as seldom as the next push comes, and a scroll arrives
-/// a frame a second.
-const AUTO_UPDATE_INTERVAL_US: u32 = 0;
+/// The Mac counts the interval from the end of its last update, so anything above
+/// zero leaves its sender idle that long after each one, and that gap is when it
+/// reads this client's input. At zero, which is what Apple's viewer arms, a
+/// changing screen is pushed back to back, and a gateway that drains more slowly
+/// than the Mac captures has its clicks and keys left unread for as long as the
+/// screen moves. A long interval costs the picture instead: Standard mode on a
+/// physical display answers an incremental request late, as seldom as the next
+/// push comes, and at a second a scroll arrives a frame a second.
+const AUTO_UPDATE_INTERVAL_US: u32 = 33_333;
 
-/// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates for every
-/// frame — see `AUTO_UPDATE_INTERVAL_US`.
+/// `AutoFrameBufferUpdate`: arm Apple's optional server-driven updates, paced by
+/// `AUTO_UPDATE_INTERVAL_US`.
 ///
 /// Cursor shapes above all depend on this arming across a login, lock or
 /// fast-user-switch, so it is re-sent for the full framebuffer whenever the
@@ -1107,7 +1111,7 @@ mod tests {
         assert_eq!(arm.len(), 16);
         assert_eq!(arm[0], 0x09);
         assert_eq!(be16(&arm, 2), 1);
-        assert_eq!(be32(&arm, 4), 0, "every frame, as Apple's viewer arms a running session");
+        assert_eq!(be32(&arm, 4), 33_333, "one push a video frame at most");
         assert_eq!(be16(&arm, 12), 3840);
         assert_eq!(be16(&arm, 14), 2160);
 
