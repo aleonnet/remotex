@@ -1638,7 +1638,11 @@ pub async fn run(
 /// not remembered, so a library installed while the gateway runs is found by the
 /// next call.
 pub fn apple_decoders() -> anyhow::Result<()> {
-    crate::libav::load()
+    crate::libav::load()?;
+    // Ahead of the first session, which would otherwise pay for the decoder's
+    // setting up on its first picture — see [`vnc_apple_media::warm`].
+    vnc_apple_media::warm();
+    Ok(())
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1759,6 +1763,12 @@ async fn session(
             .await;
     }
     info!("vnc: session terminated");
+    // A Mac that was on a virtual display enables every physical display when the
+    // session ends, a closed MacBook's own included — see `crate::mac_displays`.
+    #[cfg(target_os = "macos")]
+    if config.has_virtual_display() && engine::is_this_host(&dest) {
+        crate::mac_displays::after_private_session();
+    }
 }
 
 /// The per-session switches [`active_loop`] needs: one discovered from the

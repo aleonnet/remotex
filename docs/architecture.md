@@ -359,6 +359,12 @@ that selects the stream. See
   the Mac. Do not dial such a target as any other, and do not bind the stream's
   sockets to an address the Mac's end also holds. See
   [A gateway on the Mac it reaches](apple-vnc-889.md#a-gateway-on-the-mac-it-reaches).
+- A gateway on a MacBook it serves turns the built-in display back off after a
+  session on a virtual display ends with the lid closed, and on again when the lid
+  opens or the gateway stops: macOS enables every physical display when the
+  virtual one goes and does not apply the closed lid again until the lid moves.
+  Keep it to that case. See
+  [A MacBook's displays after a session on its own virtual display](apple-vnc-889.md#a-macbooks-displays-after-a-session-on-its-own-virtual-display).
 - The passthrough on `ard-high-performance` passes the Mac's picture
   unaltered, for a LAN: HEVC access units on the session socket. It is offered
   at the picker to a browser that said it decodes the HEVC; a session started

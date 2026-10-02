@@ -190,6 +190,19 @@ async fn connect_from(from: Option<std::net::IpAddr>, to: std::net::SocketAddr) 
     }
 }
 
+/// Whether `dest`, a `host:port` as [`host_port`] formats it, names this host:
+/// any address it resolves to is a loopback, the unspecified address, or one a
+/// socket binds. Resolved on the calling thread.
+pub fn is_this_host(dest: &str) -> bool {
+    use std::net::ToSocketAddrs as _;
+    dest.to_socket_addrs().is_ok_and(|mut addrs| {
+        addrs.any(|addr| {
+            let ip = addr.ip();
+            ip.is_loopback() || ip.is_unspecified() || std::net::UdpSocket::bind((ip, 0)).is_ok()
+        })
+    })
+}
+
 /// The address a connection to `to` leaves from so that its two ends differ, where
 /// `to` is this host's own: the loopback is reached from the address this host
 /// routes the network from, and any other address of this host from the loopback.
@@ -468,6 +481,14 @@ mod tests {
         let unanswered = answered_within(Duration::from_millis(20), std::future::pending::<std::io::Result<()>>());
         assert_eq!(unanswered.await.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
         assert!(APART_TIMEOUT < TCP_CONNECT_TIMEOUT / 2, "the plain connect keeps most of the budget");
+    }
+
+    /// A destination is this host when it resolves to an address this host holds.
+    #[test]
+    fn this_host_is_told_from_another() {
+        assert!(is_this_host("127.0.0.1:5900"));
+        assert!(is_this_host("localhost:5900"));
+        assert!(!is_this_host("192.0.2.1:5900"), "TEST-NET-1 is no host's own address");
     }
 
     /// Only a destination on this host is reached from a chosen address: another

@@ -262,6 +262,9 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         }
         _ = shutdown_signal() => info!("shutdown signal received; stopping"),
     }
+    // A built-in display this gateway turned off stays off only while it runs.
+    #[cfg(target_os = "macos")]
+    remotex::mac_displays::release();
     #[cfg(unix)]
     drop(socket_file);
     Ok(())

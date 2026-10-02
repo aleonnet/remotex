@@ -957,6 +957,12 @@ pub enum ServerMsg {
     /// resample that to its own display, which is what keeps a remote the same
     /// physical size on a 1x screen and a Retina one. A size that arrived without
     /// its density would be presented at the wrong size until the next message.
+    ///
+    /// One exception: an `ard-mirror` session that follows the window is sent the
+    /// picture the gateway reduced for it, labelled so the Mac's screen fits the
+    /// window's points, never more than the Mac's own density. There `scale` is
+    /// that fit, not the remote's density (docs/architecture.md, "Input and
+    /// display").
     Resize { w: u16, h: u16, scale: f32 },
     /// The remote pointer shape changed, and with it the fact that **the
     /// browser** owns pointer rendering for this session — a server that

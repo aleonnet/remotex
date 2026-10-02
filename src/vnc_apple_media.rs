@@ -2410,6 +2410,68 @@ impl Receiver {
     }
 }
 
+/// A 256×256 picture of 4:4:4 HEVC, one access unit in Annex B, made with
+/// `ffmpeg -f lavfi -i color=c=gray:s=256x256:r=1 -frames:v 1 -c:v libx265
+/// -pix_fmt yuv444p -x265-params keyint=1:range=full -bsf:v hevc_mp4toannexb -f hevc`.
+const WARMUP: &[u8] = include_bytes!("hevc_warmup.h265");
+
+/// Decode [`WARMUP`] once in this process, on a thread of its own, ahead of any
+/// session. A process's first picture through the decoder costs it the setting up
+/// of VideoToolbox: measured on a Mac mini, 85–108 ms for a session's first
+/// 1600×900 picture against 9–12 ms in every later session of the same process,
+/// and 82 ms for this picture, after which the first session's first picture
+/// took 12 ms. At 5120×2880 that first picture held the decoder long enough for
+/// eight more to queue behind it, and the ninth was dropped ([`DECODE_QUEUE`]).
+pub fn warm() {
+    static WARMED: std::sync::Once = std::sync::Once::new();
+    WARMED.call_once(|| {
+        let spawned = std::thread::Builder::new().name("hevc-warm".into()).spawn(|| {
+            let started = std::time::Instant::now();
+            match warm_decoder() {
+                Ok(_) => log::debug!("vnc: the HEVC decoder is warmed, in {:?}", started.elapsed()),
+                Err(e) => log::warn!("vnc: could not warm the HEVC decoder: {e:#}"),
+            }
+        });
+        if let Err(e) = spawned {
+            log::warn!("vnc: could not start the HEVC decoder's warming: {e}");
+        }
+    });
+}
+
+/// Decode [`WARMUP`] on a decoder of its own, the way a session's would be set up,
+/// and say the size it came to.
+fn warm_decoder() -> anyhow::Result<(u16, u16)> {
+    let mut decoder = Hevc::new(true)?;
+    let picture = decoder.decode(&warmup_unit())?.context("the warm-up unit completed no picture")?;
+    Ok(picture.size)
+}
+
+/// [`WARMUP`] as the decoder takes a unit: its NAL units, without start codes.
+fn warmup_unit() -> AccessUnit {
+    let mut nals = Vec::new();
+    let mut start = None;
+    let mut at = 0;
+    while at + 3 <= WARMUP.len() {
+        let code = if WARMUP[at..].starts_with(&[0, 0, 0, 1]) {
+            4
+        } else if WARMUP[at..].starts_with(&[0, 0, 1]) {
+            3
+        } else {
+            at += 1;
+            continue;
+        };
+        if let Some(from) = start {
+            nals.push(WARMUP[from..at].to_vec());
+        }
+        at += code;
+        start = Some(at);
+    }
+    if let Some(from) = start {
+        nals.push(WARMUP[from..].to_vec());
+    }
+    nals
+}
+
 /// Where the receiver sends each access unit it reassembles.
 enum Onward {
     /// The decoder thread, whose pictures the session encodes as VP9.
@@ -3066,6 +3128,22 @@ mod tests {
         let peer = "[fd00::2]:5900".parse().unwrap();
         let local = "[fd00::1]:50000".parse().unwrap();
         MediaStream::new(peer, local, false).0
+    }
+
+    /// The embedded picture the decoder is warmed on is one access unit of 4:4:4
+    /// HEVC, as the Mac sends, and it decodes: what warming pays for is the
+    /// process's first use of the decoder, which a session's first picture would
+    /// otherwise pay for.
+    #[test]
+    fn the_decoder_is_warmed_on_the_embedded_picture() {
+        let unit = warmup_unit();
+        assert!(unit.len() >= 4, "parameter sets and a picture: {} NAL units", unit.len());
+        assert!(unit.iter().any(|nal| is_random_access(nal_type(nal[0]))), "a picture to start at");
+        if crate::libav::api().is_err() {
+            eprintln!("skipped: no FFmpeg on this host to decode the warm-up picture");
+            return;
+        }
+        assert_eq!(warm_decoder().unwrap(), (256, 256));
     }
 
     /// One offer out at a time, one per display, and the encodings ahead of the

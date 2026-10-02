@@ -1332,6 +1332,37 @@ address and what that costs. Measured over IPv4 only. The session now runs from
 the host's network address, so it ends if that address goes away, where one
 between two loopbacks would not.
 
+### A MacBook's displays after a session on its own virtual display
+
+Measured on macOS 27.0.1, a MacBook Pro driving a Studio Display with its lid
+closed. When the connection closes, the agent destroys the virtual display at
+once (`screensharingd: reached eof`, then `-[SLVirtualDisplay destroy]` a
+millisecond later), and `WindowServer` enables every physical display in the same
+millisecond: `Display 1 setEnabled:1`, the built-in one under the closed lid, then
+the external one. Creating the virtual display had disabled only the external
+display. With both on, macOS applies the arrangement it keeps for the pair, and
+the Studio Display went from 2560×1440 to 3200×1800 points. Nothing undoes it but
+the lid: `powerd` logs `Clamshell state changed` as the lid is lifted and lowered,
+and only then is the built-in display disabled again; untouched, it was still on
+70 seconds later.
+
+A gateway on that Mac therefore turns the built-in display back off itself after
+such a session, while the lid stays closed, and on again when the lid opens or
+the gateway stops (`src/mac_displays.rs`). There is no public call that disables a
+display; it uses `CGSConfigureDisplayEnabled`, looked up when needed, and a
+display disabled that way stays disabled only while the process that disabled it
+runs. A gateway killed outright leaves the display to the lid, as before.
+
+### The decoder's first picture
+
+A process's first picture through VideoToolbox pays for setting it up: on a Mac
+mini, 85–108 ms for a session's first 1600×900 picture against 9–12 ms in later
+sessions of the same process. At 5120×2880 that held the decoder long enough for
+its queue of eight to fill, and the first session dropped a picture and stood
+still until a keyframe came. The gateway decodes a 256×256 4:4:4 picture once,
+ahead of any session, when it loads the decoder (82 ms); the first session's first
+picture then took 12 ms.
+
 ### Reaching the gateway
 
 The Mac sends from its own address to the viewer's address on the TCP connection,

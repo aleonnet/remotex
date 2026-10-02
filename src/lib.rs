@@ -19,6 +19,8 @@ pub mod feedback;
 pub mod hevc_wasm;
 pub mod keymap;
 pub mod libav;
+#[cfg(target_os = "macos")]
+pub mod mac_displays;
 pub mod mic;
 pub mod opus_stream;
 pub mod pcm48;
