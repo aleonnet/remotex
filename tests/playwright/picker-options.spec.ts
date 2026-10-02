@@ -90,6 +90,7 @@ async function openTarget(page: Page): Promise<Locator> {
   return page.getByRole("listitem").filter({ has: row });
 }
 
+const SOUND = /^Sound/;
 const PASSED = /^Pass the graphics pipeline through/;
 
 test.describe("the picker's options", () => {
@@ -146,10 +147,13 @@ test.describe("the picker's options", () => {
     await expect(sizes.first()).toHaveAccessibleName(/^\d+×\d+/);
     await expect(sizes.first()).toBeChecked();
     await expect(item.getByRole("radio", { name: FOLLOWS_WINDOW })).not.toBeChecked();
-    // Its sound is off or one of two formats, and the one chosen is the one
+    // Its sound is ticked, and under it are the two formats, the one chosen
     // shown.
-    const sounds = item.getByRole("group", { name: "Sound" }).getByRole("radio");
-    await expect(sounds).toHaveCount(3);
+    await expect(item.getByRole("checkbox", { name: SOUND })).toBeChecked();
+    const formats = item
+      .getByRole("radiogroup", { name: "Sound format" })
+      .getByRole("radio");
+    await expect(formats).toHaveCount(2);
     await expect(item.getByRole("radio", { name: /^Opus/ })).toBeChecked();
     await expect(item.getByRole("radio", { name: /^Lossless/ })).not.toBeChecked();
     await expect(item.getByRole("checkbox", { name: PASSED })).not.toBeChecked();
@@ -165,6 +169,7 @@ test.describe("the picker's options", () => {
     ).toBeVisible({ timeout: 20_000 });
     const again = await openTarget(page);
     await expect(again.getByRole("radio", { name: FOLLOWS_WINDOW })).toBeChecked();
+    await expect(again.getByRole("checkbox", { name: SOUND })).toBeChecked();
     await expect(again.getByRole("radio", { name: /^Opus/ })).toBeChecked();
   });
 

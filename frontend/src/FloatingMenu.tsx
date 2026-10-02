@@ -320,8 +320,11 @@ function ThroughputModal({
 }
 
 /// Reports to the desktop that it is view-only for as long as this menu has
-/// something over it — the drawer, or the modal card that opens from it and leaves
-/// the drawer standing. Turning it off again is the effect's cleanup, so there is no
+/// something over it — the drawer, the modal card that opens from it and leaves
+/// the drawer standing, or the clipboard panel, which is read, typed into and
+/// copied from like a card and has no more use for a live desktop behind it than
+/// one. The other docked panels are the desktop's own controls and leave it live.
+/// Turning it off again is the effect's cleanup, so there is no
 /// path where the menu goes away and the desktop stays inert: unmounting the menu
 /// hands the input back too. The chord that hides the ☰ button takes the drawer with
 /// it, which is why the drawer's own state is not the whole answer.
@@ -329,9 +332,11 @@ function useViewOnly(
   drawerOpen: boolean,
   chromeHidden: boolean,
   modal: Modal | null,
+  panel: Panel | null,
   report: (viewOnly: boolean) => void,
 ) {
-  const anythingUp = (drawerOpen && !chromeHidden) || modal !== null;
+  const menuUp = (drawerOpen && !chromeHidden) || modal !== null;
+  const anythingUp = menuUp || panel === "clipboard";
   useEffect(() => {
     if (!anythingUp) {
       return;
@@ -339,6 +344,38 @@ function useViewOnly(
     report(true);
     return () => report(false);
   }, [anythingUp, report]);
+  if (!anythingUp) {
+    return null;
+  }
+  return menuUp ? "menu" : "clipboard";
+}
+
+// The menu is over the desktop, so the desktop is a picture of itself for as long
+// as that lasts: it keeps painting and takes no input at all (see
+// useRemoteDesktop), and says which of the two it is doing. Takes the pointer
+// rather than passing it through — the surface underneath hides the browser's own
+// cursor, and a menu is no place to be without one — and a click on it closes the
+// drawer and the clipboard panel, as one beside any menu does.
+function ViewOnlyCover({
+  over,
+  onDismiss,
+}: {
+  // What stands over the desktop, null where nothing does.
+  over: "menu" | "clipboard" | null;
+  onDismiss: () => void;
+}) {
+  if (!over) {
+    return null;
+  }
+  return (
+    // biome-ignore lint/a11y/useKeyWithClickEvents: click-outside dismiss; the ✕ of the drawer and of the panel cover keyboard users
+    // biome-ignore lint/a11y/noStaticElementInteractions: the cover behind the drawer
+    <div className="view-only" onClick={onDismiss}>
+      <span className="view-only-label">
+        View only while the {over} is open
+      </span>
+    </div>
+  );
 }
 
 function usePanel() {
@@ -1359,10 +1396,18 @@ export default function FloatingMenu({
         };
   }, [resolvedPosition, viewport, floor]);
 
-  useViewOnly(open, hidden, modal, onViewOnlyChange);
+  const viewOnly = useViewOnly(open, hidden, modal, panel, onViewOnlyChange);
+  // A click on the cover takes down what put it there. A modal card has a
+  // backdrop of its own over the cover, and the other panels never raise one.
+  const dismissCover = useCallback(() => {
+    setOpen(false);
+    setPanel((current) => (current === "clipboard" ? null : current));
+  }, [setPanel]);
 
   return (
     <>
+      <ViewOnlyCover over={viewOnly} onDismiss={dismissCover} />
+
       {/* The button and its drawer go together: a toolbar anchored to a button
           that isn't there reads as a bug. Both keep their state while hidden, so
           the chord brings back exactly what was on screen. Docked panels are left

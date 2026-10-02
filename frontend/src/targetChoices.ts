@@ -17,8 +17,8 @@
 //   sound this gateway cannot code, a passthrough this browser cannot take, or
 //   one that is the only way this gateway can serve the target, which is then
 //   shown ticked.
-// - Sound is off, Opus or lossless where the target offers it: see
-//   `soundOptions`.
+// - Sound is ticked or not where the target offers it, and a ticked one is Opus
+//   or lossless: see `soundRow`.
 // - A target that can only be passed, in a browser that cannot take it, cannot
 //   start, and Start says so before the remote is dialled.
 
@@ -110,13 +110,22 @@ export interface SizeOption {
   note: string;
 }
 
-/** One answer to whether, and as what, a target's sound is taken. */
-export interface SoundOption {
-  value: Sound;
+/** One format a target's sound can be sent as. */
+export interface SoundFormat {
+  value: Exclude<Sound, "off">;
   label: string;
   /** What choosing it does, or why it cannot be chosen here. */
   note: string;
   disabled: boolean;
+}
+
+/** Whether a target's sound is taken, and the formats a ticked one chooses between. */
+export interface SoundRow {
+  label: string;
+  note: string;
+  checked: boolean;
+  /** Opus first, then lossless. */
+  formats: SoundFormat[];
 }
 
 /** One option under an open target. */
@@ -136,8 +145,8 @@ export interface TargetOptions {
    * where there are two, and otherwise the one size the session will have.
    */
   sizes: SizeOption[];
-  /** The target's sound, as a choice: empty where it offers none. */
-  sounds: SoundOption[];
+  /** The target's sound, as a choice: null where it offers none. */
+  soundRow: SoundRow | null;
   rows: OptionRow[];
   /** What Start sends. */
   choices: Choices;
@@ -283,21 +292,18 @@ function sizeOptions(
 }
 
 /**
- * What `target`'s sound can be taken as: nothing to choose where it offers none,
- * and otherwise off, Opus, or lossless, which is greyed where the gateway would
- * have to code it and cannot.
+ * `target`'s sound as the picker shows it: nothing where it offers none, and
+ * otherwise a tick and, under a ticked one, Opus or lossless, which is greyed
+ * where the gateway would have to code it and cannot. Ticking it takes Opus.
  */
-function soundOptions(target: TargetInfo): SoundOption[] {
+function soundRow(
+  target: TargetInfo,
+  remembered: Sound | undefined,
+): { row: SoundRow | null; audio: Sound } {
   if (!target.audio) {
-    return [];
+    return { row: null, audio: "off" };
   }
-  return [
-    {
-      value: "off",
-      label: "Off",
-      note: "The remote keeps playing where it does.",
-      disabled: false,
-    },
+  const formats: SoundFormat[] = [
     {
       value: "opus",
       label: "Opus",
@@ -313,6 +319,19 @@ function soundOptions(target: TargetInfo): SoundOption[] {
       disabled: target.losslessUnavailable,
     },
   ];
+  // What was chosen last time, where it can still be chosen here.
+  const audio =
+    formats.find((format) => format.value === remembered && !format.disabled)
+      ?.value ?? "off";
+  return {
+    row: {
+      label: "Sound",
+      note: "Take the remote's sound and play it here.",
+      checked: audio !== "off",
+      formats,
+    },
+    audio,
+  };
 }
 
 /**
@@ -329,12 +348,7 @@ export function targetOptions(
   const size =
     sizes.find((option) => option.value === remembered?.size)?.value ??
     sizes[0].value;
-  const sounds = soundOptions(target);
-  // What was chosen last time, where it can still be chosen here.
-  const audio =
-    sounds.find(
-      (option) => option.value === remembered?.audio && !option.disabled,
-    )?.value ?? "off";
+  const sound = soundRow(target, remembered?.audio);
   const rows: OptionRow[] = [];
   let blocked: string | null = null;
   if (target.passthrough) {
@@ -349,12 +363,12 @@ export function targetOptions(
   }
   const choices: Choices = {
     size,
-    audio,
+    audio: sound.audio,
     passthrough: rows.some((row) => row.checked),
   };
   return {
     sizes,
-    sounds,
+    soundRow: sound.row,
     rows,
     choices,
     // High Performance's sound comes with its picture, so it has no row and is

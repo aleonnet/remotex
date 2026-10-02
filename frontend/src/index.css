@@ -554,8 +554,8 @@ body {
   padding: 0.7rem 0.9rem 0.8rem 2.4rem;
 }
 
-/* A choice among several: the size a session will have, one line where the
-   target has one here and radio buttons where it offers two, and its sound. */
+/* The size a session will have: one line where the target has one here, radio
+   buttons where it offers two. */
 .picker-choice {
   display: flex;
   flex-direction: column;
@@ -603,6 +603,15 @@ body {
 .picker-option-note {
   color: #8b949e;
   font-size: 0.78rem;
+}
+
+/* The formats of a ticked sound, side by side under its text: Opus on the left,
+   lossless on the right. */
+.picker-sound-formats {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 0.9rem;
+  padding-left: 1.35rem;
 }
 
 /* Offered by the target, and not to be had here: greyed, with its note saying
@@ -984,7 +993,8 @@ body {
    above the framebuffer it covers. It takes the pointer instead of letting it
    through: the input overlay beneath hides the browser's own cursor for engines
    that composite their own into the pixels, and while the menu is up that cursor
-   is the one the user needs back. See RemoteDesktop.tsx. */
+   is the one the user needs back. A click on it closes the drawer and the
+   clipboard panel. See FloatingMenu.tsx. */
 .view-only {
   position: fixed;
   inset: 0;

@@ -238,11 +238,16 @@ async function startTarget(
   } else if (choices.resize) {
     await expect(item).toContainText(FOLLOWS_WINDOW);
   }
-  // Sound is off or a format, where the target offers it: asked for, it is Opus.
-  const sound = item.getByRole("group", { name: "Sound" });
+  // Sound is ticked or not, where the target offers it: asked for, it is Opus.
+  const sound = item.getByRole("checkbox", { name: /^Sound/ });
   if (choices.sound || (await sound.count()) > 0) {
-    await sound
-      .getByRole("radio", { name: choices.sound ? /^Opus/ : /^Off/ })
+    await sound.setChecked(choices.sound ?? false, {
+      timeout: LEAVE_TIMEOUT_MS,
+    });
+  }
+  if (choices.sound) {
+    await item
+      .getByRole("radio", { name: /^Opus/ })
       .check({ timeout: LEAVE_TIMEOUT_MS });
   }
   const passed = item.getByRole("checkbox", { name: /^Pass / });

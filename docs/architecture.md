@@ -1298,8 +1298,9 @@ and `GET /api/targets` carries it:
   that asks for a passthrough the browser said it cannot take is refused like an
   unoffered one.
 - **Sound is off, Opus or lossless.** `choices.audio` says `off`, `opus` or
-  `flac` (`Sound` in `src/config.rs`), and the picker shows the three under
-  Sound on a target that offers it. Opus is sent at the rate the target's audio
+  `flac` (`Sound` in `src/config.rs`). On a target that offers it the picker
+  shows a Sound tick, and under a ticked one the two formats side by side, Opus
+  on the left, which ticking takes, and lossless on the right. Opus is sent at the rate the target's audio
   keys hold; lossless is FLAC, with no rate ([Lossless sound](#lossless-sound)).
   A `connect` that names none takes none.
 - **The choice reaches the remote.** A session started without sound asks for
@@ -2293,8 +2294,9 @@ than the Alt. The left Option key is what it costs, and the soft keyboard still
 carries it: those chords are sent by code and never pass through the
 substitution. Neither side of this is a preference.
 
-While the floating menu has something over the desktop — its drawer, or the one
-modal card that opens from it and leaves the drawer standing — the desktop is
+While the floating menu has something over the desktop — its drawer, the one
+modal card that opens from it and leaves the drawer standing, or the clipboard
+panel — the desktop is
 **view-only**. No input listener is attached at all (`useRemoteDesktop.ts`), which
 is what gives the page back the chords the surface would otherwise take: ⌘C and
 Ctrl+C among them, so the text on a card can be copied. The automatic clipboard
@@ -2304,8 +2306,8 @@ to the remote — because for as long as the menu is up that clipboard holds wha
 copied off this page rather than anything the remote sent. The surface keeps
 painting, under a dimmed layer that says which of the two it is doing. Every way
 back out hands the keyboard to the surface as it goes, because the key listeners
-live there: the ✕, the chord that hides the menu, a drawer button that closed the
-drawer behind it. The soft keyboard is the one control in this menu that is itself
+live there: the ✕, a click on the dimmed layer, the chord that hides the menu, a
+drawer button that closed the drawer behind it. The soft keyboard is the one control in this menu that is itself
 keyboard input, so a key pressed there takes the drawer down as it sends — the
 label never stands over a remote being typed on.
 
