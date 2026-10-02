@@ -28,6 +28,7 @@ layer.
 | `ard` | Standard, the physical displays | ZRLE | none; the Mac's own output is left alone |
 | `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, covered until it is up | AAC-ELD over the media stream |
 | `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | ZRLE | none; the Mac's own output is left alone |
+| `ard-mirror` | Unofficial: the physical displays, over High Performance's media stream | HEVC over the media stream, reduced by the gateway to the viewer's window | AAC-ELD over the media stream; the Mac's own output is muted |
 
 `ard-high-performance` is High Performance as Apple's viewer has it. Decoding its
 picture needs FFmpeg on the gateway's host; without it the gateway runs it only
@@ -41,6 +42,12 @@ offered. Apple's viewer never offers a virtual display without the stream, so
 nothing but remotex exercises the Mac's side of this combination. It was tested
 against macOS 26 only, and a macOS update is free to break it while leaving both
 official modes alone.
+
+**Unofficial:** `ard-mirror` is the opposite combination: the media stream
+offered with no `SetDisplayConfiguration` ever sent, so the picture and the sound
+are High Performance's and the displays are Standard's. Apple's viewer never
+makes it either. What the Mac does with it is under
+[The stream on the physical displays](#the-stream-on-the-physical-displays).
 
 ## Summary
 
@@ -1199,6 +1206,83 @@ the same ports, under a new SSRC, with an IDR at the new size. Remotex offers on
 the display has settled, and the resize's cover stays up until that IDR is on its
 way to the browser.
 
+### The stream on the physical displays
+
+Measured on 2026-10-02 against macOS 27, on a Mac mini with one 1600×900 display
+and a MacBook Pro driving one 5120×2880 display, each with a single display
+attached. This is what `ard-mirror` rests on.
+
+- **The Mac accepts the offer with no virtual display.** A session that never
+  sends `SetDisplayConfiguration` and offers the stream once the physical layout
+  has arrived is answered as a High Performance one is: message 1, then the
+  picture on UDP 5901 and the sound on 5900. The physical screens stay lit and
+  show what the viewer sees.
+- **The picture is the screen's own pixels, always.** 1600×900 and 5120×2880
+  respectively. The width and height an offer names are ignored, and so is
+  server-side scaling (`SetServerScaling`, `0x08`): the stream's size did not
+  change under either. Nothing a viewer sends makes the Mac send this stream
+  smaller.
+- **The pointer lands where it is sent**, in the screen's pixels.
+- **The sound comes with it and the Mac's own output is muted**, as under High
+  Performance.
+- **A PLI is answered here too**: a session on the Mac mini asked for keyframes
+  and the picture went on.
+- **Rate.** The MacBook's 5120×2880 screen came at 33 to 38 pictures a second.
+
+Because the Mac will not reduce it, remotex does: each decoded picture is
+resampled to the viewer's window and the video ceiling before it is encoded
+(`video::fit_within`, `video::Reducer`), and the pointer is mapped back to the
+screen's pixels. Reducing one 5120×2880 picture took 10.2 ms to 3840×2160,
+5.6 ms to 2560×1440 and 5.8 ms to 1920×1080 on an M3 Max with the work spread
+over its cores, and 61 ms on one core. A passed stream is not touched.
+
+Not measured: a Mac with more than one display attached. Until it is, a mirror
+session composes no mosaic for All Displays over mixed densities, whose regions
+are in the Mac's pixels and not the reduced picture's: the stream's picture is
+shown as it came.
+
+The first session after the gateway starts has the decoder fall eight pictures
+behind in its first second on the 5120×2880 screen, which drops a picture and
+asks for a keyframe; why its start is slow has not been measured. On a gateway
+running on the Mac it reached, that request never arrived, and the picture
+stayed still until the session was started again: see
+[A gateway on the Mac it reaches](#a-gateway-on-the-mac-it-reaches).
+
+### A gateway on the Mac it reaches
+
+The media stream runs between the two addresses of the RFB connection, on one
+port number at both ends: the Mac's `avconferenced` binds its address and
+connects to the viewer's (`192.168.1.13:5901->192.168.1.171:5901` in `lsof`
+during a session), and the gateway does the mirror image. A gateway that
+dials `127.0.0.1` on the Mac it runs on has both ends at `127.0.0.1:5901`, and
+the two ask for one and the same UDP association. Measured on macOS 27 with two
+sockets on one port: whichever connects first holds it, the other's `connect`
+fails with `EADDRINUSE`, and every packet for that pair is delivered to the
+holder, its own included. The gateway connects first, so it receives the stream,
+and everything it sends on those ports comes back to itself: the Mac hears no
+PLI, no receiver report and no rate report. The returned packets fail
+authentication and are dropped without a line in the log.
+
+Nothing shows until a picture is lost. In three sessions against `127.0.0.1`
+the first lost picture ended the picture for good, with 11 to 16 keyframe
+requests unanswered; against another host's address the same request was
+answered.
+
+So a media-stream target on the gateway's own host is dialled from another of
+the host's addresses (`engine::connect`'s `apart`): `127.0.0.1` from the
+address the host routes the network from, and the host's own network address
+from `127.0.0.1`. The pairs then differ, both ends connect, and each receives
+only what the other sends. With the gateway on a Mac mini reaching itself, a
+repaint of a passed stream, which is a PLI, was followed by 1 access unit
+before the change, with 11 requests unanswered, and by 40 after it, with the one
+request answered. Where a name resolves to several addresses, one whose
+ends can be set apart is tried first, and a connection that cannot be made from
+the chosen address is made as any other. A host with no address but its
+loopback is dialled as before, and the log says that the two ends are at one
+address and what that costs. Measured over IPv4 only. The session now runs from
+the host's network address, so it ends if that address goes away, where one
+between two loopbacks would not.
+
 ### Reaching the gateway
 
 The Mac sends from its own address to the viewer's address on the TCP connection,
@@ -1223,6 +1307,7 @@ is 10 s overdue.
 - **Four-tile frames**: how Apple's viewer places each strip.
 - **Cases the test Mac could not show:**
   - a non-console user;
+  - the media stream on physical displays when more than one is attached;
   - hardware mirroring;
   - a display record whose density is 0.0.
 

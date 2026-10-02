@@ -252,19 +252,31 @@ const FOLLOWS: Record<"window" | "screen", SizeOption> = {
  *   offers the configured size beside that where there is one.
  * - A phone has nothing a desktop could follow, so there the choice is between the
  *   configured size and the default.
+ * - A target that shares its displays as they are is shown at their size. Where
+ *   the window can still drive it — a Mac mirroring its screens over its media
+ *   stream, whose picture the gateway fits to the viewer — the window comes
+ *   first, and the screens' own size is the other choice.
  */
 function sizeOptions(
   target: TargetInfo,
   follows: Abilities["follows"],
 ): SizeOption[] {
   if (!target.defaultSize) {
-    return [
-      {
-        value: "target",
-        label: "The remote's own size",
-        note: "This target shares its displays as they are.",
-      },
-    ];
+    const own: SizeOption = {
+      value: "target",
+      label: "The remote's own size",
+      note: "This target shares its displays as they are.",
+    };
+    if (target.resize && follows) {
+      const fitted: Record<"window" | "screen", string> = {
+        window:
+          "The remote's displays, fitted to the window as it changes. Passed through, they keep their own size.",
+        screen:
+          "The remote's displays, fitted to this screen once. Passed through, they keep their own size.",
+      };
+      return [{ ...FOLLOWS[follows], note: fitted[follows] }, own];
+    }
+    return [own];
   }
   // A plain VNC server is asked, and whether it takes a size is known only once
   // it is dialled.

@@ -197,6 +197,7 @@ site_passwd = ""
 #   vnc, ard                         —        —                —
 #   vnc, ard with virtual_display    yes      —                —
 #   vnc, ard-high-performance        yes      always carried   shown
+#   vnc, ard-mirror                  yes      always carried   shown
 #
 # Size is how the desktop is sized, and the picker shows it before Start. A
 # desktop either keeps one size for the session — the target's `size` below, or
@@ -216,7 +217,9 @@ site_passwd = ""
 # unofficial `virtual_display = true` below puts it on a virtual one. Apple
 # `ard-high-performance` uses Apple's dynamic-resolution feature to replace its
 # one virtual display's configuration with arbitrary viewport sizes within its
-# fixed 3840×2160 backing ceiling. An "rdp" desktop is resized through its
+# fixed 3840×2160 backing ceiling. The unofficial `ard-mirror` shares the
+# physical displays too and leaves them as they are: there the window sizes the
+# picture the gateway shows, not the Mac's screen. An "rdp" desktop is resized through its
 # graphics pipeline, so `egfx = false` leaves it at the size it keeps.
 #
 # Sound takes the remote's sound, as Opus or lossless. An "rdp" target negotiates
@@ -233,14 +236,15 @@ site_passwd = ""
 # with no adaptive walk: for a link with room.
 #
 # A plain "vnc" target carries no sound, and neither does "ard": Standard mode leaves the Mac's sound output alone, playing on the
-# Mac or to whatever AirPlay receiver it picks. An "ard-high-performance" session
+# Mac or to whatever AirPlay receiver it picks. An "ard-high-performance" or
+# "ard-mirror" session
 # always carries sound, which the Mac sends beside its picture, so there is
 # nothing to choose. In the session, the floating menu's Mute and Unmute change
 # only whether this browser is listening.
 #
 # Passthrough sends the remote's own stream to the browser as it came, for a LAN:
 # an "rdp" host's graphics pipeline for the page to compose, or an
-# "ard-high-performance" Mac's HEVC. Each is described with its
+# "ard-high-performance" or "ard-mirror" Mac's HEVC. Each is described with its
 # target below. The choice is greyed where the browser cannot take the stream,
 # and a browser that cannot take a session somebody else started with it is shown
 # why and offered End session, not a different session.
@@ -248,8 +252,9 @@ site_passwd = ""
 name = "example"
 protocol = "rdp"           # required: "rdp" or "vnc"
 # Which flavour of that protocol the far end is, where a protocol has more than
-# one. Only "vnc" has any: "wlshare" for a wlshare server, and "ard" and
-# "ard-high-performance" for macOS Screen Sharing (see the targets below).
+# one. Only "vnc" has any: "wlshare" for a wlshare server, and "ard",
+# "ard-high-performance" and "ard-mirror" for macOS Screen Sharing (see the
+# targets below).
 #subtype = "ard"
 host = "192.0.2.10"
 # Default: the protocol's standard port (3389 rdp, 5900 vnc).
@@ -271,8 +276,8 @@ password = "change-me"
 # RDP connects at the size, "ard-high-performance" creates its virtual display at
 # it, and a plain or wlshare VNC server is asked for it once, as soon as it
 # declares SetDesktopSize support; a server that never does, or refuses, keeps
-# its own. Refused on `subtype = "ard"` without `virtual_display`, which shows the
-# Mac's physical displays as they are. A Mac's virtual display takes at most
+# its own. Refused on `subtype = "ard"` without `virtual_display` and on
+# "ard-mirror", which show the Mac's physical displays as they are. A Mac's virtual display takes at most
 # "1920x1080", the points its 3840×2160 backing ceiling holds on a Retina client.
 #
 # A session that follows the client's window does not use it: that one opens at
@@ -435,10 +440,11 @@ password = "change-me"
 # vnc_password. Size is where they part: `ard` has none to set, because it shares
 # the Mac's physical displays, while "ard-high-performance" sizes the one
 # virtual display it makes, by `size` or by the window; the unofficial `virtual_display = true` gives `ard`
-# that display too. A third-party VNC server that happens to run on a Mac is not
+# that display too, and the unofficial "ard-mirror" has none to set either. A
+# third-party VNC server that happens to run on a Mac is not
 # this: it is a plain "vnc" target.
 #
-# Both speak the protocol revision Apple's own viewer answers every Mac with, and
+# All speak the protocol revision Apple's own viewer answers every Mac with, and
 # nothing in it is documented by Apple: the revision, its record layer and its
 # control messages were all reverse engineered, and are only as correct as the
 # Macs they have been measured against. A macOS update is free to change any of it.
@@ -534,6 +540,39 @@ password = "change-me"
 # name = "mac-high-performance"
 # protocol = "vnc"
 # subtype = "ard-high-performance"
+# host = "10.0.0.3"
+# username = "andrew"
+# password = "the-account-password"
+# clipboard = true
+
+# UNOFFICIAL: `subtype = "ard-mirror"` is the Mac's physical displays, as `ard`
+# shares them, with the picture and the sound over High Performance's media
+# stream instead of zlib rectangles. The session asks for no virtual display: the
+# Mac's own screens stay lit and show what the viewer sees, and the Mac codes
+# them as the HEVC it codes a virtual display as. Apple's own viewer never makes
+# this combination, so nothing but remotex has exercised the Mac's side of it; it
+# was measured against macOS 27 only, on Macs with one display, and a macOS
+# update is free to break it while leaving the two official modes alone.
+#
+# The Mac mutes its own sound output for the length of the session, as it does
+# under High Performance: whoever sits at the Mac hears nothing, and the sound
+# goes to the browser. There is no way to keep the Mac's speakers playing.
+#
+# The Mac sends each screen at its own pixels, whatever is asked of it, so the
+# gateway reduces each decoded picture to what the viewer can use before encoding
+# it: in a session that follows the window, to the window's pixels, again at every
+# window change; in any other, to the video ceiling alone. A 5120×2880 screen
+# reaches a 4K window as 4K and a 1080p window as 1080p, never enlarged. The
+# pointer is sent back in the Mac's own pixels. `size` and `virtual_display` are
+# refused. With the passthrough the picture reaches the browser as the Mac sent
+# it, at the screen's size, and nothing is reduced.
+#
+# Everything "ard-high-performance" says about the stream, its UDP ports, its
+# decoder and its passthrough holds here.
+# [[targets]]
+# name = "mac-mirror"
+# protocol = "vnc"
+# subtype = "ard-mirror"
 # host = "10.0.0.3"
 # username = "andrew"
 # password = "the-account-password"

@@ -617,6 +617,11 @@ impl VideoSink {
     /// the Mac's rectangles are never encoded on a session with a media stream, so
     /// one that passes the stream builds no encoder at all. The stream coming back
     /// after a gap starts over at an IDR, announced again.
+    ///
+    /// No ceiling: [`video::check_picture`] is what the encoder here will take, and
+    /// a passed unit is not encoded here. The Mac codes a physical screen at its
+    /// own pixels (`ard-mirror`), a 5120×2880 one included, and the browser that
+    /// asked for the stream is the one that decodes it.
     pub async fn pass_hevc(
         &self,
         w: u16,
@@ -624,7 +629,6 @@ impl VideoSink {
         frame: Vec<u8>,
         passed: crate::stream::Passed,
     ) -> anyhow::Result<bool> {
-        video::check_picture((w, h))?;
         self.forward(w, h, frame, passed).await
     }
 
@@ -1392,6 +1396,20 @@ mod tests {
         assert!(is_hevc(&out[0]), "{:?}", out[0]);
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe && unit.data.len() == 700));
         assert!(frame_rx.try_recv().is_err());
+    }
+
+    /// The Mac's own stream is passed whatever its size: the ceiling is the
+    /// encoder's, and nothing of a passed picture is encoded here.
+    #[tokio::test]
+    async fn a_passed_picture_past_the_ceiling_is_forwarded() {
+        const HEVC: &str = "hev1.4.10.L180.BE.8";
+        let (sink, mut frame_rx) = video_sink(5120, 2880).await;
+        let unit = crate::stream::Passed { decode: HEVC.to_owned(), keyframe: true };
+        assert!(sink.pass_hevc(5120, 2880, vec![7; 900], unit).await.unwrap(), "a 5120x2880 unit was not passed");
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 2).await;
+        assert!(matches!(&out[0], ServerMsg::VideoFormat { decode, passthrough: true } if decode == HEVC), "{:?}", out[0]);
+        assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe && unit.data.len() == 900), "{:?}", out[1]);
     }
 
     /// Only the stream at the chroma wlshare was asked for — the one the

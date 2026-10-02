@@ -34,7 +34,9 @@ or in High Performance with `ard-high-performance` (a virtual display, with its
 picture and sound over the Mac's media stream, as Apple's viewer takes them),
 whose AAC-ELD sound every session passes to the browser, and whose HEVC a session
 started with the passthrough passes too rather than re-encoding it — see
-[Apple's media stream, passed through](#apples-media-stream-passed-through). An RDP
+[Apple's media stream, passed through](#apples-media-stream-passed-through). The
+unofficial `ard-mirror` takes that stream for the Mac's own displays and fits its
+picture to the viewer's window. An RDP
 session started with its passthrough is not decoded here either: the host's
 graphics pipeline is passed on for the browser to compose, which is experimental — see
 [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
@@ -137,7 +139,9 @@ area and points here; read the area's section before changing what it covers.
   [Switching outputs over VNC with wlshare](wlshare-outputs.md).
 - Pointer clients present the remote desktop at 100%; oversized desktops scroll.
   Do not add fit-to-window, zoom-to-fit, or viewport-derived scaling. Mobile,
-  gated by `CAN_PINCH_ZOOM`, is the sole fit-to-width/pinch-zoom exception.
+  gated by `CAN_PINCH_ZOOM`, is the sole fit-to-width/pinch-zoom exception in
+  the browser. The gateway fits one picture itself, an `ard-mirror` session's,
+  under the rule below.
 - Neither the gateway nor the browser rescales what a remote sends: frames are
   presented at `w / scale` by the density the remote confirmed. When the size or
   density is wrong for the browser, ask the remote to render the right one and
@@ -145,8 +149,28 @@ area and points here; read the area's section before changing what it covers.
   over screens of different densities: the gateway sends a `mosaic` and the
   browser composes each screen at its points (`frontend/src/mosaic.ts`). Do not
   extend it to another engine, view or density.
+- The gateway resamples a remote's pixels in one place: an `ard-mirror`
+  session's decoded pictures, reduced to the viewer's window and the video
+  ceiling before they are encoded (`video::fit_within`, `video::Reducer`). The
+  rule above cannot be kept there, because the remote cannot be asked: a Mac
+  sends its media stream at the physical screen's own pixels whatever the offer
+  names and whatever server scaling is in force
+  ([measured](apple-vnc-889.md#the-stream-on-the-physical-displays)). The
+  reduction only ever makes a picture smaller, keeps its shape, and is the
+  gateway's alone: the browser is told the reduced size in `Resize` and shows it
+  as any other, and the pointer it sends back is mapped to the screen's pixels
+  (`DesktopState::to_native`). In a session that follows the window, that
+  `Resize` carries the one `scale` that is a fit factor: the picture's pixels
+  over the points of the window it was fitted to, never more than the Mac's own
+  density, so the whole screen shows with nothing to scroll, whether it had to
+  lose pixels or not (`DesktopState::present`). A Mac's screen cannot be sized to
+  the window, so scrolling one is all the 100% rule would buy. In any other
+  session the picture keeps the Mac's own size in points. A passed stream is not
+  reduced, and is shown at the Mac's size and density. Do not extend the
+  reduction to another subtype, to ZRLE pixels, or to the browser.
 - `ClientMsg::Viewport` is in CSS points. `ServerMsg::Resize.scale` is remote
-  pixel density, not a fit factor. A session started with resize has the window
+  pixel density, not a fit factor, save an `ard-mirror` picture fitted to its
+  window (above). A session started with resize has the window
   continuously driving the remote size, and any other keeps the size it opened
   at; the choice is made once, at the picker, so do not add a resize toggle to
   the session, and do not offer the window to a plain `vnc` target, whose answer
@@ -211,7 +235,9 @@ Displays over more than two screens, whatever its size. On VNC started without
 resize the session stays up and the page says so, offering the remote's displays; every
 other source ends on the ceiling's refusal. Do not carry such a desktop some
 other way, in the gateway or the page: rectangles as images, a scaled or a
-cropped picture. Two streams for Apple's All Displays are the planned way, in
+cropped picture. The one desktop the ceiling never refuses is an `ard-mirror`
+Mac's, whose decoded picture is reduced to it
+([Apple High Performance](#apple-high-performance)). Two streams for Apple's All Displays are the planned way, in
 [the roadmap](roadmap.md#two-streams-for-apples-all-displays). See
 [Past the ceiling](#past-the-ceiling).
 
@@ -308,6 +334,28 @@ that selects the stream. See
   every other target, and everything but the display follows `ard`. Call it
   unofficial wherever it is named, and tested with macOS 26 only; do not present
   it as a mode of Apple's viewer or grow it into a third subtype.
+- `ard-mirror` is the other unofficial combination, and a subtype of its own:
+  the Mac's physical displays, as `ard` shares them, with High Performance's
+  media stream carrying the picture and the sound. The session never sends
+  `SetDisplayConfiguration` or a server-scaling request; it offers the stream
+  once the physical layout has arrived, one offer at a time, and drops a display
+  selection made while an offer is unanswered, leaving the checkmark where it
+  was. It composes no mosaic: All Displays is the stream's one picture, shown as
+  it came. The Mac mutes its own output for the
+  session, as under High Performance, and the picker offers no choice of sound.
+  In a session that follows the window, the window sizes the picture the gateway
+  shows and never the Mac's screen; `size` and `virtual_display` are refused. A
+  decoded picture past the ceiling is reduced to it rather than refused, and the
+  passthrough forwards the Mac's HEVC at the screen's size, past the ceiling
+  included, since no encoder here touches it. Everything else about the stream
+  follows `ard-high-performance`. Call it unofficial wherever it is named, and
+  measured with macOS 27 on single-display Macs only.
+- A media-stream target on the gateway's own host is dialled from another of the
+  host's addresses, so that the stream's two ends differ: at one address the
+  gateway's keyframe requests and reports come back to itself and never reach
+  the Mac. Do not dial such a target as any other, and do not bind the stream's
+  sockets to an address the Mac's end also holds. See
+  [A gateway on the Mac it reaches](apple-vnc-889.md#a-gateway-on-the-mac-it-reaches).
 - The passthrough on `ard-high-performance` passes the Mac's picture
   unaltered, for a LAN: HEVC access units on the session socket. It is offered
   at the picker to a browser that said it decodes the HEVC; a session started
@@ -1248,6 +1296,7 @@ and `GET /api/targets` carries it:
 | `vnc`, `ard` | no | hidden | hidden |
 | `vnc`, `ard` with `virtual_display` | yes | hidden | hidden |
 | `vnc`, `ard-high-performance` | yes | hidden: always carried | shown: the Mac's media stream |
+| `vnc`, `ard-mirror` | yes: the window sizes the picture, not the Mac's screen | hidden: always carried | shown: the Mac's media stream |
 
 - **The size is shown before Start.** A desktop is sized one of three ways
   (`Sizing` in `src/config.rs`): kept at the target's size, which is its
@@ -1776,7 +1825,10 @@ permits a pointer client to scale the canvas to fit.
 `ClientMsg::Viewport` is the window's CSS size in points, including immediately
 after a connect when no remote scale has been announced. `ServerMsg::Resize`
 reports framebuffer pixels and the remote density; the browser presents it at
-`w / scale` by `h / scale` CSS pixels. The scale is never a fit factor.
+`w / scale` by `h / scale` CSS pixels. The scale is never a fit factor, except
+for an `ard-mirror` session that follows the window, whose gateway labels the
+picture it reduced so that the Mac's screen fits the window's points
+([Input and display](#input-and-display)).
 
 A session started with resize has the window drive the remote's size,
 continuously and on every engine alike: an engine that has it applies every

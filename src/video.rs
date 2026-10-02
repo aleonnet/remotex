@@ -76,6 +76,82 @@ pub fn fit_ceiling((w, h): (u32, u32)) -> (u32, u32) {
     }
 }
 
+/// The size a picture of `source` pixels is sent at to a viewer whose window holds
+/// `window` pixels: the largest size of the picture's own shape that fits the
+/// window and the ceiling both, and never larger than the picture. `None` is a
+/// viewer that named no window, which leaves the ceiling alone to hold it.
+///
+/// For a source that can be asked for neither a size nor a scale and sends what it
+/// has: a Mac's media stream of its physical screens, which comes at the screen's
+/// own pixels whatever the offer or the server scaling says (measured, see
+/// docs/apple-vnc-889.md). That picture is the one the gateway reduces
+/// ([`Reducer`]). The ceiling is taken in the picture's orientation, as
+/// [`fit_ceiling`] takes it.
+///
+/// Whole pixels, rounded down, so the answer fits whichever side binds, and the
+/// side that binds is exactly the bound: nothing smaller would do.
+pub fn fit_within(source: (u16, u16), window: Option<(u32, u32)>) -> (u16, u16) {
+    let (w, h) = (u64::from(source.0), u64::from(source.1));
+    if w == 0 || h == 0 {
+        return source;
+    }
+    let (long, short) = (u64::from(MAX_LONG_SIDE), u64::from(MAX_SHORT_SIDE));
+    let (mut max_w, mut max_h) = if w >= h { (long, short) } else { (short, long) };
+    if let Some((window_w, window_h)) = window.filter(|&(w, h)| w > 0 && h > 0) {
+        max_w = max_w.min(u64::from(window_w));
+        max_h = max_h.min(u64::from(window_h));
+    }
+    if w <= max_w && h <= max_h {
+        return source;
+    }
+    // Whichever side binds, by the two ratios cross-multiplied: no rounding decides it.
+    let (fit_w, fit_h) = if max_w * h <= max_h * w {
+        (max_w, (h * max_w / w).max(1))
+    } else {
+        ((w * max_h / h).max(1), max_h)
+    };
+    // Both are at most the ceiling's long side, which is a `u16`.
+    (fit_w as u16, fit_h as u16)
+}
+
+/// The filter a picture is reduced with: Catmull-Rom, the bicubic that keeps text
+/// sharp without the ringing a Lanczos kernel leaves beside a glyph.
+///
+/// Measured 2026-10-02 on an M3 Max with the machine otherwise busy (load 10–12),
+/// one 5120×2880 picture on the resizer's rayon pool
+/// (`measure_the_reduction` below): 10.2 ms to 3840×2160, 5.6 ms to 2560×1440 and
+/// 5.8 ms to 1920×1080, against 10.8, 3.8 and 4.1 for bilinear. On one thread the
+/// same reduction to 3840×2160 took 61 ms, which is why the crate's `rayon`
+/// feature is on: a session has 33 ms a picture at 30 a second, the decode and the
+/// encode included.
+const REDUCTION: fast_image_resize::FilterType = fast_image_resize::FilterType::CatmullRom;
+
+/// Reduces packed RGB888 pictures to a smaller size, keeping its buffers between
+/// pictures. The one place the gateway resamples a remote's pixels — see
+/// [`fit_within`] for the source it exists for.
+#[derive(Default)]
+pub struct Reducer {
+    resizer: fast_image_resize::Resizer,
+}
+
+impl Reducer {
+    /// `rgb`, a picture of `from` pixels, at `to` pixels.
+    pub fn reduce(&mut self, rgb: &[u8], from: (u16, u16), to: (u16, u16)) -> anyhow::Result<Vec<u8>> {
+        use fast_image_resize::images::{Image, ImageRef};
+        use fast_image_resize::{PixelType, ResizeAlg, ResizeOptions};
+
+        anyhow::ensure!(to.0 > 0 && to.1 > 0, "a picture cannot be reduced to {}x{}", to.0, to.1);
+        let source = ImageRef::new(u32::from(from.0), u32::from(from.1), rgb, PixelType::U8x3)
+            .map_err(|e| anyhow::anyhow!("a {}x{} picture of {} bytes: {e}", from.0, from.1, rgb.len()))?;
+        let mut reduced = Image::new(u32::from(to.0), u32::from(to.1), PixelType::U8x3);
+        let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(REDUCTION));
+        self.resizer
+            .resize(&source, &mut reduced, &options)
+            .map_err(|e| anyhow::anyhow!("reducing a {}x{} picture to {}x{}: {e}", from.0, from.1, to.0, to.1))?;
+        Ok(reduced.into_vec())
+    }
+}
+
 /// One encoded frame: a complete access unit, and whether a decoder that has seen
 /// nothing before it can start here.
 pub struct AccessUnit {
@@ -577,6 +653,122 @@ mod tests {
                 check_picture((held.0 as u16, held.1 as u16)).is_ok(),
                 "the encoder refuses the {held:?} the engine was told to ask for"
             );
+        }
+    }
+
+    /// The size a picture is sent at: its own shape, as large as the viewer's window
+    /// and the ceiling both allow, and never larger than it is.
+    #[test]
+    fn a_picture_is_fitted_to_a_window_and_the_ceiling() {
+        // No window named: the ceiling alone holds it, either way up.
+        assert_eq!(fit_within((5120, 2880), None), (3840, 2160));
+        assert_eq!(fit_within((2880, 5120), None), (2160, 3840));
+        assert_eq!(fit_within((1600, 900), None), (1600, 900), "already within");
+        // A window: whichever is smaller, the window or the ceiling.
+        assert_eq!(fit_within((5120, 2880), Some((3840, 2400))), (3840, 2160));
+        assert_eq!(fit_within((5120, 2880), Some((2560, 1440))), (2560, 1440));
+        assert_eq!(fit_within((5120, 2880), Some((1920, 1200))), (1920, 1080));
+        assert_eq!(fit_within((5120, 2880), Some((1280, 2000))), (1280, 720), "held by its width");
+        assert_eq!(fit_within((5120, 2880), Some((9000, 9000))), (3840, 2160), "a window past the ceiling");
+        // Never enlarged, and a window that is none is no window.
+        assert_eq!(fit_within((1600, 900), Some((3000, 2000))), (1600, 900));
+        assert_eq!(fit_within((5120, 2880), Some((0, 1440))), (3840, 2160));
+        assert_eq!(fit_within((0, 0), Some((100, 100))), (0, 0));
+
+        // Any picture in any window: fits both, is no larger than it was, keeps its
+        // shape to the pixel rounding costs, and one of its sides is the bound.
+        let sources = [(5120u16, 2880u16), (6016, 3384), (3456, 2234), (2880, 5120), (4000, 3900), (65535, 1), (1, 65535), (3841, 2401), (333, 777)];
+        let windows = [None, Some((3840u32, 2400u32)), Some((1280, 720)), Some((1707, 1067)), Some((500, 3000)), Some((1, 1)), Some((70000, 70000))];
+        for source in sources {
+            for window in windows {
+                let (w, h) = fit_within(source, window);
+                let (sw, sh) = (u64::from(source.0), u64::from(source.1));
+                assert!(w >= 1 && h >= 1, "{source:?} in {window:?} gave {w}x{h}");
+                assert!(w <= source.0 && h <= source.1, "{source:?} in {window:?} grew to {w}x{h}");
+                assert!(within_ceiling((u32::from(w), u32::from(h))), "{source:?} in {window:?} gave {w}x{h}");
+                if let Some((ww, wh)) = window {
+                    assert!(u32::from(w) <= ww && u32::from(h) <= wh, "{source:?} in {window:?} gave {w}x{h}");
+                }
+                let drift = (u64::from(w) * sh).abs_diff(u64::from(h) * sw);
+                assert!(drift <= sw.max(sh), "{source:?} in {window:?} gave {w}x{h}, another shape");
+                if (w, h) != source {
+                    let grown = fit_within(source, window.map(|(ww, wh)| (ww + 1, wh + 1)));
+                    assert!(grown.0 >= w && grown.1 >= h, "{source:?}: a larger window gave a smaller picture");
+                }
+            }
+        }
+    }
+
+    /// A reduced picture is the size asked for and the picture it was: a flat colour
+    /// stays that colour, and what was on the left stays on the left.
+    #[test]
+    fn a_reduced_picture_keeps_its_size_and_its_colours() {
+        let mut reducer = Reducer::default();
+        let colour = [10u8, 200, 90];
+        let reduced = reducer.reduce(&flat(640, 360, colour), (640, 360), (320, 180)).unwrap();
+        assert_eq!(reduced.len(), 320 * 180 * 3);
+        assert!(reduced.as_chunks::<3>().0.iter().all(|pixel| *pixel == colour), "a flat colour changed");
+
+        // Black on the left half, white on the right.
+        let mut halves = vec![0u8; 640 * 360 * 3];
+        for row in halves.as_chunks_mut::<{ 640 * 3 }>().0 {
+            row[320 * 3..].fill(255);
+        }
+        let reduced = reducer.reduce(&halves, (640, 360), (213, 120)).unwrap();
+        assert_eq!(reduced.len(), 213 * 120 * 3);
+        for row in reduced.as_chunks::<{ 213 * 3 }>().0 {
+            assert_eq!(&row[..3], [0, 0, 0], "the left edge");
+            assert_eq!(&row[100 * 3..101 * 3], [0, 0, 0], "left of the middle");
+            assert_eq!(&row[112 * 3..113 * 3], [255, 255, 255], "right of the middle");
+            assert_eq!(&row[212 * 3..], [255, 255, 255], "the right edge");
+        }
+
+        assert!(reducer.reduce(&flat(4, 4, colour), (4, 4), (0, 2)).is_err(), "no size is no picture");
+        assert!(reducer.reduce(&[0; 5], (4, 4), (2, 2)).is_err(), "too few bytes for the picture named");
+    }
+
+    /// What reducing a 5K picture costs, for each filter that could do it: the number
+    /// that chose [`REDUCTION`], and that says whether a session can afford it at 30
+    /// pictures a second beside the decode and the encode.
+    ///
+    /// ```sh
+    /// cargo test --profile qa --lib video::tests::measure_the_reduction -- --ignored --nocapture
+    /// ```
+    #[test]
+    #[ignore = "manual: measures the reduction of a 5K picture and prints a table"]
+    fn measure_the_reduction() {
+        use fast_image_resize::images::{Image, ImageRef};
+        use fast_image_resize::{FilterType, PixelType, ResizeAlg, ResizeOptions, Resizer};
+
+        const FRAMES: u32 = 20;
+        let from = (5120u16, 2880u16);
+        let picture = screen(from.0, from.1, 0);
+        let filters = [
+            ("box", FilterType::Box),
+            ("bilinear", FilterType::Bilinear),
+            ("hamming", FilterType::Hamming),
+            ("catmull-rom", FilterType::CatmullRom),
+            ("lanczos3", FilterType::Lanczos3),
+        ];
+        println!("\n| to        | filter      | ms/picture |");
+        println!("|-----------|-------------|------------|");
+        for to in [(3840u16, 2160u16), (2560, 1440), (1920, 1080)] {
+            for (name, filter) in filters {
+                let mut resizer = Resizer::new();
+                let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(filter));
+                let source = ImageRef::new(u32::from(from.0), u32::from(from.1), &picture, PixelType::U8x3).unwrap();
+                let started = std::time::Instant::now();
+                for _ in 0..FRAMES {
+                    let mut reduced = Image::new(u32::from(to.0), u32::from(to.1), PixelType::U8x3);
+                    resizer.resize(&source, &mut reduced, &options).unwrap();
+                    std::hint::black_box(reduced.buffer());
+                }
+                let each = started.elapsed().as_secs_f64() * 1000.0 / f64::from(FRAMES);
+                println!("| {:9} | {name:11} | {each:10.2} |", format!("{}x{}", to.0, to.1));
+            }
+        }
+        if cfg!(debug_assertions) {
+            println!("  ** debug build: these are not the numbers that ship. Re-run with --profile qa. **\n");
         }
     }
 }

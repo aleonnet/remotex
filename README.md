@@ -39,7 +39,9 @@ for the tiers they are ranked in.
   stream: the picture decoded by the host's FFmpeg, the sound by the browser. Resize
   needs a virtual display: High Performance's, or the unofficial
   `virtual_display = true` under `ard`, which puts Standard mode's picture on one
-  and was tested on macOS 26 only. Both modes are reverse engineered, having no
+  and was tested on macOS 26 only. The unofficial `subtype = "ard-mirror"` takes
+  that same media stream for the Mac's own displays, left lit, and fits the
+  picture to the viewer's window. Both modes are reverse engineered, having no
   specification.
   A wlroots-based Wayland desktop behind
   [wlshare](https://github.com/andrewtheguy/wlshare) is a `vnc` target with
@@ -350,6 +352,18 @@ stream offered, no decoders needed and no sound. Apple's viewer never offers thi
 combination, so nothing but remotex exercises the Mac's side of it; it was tested
 against macOS 26 only, and a macOS update is free to break it while leaving the
 two official modes alone.
+
+**Unofficial:** `subtype = "ard-mirror"` is the Mac's physical displays, as `ard`
+shares them, with the picture and the sound over High Performance's media stream.
+The session asks for no virtual display, so the Mac's own screens stay lit and
+show what the viewer sees. The Mac sends each screen at its own pixels, whatever
+is asked of it, so the gateway reduces each decoded picture to the viewer's
+window before encoding it, again at every window change, and sends the pointer
+back in the Mac's pixels: a 5120×2880 screen reaches a 4K window as 4K. With the
+passthrough the picture goes on as the Mac sent it. The Mac mutes its own sound
+output for the length of the session, as under High Performance, so whoever sits
+at the Mac hears nothing. Apple's viewer never makes this combination; it was
+measured against macOS 27 only, on Macs with one display.
 See [`docs/apple-vnc-889.md`](docs/apple-vnc-889.md).
 
 A plain `vnc` target has no way to learn that its pixels are HiDPI — standard RFB
@@ -499,7 +513,7 @@ Generate `site_passwd` with `remotex gen-passwd <username>`. A Mac is a `vnc`
 target with `subtype = "ard"` for Apple Screen Sharing Standard mode and its
 physical displays, or `"ard-high-performance"` for one virtual display
 containing all of its windows, with its physical displays disabled for the
-connection and its picture and sound over the Mac's media stream — each with the Mac account's username and password. The unofficial `virtual_display = true` under `subtype = "ard"` opens Standard mode on such a virtual display, tested on macOS 26 only. Keep the config mode `0600`; target
+connection and its picture and sound over the Mac's media stream — each with the Mac account's username and password. The unofficial `virtual_display = true` under `subtype = "ard"` opens Standard mode on such a virtual display, tested on macOS 26 only, and the unofficial `"ard-mirror"` takes the media stream for the physical displays, measured on macOS 27 only. Keep the config mode `0600`; target
 credentials remain server-side but are stored in this file.
 
 All fields and per-protocol examples are in

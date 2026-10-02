@@ -131,6 +131,39 @@ test("a Mac sharing its physical displays is shown at their size", () => {
   assert.match(standard.sizes[0].label, /own size/);
 });
 
+test("a Mac mirroring its screens is fitted to the window, or shown at their size", () => {
+  // The Mac's own screens over its media stream: nothing sizes them, and the
+  // gateway fits their picture to a window it follows.
+  const mirror = target({
+    subtype: "ard-mirror",
+    resize: true,
+    defaultSize: null,
+    passthrough: "apple-media",
+  });
+  assert.deepEqual(sizes(mirror, ABLE), [
+    ["window", "This window's size"],
+    ["target", "The remote's own size"],
+  ]);
+  assert.deepEqual(sizes(mirror, TABLET), [
+    ["window", "This screen's size"],
+    ["target", "The remote's own size"],
+  ]);
+  // The window is the size until somebody chooses the screens' own.
+  const options = targetOptions(mirror, undefined, ABLE);
+  assert.equal(options.choices.size, "window");
+  assert.match(options.sizes[0].note, /fitted/);
+  assert.equal(
+    targetOptions(mirror, { size: "target" }, ABLE).choices.size,
+    "target",
+  );
+  // A phone has no window a picture could follow.
+  assert.deepEqual(sizes(mirror, PHONE), [["target", "The remote's own size"]]);
+  // Standard mode's screens are still only ever their own size.
+  assert.deepEqual(sizes(target({ subtype: "ard", defaultSize: null }), ABLE), [
+    ["target", "The remote's own size"],
+  ]);
+});
+
 test("only what the target's type offers has a row", () => {
   const rdp = targetOptions(RDP, undefined, ABLE);
   assert.deepEqual(keys(rdp.rows), ["passthrough"]);

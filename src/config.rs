@@ -92,6 +92,26 @@ pub enum Subtype {
     /// lacks it can only pass the picture ([`Passthrough::AppleMedia`]), to a
     /// browser that decodes it.
     ArdHighPerformance,
+    /// UNOFFICIAL. The Mac's physical displays, as [`Subtype::Ard`] shares them,
+    /// with the picture and the sound over High Performance's media stream instead
+    /// of ZRLE rectangles: the session asks for no virtual display, the Mac's own
+    /// screens stay lit and show what the viewer sees, and the Mac codes them as
+    /// the HEVC it codes a virtual display as. A combination Apple's viewer never
+    /// makes; measured against macOS 27 alone (docs/apple-vnc-889.md, "Mirror").
+    ///
+    /// The Mac sends each screen at its own pixels, whatever the offer names and
+    /// whatever server scaling is in force, so a picture the gateway decodes is
+    /// reduced here to the viewer's window and the video ceiling
+    /// ([`crate::video::fit_within`]) — the one place the gateway resamples a
+    /// remote's pixels. In a session that follows the window the window drives
+    /// that size; in any other the ceiling alone holds it. A picture passed
+    /// through ([`Passthrough::AppleMedia`]) reaches the browser as the Mac sent
+    /// it, at the screen's size.
+    ///
+    /// As on [`Subtype::ArdHighPerformance`], the picture and the sound go
+    /// together and the Mac mutes its own output while the sound leg runs: whoever
+    /// sits at the Mac hears nothing for the session's length.
+    ArdMirror,
     /// [wlshare](https://github.com/andrewtheguy/wlshare), our own wlroots VNC
     /// server, spoken to as what it is: RFB 3.8 with wlshare's private extensions
     /// listed. Its picture is its own VP9 stream, passed to the browser untouched
@@ -113,6 +133,7 @@ impl Subtype {
         match self {
             Subtype::Ard => "ard",
             Subtype::ArdHighPerformance => "ard-high-performance",
+            Subtype::ArdMirror => "ard-mirror",
             Subtype::Wlshare => "wlshare",
         }
     }
@@ -121,7 +142,7 @@ impl Subtype {
     pub fn media_stream(self) -> bool {
         match self {
             Subtype::Ard | Subtype::Wlshare => false,
-            Subtype::ArdHighPerformance => true,
+            Subtype::ArdHighPerformance | Subtype::ArdMirror => true,
         }
     }
 
@@ -131,7 +152,7 @@ impl Subtype {
     /// `wlshare` one is.
     pub fn apple(self) -> bool {
         match self {
-            Subtype::Ard | Subtype::ArdHighPerformance => true,
+            Subtype::Ard | Subtype::ArdHighPerformance | Subtype::ArdMirror => true,
             Subtype::Wlshare => false,
         }
     }
@@ -947,6 +968,13 @@ impl TargetConfig {
                 audio: false,
                 passthrough: Some(Passthrough::AppleMedia),
             },
+            // The same stream, of the Mac's own screens: the window drives the size
+            // the gateway reduces the picture to, not the Mac's display.
+            (Protocol::Vnc, Some(Subtype::ArdMirror)) => Offers {
+                resize: true,
+                audio: false,
+                passthrough: Some(Passthrough::AppleMedia),
+            },
         }
     }
 
@@ -1102,7 +1130,7 @@ impl TargetConfig {
         match (self.protocol, self.subtype) {
             (Protocol::Vnc, Some(Subtype::ArdHighPerformance)) => true,
             (Protocol::Vnc, Some(Subtype::Ard)) => self.virtual_display,
-            (Protocol::Vnc, None | Some(Subtype::Wlshare)) | (Protocol::Rdp, _) => false,
+            (Protocol::Vnc, None | Some(Subtype::Wlshare | Subtype::ArdMirror)) | (Protocol::Rdp, _) => false,
         }
     }
 }
@@ -1574,7 +1602,7 @@ impl ConfigFile {
                      always opens a virtual display: the key is subtype \"ard\"'s. Remove it.",
                     target.name
                 ),
-                (Protocol::Vnc, None | Some(Subtype::Wlshare)) | (Protocol::Rdp, _) => anyhow::bail!(
+                (Protocol::Vnc, None | Some(Subtype::Wlshare | Subtype::ArdMirror)) | (Protocol::Rdp, _) => anyhow::bail!(
                     "target {:?} sets virtual_display, which only subtype \"ard\" takes: it \
                      opens Standard Screen Sharing on one of the Mac's virtual displays, \
                      and nothing else here has one to open. Remove the key.",
@@ -1701,9 +1729,11 @@ impl ConfigFile {
             // size there is one no session would ever state.
             anyhow::ensure!(
                 target.size.is_none() || target.sized(),
-                "target {:?} sets size on subtype \"ard\", which shares the Mac's physical \
-                 displays and never sizes them. Remove the key, or set virtual_display = true.",
-                target.name
+                "target {:?} sets size on subtype {:?}, which shares the Mac's physical \
+                 displays and never sizes them. Remove the key{}.",
+                target.name,
+                target.subtype.map_or("", Subtype::name),
+                if target.subtype == Some(Subtype::Ard) { ", or set virtual_display = true" } else { "" }
             );
             // A virtual display opens at the client's density under a ceiling of
             // pixels, so a size past the ceiling's points at 2x would be shrunk for
@@ -1809,7 +1839,7 @@ impl ConfigFile {
             // credential is refused where it cannot be used rather than quietly
             // ignored, which is how a password ends up authenticating nobody.
             match (target.protocol, target.subtype) {
-                (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdHighPerformance))) => {
+                (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdHighPerformance | Subtype::ArdMirror))) => {
                     let name = subtype.name();
                     anyhow::ensure!(
                         !target.username.is_empty() && !target.password.is_empty(),
@@ -3271,7 +3301,7 @@ mod tests {
     }
 
     /// The Apple subtypes.
-    const APPLE_SUBTYPES: &[&str] = &["ard", "ard-high-performance"];
+    const APPLE_SUBTYPES: &[&str] = &["ard", "ard-high-performance", "ard-mirror"];
 
     /// A `vnc` target body, with whatever keys the case is about.
     fn vnc_toml(extra: &str) -> String {
@@ -3451,6 +3481,42 @@ mod tests {
             "subtype = \"ard-high-performance\"\nvnc_password = \"other\"",
         ))
         .unwrap_err();
+        assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
+    }
+
+    /// The mirror subtype is the Mac's own displays over its media stream: an
+    /// account's credentials, the stream's sound and passthrough, a window to
+    /// follow, and neither a size nor a virtual display to state.
+    #[test]
+    fn ard_mirror_is_the_macs_own_displays_over_its_stream() {
+        let mirror = |extra: &str| {
+            ConfigFile::parse(&vnc_toml(&format!(
+                "subtype = \"ard-mirror\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
+            )))
+        };
+        let target = &mirror("clipboard = true").unwrap().targets[0];
+        assert_eq!(target.subtype, Some(Subtype::ArdMirror));
+        assert_eq!(target.subtype.unwrap().name(), "ard-mirror");
+        assert!(target.apple());
+        assert!(target.media_stream(), "the picture and the sound are the stream's");
+        assert!(!target.has_virtual_display(), "the Mac's own screens");
+        assert!(!target.sized());
+        assert_eq!(
+            target.offers(),
+            Offers { resize: true, audio: false, passthrough: Some(Passthrough::AppleMedia) }
+        );
+        assert!(target.sound(Choices::default()), "the sound comes with the picture");
+        let window = Choices { size: Sizing::Window, ..Choices::default() };
+        assert_eq!(target.accepts(window), Ok(()));
+        assert_eq!(target.accepts(Choices { passthrough: true, ..Choices::default() }), Ok(()));
+
+        let err = mirror("size = \"1600x1000\"").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("\"ard-mirror\"") && msg.contains("never sizes them"), "{msg}");
+        assert!(!msg.contains("virtual_display"), "the key is not this subtype's to set: {msg}");
+        let err = mirror("virtual_display = true").unwrap_err();
+        assert!(format!("{err:#}").contains("only subtype \"ard\" takes"), "{err:#}");
+        let err = ConfigFile::parse(&vnc_toml("subtype = \"ard-mirror\"\nvnc_password = \"other\"")).unwrap_err();
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
     }
 

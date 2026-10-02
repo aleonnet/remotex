@@ -245,7 +245,7 @@ enum Dialect {
 impl Dialect {
     fn of(subtype: Option<Subtype>) -> Self {
         match subtype {
-            Some(Subtype::Ard | Subtype::ArdHighPerformance) => Dialect::Apple889,
+            Some(Subtype::Ard | Subtype::ArdHighPerformance | Subtype::ArdMirror) => Dialect::Apple889,
             None | Some(Subtype::Wlshare) => Dialect::Rfb38,
         }
     }
@@ -688,6 +688,18 @@ struct DesktopState {
     /// keeps its curtain up until its stream is hooked up. Read with
     /// [`HpResize::shown`] wherever that decides whether a browser is covered.
     covered: bool,
+    /// The gateway reduces this session's picture to the viewer: a Mac's media
+    /// stream of its physical screens, decoded here (`ard-mirror`). The Mac sends
+    /// those at the screens' own pixels whatever it is asked, so [`Self::size`]
+    /// stays what the Mac calls its framebuffer — what an offer, a pixel request
+    /// and a pointer event are in — and [`Self::shown`] is what the browser has.
+    reduces: bool,
+    /// The size and scale the browser was last told ([`Self::resize_msg`]): `size`
+    /// and `scale` themselves, except where [`Self::reduces`] has the picture sent
+    /// smaller ([`Self::present`]). Written only where the `Resize` that says so
+    /// goes out, under [`Shared::showing`], so a picture is never reduced to a
+    /// size the browser has not been told.
+    shown: ((u16, u16), f32),
 }
 
 /// How long a High Performance viewport has to hold still before the Mac is
@@ -978,13 +990,58 @@ impl DesktopState {
             self.density = Density::Unanswered;
         }
     }
-    /// The size and scale, as a client is told them.
+    /// The size and scale, as a client is told them: [`Self::shown`].
     fn resize_msg(&self) -> ServerMsg {
-        ServerMsg::Resize {
-            w: self.size.0,
-            h: self.size.1,
-            scale: self.scale,
+        let ((w, h), scale) = self.shown;
+        ServerMsg::Resize { w, h, scale }
+    }
+
+    /// Work out what the browser is to be shown from the desktop as it now is, and
+    /// say whether that changed. Everywhere but a session that [`Self::reduces`],
+    /// the desktop itself.
+    ///
+    /// A reduced picture is the Mac's screen fitted to the viewer's window and the
+    /// video ceiling ([`crate::video::fit_within`]). In a session that follows the
+    /// window, the window is the browser's last report, in its own pixels — points
+    /// × its density — and the picture has no more pixels than that window shows.
+    /// It is labelled with the scale at which it also fits the window in points,
+    /// never larger than the Mac's own: a screen wider than the window in points
+    /// is shown whole, with nothing to scroll, whether it had to lose pixels or
+    /// not. Any other session names no window: the ceiling alone holds the
+    /// picture, labelled so that it keeps the Mac's own size in points.
+    fn present(&mut self) -> bool {
+        let shown = if self.reduces {
+            let viewport = self.viewport.filter(|&(w, h)| self.resize && w > 0 && h > 0);
+            let window = viewport.map(|(w, h)| {
+                let pixels = |points: u16| (f32::from(points) * self.host_density).round() as u32;
+                (pixels(w), pixels(h))
+            });
+            let size = crate::video::fit_within(self.size, window);
+            // The Mac's own width in points, and the most of it the window holds.
+            let own = f32::from(self.size.0) / self.scale;
+            let points = viewport.map_or(own, |(w, h)| {
+                let own_height = f32::from(self.size.1) / self.scale;
+                own * (f32::from(w) / own).min(f32::from(h) / own_height).min(1.0)
+            });
+            (size, f32::from(size.0) / points)
+        } else {
+            (self.size, self.scale)
+        };
+        std::mem::replace(&mut self.shown, shown) != shown
+    }
+
+    /// A browser pointer position, in the picture it is shown, as the remote
+    /// reads it: in the desktop's own pixels. The same position everywhere but a
+    /// reduced picture.
+    fn to_native(&self, x: i32, y: i32) -> (i32, i32) {
+        let ((w, h), _) = self.shown;
+        if (w, h) == self.size || w == 0 || h == 0 {
+            return (x, y);
         }
+        let native = |v: i32, shown: u16, size: u16| {
+            (f64::from(v) * f64::from(size) / f64::from(shown)).round() as i32
+        };
+        (native(x, w, self.size.0), native(y, h, self.size.1))
     }
 
     /// The scale a generic rect is labelled with: the server's reported one
@@ -1619,6 +1676,8 @@ async fn session(
     let Some(connected) = engine::connect_and_handshake(
         "vnc",
         &dest,
+        // A Mac's media stream runs between this connection's two addresses.
+        config.media_stream(),
         engine::HANDSHAKE_TIMEOUT,
         sink,
         |stream| connect(&config, choices, display, plan, stream),
@@ -1670,7 +1729,16 @@ async fn session(
             audio_rate: config.audio_plan().bitrate_bps,
             camera,
             microphone,
-            host_density: display.map_or(UNSCALED, |d| crate::protocol::render_density(d.scale)),
+            // A virtual display is rendered at one or two pixels a point, so its
+            // density is one of those. A mirror session's picture is reduced
+            // here, to the viewer's own pixels, whatever their ratio.
+            host_density: display.map_or(UNSCALED, |d| {
+                if config.media_stream() && !virtual_display {
+                    crate::protocol::scale_ratio(d.scale)
+                } else {
+                    crate::protocol::render_density(d.scale)
+                }
+            }),
             poll,
             media,
             passthrough,
@@ -1820,6 +1888,14 @@ async fn connect(
     // Where the connection runs, for High Performance's media stream: the Mac
     // sends it from its own address to this side's, on UDP.
     let addresses = (stream.peer_addr()?, stream.local_addr()?);
+    if config.media_stream() && addresses.0.ip() == addresses.1.ip() {
+        warn!(
+            "vnc: this gateway and the Mac are at one address, {}: what it sends on the media \
+             stream's ports comes back to itself, so a picture the Mac is asked to send again \
+             never comes",
+            addresses.0.ip()
+        );
+    }
     let (read_half, mut sock) = stream.into_split();
     let mut reader = BufReader::new(read_half);
 
@@ -2471,6 +2547,10 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let uplink: SharedUplink = Arc::new(Mutex::new(uplink));
     let hp = if virtual_display && resize { HpResize::opening() } else { HpResize::default() };
     let media_only = media.is_some();
+    // The Mac's stream of its own screens comes at their own pixels, so where it is
+    // decoded here it is reduced here — see [`DesktopState::reduces`]. One passed
+    // to the browser is the Mac's as it came.
+    let reduces = media_only && !virtual_display && matches!(pictures, Some(Pictures::Decoded(_)));
     let desktop: SharedDesktop = Arc::new(std::sync::Mutex::new(DesktopState {
         size,
         scale: UNSCALED,
@@ -2494,6 +2574,8 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         media_live: false,
         media_only,
         covered: media_only,
+        reduces,
+        shown: (size, UNSCALED),
     }));
     let cursor: SharedCursor = Arc::new(std::sync::Mutex::new(CursorState::default()));
     let clipboard: SharedClipboard = Arc::new(std::sync::Mutex::new(ClipboardState::default()));
@@ -2538,7 +2620,12 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         microphone: microphone.clone(),
         media: media.clone(),
         passthrough,
+        reducer: Arc::default(),
+        showing: Arc::default(),
     };
+    // The input side shows a picture too: a window change re-presents a mirror
+    // session's last one — see [`represent`].
+    let presenting = shared.clone();
 
     // A High Performance session opens covered — see [`HpResize::opening`] and
     // [`DesktopState::covered`].
@@ -2667,6 +2754,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                 // the layout names — see [`DisplayState::apple_pointer`].
                 let input = match input {
                     ClientMsg::MouseMove { x, y } => {
+                        // Out of a reduced picture first, then out of the Mac's
+                        // server scaling: each undoes what was done to the pixels.
+                        let (x, y) = desktop.lock().unwrap().to_native(x, y);
                         let (x, y) = display.lock().unwrap().apple_pointer(x, y);
                         ClientMsg::MouseMove { x, y }
                     }
@@ -2729,11 +2819,27 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         changed.then_some(ResizeAsk::Density)
                     }
                     ClientMsg::HostDisplay(screen) if apple && !virtual_display => {
-                        let density = crate::protocol::render_density(screen.scale);
+                        // As at connect: the viewer's own ratio where the picture
+                        // is reduced to it here.
+                        let density = if media.is_some() {
+                            crate::protocol::scale_ratio(screen.scale)
+                        } else {
+                            crate::protocol::render_density(screen.scale)
+                        };
                         desktop.lock().unwrap().host_density = density;
                         // Decided and sent under the uplink lock, as every scale
                         // request is, so the Mac receives them in the order they
                         // were decided in — see [`DisplayState::request_apple_scale`].
+                        // A Mac whose media stream carries the picture is asked
+                        // for no scale: the stream ignores it, and a display
+                        // change while an offer is out is what the Mac cannot
+                        // take. The density is the reduced picture's instead.
+                        if media.is_some() {
+                            if let Err(e) = represent(&presenting, &sink).await {
+                                break Err(e);
+                            }
+                            continue;
+                        }
                         let mut out = uplink.lock().await;
                         let scaling = {
                             let mut state = display.lock().unwrap();
@@ -2753,7 +2859,14 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     _ => None,
                 };
                 let sent = if let Some(ask) = ask {
-                    if resize {
+                    if apple && !virtual_display && media.is_some() {
+                        // The Mac's screens are not the window's to size: the
+                        // window sizes the picture the gateway reduces to it.
+                        if let ResizeAsk::Viewport(points) = ask {
+                            desktop.lock().unwrap().viewport = Some(points);
+                        }
+                        represent(&presenting, &sink).await
+                    } else if resize {
                         request_resize(&uplink, &desktop, ask, virtual_display).await
                     } else {
                         Ok(())
@@ -2837,7 +2950,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         live.and_then(|m| m.latest()).filter(|picture| picture.size == d.size)
                     };
                     if let Some(picture) = latest
-                        && let Err(e) = blit_picture(&shadow, &picture, &sink).await
+                        && let Err(e) = show_picture(&presenting, &picture, &sink).await
                     {
                         break Err(e);
                     }
@@ -2946,7 +3059,22 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                         let host_density = desktop.lock().unwrap().host_density;
                         // Held from the decision to the send; see `HostDisplay`.
                         let mut out = uplink.lock().await;
-                        let scaling = display.lock().unwrap().request_apple_scale(pick, host_density);
+                        // No display change goes to a mirror session's Mac while
+                        // its media-stream offer is unanswered: the Mac is starting
+                        // a capture of the display the change would replace. The
+                        // selection is dropped, as one of an unknown display is —
+                        // the checkmark stays where it is, and it can be made again
+                        // once the picture is up. None of it is a scale either —
+                        // see `HostDisplay`.
+                        if !virtual_display && media.as_ref().is_some_and(|m| m.lock().unwrap().pending()) {
+                            debug!("vnc: dropping a display selection made while a media-stream offer is out");
+                            continue;
+                        }
+                        let scaling = if media.is_some() {
+                            None
+                        } else {
+                            display.lock().unwrap().request_apple_scale(pick, host_density)
+                        };
                         // Queue the repaint while the selection is still the
                         // message in front of the Mac. Asking only after its
                         // answering layout is too late on macOS 26: the layout
@@ -3182,12 +3310,22 @@ async fn show_picture(
     picture: &vnc_apple_media::Picture,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    let first = {
+    let _showing = shared.showing.lock().await;
+    show_picture_held(shared, picture, sink).await
+}
+
+/// [`show_picture`], for a caller that holds [`Shared::showing`].
+async fn show_picture_held(
+    shared: &Shared,
+    picture: &vnc_apple_media::Picture,
+    sink: &VideoSink,
+) -> anyhow::Result<()> {
+    let (first, shown) = {
         let mut d = shared.desktop.lock().unwrap();
         if picture.size != d.size || d.hp.holds_pixels() {
             return Ok(());
         }
-        !std::mem::replace(&mut d.media_live, true)
+        (!std::mem::replace(&mut d.media_live, true), d.shown.0)
     };
     if first {
         info!("vnc: the picture now comes from the Mac's HEVC media stream");
@@ -3196,7 +3334,52 @@ async fn show_picture(
         send(&shared.uplink, &vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST)).await?;
     }
     uncover(shared, sink);
-    blit_picture(&shared.shadow, picture, sink).await
+    if shown == picture.size {
+        return blit_picture(&shared.shadow, picture.size, &picture.rgb, sink).await;
+    }
+    // A mirror session's picture, at the size the browser was told — see
+    // [`DesktopState::reduces`].
+    let reduced = shared.reducer.lock().unwrap().reduce(&picture.rgb, picture.size, shown)?;
+    blit_picture(&shared.shadow, shown, &reduced, sink).await
+}
+
+/// Show a mirror session's browser the desktop again after its window or its
+/// screen's density changed: the size it is reduced to is worked out afresh
+/// ([`DesktopState::present`]), and where that moved the browser is told and sent
+/// the stream's last picture at it. The Mac sends none while its screen is still,
+/// so waiting for the next one would leave a resized window empty.
+async fn represent(shared: &Shared, sink: &VideoSink) -> anyhow::Result<()> {
+    // Only a stream that is carrying the picture has one to show again: a display
+    // change stops it, and its last picture is then the old display's.
+    let latest = {
+        let d = shared.desktop.lock().unwrap();
+        shared.media.as_ref().filter(|_| d.media_live).and_then(|media| media.lock().unwrap().latest())
+    };
+    represent_with(shared, sink, latest).await
+}
+
+/// [`represent`], given the stream's last picture.
+async fn represent_with(
+    shared: &Shared,
+    sink: &VideoSink,
+    latest: Option<Arc<vnc_apple_media::Picture>>,
+) -> anyhow::Result<()> {
+    let _showing = shared.showing.lock().await;
+    let (resize_msg, shown) = {
+        let mut d = shared.desktop.lock().unwrap();
+        if !d.present() {
+            return Ok(());
+        }
+        (d.resize_msg(), d.shown.0)
+    };
+    debug!("vnc: the mirror picture is now shown at {}x{}", shown.0, shown.1);
+    shared.shadow.lock().unwrap().resize(shown.0, shown.1);
+    sink.reset_render();
+    sink.msg(resize_msg).await?;
+    match latest {
+        Some(picture) => show_picture_held(shared, &picture, sink).await,
+        None => Ok(()),
+    }
 }
 
 /// Bring the browser's resize notice down on the stream's first picture of a
@@ -3216,19 +3399,20 @@ fn uncover(shared: &Shared, sink: &VideoSink) {
 /// A whole-display picture into the stream, as much of it as the browser lacks.
 async fn blit_picture(
     shadow: &SharedShadow,
-    picture: &vnc_apple_media::Picture,
+    size: (u16, u16),
+    rgb: &[u8],
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    let Some(rect) = Rect::from_size(0, 0, picture.size.0, picture.size.1) else {
+    let Some(rect) = Rect::from_size(0, 0, size.0, size.1) else {
         return Ok(());
     };
-    let changed = shadow.lock().unwrap().accept(rect, &picture.rgb);
+    let changed = shadow.lock().unwrap().accept(rect, rgb);
     if let Some(changed) = changed {
         if changed == rect {
-            sink.damage(rect, &picture.rgb).await?;
+            sink.damage(rect, rgb).await?;
         } else {
             let mut pixels = Vec::new();
-            shadow::crop(&picture.rgb, rect, changed, &mut pixels);
+            shadow::crop(rgb, rect, changed, &mut pixels);
             sink.damage(changed, &pixels).await?;
         }
     }
@@ -3376,6 +3560,14 @@ struct Shared {
     /// See [`Connected::passthrough`]. `Some` is a session that may be sent
     /// [`ENCODING_WLSHARE_VP9`], and the only one that reads it.
     passthrough: Option<Arc<Listing>>,
+    /// What reduces a mirror session's pictures — see [`DesktopState::reduces`].
+    reducer: Arc<std::sync::Mutex<crate::video::Reducer>>,
+    /// Held while the size the browser is shown changes and while a picture is
+    /// put through at it. Both loops do both — the read loop a layout and the
+    /// stream's pictures, the input loop a window change and its repaint — and a
+    /// picture reduced to one size must not reach a shadow and a stream that have
+    /// moved to another in between.
+    showing: Arc<Mutex<()>>,
 }
 
 /// Read server messages forever, forwarding framebuffer updates to the sink.
@@ -3727,6 +3919,12 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     }
                     offer_media(uplink, desktop, media.as_ref()).await?;
                     holding
+                } else if media.is_some() {
+                    // A mirror session: the stream is offered for the Mac's own
+                    // screens once a layout has named them, and pixel polling
+                    // holds to one pixel while it carries the picture.
+                    offer_media(uplink, desktop, media.as_ref()).await?;
+                    desktop.lock().unwrap().media_live
                 } else {
                     false
                 };
@@ -5265,32 +5463,39 @@ async fn apply_resize(
         new.0,
         new.1
     );
-    let (was, resize_msg) = {
+    let (was, resized, resize_msg, shown) = {
         let mut d = desktop.lock().unwrap();
-        if d.size == new && d.scale == scale {
-            return Ok(false);
-        }
         let was = (d.size, d.scale);
+        let resized = was != (new, scale);
         d.size = new;
         d.scale = scale;
-        (was, d.resize_msg())
+        // A reduced picture's size is worked out here even where the remote's did
+        // not move: a mirror session's first layout names the size it opened
+        // with, and the picture has still to be fitted for the browser.
+        if !d.present() && !resized {
+            return Ok(false);
+        }
+        (was, resized, d.resize_msg(), d.shown.0)
     };
     // The old pixels describe a framebuffer that no longer exists, and the
-    // browser is about to reallocate its canvas.
-    shadow.lock().unwrap().resize(new.0, new.1);
+    // browser is about to reallocate its canvas. The shadow is what the browser
+    // holds, which a reduced picture makes smaller than the desktop.
+    shadow.lock().unwrap().resize(shown.0, shown.1);
     sink.reset_render();
-    info!(
-        "vnc: desktop resized from {}x{} px at {}x to {}x{} px at {scale}x ({}x{} pt)",
-        was.0.0,
-        was.0.1,
-        was.1,
-        new.0,
-        new.1,
-        f32::from(new.0) / scale,
-        f32::from(new.1) / scale
-    );
+    if resized {
+        info!(
+            "vnc: desktop resized from {}x{} px at {}x to {}x{} px at {scale}x ({}x{} pt)",
+            was.0.0,
+            was.0.1,
+            was.1,
+            new.0,
+            new.1,
+            f32::from(new.0) / scale,
+            f32::from(new.1) / scale
+        );
+    }
     sink.msg(resize_msg).await?;
-    Ok(true)
+    Ok(resized)
 }
 
 /// Handle an Apple `CursorImage` rect: a shape stored once under an id, then
@@ -5366,7 +5571,9 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // is presented, and a browser must not present one layout's pixels through
     // another's regions. So it says whether that resize is coming, and the
     // browser holds it until then rather than laying it over the old pixels.
-    let mosaic = if virtual_display { None } else { layout.mosaic() };
+    // A mirror session composes none: its picture is the stream's, one picture of
+    // one size, and a mosaic's regions are in the Mac's own pixels.
+    let mosaic = if virtual_display || shared.media.is_some() { None } else { layout.mosaic() };
     let resize = {
         let d = desktop.lock().unwrap();
         d.size != layout.backing || d.scale != layout.scale()
@@ -5384,7 +5591,10 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // All Displays over too many screens has no picture, whatever its size, and the
     // resize below is where the sink reads it.
     sink.hold_screens(!virtual_display && layout.too_many_screens());
-    let resized = apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?;
+    let resized = {
+        let _showing = shared.showing.lock().await;
+        apply_resize(desktop, shadow, layout.backing, layout.scale(), sink).await?
+    };
     if virtual_display {
         let cover = {
             let mut d = desktop.lock().unwrap();
@@ -5403,6 +5613,21 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
             }
         };
         hp_wake.notify_one();
+        if cover {
+            sink.msg(ServerMsg::Resizing { active: true }).await?;
+        }
+    } else if let Some(media) = &shared.media {
+        // A mirror session: the Mac's own screens are what the stream is offered
+        // for, and one that changed stopped the stream as a virtual one does.
+        let cover = {
+            let mut d = desktop.lock().unwrap();
+            d.laid_out = true;
+            resized && {
+                d.media_live = false;
+                media.lock().unwrap().stopped();
+                d.media_only && !std::mem::replace(&mut d.covered, true)
+            }
+        };
         if cover {
             sink.msg(ServerMsg::Resizing { active: true }).await?;
         }
@@ -5447,6 +5672,13 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
         state.active = active;
         state.listed = true;
         let server_scaling = if virtual_display {
+            None
+        } else if shared.media.is_some() {
+            // A mirror session keeps the layout, which is where a pointer event's
+            // space comes from, and asks for no scale: the stream comes at the
+            // screen's own pixels whatever factor is in force (measured), and a
+            // display change must not meet an offer on its way.
+            state.apple_layout = Some(layout.clone());
             None
         } else {
             state.accept_apple_layout(&layout, host_density)
@@ -8295,7 +8527,36 @@ mod tests {
             media_live: false,
             media_only: false,
             covered: false,
+            reduces: false,
+            shown: (size, UNSCALED),
         }))
+    }
+
+    /// A desktop state of its own, taken out of a shared one a test built: for
+    /// reading what [`DesktopState::present`] makes of a case without a session.
+    fn unwrap_desktop(desktop: &SharedDesktop) -> DesktopState {
+        let d = desktop.lock().unwrap();
+        DesktopState {
+            size: d.size,
+            scale: d.scale,
+            host_density: d.host_density,
+            screen: None,
+            pending: d.pending,
+            viewport: d.viewport,
+            density: d.density,
+            wire_scale: d.wire_scale,
+            resize: d.resize,
+            following: d.following,
+            declared: d.declared,
+            repaint_owed: d.repaint_owed,
+            hp: HpResize::default(),
+            laid_out: d.laid_out,
+            media_live: d.media_live,
+            media_only: d.media_only,
+            covered: d.covered,
+            reduces: d.reduces,
+            shown: d.shown,
+        }
     }
 
     /// The shared state the rect handlers take, with only the desktop and shadow
@@ -8316,6 +8577,8 @@ mod tests {
             microphone: None,
             media: None,
             passthrough: None,
+            reducer: Arc::default(),
+            showing: Arc::default(),
         }
     }
 
@@ -10036,6 +10299,260 @@ mod tests {
         assert!(out.iter().any(|m| matches!(m, ServerMsg::Video(_))), "{out:?}");
         assert!(!out.iter().any(|m| matches!(m, ServerMsg::Resizing { .. })), "{out:?}");
         assert!(desktop.lock().unwrap().covered, "still owed to the display the resize brings");
+    }
+
+    /// A mirror session — the Mac's own screens over its media stream — is offered
+    /// the stream for a physical layout, at the screen's own pixels, and the Mac is
+    /// asked for no scale: Standard would ask this 2x screen for half, for a 1x
+    /// browser.
+    #[tokio::test]
+    async fn a_mirror_session_offers_the_stream_for_the_physical_screens() {
+        let (uplink, sent) = test_uplink();
+        let (sink, _rx) = test_sink();
+        let desktop = shared_desktop((100, 100), None, None);
+        desktop.lock().unwrap().media_only = true;
+        let addr = "127.0.0.1:5900".parse().unwrap();
+        let media: SharedMedia = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, false).0));
+        let shared = Shared {
+            media: Some(Arc::clone(&media)),
+            ..test_shared(Arc::clone(&uplink), Arc::clone(&desktop), test_shadow((100, 100)))
+        };
+
+        // Before any layout there is no screen to offer the stream for.
+        offer_media(&uplink, &desktop, Some(&media)).await.unwrap();
+        assert!(!media.lock().unwrap().pending());
+
+        let payload = layout_payload(Some(11), &[(11, (1920, 1080), (3840, 2160), 0x01)]);
+        assert!(read_display_layout(&mut payload.as_slice(), &shared, false, false, &sink).await.unwrap());
+        assert_eq!(desktop.lock().unwrap().size, (3840, 2160));
+        assert!(desktop.lock().unwrap().laid_out);
+        assert_eq!(
+            written(&sent),
+            vnc_apple::auto_framebuffer_update((3840, 2160)),
+            "re-armed, and asked for no server scaling"
+        );
+        assert!(shared.display.lock().unwrap().apple_layout.is_some(), "the layout a pointer event is read by");
+
+        offer_media(&uplink, &desktop, Some(&media)).await.unwrap();
+        assert!(media.lock().unwrap().pending(), "the stream is offered for the Mac's own screen");
+        let offered = written(&sent)[vnc_apple::auto_framebuffer_update((3840, 2160)).len()..].to_vec();
+        let listed = set_encodings(&vnc_apple_media::encodings_with_media_stream());
+        assert_eq!(offered[..listed.len()], listed[..], "the list naming the stream goes first");
+        assert_eq!(offered[listed.len()], 0x1c, "then the offer itself");
+
+        // The same layout again changes nothing, and stops no stream.
+        desktop.lock().unwrap().media_live = true;
+        assert!(!read_display_layout(&mut payload.as_slice(), &shared, false, false, &sink).await.unwrap());
+        assert!(desktop.lock().unwrap().media_live);
+    }
+
+    /// A mirror picture reaches the browser at the size its window holds: the
+    /// browser is told that size, at its own density, and sent the picture reduced
+    /// to it. Without a window to follow the ceiling alone holds it, labelled so it
+    /// keeps the Mac's size in points.
+    #[tokio::test]
+    async fn a_mirror_picture_is_shown_at_the_windows_size() {
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = sized_sink((640, 360)).await;
+        let shadow = test_shadow((640, 360));
+        let desktop = shared_desktop((640, 360), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.media_only = true;
+            d.reduces = true;
+            d.viewport = Some((320, 400));
+        }
+        let shared = test_shared(uplink, Arc::clone(&desktop), Arc::clone(&shadow));
+
+        represent_with(&shared, &sink, None).await.unwrap();
+        sink.flush().await;
+        assert!(
+            matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 320, h: 180, scale }) if scale == 1.0),
+            "the window's width holds it, at the browser's density"
+        );
+        assert_eq!(desktop.lock().unwrap().size, (640, 360), "the Mac's framebuffer is what it was");
+
+        let colour = [10u8, 200, 90];
+        let rgb: Vec<u8> = colour.iter().copied().cycle().take(640 * 360 * 3).collect();
+        let picture = vnc_apple_media::Picture { size: (640, 360), rgb };
+        show_picture(&shared, &picture, &sink).await.unwrap();
+        sink.flush().await;
+        assert_eq!(units(&mut rx).len(), 1, "one picture, one access unit");
+        let held = shadow.lock().unwrap().copy_out(Rect::from_size(0, 0, 320, 180).unwrap()).expect("the reduced picture");
+        assert_eq!(held.len(), 320 * 180 * 3);
+        assert!(held.as_chunks::<3>().0.iter().all(|pixel| *pixel == colour), "the picture, reduced");
+
+        // No window to follow: the ceiling alone, at the Mac's own points.
+        let mut kept = DesktopState { resize: false, size: (5120, 2880), scale: 2.0, ..unwrap_desktop(&desktop) };
+        assert!(kept.present());
+        assert_eq!(kept.shown, ((3840, 2160), 1.5));
+        // A window larger than the screen leaves the picture as the Mac sent it.
+        let mut roomy = DesktopState { viewport: Some((4000, 3000)), ..unwrap_desktop(&desktop) };
+        roomy.present();
+        assert_eq!(roomy.shown, ((640, 360), UNSCALED));
+        // A 1.5x browser's window is its own pixels: points times its density.
+        let mut dense = DesktopState { viewport: Some((200, 400)), host_density: 1.5, ..unwrap_desktop(&desktop) };
+        dense.present();
+        assert_eq!(dense.shown, ((300, 168), 1.5));
+        // A window with the pixels for the whole screen and not the points: every
+        // pixel is sent, labelled so the screen fits the window with nothing to scroll.
+        let mut sharp = DesktopState {
+            size: (1600, 900),
+            viewport: Some((1274, 1191)),
+            host_density: 2.0,
+            ..unwrap_desktop(&desktop)
+        };
+        sharp.present();
+        assert_eq!(sharp.shown, ((1600, 900), 1600.0 / 1274.0));
+        // And a session that does not reduce shows the desktop as it is.
+        let mut plain = DesktopState { reduces: false, ..unwrap_desktop(&desktop) };
+        plain.present();
+        assert_eq!(plain.shown, ((640, 360), UNSCALED));
+    }
+
+    /// A pointer position on a reduced picture is sent to the Mac in the Mac's own
+    /// pixels, and one on a picture shown as it came is sent as it is.
+    #[test]
+    fn a_mirror_pointer_goes_back_to_the_macs_pixels() {
+        let desktop = shared_desktop((5120, 2880), None, None);
+        let mut d = unwrap_desktop(&desktop);
+        assert_eq!(d.to_native(1280, 720), (1280, 720), "shown as it came");
+        d.shown = ((2560, 1440), 2.0);
+        assert_eq!(d.to_native(0, 0), (0, 0));
+        assert_eq!(d.to_native(1280, 720), (2560, 1440), "the centre stays the centre");
+        assert_eq!(d.to_native(2559, 1439), (5118, 2878), "the far corner stays inside the screen");
+        d.shown = ((3840, 2160), 1.5);
+        assert_eq!(d.to_native(3839, 2159), (5119, 2879));
+    }
+
+    /// A window that changes while the Mac's screen is still is shown the stream's
+    /// last picture again at the new size, since the Mac sends none until its
+    /// screen changes; a report that changes nothing sends nothing.
+    #[tokio::test]
+    async fn a_window_change_shows_the_last_picture_again() {
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = sized_sink((640, 360)).await;
+        let shadow = test_shadow((640, 360));
+        let desktop = shared_desktop((640, 360), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.media_only = true;
+            d.reduces = true;
+        }
+        let shared = test_shared(uplink, Arc::clone(&desktop), Arc::clone(&shadow));
+        let colour = [200u8, 30, 60];
+        let rgb: Vec<u8> = colour.iter().copied().cycle().take(640 * 360 * 3).collect();
+        let picture = Arc::new(vnc_apple_media::Picture { size: (640, 360), rgb });
+
+        // No window reported yet: the desktop is shown as it is, and nothing is said.
+        represent_with(&shared, &sink, Some(Arc::clone(&picture))).await.unwrap();
+        sink.flush().await;
+        assert!(rx.try_recv().is_err(), "nothing changed, nothing sent");
+
+        desktop.lock().unwrap().viewport = Some((320, 180));
+        represent_with(&shared, &sink, Some(Arc::clone(&picture))).await.unwrap();
+        sink.flush().await;
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 320, h: 180, .. })));
+        assert_eq!(units(&mut rx).len(), 1, "the last picture, at the new size");
+        let held = shadow.lock().unwrap().copy_out(Rect::from_size(0, 0, 320, 180).unwrap()).expect("the picture again");
+        assert!(held.as_chunks::<3>().0.iter().all(|pixel| *pixel == colour));
+
+        represent_with(&shared, &sink, Some(picture)).await.unwrap();
+        sink.flush().await;
+        assert!(rx.try_recv().is_err(), "the same window again says nothing");
+    }
+
+    /// A window change waits for a picture that is being shown, and a picture for
+    /// a window change: neither loop moves the shown size under the other.
+    #[tokio::test]
+    async fn a_window_change_waits_for_the_picture_being_shown() {
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = sized_sink((640, 360)).await;
+        let shadow = test_shadow((640, 360));
+        let desktop = shared_desktop((640, 360), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.media_only = true;
+            d.reduces = true;
+            d.viewport = Some((320, 180));
+        }
+        let shared = test_shared(uplink, Arc::clone(&desktop), Arc::clone(&shadow));
+        let picture = vnc_apple_media::Picture { size: (640, 360), rgb: vec![7; 640 * 360 * 3] };
+        let brief = std::time::Duration::from_millis(50);
+
+        let showing = shared.showing.lock().await;
+        assert!(tokio::time::timeout(brief, represent_with(&shared, &sink, None)).await.is_err());
+        assert_eq!(desktop.lock().unwrap().shown.0, (640, 360), "the size has not moved under the picture");
+        assert!(tokio::time::timeout(brief, show_picture(&shared, &picture, &sink)).await.is_err());
+        sink.flush().await;
+        assert!(rx.try_recv().is_err(), "and nothing was sent");
+        drop(showing);
+
+        represent_with(&shared, &sink, None).await.unwrap();
+        show_picture(&shared, &picture, &sink).await.unwrap();
+        sink.flush().await;
+        assert!(matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 320, h: 180, .. })));
+        assert_eq!(units(&mut rx).len(), 1);
+    }
+
+    /// A mirror screen past the ceiling is fitted to it at its first layout, though
+    /// that layout names the size and scale the session opened with: the browser
+    /// is told the fitted size, and no remote resize is reported.
+    #[tokio::test]
+    async fn a_mirror_screen_past_the_ceiling_is_fitted_at_its_first_layout() {
+        let (sink, mut rx) = test_sink();
+        let shadow = test_shadow((5120, 1440));
+        let desktop = shared_desktop((5120, 1440), None, None);
+        {
+            let mut d = desktop.lock().unwrap();
+            d.media_only = true;
+            d.reduces = true;
+            d.resize = false;
+        }
+        assert!(!apply_resize(&desktop, &shadow, (5120, 1440), UNSCALED, &sink).await.unwrap());
+        sink.flush().await;
+        assert!(
+            matches!(rx.try_recv(), Ok(ServerMsg::Resize { w: 3840, h: 1080, scale }) if scale == 0.75),
+            "the ceiling holds it, at the Mac's own points"
+        );
+        assert_eq!(desktop.lock().unwrap().shown.0, (3840, 1080));
+        assert_eq!(shadow.lock().unwrap().size(), (3840, 1080), "the shadow is what the browser holds");
+
+        // The same layout again says nothing.
+        assert!(!apply_resize(&desktop, &shadow, (5120, 1440), UNSCALED, &sink).await.unwrap());
+        sink.flush().await;
+        assert!(rx.try_recv().is_err());
+    }
+
+    /// A mirror session's All Displays over screens of different densities is the
+    /// stream's one picture, shown as it came: no mosaic is composed, whose regions
+    /// would be in the Mac's pixels and not the reduced picture's.
+    #[tokio::test]
+    async fn a_mirror_session_composes_no_mosaic() {
+        let (uplink, _sent) = test_uplink();
+        let (sink, mut rx) = test_sink();
+        let desktop = shared_desktop((100, 100), None, None);
+        desktop.lock().unwrap().media_only = true;
+        let addr = "127.0.0.1:5900".parse().unwrap();
+        let media: SharedMedia = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, false).0));
+        let mixed = layout_payload(None, &[(1, (1280, 800), (1280, 800), 0x01), (2, (1600, 900), (3200, 1800), 0x00)]);
+
+        // Standard's session composes it.
+        let standard = test_shared(Arc::clone(&uplink), shared_desktop((100, 100), None, None), test_shadow((100, 100)));
+        read_display_layout(&mut mixed.as_slice(), &standard, false, false, &sink).await.unwrap();
+        sink.flush().await;
+        let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(out.iter().any(|m| matches!(m, ServerMsg::Mosaic { .. })), "{out:?}");
+
+        let shared = Shared {
+            media: Some(media),
+            ..test_shared(uplink, Arc::clone(&desktop), test_shadow((100, 100)))
+        };
+        read_display_layout(&mut mixed.as_slice(), &shared, false, false, &sink).await.unwrap();
+        sink.flush().await;
+        let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        assert!(!out.iter().any(|m| matches!(m, ServerMsg::Mosaic { .. })), "{out:?}");
+        assert!(shared.display.lock().unwrap().mosaic.is_none());
     }
 
     /// CopyRect saves the VNC link its pixels: the source is read back out of the
