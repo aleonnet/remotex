@@ -193,6 +193,7 @@ async fn connect_from(from: Option<std::net::IpAddr>, to: std::net::SocketAddr) 
 /// Whether `dest`, a `host:port` as [`host_port`] formats it, names this host:
 /// any address it resolves to is a loopback, the unspecified address, or one a
 /// socket binds. Resolved on the calling thread.
+#[cfg(target_os = "macos")]
 pub fn is_this_host(dest: &str) -> bool {
     use std::net::ToSocketAddrs as _;
     dest.to_socket_addrs().is_ok_and(|mut addrs| {
@@ -484,6 +485,7 @@ mod tests {
     }
 
     /// A destination is this host when it resolves to an address this host holds.
+    #[cfg(target_os = "macos")]
     #[test]
     fn this_host_is_told_from_another() {
         assert!(is_this_host("127.0.0.1:5900"));

@@ -147,7 +147,7 @@ fn built_in() -> Option<(CGDirectDisplayID, bool)> {
         .map(|&display| (display, unsafe { CGDisplayIsActive(display) } != 0))
 }
 
-/// Enable or disable `display` for this login session.
+/// Enable or disable `display`, for as long as this process runs.
 fn set_enabled(display: CGDirectDisplayID, enabled: bool) -> anyhow::Result<()> {
     type ConfigureEnabled = unsafe extern "C" fn(CGDisplayConfigRef, CGDirectDisplayID, bool) -> CGError;
     // SAFETY: a symbol of this name is CoreGraphics' re-export of SkyLight's, with
