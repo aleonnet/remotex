@@ -228,6 +228,13 @@ pub fn enable_inbound_record_decryption() -> Vec<u8> {
 /// push comes, and at a second a scroll arrives a frame a second.
 pub const PUSH_INTERVAL_US: u32 = 33_333;
 
+/// The interval a High Performance session arms, in microseconds. Its picture is
+/// the media stream and the Mac's pixel updates are stepped over undecoded, so
+/// there is nothing to gain from more of them: one a second keeps the arming,
+/// and the cursor shapes that depend on it, at the least the Mac can be made to
+/// push before the stream is up and across a display change.
+pub const PUSH_INTERVAL_MEDIA_US: u32 = 1_000_000;
+
 /// The longest interval [`PushPace`] arms: the second that starves a physical
 /// display's picture, which a gateway that far behind is not showing anyway.
 const PUSH_INTERVAL_CEILING_US: u32 = 1_000_000;

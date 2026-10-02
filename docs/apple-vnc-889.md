@@ -628,7 +628,9 @@ rectangle.
   stream, the browser's link included where that holds the stream — smoothed over
   a few updates, up to 1,000,000, and comes back to 33,333 as the cost falls. It
   arms again only when the interval moves by half, and at most twice a second.
-  High Performance stays at 33,333: its picture is the media stream.
+  High Performance arms 1,000,000: its picture is the media stream and the Mac's
+  pixel updates are stepped over undecoded, so one a second is the least it can
+  be made to push before the stream is up and across a display change.
 - **`0xffffffff` turns the pushes off.** The daemon records whether the word is
   the all-ones value and pushes nothing while it is. A published description reads
   the word as a screen id, with all-ones meaning all displays. It is not one:
