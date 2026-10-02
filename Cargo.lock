@@ -784,35 +784,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "desktop-flac"
-version = "0.0.3"
-source = "git+https://github.com/andrewtheguy/desktop-flac?tag=v0.0.3#752f65c3ca4be067f29417b1bdd1a113e091845b"
-dependencies = [
- "libflac-prebuilt-sys",
- "thiserror",
-]
-
-[[package]]
-name = "desktop-opus"
-version = "0.0.1"
-source = "git+https://github.com/andrewtheguy/desktop-opus?tag=v0.0.1#5ad2c18a5ef8e269bdfe23c0133f72094ba22867"
-dependencies = [
- "opus-prebuilt",
- "thiserror",
-]
-
-[[package]]
-name = "desktop-vp9"
-version = "0.0.5"
-source = "git+https://github.com/andrewtheguy/desktop-vp9?tag=v0.0.5#b4f1c659d9d48c0ee9f821de7b275ba0e854622b"
-dependencies = [
- "libvpx-prebuilt-sys",
- "log",
- "thiserror",
- "yuv",
-]
-
-[[package]]
 name = "digest"
 version = "0.10.7"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2331,9 +2302,6 @@ dependencies = [
  "clap",
  "crossterm",
  "des 0.8.1",
- "desktop-flac",
- "desktop-opus",
- "desktop-vp9",
  "eax",
  "env_logger",
  "flate2",
@@ -2354,11 +2322,14 @@ dependencies = [
  "rubato",
  "rusqlite",
  "rust-embed",
+ "screen-vp9",
  "serde",
  "serde_json",
  "sha1 0.11.0",
  "sha2",
  "socket2",
+ "sound-flac",
+ "sound-opus",
  "sspi",
  "tar",
  "tempfile",
@@ -2662,6 +2633,17 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
+name = "screen-vp9"
+version = "0.0.6"
+source = "git+https://github.com/andrewtheguy/screen-vp9?tag=v0.0.6#0014571b707973893adf6c077c8904fee1b00408"
+dependencies = [
+ "libvpx-prebuilt-sys",
+ "log",
+ "thiserror",
+ "yuv",
+]
+
+[[package]]
 name = "sec1"
 version = "0.8.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -2902,6 +2884,24 @@ checksum = "c3d1e2c7f27f8d4cb10542a02c49005dbd6e93095799d6f3be745fae9f8fedd4"
 dependencies = [
  "libc",
  "windows-sys 0.61.2",
+]
+
+[[package]]
+name = "sound-flac"
+version = "0.0.4"
+source = "git+https://github.com/andrewtheguy/sound-flac?tag=v0.0.4#94ee467d6b7439ee9ae152b7b864ecb08ebc0a7a"
+dependencies = [
+ "libflac-prebuilt-sys",
+ "thiserror",
+]
+
+[[package]]
+name = "sound-opus"
+version = "0.0.2"
+source = "git+https://github.com/andrewtheguy/sound-opus?tag=v0.0.2#57147b529bd836abc2fca562c6936e5b74a71e7d"
+dependencies = [
+ "opus-prebuilt",
+ "thiserror",
 ]
 
 [[package]]

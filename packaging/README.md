@@ -132,7 +132,7 @@ binary's global CPU floor.
 ## Prebuilt native dependencies
 
 Release builds link `opus-prebuilt`, `libvpx-prebuilt` and, under
-[desktop-flac](https://github.com/andrewtheguy/desktop-flac), `libflac-prebuilt`.
+[sound-flac](https://github.com/andrewtheguy/sound-flac), `libflac-prebuilt`.
 Their sys crates download static archives instead of building vendored C and
 C++, so this project needs no CMake, assembler, pkg-config, libclang, vcpkg, or
 system copies of those libraries, and no artifact carries or depends on one.

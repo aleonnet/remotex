@@ -90,7 +90,7 @@ for a frame. What the gateway asks of it:
   the page's decoder is held to the format and the 960-sample block.
 
 An Opus packet is the stream the gateway's own encoder makes of an RDP host's
-sound: both are [desktop-opus](https://github.com/andrewtheguy/desktop-opus), a
+sound: both are [sound-opus](https://github.com/andrewtheguy/sound-opus), a
 repository of its own that the gateway and wlshare each pin by release tag.
 
 Opus is the one lossy step on the way to the browser, made once, by wlshare, and
@@ -142,7 +142,7 @@ announces late is still taken.
 
 So the gateway needs no codec for wlshare's sound.
 wlshare's FLAC encoder is libFLAC, through
-[desktop-flac](https://github.com/andrewtheguy/desktop-flac), which the gateway
+[sound-flac](https://github.com/andrewtheguy/sound-flac), which the gateway
 pins too, for the FLAC it codes of an RDP host's sound.
 
 Audio shares the TCP stream with the pixels, which is the one cost of carrying

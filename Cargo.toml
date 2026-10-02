@@ -77,7 +77,7 @@ png = "0.18"
 # SQLite's one C file with `cc` — no system library to find.
 rusqlite = { version = "0.40", features = ["bundled"] }
 # VP9 — the video codec every desktop is streamed with (src/vp9.rs) — as wlshare codes
-# it: desktop-vp9, the one crate that speaks to libvpx for this gateway and for wlshare's
+# it: screen-vp9, the one crate that speaks to libvpx for this gateway and for wlshare's
 # own stream, its own repository pinned at a release tag by both, so a passed wlshare frame
 # and one encoded here are the same stream by construction and a libvpx setting changes in
 # one place.
@@ -90,7 +90,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # a thing no check of this gateway should have to have. Do not restore a source build,
 # a vcpkg dependency, or bindgen. libvpx asserts nothing — it returns error codes —
 # which is why the encoder is a plain `?` path under `panic = "abort"`.
-desktop-vp9 = { git = "https://github.com/andrewtheguy/desktop-vp9", tag = "v0.0.5" }
+screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.6" }
 # YUV→RGB for the HEVC pictures High Performance's media stream decodes to
 # (src/vnc_apple_media.rs). Pure Rust with AVX2 and NEON paths chosen at run time —
 # no C, no assembler, the same bargain as above.
@@ -101,7 +101,7 @@ yuv = "0.8"
 # Mac's AAC-ELD sound is decoded by the browser.
 libloading = "0.9"
 # `apple-hp-media-static` links it instead, from the prebuilt bargain `opus`
-# and `desktop-vp9` make: static archives the sys crate downloads, compiling no
+# and `screen-vp9` make: static archives the sys crate downloads, compiling no
 # C. They are configured down to the HEVC decoder and parser (and on
 # macOS its VideoToolbox hwaccel); that FFmpeg is LGPL-2.1-or-later, linked
 # statically, and the prebuilt repository's README says what that obliges. The
@@ -110,13 +110,13 @@ libloading = "0.9"
 # The tag pins the crate; the archives are the latest release's.
 avcodec-hevc-sys = { package = "libavcodec-hevc-prebuilt-sys", git = "https://github.com/andrewtheguy/libavcodec-hevc-prebuilt", tag = "v9.0.2-20260928041244-5fdbab1", optional = true }
 # Remote audio: resample redirected PCM and encode bare Opus packets, as wlshare
-# codes its own: desktop-opus, the one crate that codes a desktop's sound as Opus
+# codes its own: sound-opus, the one crate that codes a desktop's sound as Opus
 # for this gateway and for wlshare, its own repository pinned at a release tag by
 # both, so a passed wlshare packet and one encoded here are the same stream by
 # construction and an encoder setting changes in one place.
-desktop-opus = { git = "https://github.com/andrewtheguy/desktop-opus", tag = "v0.0.1" }
+sound-opus = { git = "https://github.com/andrewtheguy/sound-opus", tag = "v0.0.2" }
 # libopus itself, for the microphone's decoder (src/mic.rs) and for the tests
-# that read the encoder's packets back; desktop-opus links the same crate at the
+# that read the encoder's packets back; sound-opus links the same crate at the
 # same tag, so there is one libopus in the binary.
 #
 # `opus-prebuilt` is a fork of the `opus` 0.3.1 crate that links libopus from a
@@ -130,16 +130,16 @@ opus = { package = "opus-prebuilt", git = "https://github.com/andrewtheguy/libop
 # There is deliberately no container. Opus packets travel as audio frames on the
 # dedicated audio WebSocket, which already delimits them, and the browser hands
 # them straight to a WebCodecs decoder — so an Ogg dependency would buy framing
-# that is already there. `OpusHead` is still sent, built by desktop-opus,
+# that is already there. `OpusHead` is still sent, built by sound-opus,
 # because a decoder needs it wherever it arrives from.
 # FLAC, for an RDP session started with its sound lossless, whose PCM is coded
-# lossless here (src/audio.rs). `desktop-flac` is the one place libFLAC is spoken
+# lossless here (src/audio.rs). `sound-flac` is the one place libFLAC is spoken
 # to, for wlshare's encoder and for the one here, its own repository pinned at a
 # release tag by both. libFLAC is linked statically, from the prebuilt archive
 # its sys crate downloads, as libopus and libvpx are, so no package carries or
 # depends on one. wlshare's own sound, FLAC or Opus, is passed as it came and needs
 # neither codec here (src/vnc_audio.rs).
-desktop-flac = { git = "https://github.com/andrewtheguy/desktop-flac", tag = "v0.0.3" }
+sound-flac = { git = "https://github.com/andrewtheguy/sound-flac", tag = "v0.0.4" }
 # 44100 -> 48000, because libopus accepts only 8/12/16/24/48 kHz and RDP offers
 # no 48 kHz format. Pure Rust, and it resamples deinterleaved channels — which is
 # the point: the naive interleaved interpolation blends left into right.

@@ -451,7 +451,7 @@ const PASSED_FPS: u64 = 60;
 pub fn pass(w: u16, h: u16, frame: &[u8], chroma: Chroma) -> anyhow::Result<Passed> {
     let header = crate::vp9::frame_header(frame)
         .ok_or_else(|| anyhow::anyhow!("the server's VP9 frame does not start with a VP9 header"))?;
-    let asked = desktop_vp9::Chroma::from(chroma);
+    let asked = screen_vp9::Chroma::from(chroma);
     anyhow::ensure!(
         header.profile == asked.profile(),
         "the server's VP9 frame is profile {}, not the {} profile {} this session asked for",
