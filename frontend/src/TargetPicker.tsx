@@ -227,43 +227,75 @@ export default function TargetPicker({
                         </span>
                       </p>
                     )}
-                    {/* The remote's sound, where the target offers it: off, or
-                        the format it is sent as. */}
-                    {options.sounds.length > 0 && (
-                      <fieldset className="picker-choice">
-                        <legend>Sound</legend>
-                        {options.sounds.map((sound) => (
-                          <label
-                            key={sound.value}
-                            className={`picker-option${sound.disabled ? " picker-option-unavailable" : ""}`}
-                          >
-                            <input
-                              type="radio"
-                              name={`picker-sound-${t.name}`}
-                              checked={options.choices.audio === sound.value}
-                              disabled={
-                                sound.disabled || pendingTarget !== null
-                              }
-                              onChange={() =>
-                                setRemembered((was) =>
-                                  rememberChoice(
-                                    was,
-                                    t.name,
-                                    "audio",
-                                    sound.value,
-                                  ),
-                                )
-                              }
-                            />
-                            <span className="picker-option-text">
-                              <span>{sound.label}</span>
-                              <span className="picker-option-note">
-                                {sound.note}
-                              </span>
+                    {/* The remote's sound, where the target offers it: ticked or
+                        not, and under a ticked one the format it is sent as. */}
+                    {options.soundRow && (
+                      <>
+                        <label className="picker-option">
+                          <input
+                            type="checkbox"
+                            checked={options.soundRow.checked}
+                            disabled={pendingTarget !== null}
+                            onChange={(e) =>
+                              setRemembered((was) =>
+                                rememberChoice(
+                                  was,
+                                  t.name,
+                                  "audio",
+                                  e.target.checked ? "opus" : "off",
+                                ),
+                              )
+                            }
+                          />
+                          <span className="picker-option-text">
+                            <span>{options.soundRow.label}</span>
+                            <span className="picker-option-note">
+                              {options.soundRow.note}
                             </span>
-                          </label>
-                        ))}
-                      </fieldset>
+                          </span>
+                        </label>
+                        {options.soundRow.checked && (
+                          <div
+                            className="picker-sound-formats"
+                            role="radiogroup"
+                            aria-label="Sound format"
+                          >
+                            {options.soundRow.formats.map((format) => (
+                              <label
+                                key={format.value}
+                                className={`picker-option${format.disabled ? " picker-option-unavailable" : ""}`}
+                              >
+                                <input
+                                  type="radio"
+                                  name={`picker-sound-${t.name}`}
+                                  checked={
+                                    options.choices.audio === format.value
+                                  }
+                                  disabled={
+                                    format.disabled || pendingTarget !== null
+                                  }
+                                  onChange={() =>
+                                    setRemembered((was) =>
+                                      rememberChoice(
+                                        was,
+                                        t.name,
+                                        "audio",
+                                        format.value,
+                                      ),
+                                    )
+                                  }
+                                />
+                                <span className="picker-option-text">
+                                  <span>{format.label}</span>
+                                  <span className="picker-option-note">
+                                    {format.note}
+                                  </span>
+                                </span>
+                              </label>
+                            ))}
+                          </div>
+                        )}
+                      </>
                     )}
                     {/* Only what the target's type offers has a row; one that
                         cannot be had here is greyed and says why. */}

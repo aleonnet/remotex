@@ -64,9 +64,11 @@ function keys(rows: { key: string }[]): string[] {
   return rows.map((row) => row.key);
 }
 
-/** What a target's sound can be taken as, in the order shown. */
-function sounds(options: { sounds: { value: string }[] }): string[] {
-  return options.sounds.map((sound) => sound.value);
+/** The formats a target's sound can be sent as, in the order shown. */
+function formats(options: {
+  soundRow: { formats: { value: string }[] } | null;
+}): string[] | null {
+  return options.soundRow?.formats.map((format) => format.value) ?? null;
 }
 
 /** The sizes a target offers a client, as `[value, label]`. */
@@ -132,11 +134,11 @@ test("a Mac sharing its physical displays is shown at their size", () => {
 test("only what the target's type offers has a row", () => {
   const rdp = targetOptions(RDP, undefined, ABLE);
   assert.deepEqual(keys(rdp.rows), ["passthrough"]);
-  assert.deepEqual(sounds(rdp), ["off", "opus", "flac"]);
+  assert.deepEqual(formats(rdp), ["opus", "flac"]);
   // A plain VNC server has nothing to choose.
   const plain = targetOptions(target({}), undefined, ABLE);
   assert.deepEqual(plain.rows, []);
-  assert.deepEqual(plain.sounds, []);
+  assert.equal(plain.soundRow, null);
   // wlshare's VP9 is the subtype's picture, not a choice. Its sound is.
   const wlshare = targetOptions(
     target({ subtype: "wlshare", resize: true, audio: true }),
@@ -144,11 +146,11 @@ test("only what the target's type offers has a row", () => {
     ABLE,
   );
   assert.deepEqual(wlshare.rows, []);
-  assert.deepEqual(sounds(wlshare), ["off", "opus", "flac"]);
+  assert.deepEqual(formats(wlshare), ["opus", "flac"]);
   // Standard Screen Sharing on the Mac's physical displays offers nothing.
   const standard = targetOptions(target({ subtype: "ard" }), undefined, ABLE);
   assert.deepEqual(standard.rows, []);
-  assert.deepEqual(standard.sounds, []);
+  assert.equal(standard.soundRow, null);
   assert.deepEqual(standard.choices, {
     size: "target",
     audio: "off",
@@ -166,7 +168,8 @@ test("nothing is ticked until somebody ticks it", () => {
   });
   assert.equal(options.sound, false);
   assert.ok(options.rows.every((row) => !row.checked && !row.disabled));
-  assert.ok(options.sounds.every((sound) => !sound.disabled));
+  assert.equal(options.soundRow?.checked, false);
+  assert.ok(options.soundRow?.formats.every((format) => !format.disabled));
 });
 
 test("what was chosen last time is what Start sends", () => {
@@ -178,9 +181,11 @@ test("what was chosen last time is what Start sends", () => {
     passthrough: false,
   });
   assert.equal(options.sound, true);
+  assert.equal(options.soundRow?.checked, true);
   // The format is part of the choice.
   const lossless = targetOptions(sized, { audio: "flac" }, ABLE);
   assert.equal(lossless.choices.audio, "flac");
+  assert.equal(lossless.soundRow?.checked, true);
   assert.equal(lossless.sound, true);
   // A choice remembered for something the target does not offer here is not
   // sent: a phone has no window, and a plain server neither that nor sound.
@@ -206,7 +211,7 @@ test("what was chosen last time is what Start sends", () => {
 test("High Performance's sound has no row and is always carried", () => {
   const options = targetOptions(HIGH_PERFORMANCE, undefined, ABLE);
   assert.deepEqual(keys(options.rows), ["passthrough"]);
-  assert.deepEqual(options.sounds, []);
+  assert.equal(options.soundRow, null);
   assert.equal(options.choices.audio, "off");
   assert.equal(options.sound, true);
 });
@@ -232,16 +237,20 @@ test("a lossless sound the gateway cannot code is greyed, with the reason", () =
   const without = { ...RDP, losslessUnavailable: true };
   // Chosen last time, on a gateway that could code it.
   const options = targetOptions(without, { audio: "flac" }, ABLE);
-  const lossless = options.sounds.find((sound) => sound.value === "flac");
+  const lossless = options.soundRow?.formats.find(
+    (format) => format.value === "flac",
+  );
   assert.ok(lossless);
   assert.equal(lossless.disabled, true);
   assert.match(lossless.note, /libFLAC/);
   assert.equal(options.choices.audio, "off");
+  assert.equal(options.soundRow?.checked, false);
   assert.equal(options.sound, false);
   assert.equal(options.blocked, null, "the target still starts, without sound");
   // Opus is coded by the gateway itself, and is still a choice.
   assert.equal(
-    options.sounds.find((sound) => sound.value === "opus")?.disabled,
+    options.soundRow?.formats.find((format) => format.value === "opus")
+      ?.disabled,
     false,
   );
   assert.equal(
@@ -251,7 +260,7 @@ test("a lossless sound the gateway cannot code is greyed, with the reason", () =
 
   const able = targetOptions(RDP, { audio: "flac" }, ABLE);
   assert.equal(
-    able.sounds.find((sound) => sound.value === "flac")?.disabled,
+    able.soundRow?.formats.find((format) => format.value === "flac")?.disabled,
     false,
   );
   assert.equal(able.choices.audio, "flac");

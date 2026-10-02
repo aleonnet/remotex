@@ -1298,8 +1298,9 @@ and `GET /api/targets` carries it:
   that asks for a passthrough the browser said it cannot take is refused like an
   unoffered one.
 - **Sound is off, Opus or lossless.** `choices.audio` says `off`, `opus` or
-  `flac` (`Sound` in `src/config.rs`), and the picker shows the three under
-  Sound on a target that offers it. Opus is sent at the rate the target's audio
+  `flac` (`Sound` in `src/config.rs`). On a target that offers it the picker
+  shows a Sound tick, and under a ticked one the two formats side by side, Opus
+  on the left, which ticking takes, and lossless on the right. Opus is sent at the rate the target's audio
   keys hold; lossless is FLAC, with no rate ([Lossless sound](#lossless-sound)).
   A `connect` that names none takes none.
 - **The choice reaches the remote.** A session started without sound asks for
