@@ -310,7 +310,9 @@ function RateChart({
   );
 }
 
-/// The meter: each direction's rate now over its graph of the range.
+/// The meter: each direction's rate now over its graph of the range. The directions
+/// are named by the browser's end: "sent" is the gateway's word for what it wrote to
+/// the browser, and on a page reads as the page's own sending.
 function Meter({
   rates,
   series,
@@ -328,14 +330,14 @@ function Meter({
     <section className="throughput-meter" aria-label="Rate right now">
       <div className="throughput-tiles">
         <RateTile
-          name="Sent"
+          name="To browser"
           direction="sent"
           now={rates === null ? null : rates.sent}
           series={series.sent}
           rangeLabel={rangeLabel}
         />
         <RateTile
-          name="Received"
+          name="From browser"
           direction="received"
           now={rates === null ? null : rates.received}
           series={series.received}
@@ -343,7 +345,7 @@ function Meter({
         />
       </div>
       <RateChart
-        name="Sent"
+        name="To browser"
         series={series.sent}
         stepSecs={series.stepSecs}
         spanSecs={series.spanSecs}
@@ -354,7 +356,7 @@ function Meter({
         ink={SENT_INK}
       />
       <RateChart
-        name="Received"
+        name="From browser"
         series={series.received}
         stepSecs={series.stepSecs}
         spanSecs={series.spanSecs}
