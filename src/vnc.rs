@@ -1661,7 +1661,6 @@ async fn session(
         Flags {
             macos,
             resize: choices.resize(),
-            clipboard: config.clipboard,
             kept: (!apple && !choices.resize())
                 .then(|| config.opening_size(choices.size, display)),
             apple,
@@ -1695,7 +1694,6 @@ async fn session(
 struct Flags {
     macos: bool,
     resize: bool,
-    clipboard: bool,
     /// The size the session keeps, in points, on a plain or wlshare target that
     /// does not follow a window: the configured size or the default
     /// ([`TargetConfig::opening_size`]). The desktop is asked for it once, as
@@ -1745,14 +1743,6 @@ struct Flags {
     media: Option<(MediaStream, Pictures)>,
     /// See [`Connected::passthrough`].
     passthrough: Option<Arc<Listing>>,
-}
-
-/// What the read loop needs to know about the dialect it is reading. Two bools
-/// with names on them, because at the call site they are indistinguishable.
-#[derive(Clone, Copy)]
-struct ReadFlags {
-    clipboard: bool,
-    poll: bool,
 }
 
 /// An established, handshaken RFB link, plus what the handshake revealed about
@@ -2061,13 +2051,13 @@ async fn rfb38_preface(
     uplink.send(&set_pixel_format()).await?;
     let passthrough = if config.wlshare() {
         let audio = config.sound(choices).then(|| config.lossless(choices));
-        let encodings = wlshare_encoding_list(config.clipboard, audio, config.camera, config.microphone);
+        let encodings = wlshare_encoding_list(audio, config.camera, config.microphone);
         let lists = Listing::new(encodings, plan);
         let listed = if lists_wlshare_vp9((server.width, server.height)) { &lists.vp9 } else { &lists.plain };
         uplink.send(&set_encodings(listed)).await?;
         Some(Arc::new(lists))
     } else {
-        uplink.send(&set_encodings(&rfb38_encoding_list(config.clipboard))).await?;
+        uplink.send(&set_encodings(&rfb38_encoding_list())).await?;
         None
     };
 
@@ -2128,7 +2118,7 @@ fn with_wlshare_vp9(encodings: &[i32], plan: RenderPlan) -> Vec<i32> {
     listed
 }
 
-fn rfb38_encoding_list(clipboard: bool) -> Vec<i32> {
+fn rfb38_encoding_list() -> Vec<i32> {
     // A preference order, because a server reads it as one: it encodes with the
     // first entry it supports and keeps that choice for the session.
     //
@@ -2162,7 +2152,7 @@ fn rfb38_encoding_list(clipboard: bool) -> Vec<i32> {
     // for: the server measures the link by fences it asks this end to echo, and
     // cannot do that unless the pseudo-encoding is in this list. A server with
     // neither is unaffected: it says nothing, and the polling loop below never stops.
-    let mut encodings = vec![
+    vec![
         ENCODING_COPY_RECT,
         ENCODING_ZRLE,
         ENCODING_ZLIB,
@@ -2175,22 +2165,19 @@ fn rfb38_encoding_list(clipboard: bool) -> Vec<i32> {
         ENCODING_FENCE,
         ENCODING_EXTENDED_DESKTOP_SIZE,
         ENCODING_DESKTOP_SIZE,
-    ];
-    if clipboard {
         // Extended Clipboard is the only way generic RFB carries anything outside
         // latin-1. A server that ignores it never sends caps and the fallback stays
         // in use.
-        encodings.push(vnc_clipboard::ENCODING);
-    }
-    encodings
+        vnc_clipboard::ENCODING,
+    ]
 }
 
 /// What a `wlshare` target lists: the generic list, and after it wlshare's own
 /// extensions. A plain target lists none of them, whatever server answers it.
 /// `audio` is `Some` in a session started with sound, and says whether that
 /// sound is lossless.
-fn wlshare_encoding_list(clipboard: bool, audio: Option<bool>, camera: bool, microphone: bool) -> Vec<i32> {
-    let mut encodings = rfb38_encoding_list(clipboard);
+fn wlshare_encoding_list(audio: Option<bool>, camera: bool, microphone: bool) -> Vec<i32> {
+    let mut encodings = rfb38_encoding_list();
     if let Some(lossless) = audio {
         // wlshare's audio extension, on a target that asked for sound. wlshare
         // announces it with a rectangle of this encoding, and a server that does
@@ -2316,9 +2303,7 @@ async fn apple_preface(
     // data.
     sock.write_all(&vnc_apple::viewer_info()).await?;
     sock.write_all(&vnc_apple::set_mode_control()).await?;
-    if config.clipboard {
-        sock.write_all(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
-    }
+    sock.write_all(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     sock.write_all(&vnc_apple::set_encryption_start()).await?;
     sock.write_all(&vnc_apple::enable_inbound_record_decryption()).await?;
 
@@ -2443,7 +2428,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let Flags {
         macos,
         resize,
-        clipboard: clipboard_enabled,
         kept,
         apple,
         virtual_display,
@@ -2557,10 +2541,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let mut read_task = tokio::spawn(read_loop(
         downlink,
         shared,
-        ReadFlags {
-            clipboard: clipboard_enabled,
-            poll,
-        },
+        poll,
         apple.then(|| Apple::new(virtual_display, pictures)),
         sink.clone(),
     ));
@@ -2843,39 +2824,42 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     }
                     send(&uplink, &update_request(false, size)).await
                 } else if matches!(input, ClientMsg::ClipboardRequest) {
-                    if clipboard_enabled && apple {
+                    if apple {
                         // Unlike standard RFB, Apple's pasteboard can be read on
                         // demand. Answer from the cache first so a silent Mac
                         // cannot strand the browser's read, then fetch so a later
                         // response refreshes that cache and the open panel.
                         request_apple_clipboard(&clipboard, &uplink, &sink).await
-                    } else if clipboard_enabled {
+                    } else {
                         // Standard RFB can only answer from the buffer the read
                         // loop fills. Empty means nothing has been copied there
-                        // yet during this session.
-                        let snapshot = clipboard
-                            .lock()
-                            .unwrap()
-                            .remote
-                            .clone()
-                            .unwrap_or_else(ClipboardSnapshot::unobserved);
+                        // yet during this session — or that the server has no
+                        // clipboard, which base RFB never says. A server that
+                        // announced no Extended Clipboard and has sent no cut
+                        // text is reported as unconfirmed, for the panel to show.
+                        let (snapshot, unconfirmed) = {
+                            let state = clipboard.lock().unwrap();
+                            (
+                                state.remote.clone().unwrap_or_else(ClipboardSnapshot::unobserved),
+                                state.server.is_none() && state.remote.is_none(),
+                            )
+                        };
                         if let Err(e) = sink
                             .msg(ServerMsg::Clipboard {
                                 text: snapshot.text,
                                 changed_at_ms: snapshot.changed_at_ms,
                                 requested: true,
                                 oversized_bytes: snapshot.oversized_bytes,
+                                unconfirmed,
                             })
                             .await
                         {
                             break Err(e);
                         }
                         Ok(())
-                    } else {
-                        Ok(())
                     }
                 } else if let ClientMsg::Clipboard { text } = &input {
-                    if clipboard_enabled && !clipboard_fits(text) {
+                    if !clipboard_fits(text) {
                         // Refused, as the RDP engine does: the remote
                         // keeps what it had rather than being handed a partial
                         // copy that looks whole. Also keeps an oversized string
@@ -2886,7 +2870,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                             text.len()
                         );
                         Ok(())
-                    } else if clipboard_enabled && apple {
+                    } else if apple {
                         let session_id = {
                             let mut state = clipboard.lock().unwrap();
                             state.local = Some(text.to_owned());
@@ -2896,7 +2880,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                             Ok(msg) => send(&uplink, &msg).await,
                             Err(e) => Err(e),
                         }
-                    } else if clipboard_enabled {
+                    } else {
                         // Extended when the server offered it, which is the
                         // only path that carries anything outside latin-1.
                         // Deferred by design: advertise now, hand the text over
@@ -2919,8 +2903,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                                 None => Ok(()),
                             }
                         }
-                    } else {
-                        Ok(())
                     }
                 } else if let ClientMsg::SelectDisplay { id } = input {
                     // Handled here rather than in `translate_input`, which is a
@@ -3385,11 +3367,10 @@ struct Shared {
 async fn read_loop<R: AsyncRead + Unpin>(
     mut reader: R,
     shared: Shared,
-    flags: ReadFlags,
+    poll: bool,
     mut apple: Option<Apple>,
     sink: VideoSink,
 ) -> anyhow::Result<()> {
-    let ReadFlags { clipboard: clipboard_enabled, poll } = flags;
     let Shared {
         uplink, desktop, clipboard, display, hp_wake, audio, audio_rate, camera, microphone, media, passthrough, ..
     } = &shared;
@@ -3613,7 +3594,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         &shared,
                         &mut apple,
                         &mut decoders,
-                        clipboard_enabled,
                         &sink,
                     )
                     .await?;
@@ -3800,7 +3780,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             // browser as it arrives *and* stashed, because the two serve
             // different readers: the push drives automatic sync, the stash
             // answers a Fetch from a browser that attached later and so never
-            // saw the push. Drained and dropped when the target didn't opt in.
+            // saw the push.
             3 => {
                 let mut padding = [0u8; 3];
                 reader.read_exact(&mut padding).await?;
@@ -3809,10 +3789,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // than latin-1 text.
                 let signed = reader.read_i32().await?;
                 let len = u64::from(signed.unsigned_abs());
-                if !clipboard_enabled {
-                    discard(&mut reader, len).await?;
-                    continue;
-                }
                 // Discard an oversized announcement and report its size instead
                 // of the first 512 KiB, which would look like the whole thing.
                 // The body is consumed either way: the stream position must stay
@@ -3834,6 +3810,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                             changed_at_ms: snapshot.changed_at_ms,
                             requested: false,
                             oversized_bytes: snapshot.oversized_bytes,
+                            unconfirmed: false,
                         })
                         .await
                         .is_err()
@@ -3866,6 +3843,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         changed_at_ms: snapshot.changed_at_ms,
                         requested: false,
                         oversized_bytes: snapshot.oversized_bytes,
+                        unconfirmed: false,
                     })
                     .await
                     .is_err()
@@ -4092,13 +4070,13 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 }
                 let command = u16::from_be_bytes([body[2], body[3]]);
                 match command {
-                    2 if clipboard_enabled => {
+                    2 => {
                         let session_id = clipboard.lock().unwrap().begin_apple_fetch(true);
                         if let Some(session_id) = session_id {
                             send(uplink, &vnc_apple_clipboard::fetch(session_id)).await?;
                         }
                     }
-                    3 if clipboard_enabled => {
+                    3 => {
                         let local = {
                             let state = clipboard.lock().unwrap();
                             state
@@ -4134,9 +4112,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 };
                 let Some(mut receiver) = receiver else {
                     discard(&mut reader, compressed).await?;
-                    if !clipboard_enabled {
-                        continue;
-                    }
                     let requested = finish_apple_clipboard_fetch(
                         clipboard,
                         desktop,
@@ -4169,12 +4144,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     let n = left.min(chunk.len() as u64) as usize;
                     reader.read_exact(&mut chunk[..n]).await?;
                     left -= n as u64;
-                    if clipboard_enabled && received.is_ok() {
+                    if received.is_ok() {
                         received = receiver.feed(&chunk[..n]);
                     }
-                }
-                if !clipboard_enabled {
-                    continue;
                 }
                 let requested = finish_apple_clipboard_fetch(
                     clipboard,
@@ -4272,6 +4244,7 @@ async fn emit_clipboard(sink: &VideoSink, snapshot: ClipboardSnapshot, requested
         changed_at_ms: snapshot.changed_at_ms,
         requested,
         oversized_bytes: snapshot.oversized_bytes,
+        unconfirmed: false,
     })
     .await
     .is_err()
@@ -4301,6 +4274,7 @@ async fn request_apple_clipboard(
         changed_at_ms: snapshot.changed_at_ms,
         requested: true,
         oversized_bytes: snapshot.oversized_bytes,
+        unconfirmed: false,
     })
     .await?;
     if let Some(session_id) = fetch {
@@ -4383,6 +4357,7 @@ async fn extended_cut_text(
                     changed_at_ms: snapshot.changed_at_ms,
                     requested: false,
                     oversized_bytes: snapshot.oversized_bytes,
+                    unconfirmed: false,
                 })
                 .await
                 .is_err()
@@ -4409,6 +4384,7 @@ async fn extended_cut_text(
                     changed_at_ms: snapshot.changed_at_ms,
                     requested: false,
                     oversized_bytes: snapshot.oversized_bytes,
+                    unconfirmed: false,
                 })
                 .await
                 .is_err()
@@ -4585,7 +4561,6 @@ async fn read_rect<R: AsyncRead + Unpin>(
     shared: &Shared,
     apple: &mut Option<Apple>,
     decoders: &mut Decoders,
-    clipboard_enabled: bool,
     sink: &VideoSink,
 ) -> anyhow::Result<RectEffect> {
     let Shared { uplink, desktop, cursor, shadow, .. } = shared;
@@ -4650,7 +4625,6 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 reader,
                 shared,
                 virtual_display,
-                clipboard_enabled && virtual_display,
                 sink,
             )
             .await?;
@@ -5348,7 +5322,6 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     reader: &mut R,
     shared: &Shared,
     virtual_display: bool,
-    rearm_pasteboard: bool,
     sink: &VideoSink,
 ) -> anyhow::Result<bool> {
     let Shared { uplink, desktop, shadow, display, hp_wake, .. } = shared;
@@ -5471,7 +5444,7 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // [`HP_HOLD_REQUEST`].
     let armed = desktop.lock().unwrap().poll_size();
     let mut uplink = uplink.lock().await;
-    if rearm_pasteboard {
+    if virtual_display {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }
     debug!(
@@ -6862,12 +6835,13 @@ mod tests {
             ENCODING_FENCE,
             ENCODING_EXTENDED_DESKTOP_SIZE,
             ENCODING_DESKTOP_SIZE,
+            vnc_clipboard::ENCODING,
         ];
-        assert_eq!(rfb38_encoding_list(false), generic);
+        assert_eq!(rfb38_encoding_list(), generic);
         // A wlshare target's is the same list with wlshare's requests after it.
         let mut wlshare = generic;
         wlshare.extend([ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-        assert_eq!(wlshare_encoding_list(false, None, false, false), wlshare);
+        assert_eq!(wlshare_encoding_list(None, false, false), wlshare);
 
         // Every pixel encoding advertised is one this side can be handed. A rect
         // header alone is enough to prove it: an unrecognised encoding bails with
@@ -6880,7 +6854,7 @@ mod tests {
         // ServerCutText, the density report and the output list as their own
         // messages, and the audio announcement is an empty rectangle with no
         // pixels behind it.
-        let pixel_encodings = wlshare_encoding_list(true, Some(false), true, true)
+        let pixel_encodings = wlshare_encoding_list(Some(false), true, true)
             .into_iter()
             .filter(|encoding| {
                 *encoding >= 0
@@ -6903,7 +6877,7 @@ mod tests {
             let err = read_loop(
                 std::io::Cursor::new(wire),
                 shared,
-                ReadFlags { clipboard: true, poll: false },
+                false,
                 None,
                 sink,
             )
@@ -7168,10 +7142,8 @@ mod tests {
     fn the_wlshare_extensions_are_asked_of_a_wlshare_target() {
         assert_eq!(ENCODING_WLSHARE_DENSITY, i32::from_be_bytes(*b"WLSH"));
         assert_eq!(ENCODING_WLSHARE_OUTPUTS, i32::from_be_bytes(*b"WLSO"));
-        for clipboard in [false, true] {
-            let wlshare = wlshare_encoding_list(clipboard, None, false, false);
-            assert_eq!(&wlshare[wlshare.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-        }
+        let wlshare = wlshare_encoding_list(None, false, false);
+        assert_eq!(&wlshare[wlshare.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
     }
 
     /// A plain target lists nothing of wlshare's, so a wlshare server reached as
@@ -7179,20 +7151,18 @@ mod tests {
     /// output list, no sound, camera or microphone.
     #[test]
     fn a_plain_target_lists_no_wlshare_extension() {
-        for clipboard in [false, true] {
-            let plain = rfb38_encoding_list(clipboard);
-            for encoding in [
-                ENCODING_WLSHARE_VP9,
-                ENCODING_WLSHARE_DENSITY,
-                ENCODING_WLSHARE_OUTPUTS,
-                vnc_audio::ENCODING,
-                vnc_camera::ENCODING,
-                vnc_mic::ENCODING,
-            ] {
-                assert!(!plain.contains(&encoding), "{encoding:#x}");
-            }
-            assert!(plain.contains(&ENCODING_ZRLE));
+        let plain = rfb38_encoding_list();
+        for encoding in [
+            ENCODING_WLSHARE_VP9,
+            ENCODING_WLSHARE_DENSITY,
+            ENCODING_WLSHARE_OUTPUTS,
+            vnc_audio::ENCODING,
+            vnc_camera::ENCODING,
+            vnc_mic::ENCODING,
+        ] {
+            assert!(!plain.contains(&encoding), "{encoding:#x}");
         }
+        assert!(plain.contains(&ENCODING_ZRLE));
     }
 
     /// The stream wlshare is asked for is the plan, listed beside its encoding at
@@ -7589,7 +7559,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             None,
             sink,
         )
@@ -7603,24 +7573,22 @@ mod tests {
     #[test]
     fn the_audio_extension_is_asked_only_where_sound_was() {
         assert_eq!(vnc_audio::ENCODING.to_be_bytes(), *b"WLSF");
-        for clipboard in [false, true] {
-            for lossless in [false, true] {
-                let asked = wlshare_encoding_list(clipboard, Some(lossless), false, false);
-                assert!(asked.contains(&vnc_audio::ENCODING));
-                assert_eq!(asked.contains(&vnc_audio::ENCODING_OPUS), !lossless, "FLAC is a list without Opus");
-                assert!(!asked.contains(&-259), "QEMU's raw samples are not taken");
-                assert_eq!(
-                    &asked[asked.len() - 2..],
-                    &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS],
-                    "the wlshare requests stay last, so audio never weighs on encoding preference"
-                );
-            }
-            let silent = wlshare_encoding_list(clipboard, None, false, false);
-            assert!(
-                !silent.contains(&vnc_audio::ENCODING) && !silent.contains(&vnc_audio::ENCODING_OPUS),
-                "a target without audio does not ask"
+        for lossless in [false, true] {
+            let asked = wlshare_encoding_list(Some(lossless), false, false);
+            assert!(asked.contains(&vnc_audio::ENCODING));
+            assert_eq!(asked.contains(&vnc_audio::ENCODING_OPUS), !lossless, "FLAC is a list without Opus");
+            assert!(!asked.contains(&-259), "QEMU's raw samples are not taken");
+            assert_eq!(
+                &asked[asked.len() - 2..],
+                &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS],
+                "the wlshare requests stay last, so audio never weighs on encoding preference"
             );
         }
+        let silent = wlshare_encoding_list(None, false, false);
+        assert!(
+            !silent.contains(&vnc_audio::ENCODING) && !silent.contains(&vnc_audio::ENCODING_OPUS),
+            "a target without audio does not ask"
+        );
     }
 
     /// The camera extension is asked of a wlshare target exactly where the target
@@ -7628,12 +7596,10 @@ mod tests {
     /// encoding preference: the density and outputs requests stay last.
     #[test]
     fn the_camera_extension_is_asked_only_where_a_camera_is_carried() {
-        for clipboard in [false, true] {
-            let asked = wlshare_encoding_list(clipboard, Some(false), true, false);
-            assert!(asked.contains(&vnc_camera::ENCODING));
-            assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            assert!(!wlshare_encoding_list(clipboard, Some(false), false, false).contains(&vnc_camera::ENCODING));
-        }
+        let asked = wlshare_encoding_list(Some(false), true, false);
+        assert!(asked.contains(&vnc_camera::ENCODING));
+        assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
+        assert!(!wlshare_encoding_list(Some(false), false, false).contains(&vnc_camera::ENCODING));
     }
 
     /// The microphone extension on the same terms: asked of a wlshare target exactly
@@ -7641,12 +7607,10 @@ mod tests {
     /// outputs requests.
     #[test]
     fn the_microphone_extension_is_asked_only_where_a_microphone_is_carried() {
-        for clipboard in [false, true] {
-            let asked = wlshare_encoding_list(clipboard, Some(false), true, true);
-            assert!(asked.contains(&vnc_mic::ENCODING));
-            assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            assert!(!wlshare_encoding_list(clipboard, Some(false), true, false).contains(&vnc_mic::ENCODING));
-        }
+        let asked = wlshare_encoding_list(Some(false), true, true);
+        assert!(asked.contains(&vnc_mic::ENCODING));
+        assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
+        assert!(!wlshare_encoding_list(Some(false), true, false).contains(&vnc_mic::ENCODING));
     }
 
     /// The announcement rectangle is answered with the format this client
@@ -7692,7 +7656,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(audio_announcement()),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             None,
             sink,
         )
@@ -7768,7 +7732,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             None,
             sink,
         )
@@ -7808,7 +7772,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(pixels_without_announcement()),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             None,
             sink.clone(),
         )
@@ -7858,7 +7822,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             None,
             sink,
         )
@@ -8329,7 +8293,7 @@ mod tests {
             apple_media: false,
             rdp_graphics: false,
         };
-        Arc::new(Listing::new(wlshare_encoding_list(false, None, false, false), plan))
+        Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
     }
 
     /// The same, for a session that asked for the desktop's sound: the bridge
@@ -8432,7 +8396,7 @@ mod tests {
                 shared_desktop((1280, 800), None, None),
                 test_shadow((1280, 800)),
             ),
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink,
         )
@@ -9917,7 +9881,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(update(&rects)),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             None,
             sink.clone(),
         )
@@ -9967,7 +9931,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(update(&[zrle, raw])),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             None,
             sink.clone(),
         )
@@ -10054,7 +10018,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             None,
             sink.clone(),
         )
@@ -10089,7 +10053,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             None,
             sink.clone(),
         )
@@ -10133,7 +10097,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             None,
             sink.clone(),
         )
@@ -10163,7 +10127,7 @@ mod tests {
         let err = read_loop(
             RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             Some(Apple::default()),
             sink.clone(),
         )
@@ -10191,7 +10155,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             Some(Apple::default()),
             sink.clone(),
         )
@@ -10258,7 +10222,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: true, poll: true },
+            true,
             Some(Apple::default()),
             sink,
         )
@@ -10292,7 +10256,7 @@ mod tests {
             let task = tokio::spawn(read_loop(
                 reader,
                 shared,
-                ReadFlags { clipboard: true, poll: true },
+                true,
                 Some(Apple::default()),
                 sink,
             ));
@@ -10355,7 +10319,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             Some(Apple::default()),
             sink.clone(),
         )
@@ -10371,45 +10335,6 @@ mod tests {
                 ..
             }) if text == "cached"
         ));
-    }
-
-    #[tokio::test]
-    async fn disabled_apple_pasteboards_do_not_consume_browser_requests() {
-        let ordinary = vnc_apple_clipboard::send(7, "ignored").unwrap();
-        // Declared past Apple's own limit, and so never inflated.
-        let mut oversized = vec![0x1f, 0, 0, 0];
-        oversized.extend_from_slice(&9u32.to_be_bytes());
-        oversized.extend_from_slice(&(vnc_apple_clipboard::MAX_ARCHIVE_BYTES + 1).to_be_bytes());
-        oversized.extend_from_slice(&4u32.to_be_bytes());
-        oversized.extend_from_slice(&[0; 4]);
-
-        for (wire, session_id) in [(ordinary, 7), (oversized, 9)] {
-            let (uplink, _sent) = test_uplink();
-            let (sink, _rx) = test_sink();
-            let shared = test_shared(
-                uplink,
-                shared_desktop((2, 2), None, None),
-                test_shadow((2, 2)),
-            );
-            {
-                let mut clipboard = shared.clipboard.lock().unwrap();
-                clipboard.apple_requests = 2;
-            }
-            let clipboard = shared.clipboard.clone();
-
-            let _ = read_loop(
-                std::io::Cursor::new(wire),
-                shared,
-                ReadFlags { clipboard: false, poll: false },
-                Some(Apple::default()),
-                sink,
-            )
-            .await;
-
-            let clipboard = clipboard.lock().unwrap();
-            assert_eq!(clipboard.apple_session_id, session_id);
-            assert_eq!(clipboard.apple_requests, 2);
-        }
     }
 
     /// When a server drives its own updates, a request per update would race that
@@ -10428,7 +10353,7 @@ mod tests {
             let _ = read_loop(
                 RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
                 shared,
-                ReadFlags { clipboard: false, poll },
+                poll,
                 Some(Apple::default()),
                 sink,
             )
@@ -10504,7 +10429,7 @@ mod tests {
             read_loop(
                 std::io::Cursor::new(updates),
                 shared,
-                ReadFlags { clipboard: false, poll: true },
+                true,
                 None,
                 sink,
             ),
@@ -10655,7 +10580,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(end_of_continuous_updates()),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink,
         )
@@ -10686,7 +10611,7 @@ mod tests {
             let _ = read_loop(
                 std::io::Cursor::new(wire),
                 shared,
-                ReadFlags { clipboard: false, poll: true },
+                true,
                 None,
                 sink,
             )
@@ -10720,7 +10645,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink,
         )
@@ -10754,7 +10679,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink,
         )
@@ -10786,7 +10711,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(server_fence(flags, b"marker")),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink,
         )
@@ -10818,7 +10743,7 @@ mod tests {
         let (mut server, client) = tokio::io::duplex(1 << 16);
         tokio::spawn(async move {
             server.write_all(&wire).await.unwrap();
-            let _ = read_loop(client, shared, ReadFlags { clipboard: false, poll: false }, None, sink).await;
+            let _ = read_loop(client, shared, false, None, sink).await;
             drop(server);
         })
     }
@@ -10943,7 +10868,7 @@ mod tests {
             server
         });
         let task = tokio::spawn(async move {
-            let _ = read_loop(client, shared, ReadFlags { clipboard: false, poll: false }, None, sink).await;
+            let _ = read_loop(client, shared, false, None, sink).await;
         });
 
         assert!(matches!(rx.recv().await, Some(ServerMsg::VideoFormat { .. })));
@@ -10974,7 +10899,7 @@ mod tests {
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
         let mut shared = test_shared(uplink, shared_desktop(small, None, None), test_shadow(small));
-        let encodings = wlshare_encoding_list(false, None, false, false);
+        let encodings = wlshare_encoding_list(None, false, false);
         let lists = Arc::new(Listing::new(encodings, plan));
         shared.passthrough = Some(Arc::clone(&lists));
         let mut wire = update(&[geometry(0, 0, big.0, big.1, ENCODING_DESKTOP_SIZE)]);
@@ -10983,7 +10908,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             None,
             sink,
         )
@@ -11021,7 +10946,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink,
         )
@@ -11088,7 +11013,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink.clone(),
         )
@@ -11124,7 +11049,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink.clone(),
         )
@@ -11201,7 +11126,7 @@ mod tests {
         let _ = read_loop(
             RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             Some(apple),
             sink,
         )
@@ -11234,7 +11159,7 @@ mod tests {
         let _ = read_loop(
             RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             Some(apple),
             sink,
         )
@@ -11336,7 +11261,7 @@ mod tests {
             Some(11),
             &[(11, (1920, 1080), (3840, 2160), 0x01), (22, (1600, 1000), (1600, 1000), 0x00)],
         );
-        let resized = read_display_layout(&mut payload.as_slice(), &shared, false, false, &sink)
+        let resized = read_display_layout(&mut payload.as_slice(), &shared, false, &sink)
             .await
             .unwrap();
         assert!(resized);
@@ -11390,7 +11315,7 @@ mod tests {
             (3, (1280, 800), (1280, 800), 0x00),
         ];
         for current in [None, Some(2)] {
-            read_display_layout(&mut layout_payload(current, &screens).as_slice(), &shared, false, false, &sink)
+            read_display_layout(&mut layout_payload(current, &screens).as_slice(), &shared, false, &sink)
                 .await
                 .unwrap();
         }
@@ -11425,20 +11350,20 @@ mod tests {
 
         // A session opens on the combined view, which is what the Mac sends when
         // nothing has asked otherwise.
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, &sink)
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);
 
         // Then a screen, then back again. Each move is a layout, never a request.
-        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, &sink)
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, 22);
-        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, &sink)
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, &sink)
             .await
             .unwrap();
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, &sink)
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);

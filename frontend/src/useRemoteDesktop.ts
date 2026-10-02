@@ -507,9 +507,6 @@ export function useRemoteDesktop(
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
   const [pendingTarget, setPendingTarget] = useState<string | null>(null);
-  // True when the connected target opted into the clipboard bridge, which is
-  // what enables the floating menu's Clipboard button.
-  const [canClipboard, setCanClipboard] = useState(false);
   // Whether this session carries the remote's sound, which it was started with or
   // without; this says nothing about activity.
   const [canAudio, setCanAudio] = useState(false);
@@ -1569,7 +1566,6 @@ export function useRemoteDesktop(
       setConnectError(null);
       setPendingTarget(null);
       setMode("desktop");
-      setCanClipboard(msg.clipboard);
       setCanTouch(false);
       setRemoteResizing(false);
       setCanAudio(msg.audio);
@@ -1633,7 +1629,6 @@ export function useRemoteDesktop(
     const endDesktop = () => {
       // No engine to resize: the next target states its own policy.
       followWindowRef.current = false;
-      setCanClipboard(false);
       // No engine, so no queue to subscribe to: the row goes away rather than
       // offering a control that would be answered with a warning in the log.
       setCanAudio(false);
@@ -1753,8 +1748,9 @@ export function useRemoteDesktop(
           // into the browser's OS clipboard. Opening/revealing the panel is a
           // read action; its explicit Copy button is the consent boundary for
           // changing the local clipboard.
-          const { text, changedAtMs, requested, oversizedBytes } = msg;
-          const snapshot = { text, changedAtMs, oversizedBytes };
+          const { text, changedAtMs, requested, oversizedBytes, unconfirmed } =
+            msg;
+          const snapshot = { text, changedAtMs, oversizedBytes, unconfirmed };
           setRemoteClipboard((prev) => ({
             ...snapshot,
             seq: (prev?.seq ?? 0) + 1,
@@ -2217,7 +2213,7 @@ export function useRemoteDesktop(
   // Best-effort clipboard push on focus, when reads are permitted. Oversized
   // values are skipped locally; the explicit panel reports the limit.
   useEffect(() => {
-    if (mode !== "desktop" || !canClipboard) {
+    if (mode !== "desktop") {
       return;
     }
     const pushBrowserClipboardOnFocus = () => {
@@ -2265,7 +2261,7 @@ export function useRemoteDesktop(
         pushBrowserClipboardOnFocus,
       );
     };
-  }, [mode, canClipboard]);
+  }, [mode]);
 
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is
@@ -2694,7 +2690,6 @@ export function useRemoteDesktop(
     renderPlan,
     oversize,
     connection,
-    canClipboard,
     canAudio,
     audioEnabled,
     audioError,

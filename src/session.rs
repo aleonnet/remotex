@@ -419,7 +419,6 @@ impl Selected {
             protocol: target.protocol.name(),
             subtype: target.subtype.map(Subtype::name),
             resize: choices.resize(),
-            clipboard: target.clipboard,
             audio: target.sound(*choices),
             passthrough: plan.passthrough().map(Passthrough::name),
             camera: target.camera,
@@ -1740,7 +1739,6 @@ mod tests {
     struct Meta {
         protocol: Protocol,
         resize: bool,
-        clipboard: bool,
         audio: bool,
         camera: bool,
         microphone: bool,
@@ -1751,7 +1749,6 @@ mod tests {
             Self {
                 protocol,
                 resize: false,
-                clipboard: false,
                 audio: false,
                 camera: false,
                 microphone: false,
@@ -1776,11 +1773,6 @@ mod tests {
 
         const fn resize(mut self) -> Self {
             self.resize = true;
-            self
-        }
-
-        const fn clipboard(mut self) -> Self {
-            self.clipboard = true;
             self
         }
 
@@ -1810,7 +1802,6 @@ mod tests {
             domain: None,
             size: Some((1, 1)),
             egfx: None,
-            clipboard: meta.clipboard,
             camera: meta.camera,
             microphone: meta.microphone,
             video_quality: None,
@@ -1862,7 +1853,6 @@ mod tests {
                 subtype: Some(Subtype::Wlshare),
                 ..fake_target_with("vnc-resize", Meta::of(Protocol::Vnc))
             },
-            fake_target_with("vnc-clip", Meta::of(Protocol::Vnc).clipboard()),
             fake_target_with("rdp-audio", Meta::of(Protocol::Rdp)),
             fake_target_with("rdp-camera", Meta::of(Protocol::Rdp).camera()),
             fake_target_with("rdp-mic", Meta::of(Protocol::Rdp).microphone()),
@@ -1922,7 +1912,6 @@ mod tests {
                 // the wlshare target a window can drive.
                 subtype: _,
                 resize: got_resize,
-                clipboard: got_clipboard,
                 audio: got_audio,
                 passthrough: None,
                 camera: got_camera,
@@ -1932,7 +1921,6 @@ mod tests {
                 assert_eq!(got, name);
                 assert_eq!(got_protocol, meta.protocol.name(), "protocol for {name}");
                 assert_eq!(got_resize, meta.resize, "resize metadata for {name}");
-                assert_eq!(got_clipboard, meta.clipboard, "clipboard metadata for {name}");
                 assert_eq!(got_audio, meta.audio, "audio metadata for {name}");
                 assert_eq!(got_camera, meta.camera, "camera metadata for {name}");
                 assert_eq!(got_microphone, meta.microphone, "microphone metadata for {name}");
@@ -2100,15 +2088,6 @@ mod tests {
         let token = mgr.claim(false, Some(&token)).unwrap();
         let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-resize", rdp_resize).await;
-
-        // The clipboard flag travels the same way, and independently of resize:
-        // the vnc-clip fake target has clipboard on and resize off.
-        let (mgr, _hooks) = manager_with_fake_engine();
-        let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
-        expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "vnc-clip", None, Choices::default()).await.unwrap();
-        expect_connected_meta(&mut att.events, "vnc-clip", Meta::of(Protocol::Vnc).clipboard()).await;
 
         // And so does audio, which is what tells the browser it may offer the toggle
         // that opens the audio socket.
@@ -2554,7 +2533,7 @@ mod tests {
         for (target, meta) in [
             ("rdp-resize", Meta::of(Protocol::Rdp).resize()),
             ("vnc-resize", Meta::of(Protocol::Vnc).resize()),
-            ("vnc-clip", Meta::of(Protocol::Vnc).clipboard()),
+            ("fake", PLAIN),
         ] {
             let protocol = meta.protocol.name();
             let (mgr, hooks) = manager_with_fake_engine();

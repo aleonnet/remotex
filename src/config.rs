@@ -79,8 +79,8 @@ pub enum Subtype {
     /// High Performance Screen Sharing uses a virtual display rather than the
     /// Mac's physical displays. This gateway requests one virtual display at the
     /// session's opening size ([`TargetConfig::opening_size`]). Apple's native
-    /// pasteboard payloads are carried inside the encrypted record transport
-    /// when `clipboard` is enabled. In a session that follows the window,
+    /// pasteboard payloads are carried inside the encrypted record transport.
+    /// In a session that follows the window,
     /// viewport reports replace the virtual display's one advertised mode and the
     /// Mac answers with its new layout.
     ///
@@ -352,7 +352,7 @@ pub enum Passthrough {
     /// **Experimental.** The compositor the page runs is the gateway's own and is
     /// unit tested as it is there, and what is passed is checked against a real
     /// host, by the probe and by a headless browser. That is one Windows 11 host,
-    /// with sound and [`TargetConfig::clipboard`] beside it;
+    /// with sound and the clipboard beside it;
     /// [`TargetConfig::camera`] and [`TargetConfig::microphone`] beside it have not
     /// been tried.
     RdpGraphics,
@@ -691,17 +691,6 @@ pub struct TargetConfig {
     /// ([`TargetConfig::egfx`]).
     #[serde(default)]
     pub egfx: Option<bool>,
-    /// Clipboard bridge: let the browser read and write this target's
-    /// clipboard, through the floating menu's Clipboard panel. Off by default —
-    /// a remote desktop's clipboard often holds whatever was last copied there,
-    /// so exposing it is a per-target decision rather than a default.
-    ///
-    /// Supported by both engines, though what reaches the far side differs:
-    /// generic VNC uses the UTF-8 Extended Clipboard extension when available and
-    /// falls back to latin-1 `ServerCutText`/`ClientCutText`; Apple VNC uses the
-    /// native pasteboard protocol; RDP uses MS-RDPECLIP `CF_UNICODETEXT`.
-    #[serde(default)]
-    pub clipboard: bool,
     /// Offer the remote a redirected camera: MS-RDPECAM on RDP, and on a
     /// `wlshare` target the wlshare camera extension ([`crate::vnc_camera`]),
     /// listed the way its audio extension is. Rejected on a plain `vnc`
@@ -2404,7 +2393,6 @@ mod tests {
         assert_eq!(t.kept_size(), DEFAULT_SIZE);
         assert_eq!((t.username.as_str(), t.password.as_str(), t.domain.as_deref()), ("u", "p", None));
         assert!(t.egfx(), "the graphics pipeline is on unless turned off");
-        assert!(!t.clipboard, "the clipboard bridge is opt-in");
         assert!(!t.sound(Choices::default()), "the remote's sound is taken only where it is chosen");
     }
 
@@ -3325,9 +3313,6 @@ mod tests {
         let standard = &ard("username = \"andrew\"\npassword = \"h\"").unwrap().targets[0];
         assert_eq!(standard.offers(), Offers { resize: false, audio: false, passthrough: None });
 
-        // Both Apple subtypes use Apple's native pasteboard messages.
-        assert!(ard("username = \"andrew\"\npassword = \"h\"\nclipboard = true").is_ok());
-
         // And it is a VNC subtype only.
         let err = ConfigFile::parse(&format!(
             r#"
@@ -3402,24 +3387,20 @@ mod tests {
         assert!(format!("{err:#}").contains("only subtype \"ard\" takes"), "{err:#}");
     }
 
-    /// The high-performance subtype carries the same account credentials and native
-    /// Apple pasteboard as plain `ard`, and requests a virtual display at the
-    /// configured size.
+    /// The high-performance subtype carries the same account credentials as plain
+    /// `ard`, and requests a virtual display at the configured size.
     #[test]
-    fn the_high_performance_subtype_accepts_clipboard_and_offers_resize() {
+    fn the_high_performance_subtype_offers_resize() {
         let hp = |extra: &str| {
             ConfigFile::parse(&vnc_toml(&format!(
                 "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
             )))
         };
 
-        let target = &hp("size = \"1600x1000\"\nclipboard = true")
-            .unwrap()
-            .targets[0];
+        let target = &hp("size = \"1600x1000\"").unwrap().targets[0];
         assert_eq!(target.subtype, Some(Subtype::ArdHighPerformance));
         assert_eq!(target.size, Some((1600, 1000)));
         assert!(target.offers().resize);
-        assert!(target.clipboard);
         // The name is what a config file writes, hyphens and all — the enum is
         // kebab-case, not lowercase, and this is what pins that.
         assert_eq!(target.subtype.unwrap().name(), "ard-high-performance");
@@ -3675,12 +3656,12 @@ mod tests {
         }
     }
 
-    /// The clipboard is every engine's: generic VNC's Extended Clipboard, Apple's
-    /// pasteboard, and MS-RDPECLIP on the RDP client's own channel.
+    /// The clipboard is every engine's and always bridged, so a target has no key
+    /// for it.
     #[test]
-    fn clipboard_is_taken_by_every_protocol() {
+    fn clipboard_is_not_a_target_key() {
         for (protocol, host) in [("vnc", "10.0.0.4"), ("rdp", "10.0.0.5")] {
-            let config = ConfigFile::parse(&format!(
+            let err = ConfigFile::parse(&format!(
                 r#"
                 [server]
                 {}
@@ -3695,10 +3676,8 @@ mod tests {
                 "#,
                 site_passwd_line()
             ))
-            .unwrap()
-            .resolve()
-            .unwrap();
-            assert!(config.targets[0].clipboard, "{protocol}");
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("clipboard"), "{protocol}: {err:#}");
         }
     }
 

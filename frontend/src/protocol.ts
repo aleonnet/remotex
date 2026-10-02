@@ -139,6 +139,11 @@ export interface ClipboardSnapshot {
   // this is what keeps that apart from a remote that has copied nothing —
   // truncating instead would have arrived looking like the whole clipboard.
   oversizedBytes: number | null;
+  // The remote has shown no sign of a clipboard: a plain VNC server that
+  // announced no Extended Clipboard and has sent no cut text. Base RFB
+  // acknowledges nothing, so that is as much as the gateway can know, and it
+  // says so only in the answer to a Fetch. False on every other engine.
+  unconfirmed: boolean;
 }
 
 export interface RemoteClipboard extends ClipboardSnapshot {
@@ -214,8 +219,7 @@ export type ControlMsg =
   // every engine alike — what the session was started with, with no client-side
   // mode. True is auto-follow (and the mobile one-shot); false is a session
   // whose size was settled at open.
-  // `protocol` ("rdp"/"vnc") is carried for the status line. `clipboard` is
-  // whether this target opted into the clipboard bridge. `audio` says the
+  // `protocol` ("rdp"/"vnc") is carried for the status line. `audio` says the
   // session carries the remote's sound, not that any is arriving.
   | {
       type: "connected";
@@ -229,7 +233,6 @@ export type ControlMsg =
       // reverse-engineered one. See connectionLabel.ts.
       subtype: string | null;
       resize: boolean;
-      clipboard: boolean;
       audio: boolean;
       // The remote's own stream this session passes untouched — "rdp-graphics"
       // or "apple-media" — or null for a desktop the gateway encodes.

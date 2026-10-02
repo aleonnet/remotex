@@ -2028,7 +2028,6 @@ mod tests {
             domain: None,
             size: Some((1, 1)),
             egfx: None,
-            clipboard: false,
             camera: false,
             microphone: false,
             video_quality: None,

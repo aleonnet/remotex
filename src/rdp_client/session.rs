@@ -77,14 +77,6 @@ pub struct Connect {
     /// and nothing for a host that answers the offer with bitmap updates, which are
     /// decoded into the framebuffer as always.
     pub pass_graphics: bool,
-    /// Whether to open MS-RDPECLIP, which is what makes the clipboard side of
-    /// [`Input`] do anything.
-    ///
-    /// A server opens the channel a moment after the desktop and says so with
-    /// [`Event::ClipboardReady`]; nothing crosses it until one end announces a copy.
-    /// A session that did not ask for the channel reports none of the clipboard
-    /// events and drops every clipboard command.
-    pub clipboard: bool,
     /// Where the remote's sound goes, for a target that asked for it (MS-RDPEA).
     ///
     /// Asked for, the client names the `rdpsnd` channel, takes the dynamic channel a

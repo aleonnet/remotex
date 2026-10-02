@@ -41,8 +41,8 @@
 //!
 //! # The clipboard
 //!
-//! MS-RDPECLIP, on a static virtual channel of its own, and only for a session that
-//! asked for it with [`Connect::clipboard`]. Both directions are lazy: a copy on
+//! MS-RDPECLIP, on a static virtual channel of its own, which every session asks
+//! for. Both directions are lazy: a copy on
 //! either end announces *which formats* it can be had in, and the bytes cost a second
 //! round trip that happens only when somebody pastes. This module carries format ids
 //! and bytes and decides nothing about either — which format is text, and what its

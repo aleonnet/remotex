@@ -1340,7 +1340,7 @@ Control and input messages are tagged JSON. Server messages cover picker and
 connected state, desktop size, display selection, cursor shape, clipboard,
 audio format, and errors. The `connected` message says what the session was
 started with — `resize`, `audio` and `passthrough` — and includes the
-`clipboard`, `camera`, and `microphone` capability flags, so clients
+`camera` and `microphone` capability flags, so clients
 expose only supported controls.
 
 It also carries two things a client cannot work out and nothing else reveals:
@@ -1889,7 +1889,8 @@ layer injects it after attaching to an existing engine.
 
 ### Clipboard
 
-Clipboard support is a per-target opt-in available on all engines. The backend
+Every session bridges the clipboard, on all engines; no target key turns it on
+or off. The backend
 holds the latest remote value and its observed change time:
 
 - plain and wlshare VNC forward and buffer `ServerCutText` or Extended Clipboard
@@ -1910,6 +1911,12 @@ missed earlier pushes. Replies to that explicit request are marked separately
 from unsolicited changes. Only unsolicited changes are eligible for automatic
 remote-to-local synchronization; an explicit fetch fills the UI until the user
 chooses Copy.
+
+Base RFB acknowledges nothing and announces no clipboard, so a plain VNC server
+without one looks like one where nothing has been copied. The reply to a fetch
+carries `unconfirmed` while such a server has announced no Extended Clipboard
+and sent no cut text, and the Clipboard panel says so. Every other engine's
+clipboard is negotiated and never reports it.
 
 Transfers are capped at 512 KiB and refused rather than truncated. Browser
 clipboard integration is best effort because Safari's permission rules, and an
@@ -1957,7 +1964,7 @@ announced only by a host that opens MS-RDPEI, which this client never asks for. 
 
 Static virtual channels are asked for by what the session needs: `drdynvc` for a
 session started with resize, the default `egfx = true`, `camera = true`, or
-`microphone = true`; `cliprdr` for `clipboard = true`; and `rdpsnd` with `rdpdr`
+`microphone = true`; `cliprdr` always; and `rdpsnd` with `rdpdr`
 for a session started with sound.
 Under the Graphics Pipeline (MS-RDPEGFX) the server draws through surfaces on a
 dynamic channel, marks every frame's end — which is the engine's flush signal, with

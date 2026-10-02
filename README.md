@@ -331,8 +331,7 @@ shows the passthrough as already chosen, and a browser that cannot decode the
 HEVC cannot start the target. See
 [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
-Every Apple subtype supports the native Apple pasteboard when `clipboard =
-true`. In a session started with resize, the window continuously drives High
+Every Apple subtype carries the native Apple pasteboard. In a session started with resize, the window continuously drives High
 Performance's virtual display, using Apple's
 dynamic-resolution feature to replace its mode from client viewport reports.
 The size is chosen before the session starts and holds for it: there is no
