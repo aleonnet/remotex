@@ -263,7 +263,7 @@ export default function TargetPicker({
                             {options.soundRow.formats.map((format) => (
                               <label
                                 key={format.value}
-                                className={`picker-option${format.disabled ? " picker-option-unavailable" : ""}`}
+                                className="picker-option"
                               >
                                 <input
                                   type="radio"
@@ -271,9 +271,7 @@ export default function TargetPicker({
                                   checked={
                                     options.choices.audio === format.value
                                   }
-                                  disabled={
-                                    format.disabled || pendingTarget !== null
-                                  }
+                                  disabled={pendingTarget !== null}
                                   onChange={() =>
                                     setRemembered((was) =>
                                       rememberChoice(

@@ -466,24 +466,6 @@ impl AudioListener {
     }
 }
 
-/// Load libFLAC, or say that the host lacks it: what a session whose sound is
-/// coded as FLAC here ([`crate::config::TargetConfig::needs_libflac`]) checks
-/// before it dials. A failure is not remembered, so a library installed while
-/// the gateway runs is found by the next session.
-pub fn load_libflac() -> anyhow::Result<()> {
-    desktop_flac::load().context("the sound is coded as FLAC, by libFLAC")
-}
-
-/// Load the libFLAC this gateway's package carries, if it carries one, before
-/// the gateway listens: a package that brought the library refuses to start
-/// without it, and codes with no other.
-pub fn load_carried_libflac() -> anyhow::Result<()> {
-    if let Some(dir) = crate::config::carried_libflac() {
-        desktop_flac::load_from(&dir).context("the libFLAC this package installs is missing; reinstall it")?;
-    }
-    Ok(())
-}
-
 /// What `audioFormat` names lossless sound as. Not a WebCodecs registration's
 /// string to this client: the page decodes these frames itself.
 pub const FLAC_CODEC: &str = "flac";
@@ -493,7 +475,7 @@ impl AudioListener {
     /// a live-only stream of its frames: twenty milliseconds each, a FLAC stream
     /// of its own as wlshare's are, so each decodes alone and a dropped buffer
     /// costs its own samples. No walk and no silence to shed: silence is a few
-    /// bytes a frame already. Fails where libFLAC is not on this host.
+    /// bytes a frame already. Fails for a format FLAC does not carry.
     pub fn into_flac(self, format: PcmFormat) -> anyhow::Result<EncodedAudio<impl Stream<Item = Vec<Bytes>>>> {
         struct State {
             encoder: desktop_flac::Encoder,
@@ -1041,10 +1023,6 @@ mod tests {
     /// its own to exactly the samples that went in.
     #[tokio::test]
     async fn pcm_coded_as_flac_is_whole_frames_of_the_same_samples() {
-        if desktop_flac::load().is_err() {
-            eprintln!("skipped: libFLAC is not installed on this host");
-            return;
-        }
         let bridge = AudioBridge::new();
         let flac = bridge.take_listener().into_flac(PCM_CD_QUALITY).expect("flac");
         assert_eq!(

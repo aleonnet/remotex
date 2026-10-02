@@ -1019,18 +1019,6 @@ impl TargetConfig {
         self.offers().audio && choices.audio == Sound::Flac
     }
 
-    /// Whether this target's lossless sound is coded here, which takes libFLAC on
-    /// this host: an RDP host's PCM. wlshare's sound is passed, Opus or FLAC, and
-    /// needs none.
-    pub fn codes_flac(&self) -> bool {
-        self.protocol == Protocol::Rdp
-    }
-
-    /// Whether a session started with `choices` needs libFLAC on this host.
-    pub fn needs_libflac(&self, choices: Choices) -> bool {
-        self.codes_flac() && self.lossless(choices)
-    }
-
     /// Whether the Opus bitrate walks with the link — on unless the operator
     /// wrote `audio_adaptive = false`.
     pub fn audio_adaptive(&self) -> bool {
@@ -2246,16 +2234,6 @@ fn running_exe() -> Option<PathBuf> {
 /// from the executable that is actually running.
 fn installed_layout() -> Option<InstalledLayout> {
     installed_layout_for_exe(&running_exe()?)
-}
-
-/// The folder the macOS package carries libFLAC in, for a gateway that package
-/// installed: one of its own, so it neither replaces nor is replaced by a FLAC
-/// the operator installed. The Linux packages depend on the distribution's, and
-/// the Windows package puts the DLL beside the executable, where the system's
-/// loader looks first, so neither has a folder to name.
-pub fn carried_libflac() -> Option<PathBuf> {
-    let packaged = cfg!(target_os = "macos") && running_exe()?.parent()? == Path::new("/usr/local/bin");
-    packaged.then(|| PathBuf::from("/usr/local/lib/remotex"))
 }
 
 fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
@@ -4106,8 +4084,7 @@ mod tests {
     }
 
     /// Lossless sound is a session's choice, on the two targets whose sound is
-    /// one, and not a key of the file. Only an RDP host's PCM coded as FLAC needs
-    /// libFLAC: wlshare's sound is passed in either format.
+    /// one, and not a key of the file.
     #[test]
     fn lossless_sound_is_chosen_at_the_picker_where_there_is_sound_to_choose() {
         let wlshare = parse_audio_target("").unwrap().targets[0].clone();
@@ -4117,13 +4094,10 @@ mod tests {
         for target in [&wlshare, &rdp] {
             for audio in [Sound::Off, Sound::Opus] {
                 assert!(!target.lossless(chose(audio)));
-                assert!(!target.needs_libflac(chose(audio)));
             }
             assert_eq!(target.accepts(chose(Sound::Flac)), Ok(()));
             assert!(target.sound(chose(Sound::Flac)) && target.lossless(chose(Sound::Flac)));
         }
-        assert!(!wlshare.needs_libflac(chose(Sound::Flac)), "passed frames need no codec here");
-        assert!(rdp.needs_libflac(chose(Sound::Flac)));
 
         assert!(parse_target("audio_format = \"flac\"").is_err(), "not a key of the file");
         assert!(serde_json::from_str::<Sound>("\"pcm\"").is_err(), "no third format");

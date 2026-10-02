@@ -20,11 +20,9 @@ FROM debian:trixie-slim
 LABEL org.opencontainers.image.source=https://github.com/andrewtheguy/remotex
 
 # The RDP/VNC TLS paths accept self-signed server certificates, but rustls still
-# wants a system trust store for anything conventionally signed. libFLAC decodes
-# wlshare's sound and is loaded at run time (desktop-flac), as the .deb's
-# dependency on it says.
+# wants a system trust store for anything conventionally signed.
 RUN apt-get update && apt-get install -y --no-install-recommends \
-      ca-certificates libflac14 \
+      ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 # The version is part of the on-disk layout, not decoration: remotex derives its

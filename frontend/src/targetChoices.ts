@@ -48,11 +48,6 @@ export interface TargetInfo {
   defaultSize: Points | null;
   /** Whether the remote's sound is a choice. */
   audio: boolean;
-  /**
-   * Whether this gateway cannot send that sound lossless: an RDP host's, which
-   * it codes as FLAC, on a host without libFLAC.
-   */
-  losslessUnavailable: boolean;
   /** The stream this target can pass, null where it has none. */
   passthrough: Passthrough | null;
   /**
@@ -114,9 +109,8 @@ export interface SizeOption {
 export interface SoundFormat {
   value: Exclude<Sound, "off">;
   label: string;
-  /** What choosing it does, or why it cannot be chosen here. */
+  /** What choosing it does. */
   note: string;
-  disabled: boolean;
 }
 
 /** Whether a target's sound is taken, and the formats a ticked one chooses between. */
@@ -293,8 +287,8 @@ function sizeOptions(
 
 /**
  * `target`'s sound as the picker shows it: nothing where it offers none, and
- * otherwise a tick and, under a ticked one, Opus or lossless, which is greyed
- * where the gateway would have to code it and cannot. Ticking it takes Opus.
+ * otherwise a tick and, under a ticked one, Opus or lossless. Ticking it takes
+ * Opus.
  */
 function soundRow(
   target: TargetInfo,
@@ -308,21 +302,16 @@ function soundRow(
       value: "opus",
       label: "Opus",
       note: "Compressed, at a rate that follows the link.",
-      disabled: false,
     },
     {
       value: "flac",
       label: "Lossless (experimental)",
-      note: target.losslessUnavailable
-        ? "This gateway cannot code this target's sound as FLAC. Install libFLAC on the gateway's host."
-        : "FLAC, about a megabit a second of music. For a LAN.",
-      disabled: target.losslessUnavailable,
+      note: "FLAC, about a megabit a second of music. For a LAN.",
     },
   ];
-  // What was chosen last time, where it can still be chosen here.
+  // What was chosen last time.
   const audio =
-    formats.find((format) => format.value === remembered && !format.disabled)
-      ?.value ?? "off";
+    formats.find((format) => format.value === remembered)?.value ?? "off";
   return {
     row: {
       label: "Sound",

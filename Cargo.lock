@@ -785,10 +785,10 @@ dependencies = [
 
 [[package]]
 name = "desktop-flac"
-version = "0.0.2"
-source = "git+https://github.com/andrewtheguy/desktop-flac?tag=v0.0.2#05960c018d49154fc67aff5a8872923a496ccec6"
+version = "0.0.3"
+source = "git+https://github.com/andrewtheguy/desktop-flac?tag=v0.0.3#752f65c3ca4be067f29417b1bdd1a113e091845b"
 dependencies = [
- "libloading",
+ "libflac-prebuilt-sys",
  "thiserror",
 ]
 
@@ -1589,6 +1589,11 @@ name = "libc"
 version = "0.2.189"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eaf3ede3fee6db1a4c2ee091bf8a8b4dccdc6d17f656fb07896ee72867612f2"
+
+[[package]]
+name = "libflac-prebuilt-sys"
+version = "0.1.0"
+source = "git+https://github.com/andrewtheguy/libflac-prebuilt?tag=v1.5.0-20261002034056-4ba69e8#4ba69e821e60fca68657abdb3968c21dab01e747"
 
 [[package]]
 name = "libloading"

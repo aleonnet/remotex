@@ -15,13 +15,6 @@
 #   Linux: /usr/bin/remotex
 #   macOS: /usr/local/bin/remotex
 #
-# Every package brings libFLAC, which encodes a lossless "rdp" target's sound
-# and is loaded at run time (desktop-flac): the Linux ones depend on the
-# distribution's, and the
-# macOS one, whose system has none, carries its own:
-#
-#   macOS: /usr/local/lib/remotex/libFLAC.14.dylib
-#
 # The web client is inside that one binary; the packages carry no web directory.
 #
 # The live config is not package-owned. It contains credentials, so the operator
@@ -87,39 +80,12 @@ reported="$("$release/bin/remotex" --version)"
 
 if [ "$os" = macos ]; then
   command -v pkgbuild >/dev/null 2>&1 || { echo "pkgbuild is required" >&2; exit 1; }
-  command -v cmake >/dev/null 2>&1 || { echo "cmake is required, to build libFLAC" >&2; exit 1; }
   payload="$stage/payload"
-  mkdir -p "$payload/usr/local/bin" "$payload/usr/local/share/doc/remotex" "$payload/usr/local/lib/remotex"
+  mkdir -p "$payload/usr/local/bin" "$payload/usr/local/share/doc/remotex"
   # -X: without the extended attributes, which pkgbuild would archive (below).
   cp -X "$release/bin/remotex" "$payload/usr/local/bin/remotex"
   cp -X "$release/share/doc/remotex/"* "$payload/usr/local/share/doc/remotex/"
 
-  # libFLAC, in a folder of the package's own (`carried_libflac` in
-  # src/config.rs), so it neither replaces nor is replaced by a FLAC the operator
-  # installed. Built from FLAC's release source, checked against the digest of
-  # the file this was written against: without Ogg, so it needs nothing beside
-  # it, and for macOS 11, the oldest the gateway itself runs on.
-  flac_version=1.5.0
-  flac_sha256=f2c1c76592a82ffff8413ba3c4a1299b6c7ab06c734dee03fd88630485c2b920
-  curl -fsSL -o "$stage/flac.tar.xz" \
-    "https://github.com/xiph/flac/releases/download/${flac_version}/flac-${flac_version}.tar.xz"
-  echo "${flac_sha256}  $stage/flac.tar.xz" | shasum -a 256 -c - >/dev/null
-  tar -xJf "$stage/flac.tar.xz" -C "$stage"
-  cmake -S "$stage/flac-${flac_version}" -B "$stage/flac-build" \
-    -DCMAKE_BUILD_TYPE=Release -DCMAKE_OSX_DEPLOYMENT_TARGET=11.0 \
-    -DBUILD_SHARED_LIBS=ON -DWITH_OGG=OFF -DBUILD_CXXLIBS=OFF -DBUILD_PROGRAMS=OFF \
-    -DBUILD_EXAMPLES=OFF -DBUILD_TESTING=OFF -DBUILD_DOCS=OFF -DINSTALL_MANPAGES=OFF \
-    > "$stage/flac-build.log" 2>&1 \
-    && cmake --build "$stage/flac-build" --target FLAC >> "$stage/flac-build.log" 2>&1 \
-    || { cat "$stage/flac-build.log" >&2; echo "libFLAC did not build" >&2; exit 1; }
-  flac_dylib="$payload/usr/local/lib/remotex/libFLAC.14.dylib"
-  # -L: the versioned name is a link to the file.
-  cp -LX "$stage/flac-build/src/libFLAC/libFLAC.14.dylib" "$flac_dylib"
-  # After its own name, everything it links must be the system's.
-  if otool -L "$flac_dylib" | tail -n +3 | grep -v '^[[:space:]]*/usr/lib/'; then
-    echo "the built libFLAC links a library macOS does not have" >&2
-    exit 1
-  fi
   output="dist/remotex-macos-${asset_arch}.pkg"
   pkgbuild \
     --root "$payload" \
@@ -138,7 +104,6 @@ if [ "$os" = macos ]; then
     exit 1
   fi
   grep -qx './usr/local/bin/remotex' "$stage/pkg-contents"
-  grep -qx './usr/local/lib/remotex/libFLAC.14.dylib' "$stage/pkg-contents"
   for doc in remotex.example.toml LICENSE; do
     grep -qx "./usr/local/share/doc/remotex/$doc" "$stage/pkg-contents"
   done
@@ -172,11 +137,7 @@ mkdir -p "$deb_root/DEBIAN"
   echo "Maintainer: andrewtheguy <andrewchen5678@gmail.com>"
   echo "Section: net"
   echo "Priority: optional"
-  # libFLAC encodes a lossless "rdp" target's sound and is loaded at run time
-  # (desktop-flac), so
-  # nothing reads it out of the binary: FLAC 1.5's, or 1.4's where that is the
-  # one the distribution has, as on Ubuntu 24.04.
-  echo "Depends: ca-certificates, libc6 (>= 2.39), libflac14 | libflac12t64"
+  echo "Depends: ca-certificates, libc6 (>= 2.39)"
   # High Performance's HEVC decoder, loaded at run time (src/libav.rs): any
   # libavcodec the gateway loads.
   echo "Recommends: libavcodec63 | libavcodec62 | libavcodec61 | libavcodec60"
@@ -214,8 +175,6 @@ spec="$rpm_top/SPECS/remotex.spec"
   echo 'License: MIT'
   echo 'URL: https://github.com/andrewtheguy/remotex'
   echo 'Requires: ca-certificates'
-  # libFLAC, as the .deb depends on it: whichever of the two the distribution has.
-  echo 'Requires: (libFLAC.so.14()(64bit) or libFLAC.so.12()(64bit))'
   echo
   echo '%description'
   echo 'Connects a browser to RDP, VNC, and macOS Screen Sharing targets.'
