@@ -62,8 +62,11 @@ pub(crate) enum Layout {
     V2,
 }
 
-/// The difference past which the recovered chroma sample is used in place of the
-/// averaged one — [MS-RDPEGFX] 3.3.8.3.2's cutoff.
+/// The difference from which the recovered chroma sample is used in place of the
+/// averaged one — [\[MS-RDPEGFX\] 3.3.8.3.2]'s cutoff: the average is kept only
+/// where the reverse changes it by less.
+///
+/// [\[MS-RDPEGFX\] 3.3.8.3.2]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-rdpegfx/8131c1bc-1af8-4907-a05a-f72f4581160f
 const FILTER_CUTOFF: i32 = 30;
 
 /// Fewest pixels a rectangle is converted on more than one thread for.
@@ -720,13 +723,13 @@ fn combine(main: &View<'_>, aux: &View<'_>, layout: Layout, block: Area, u444: &
 }
 
 /// The 2x2's top-left sample back from the host's average of the four and the
-/// other three — taken when it differs from the average by more than the cutoff,
+/// other three — taken when it differs from the average by the cutoff or more,
 /// since past a quantized average the reverse can be further from the truth than
 /// the average was. [MS-RDPEGFX] 3.3.8.3.2.
 fn unfilter(average: u8, right: u8, below: u8, diagonal: u8) -> u8 {
     let average = i32::from(average);
     let reversed = average * 4 - i32::from(right) - i32::from(below) - i32::from(diagonal);
-    if (average - reversed).abs() > FILTER_CUTOFF { reversed.clamp(0, 255) as u8 } else { average as u8 }
+    if (average - reversed).abs() >= FILTER_CUTOFF { reversed.clamp(0, 255) as u8 } else { average as u8 }
 }
 
 #[cfg(test)]
@@ -940,11 +943,15 @@ mod tests {
     /// The filter's two sides: a 2x2 whose corner is far from its average gets the
     /// corner back; one whose corner is near keeps the average.
     #[test]
-    fn the_filter_recovers_a_corner_only_past_the_cutoff() {
+    fn the_filter_recovers_a_corner_only_from_the_cutoff_up() {
         // [100, 200, 200, 200]: average 175, reverse 100, 75 apart.
         assert_eq!(unfilter(175, 200, 200, 200), 100);
         // [100, 110, 110, 112]: average 108, reverse 100, 8 apart.
         assert_eq!(unfilter(108, 110, 110, 112), 108);
+        // The cutoff itself is the reverse's: [80, 120, 120, 120], average 110,
+        // reverse 80, 30 apart; and [81, 120, 120, 119], 29 apart, keeps the average.
+        assert_eq!(unfilter(110, 120, 120, 120), 80);
+        assert_eq!(unfilter(110, 120, 120, 119), 110);
         // The reverse is clamped when the neighbours overshoot it.
         assert_eq!(unfilter(10, 250, 250, 250), 0);
     }
