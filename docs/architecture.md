@@ -863,17 +863,23 @@ the pipeline.
   codecs: one H.264 stream for each surface, each access unit behind a mask of
   the rectangles it shows. The gateway does nothing with them: they are bytes in
   the commands it passes. The page says whether it can on its session socket,
-  `rdp_h264=true|false` (`frontend/src/rdpH264.ts`): a `VideoDecoder` that takes
-  the host's stream, and a decoded picture that copies into shared memory. A page
-  that says no is not turned away; its host is told to send none.
+  `rdp_h264=true|false` (`frontend/src/rdpH264.ts`), and finds out by doing it
+  when it loads: three access units of a stream of its own, shaped like a Windows
+  host's, go through the decoders a session uses, and each has to give its
+  picture before the next unit is handed over, laid out as the compositor reads
+  it, and copy into shared memory. A decoder that holds a picture back for the
+  units after it gives none in time, which is a no: a run cannot wait on units
+  the host has not sent. A page that says no is not turned away; its host is told
+  to send none.
 
   A run that carries H.264 is composed in three steps, and its batch is
   acknowledged after the third, so the host is still paced by what the page has
   drawn. The compositor scans the run for its access units (`avc::scan`). Each is
   decoded by its surface's own `VideoDecoder` (`frontend/src/egfxVideo.ts`), as
   the host sent it — Annex B, parameter sets inline, the codec string made from
-  the stream's own profile and level — and its picture awaited: a decoder asked
-  for low latency gives one picture for one unit. The part of the picture the
+  the stream's own profile and level — and its picture awaited: the decoder is
+  asked for low latency, and the page's answer is that it then gives one picture
+  for one unit. The part of the picture the
   unit's mask shows is copied into the compositor's memory, and the run is then
   composed, painting those rectangles from the samples
   (`crates/remotex-rdp-graphics/src/avc.rs`). The conversion to RGB is the

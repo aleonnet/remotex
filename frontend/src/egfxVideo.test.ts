@@ -3,7 +3,7 @@
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
 import type { H264Unit } from "./egfxCompositor.ts";
-import { createEgfxVideo } from "./egfxVideo.ts";
+import { createEgfxVideo, rdpH264Config } from "./egfxVideo.ts";
 
 interface Chunk {
   type: string;
@@ -145,6 +145,14 @@ test("each surface's stream goes through a decoder of its own, a picture a unit"
   );
 });
 
+test("a decoder is configured for the stream's own profile, the browser's choice of decoder", async () => {
+  assert.deepEqual(await rdpH264Config("avc1.640028"), {
+    codec: "avc1.640028",
+    optimizeForLatency: true,
+  });
+  assert.equal(await rdpH264Config("avc1.4d40ff"), null);
+});
+
 test("a keyframe that names another profile configures the decoder again", async () => {
   const video = createEgfxVideo();
   const first = video.decode(key(1), Uint8Array.of(1));
@@ -196,6 +204,17 @@ test("a decoder that fails, or is closed, settles the unit waiting on it", async
     video.decode(key(4), Uint8Array.of(1)),
     /decoders are closed/,
   );
+});
+
+test("a decoder that gives no picture in the time it is given is given up on", async () => {
+  const video = createEgfxVideo(10);
+  await assert.rejects(
+    video.decode(key(1), Uint8Array.of(1)),
+    /gave no picture for a unit/,
+  );
+  // A picture that comes after that is nothing's, and is closed.
+  assert.equal(decoders[0].output().closed, true);
+  video.close();
 });
 
 test("a surface's stream that ended starts over on a new decoder", async () => {

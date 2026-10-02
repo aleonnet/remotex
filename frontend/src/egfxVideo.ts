@@ -16,20 +16,35 @@
 //
 // **One picture for each unit, awaited.** The compositor composes a run's commands
 // in order and takes a unit's picture where its command is, so a unit is decoded
-// and its picture in hand before the run is composed. A decoder asked for low
-// latency gives one picture out for one unit in on every browser this was tried
-// with; one that gives none in time, or fails, ends the pipeline, since the host
-// sends no keyframe to a client that asks and the units after it are a chain with a
-// link missing.
+// and its picture in hand before the run is composed. So the decoder has to give
+// one picture out for one unit in, holding none back for the units after it, which
+// the page finds out before a host is told it may send H.264: it puts a stream of
+// its own through these decoders when it loads (rdpH264.ts). One that then gives
+// none in time, or fails, ends the pipeline, since the host sends no keyframe to a
+// client that asks and the units after it are a chain with a link missing.
 
 import type { H264Unit } from "./egfxCompositor.ts";
-import { rdpH264Config } from "./rdpH264.ts";
 
 /**
  * How long a decoder may take over one access unit's picture. A decoder that is
- * starting takes the longest; one that has dropped the unit never answers.
+ * starting takes the longest; one that has dropped the unit, or is holding its
+ * picture for the unit after it, never answers.
  */
 const PICTURE_TIMEOUT_MS = 5000;
+
+/**
+ * How a decoder for the host's stream is configured: for one picture out for each
+ * access unit in, which is what composing in command order needs. Which decoder
+ * that is, the GPU's or one in software, is left to the browser, as it is for the
+ * desktop's own stream (videoDecoder.ts). Null where the browser has none.
+ */
+export async function rdpH264Config(
+  codec: string,
+): Promise<VideoDecoderConfig | null> {
+  const config: VideoDecoderConfig = { codec, optimizeForLatency: true };
+  const support = await VideoDecoder.isConfigSupported(config);
+  return support.supported === true ? config : null;
+}
 
 export interface EgfxVideo {
   /**
@@ -58,7 +73,8 @@ interface Stream {
   units: number;
 }
 
-export function createEgfxVideo(): EgfxVideo {
+/** The decoders, each given `patienceMs` for a unit's picture. */
+export function createEgfxVideo(patienceMs = PICTURE_TIMEOUT_MS): EgfxVideo {
   const streams = new Map<number, Stream>();
   let closed = false;
 
@@ -128,7 +144,7 @@ export function createEgfxVideo(): EgfxVideo {
         if (settle(stream)) {
           reject(new Error("its H.264 decoder gave no picture for a unit"));
         }
-      }, PICTURE_TIMEOUT_MS);
+      }, patienceMs);
       stream.waiting = { resolve, reject, timer };
       try {
         stream.decoder.decode(
