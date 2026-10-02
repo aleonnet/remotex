@@ -8677,6 +8677,7 @@ mod tests {
             following: d.following,
             declared: d.declared,
             repaint_owed: d.repaint_owed,
+            push_interval_us: d.push_interval_us,
             hp: HpResize::default(),
             laid_out: d.laid_out,
             media_live: d.media_live,
@@ -10440,7 +10441,12 @@ mod tests {
         let (uplink, sent) = test_uplink();
         let (sink, _rx) = test_sink();
         let desktop = shared_desktop((100, 100), None, None);
-        desktop.lock().unwrap().media_only = true;
+        {
+            let mut d = desktop.lock().unwrap();
+            d.media_only = true;
+            // What a session whose picture is the media stream arms with.
+            d.push_interval_us = vnc_apple::PUSH_INTERVAL_MEDIA_US;
+        }
         let addr = "127.0.0.1:5900".parse().unwrap();
         let media: SharedMedia = Arc::new(std::sync::Mutex::new(MediaStream::new(addr, addr, false).0));
         let shared = Shared {
@@ -10453,26 +10459,26 @@ mod tests {
         assert!(!media.lock().unwrap().pending());
 
         let payload = layout_payload(Some(11), &[(11, (1920, 1080), (3840, 2160), 0x01)]);
-        assert!(read_display_layout(&mut payload.as_slice(), &shared, false, false, &sink).await.unwrap());
+        assert!(read_display_layout(&mut payload.as_slice(), &shared, false, &sink).await.unwrap());
         assert_eq!(desktop.lock().unwrap().size, (3840, 2160));
         assert!(desktop.lock().unwrap().laid_out);
         assert_eq!(
             written(&sent),
-            vnc_apple::auto_framebuffer_update((3840, 2160)),
+            vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_MEDIA_US, (3840, 2160)),
             "re-armed, and asked for no server scaling"
         );
         assert!(shared.display.lock().unwrap().apple_layout.is_some(), "the layout a pointer event is read by");
 
         offer_media(&uplink, &desktop, Some(&media)).await.unwrap();
         assert!(media.lock().unwrap().pending(), "the stream is offered for the Mac's own screen");
-        let offered = written(&sent)[vnc_apple::auto_framebuffer_update((3840, 2160)).len()..].to_vec();
+        let offered = written(&sent)[vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_MEDIA_US, (3840, 2160)).len()..].to_vec();
         let listed = set_encodings(&vnc_apple_media::encodings_with_media_stream());
         assert_eq!(offered[..listed.len()], listed[..], "the list naming the stream goes first");
         assert_eq!(offered[listed.len()], 0x1c, "then the offer itself");
 
         // The same layout again changes nothing, and stops no stream.
         desktop.lock().unwrap().media_live = true;
-        assert!(!read_display_layout(&mut payload.as_slice(), &shared, false, false, &sink).await.unwrap());
+        assert!(!read_display_layout(&mut payload.as_slice(), &shared, false, &sink).await.unwrap());
         assert!(desktop.lock().unwrap().media_live);
     }
 
@@ -10669,7 +10675,7 @@ mod tests {
 
         // Standard's session composes it.
         let standard = test_shared(Arc::clone(&uplink), shared_desktop((100, 100), None, None), test_shadow((100, 100)));
-        read_display_layout(&mut mixed.as_slice(), &standard, false, false, &sink).await.unwrap();
+        read_display_layout(&mut mixed.as_slice(), &standard, false, &sink).await.unwrap();
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(out.iter().any(|m| matches!(m, ServerMsg::Mosaic { .. })), "{out:?}");
@@ -10678,7 +10684,7 @@ mod tests {
             media: Some(media),
             ..test_shared(uplink, Arc::clone(&desktop), test_shadow((100, 100)))
         };
-        read_display_layout(&mut mixed.as_slice(), &shared, false, false, &sink).await.unwrap();
+        read_display_layout(&mut mixed.as_slice(), &shared, false, &sink).await.unwrap();
         sink.flush().await;
         let out: Vec<ServerMsg> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
         assert!(!out.iter().any(|m| matches!(m, ServerMsg::Mosaic { .. })), "{out:?}");

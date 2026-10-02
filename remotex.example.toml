@@ -587,7 +587,6 @@ password = "change-me"
 # host = "10.0.0.3"
 # username = "andrew"
 # password = "the-account-password"
-# clipboard = true
 
 # How this target's VP9 stream is configured. The gateway applies the plan when it
 # encodes a desktop, and wlshare applies the same plan to the VP9 it makes and the

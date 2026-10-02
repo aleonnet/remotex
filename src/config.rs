@@ -3500,7 +3500,7 @@ mod tests {
                 "subtype = \"ard-mirror\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
             )))
         };
-        let target = &mirror("clipboard = true").unwrap().targets[0];
+        let target = &mirror("").unwrap().targets[0];
         assert_eq!(target.subtype, Some(Subtype::ArdMirror));
         assert_eq!(target.subtype.unwrap().name(), "ard-mirror");
         assert!(target.apple());

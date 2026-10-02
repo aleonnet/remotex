@@ -1274,6 +1274,10 @@ screen's pixels. Reducing one 5120×2880 picture took 10.2 ms to 3840×2160,
 5.6 ms to 2560×1440 and 5.8 ms to 1920×1080 on an M3 Max with the work spread
 over its cores, and 61 ms on one core. A passed stream is not touched.
 
+A mirror session arms the Mac's pushes as a High Performance one does, at one a
+second (`PUSH_INTERVAL_MEDIA_US`): its picture is the stream's, and its pixel
+region is held to one pixel once the stream is up.
+
 Not measured: a Mac with more than one display attached. Until it is, a mirror
 session composes no mosaic for All Displays over mixed densities, whose regions
 are in the Mac's pixels and not the reduced picture's: the stream's picture is
