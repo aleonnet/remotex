@@ -16,10 +16,14 @@
 //! opens or the gateway stops. macOS has no public call that disables a display:
 //! this uses `CGSConfigureDisplayEnabled`, which CoreGraphics exports from SkyLight
 //! and which display utilities use for the same purpose. It is looked up when it is
-//! needed, so a macOS without it costs a warning and nothing else. A display
-//! disabled this way stays disabled only while the process that disabled it holds
-//! its connection to `WindowServer`, which is why the gateway enables it before it
-//! exits; a gateway killed outright cannot, and leaves the display to the lid.
+//! needed, so a macOS without it costs a warning and nothing else; its declaration
+//! is display utilities' (displayplacer's `src/Header.h`: `CGError
+//! CGSConfigureDisplayEnabled(CGDisplayConfigRef config, CGDirectDisplayID display,
+//! bool enabled);`). The change is completed for this process alone
+//! (`kCGConfigureForAppOnly`), which Apple's `CGDisplayConfiguration.h` documents
+//! the system as reverting when the process ends: a gateway killed outright leaves
+//! the display on, as macOS left it, and never dark. The gateway enables it itself
+//! when the lid opens and when it stops.
 
 use std::ffi::{c_char, c_void};
 use std::sync::Mutex;
@@ -31,9 +35,8 @@ type CGDirectDisplayID = u32;
 type CGDisplayConfigRef = *mut c_void;
 type CGError = i32;
 
-/// `kCGConfigureForSession`: the change lasts for the login session, never
-/// written to the display preferences.
-const CONFIGURE_FOR_SESSION: u32 = 1;
+/// `kCGConfigureForAppOnly`: the change lasts while this process runs.
+const CONFIGURE_FOR_APP_ONLY: u32 = 0;
 
 #[link(name = "CoreGraphics", kind = "framework")]
 unsafe extern "C" {
@@ -162,57 +165,90 @@ fn set_enabled(display: CGDirectDisplayID, enabled: bool) -> anyhow::Result<()> 
             CGCancelDisplayConfiguration(config);
             anyhow::bail!("could not set display {display} enabled={enabled} (CGError {err})");
         }
-        let err = CGCompleteDisplayConfiguration(config, CONFIGURE_FOR_SESSION);
+        let err = CGCompleteDisplayConfiguration(config, CONFIGURE_FOR_APP_ONLY);
         anyhow::ensure!(err == 0, "could not complete the display configuration (CGError {err})");
     }
     Ok(())
 }
 
-/// After a session that put this Mac on a virtual display ends: wait for the Mac to
-/// bring its physical displays back, and with the lid closed disable the built-in
-/// one it brought back, then enable it when the lid opens. On a thread of its own,
-/// since the session's runtime goes away with the session.
-pub fn after_private_session() {
-    let spawned = std::thread::Builder::new().name("mac-displays".into()).spawn(|| {
-        let deadline = std::time::Instant::now() + SETTLE;
-        let display = loop {
-            if let Some(display) = to_disable(lid_closed(), built_in()) {
-                break display;
-            }
-            if std::time::Instant::now() >= deadline {
-                debug!("mac: the built-in display stayed as the lid has it after the session");
-                return;
-            }
-            std::thread::sleep(SETTLE_STEP);
-        };
+/// Held by a session that put a Mac on a virtual display, from its connect on: the
+/// session's end, by any way out, is when the Mac at `dest` brings its physical
+/// displays back. Acts only where `dest` is this host.
+pub struct AfterPrivateSession {
+    pub dest: String,
+}
+
+impl Drop for AfterPrivateSession {
+    fn drop(&mut self) {
+        let dest = std::mem::take(&mut self.dest);
+        let spawned = std::thread::Builder::new()
+            .name("mac-displays".into())
+            .spawn(move || settle(&dest));
+        if let Err(e) = spawned {
+            warn!("mac: could not watch the displays after the session: {e}");
+        }
+    }
+}
+
+/// Wait for the Mac at `dest`, this one, to bring its physical displays back, and
+/// with the lid closed turn the built-in one off again; then hold it off until the
+/// lid opens. One thread holds the display at a time: a later session's end that
+/// finds it already held turns it off again and leaves the watching to the holder.
+fn settle(dest: &str) {
+    if !crate::engine::is_this_host(dest) {
+        return;
+    }
+    let deadline = std::time::Instant::now() + SETTLE;
+    let display = loop {
+        if let Some(display) = to_disable(lid_closed(), built_in()) {
+            break display;
+        }
+        if std::time::Instant::now() >= deadline {
+            debug!("mac: the built-in display stayed as the lid has it after the session");
+            return;
+        }
+        std::thread::sleep(SETTLE_STEP);
+    };
+    {
+        // Held across the change, so a release cannot slip between the two.
+        let mut held = HELD.lock().unwrap();
         if let Err(e) = set_enabled(display, false) {
             warn!("mac: the lid is closed but the built-in display came back on, and could not be turned off: {e:#}");
             return;
         }
         info!("mac: turned the built-in display back off, the lid being closed");
-        *HELD.lock().unwrap() = Some(display);
-        while !to_enable(lid_closed()) {
-            std::thread::sleep(LID_STEP);
-            if HELD.lock().unwrap().is_none() {
-                return;
-            }
+        if held.replace(display).is_some() {
+            return;
         }
-        release();
-    });
-    if let Err(e) = spawned {
-        warn!("mac: could not watch the displays after the session: {e}");
     }
+    while !to_enable(lid_closed()) {
+        std::thread::sleep(LID_STEP);
+        if HELD.lock().unwrap().is_none() {
+            return;
+        }
+    }
+    release();
 }
 
-/// Enable the built-in display again if the gateway turned it off: when the lid
-/// opens, and when the gateway stops.
+/// Enable the built-in display again if the gateway turned it off.
 pub fn release() {
-    let Some(display) = HELD.lock().unwrap().take() else {
+    let mut held = HELD.lock().unwrap();
+    let Some(display) = held.take() else {
         return;
     };
     match set_enabled(display, true) {
         Ok(()) => info!("mac: turned the built-in display back on"),
         Err(e) => warn!("mac: could not turn the built-in display back on: {e:#}"),
+    }
+}
+
+/// Held for the life of a gateway: whichever way it stops, it gives back a
+/// built-in display it turned off.
+pub struct ReleaseOnExit;
+
+impl Drop for ReleaseOnExit {
+    fn drop(&mut self) {
+        release();
     }
 }
 

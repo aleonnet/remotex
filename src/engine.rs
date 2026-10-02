@@ -489,6 +489,14 @@ mod tests {
         assert!(is_this_host("127.0.0.1:5900"));
         assert!(is_this_host("localhost:5900"));
         assert!(!is_this_host("192.0.2.1:5900"), "TEST-NET-1 is no host's own address");
+        // The host's own network address, asked of the kernel apart from the code
+        // under test: the case a target addressed by it decides.
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let routed = probe.connect("192.0.2.1:9").ok().map(|()| probe.local_addr().unwrap().ip());
+        match routed.filter(|ip| !ip.is_loopback() && !ip.is_unspecified()) {
+            Some(own) => assert!(is_this_host(&host_port(&own.to_string(), 5900)), "{own} is this host's"),
+            None => eprintln!("not checked: this host has no address but its loopback"),
+        }
     }
 
     /// Only a destination on this host is reached from a chosen address: another

@@ -1694,6 +1694,12 @@ async fn session(
     else {
         return;
     };
+    // A Mac that was on a virtual display enables every physical display when the
+    // session ends, a closed MacBook's own included — see `crate::mac_displays`.
+    #[cfg(target_os = "macos")]
+    let _displays = config
+        .has_virtual_display()
+        .then(|| crate::mac_displays::AfterPrivateSession { dest: dest.clone() });
 
     let Connected { downlink, uplink, width, height, macos, apple, poll, media, passthrough } = connected;
     info!("vnc: connected, desktop {width}x{height} px (macos={macos})");
@@ -1763,12 +1769,6 @@ async fn session(
             .await;
     }
     info!("vnc: session terminated");
-    // A Mac that was on a virtual display enables every physical display when the
-    // session ends, a closed MacBook's own included — see `crate::mac_displays`.
-    #[cfg(target_os = "macos")]
-    if config.has_virtual_display() && engine::is_this_host(&dest) {
-        crate::mac_displays::after_private_session();
-    }
 }
 
 /// The per-session switches [`active_loop`] needs: one discovered from the

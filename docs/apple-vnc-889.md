@@ -1349,9 +1349,12 @@ and only then is the built-in display disabled again; untouched, it was still on
 A gateway on that Mac therefore turns the built-in display back off itself after
 such a session, while the lid stays closed, and on again when the lid opens or
 the gateway stops (`src/mac_displays.rs`). There is no public call that disables a
-display; it uses `CGSConfigureDisplayEnabled`, looked up when needed, and a
-display disabled that way stays disabled only while the process that disabled it
-runs. A gateway killed outright leaves the display to the lid, as before.
+display; it uses `CGSConfigureDisplayEnabled`, looked up when needed, and
+completes the change for its own process alone (`kCGConfigureForAppOnly`), which
+Apple's header documents as reverted when the process ends: a gateway killed
+outright leaves the display on, as macOS left it, never dark. The watch starts
+from the session's connect, so a session that ends by any way out is covered,
+and one gateway thread holds the display at a time.
 
 ### The decoder's first picture
 

@@ -112,6 +112,9 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
 /// hand, and the server arm only completes by failing.
 #[cfg(feature = "embedded-gateway")]
 async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Result<()> {
+    // As in `serve`.
+    #[cfg(target_os = "macos")]
+    let _displays = remotex::mac_displays::ReleaseOnExit;
     // Ahead of the race below, because asking for the claim can wait, and waiting
     // is what `serve` must not do before it has refused.
     let claim = instance.claim().await?;
@@ -149,6 +152,9 @@ fn load_hevc_decoder(config: &AppConfig) -> anyhow::Result<Option<remotex::hevc_
 }
 
 async fn serve(config: AppConfig) -> anyhow::Result<()> {
+    // Gives back a built-in display the gateway turned off, however it stops.
+    #[cfg(target_os = "macos")]
+    let _displays = remotex::mac_displays::ReleaseOnExit;
     if let Some(recording) = &config.meter {
         info!("recording websocket throughput to {}", recording.database.display());
     }
@@ -262,9 +268,6 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         }
         _ = shutdown_signal() => info!("shutdown signal received; stopping"),
     }
-    // A built-in display this gateway turned off stays off only while it runs.
-    #[cfg(target_os = "macos")]
-    remotex::mac_displays::release();
     #[cfg(unix)]
     drop(socket_file);
     Ok(())
