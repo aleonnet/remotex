@@ -146,6 +146,12 @@ const ENCODING_WLSHARE_DENSITY: i32 = 0x574c_5348;
 /// every registered RFB message type.
 const MSG_WLSHARE_DENSITY: u8 = 0xE0;
 
+/// wlshare's scroll message: a distance, where RFB's wheel buttons have only
+/// notches. Six bytes — this type, padding, and the horizontal and vertical
+/// distance as S16 logical pixels of the output, positive rightward and
+/// downward. Sent on a `wlshare` target alone and not listed for: wlshare holds
+/// no state for it and answers nothing.
+const MSG_WLSHARE_SCROLL: u8 = 0xE5;
 /// The wlshare outputs extension's pseudo-encoding, the ASCII bytes `WLSO`.
 /// Listed beside the density request on a `wlshare` target: wlshare answers it
 /// with an [`MSG_WLSHARE_OUTPUTS`] list of the compositor's outputs. It is what
@@ -2423,6 +2429,9 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         media,
         passthrough,
     } = flags;
+    // Only a `wlshare` target has a listing, and it is the one sent a scroll as
+    // a distance.
+    let mut wheel = if passthrough.is_some() { Wheel::wlshare() } else { Wheel::new(apple) };
     let (media, pictures) = match media {
         Some((media, pictures)) => (Some(Arc::new(std::sync::Mutex::new(media))), Some(pictures)),
         None => (None, None),
@@ -2539,7 +2548,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     // tracked here — every key event carries the browser's authoritative lock
     // state (see [`ClientMsg::Key`]).
     let mut pressed_keys: HashMap<String, u32> = HashMap::new();
-    let mut wheel = Wheel::new(apple);
     let buttons = Buttons::new(apple);
     let mut held = HeldMotion::default();
 
@@ -5469,12 +5477,19 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
 /// way overshoots — an X11 desktop asked for a distance in pulses it spends a
 /// notch apiece on scrolls in lurches — so those keep the one-pulse convention
 /// every other client follows and every such server is tuned for.
+///
+/// wlshare is ours, so there the vocabulary was widened instead: a `wlshare`
+/// target is sent the distance itself ([`MSG_WLSHARE_SCROLL`]), which the
+/// compositor hands its applications the way it hands them a touchpad's.
 enum Wheel {
     /// One pulse per event, whatever the delta.
     Notch,
     /// Pulses proportional to the distance asked for, holding the sub-pulse
     /// remainder per axis between events.
     Apple { pending: (f32, f32) },
+    /// The distance itself, in whole pixels, holding the sub-pixel remainder
+    /// per axis between events.
+    Wlshare { pending: (f32, f32) },
 }
 
 impl Wheel {
@@ -5504,6 +5519,12 @@ impl Wheel {
         }
     }
 
+    /// A `wlshare` target's: not merely a wlshare server, since one reached as
+    /// plain `vnc` is read through the RFB baseline.
+    fn wlshare() -> Self {
+        Self::Wlshare { pending: (0.0, 0.0) }
+    }
+
     /// A delta in the pixels it stands for, whatever unit it was reported in.
     fn pixels(delta: f32, unit: WheelUnit) -> f32 {
         match unit {
@@ -5513,7 +5534,8 @@ impl Wheel {
         }
     }
 
-    /// Whole pulses to send for one wheel event, as (horizontal, vertical).
+    /// Whole pulses to send for one wheel event, as (horizontal, vertical) —
+    /// or, for wlshare, whole pixels.
     fn pulses(&mut self, dx: f32, dy: f32, unit: WheelUnit) -> (i32, i32) {
         let px = |delta: f32| Self::pixels(delta, unit);
         match self {
@@ -5526,6 +5548,10 @@ impl Wheel {
                     Self::spend(&mut pending.1, px(dy) / step, max),
                 )
             }
+            Self::Wlshare { pending } => (
+                Self::spend(&mut pending.0, px(dx), Self::MAX_PX),
+                Self::spend(&mut pending.1, px(dy), Self::MAX_PX),
+            ),
         }
     }
 
@@ -5663,6 +5689,16 @@ fn translate_input(
             // is the input to every constant above, and it varies by browser,
             // by pointing device and by platform.
             debug!("vnc: wheel dx={dx} dy={dy} {unit:?} -> {px} + {py} pulses");
+            if let Wheel::Wlshare { .. } = wheel {
+                if (px, py) == (0, 0) {
+                    return Vec::new();
+                }
+                // Both fit: one event spends at most [`Wheel::MAX_PX`].
+                let mut msg = vec![MSG_WLSHARE_SCROLL, 0];
+                msg.extend_from_slice(&(px as i16).to_be_bytes());
+                msg.extend_from_slice(&(py as i16).to_be_bytes());
+                return vec![msg];
+            }
             // Screen Sharing scrolls only on a mask of exactly 0x08 or 0x10 and
             // posts any other mask as buttons by bit position, so a pulse there goes
             // without the held buttons — which the release restores — and the
@@ -5670,7 +5706,9 @@ fn translate_input(
             // docs/apple-vnc-889.md, "A Mac scrolls only on a lone wheel bit".
             let (axes, held): (&[_], u8) = match wheel {
                 Wheel::Apple { .. } => (&[(py, 0x08, 0x10)], 0),
-                Wheel::Notch => (&[(py, 0x08, 0x10), (px, 0x20, 0x40)], *button_mask),
+                Wheel::Notch | Wheel::Wlshare { .. } => {
+                    (&[(py, 0x08, 0x10), (px, 0x20, 0x40)], *button_mask)
+                }
             };
             let mut out = Vec::new();
             for &(pulses, negative_bit, positive_bit) in axes {
@@ -7959,6 +7997,28 @@ mod tests {
         assert_eq!(scroll(&mut generic, 0.0, 4.0, WheelUnit::Pixel).1, 1);
         assert_eq!(scroll(&mut generic, 0.0, 0.0, WheelUnit::Pixel).1, 0);
         assert_eq!(scroll(&mut generic, 0.0, f32::NAN, WheelUnit::Pixel).1, 0);
+    }
+
+    /// A `wlshare` target is sent the distance, as one message of its own type
+    /// in place of wheel-button presses, with the fraction carried.
+    #[test]
+    fn a_wlshare_target_is_sent_the_distance() {
+        let mut wheel = Wheel::wlshare();
+        let mut send = |dx, dy| {
+            translate_input(
+                ClientMsg::Wheel { dx, dy, unit: WheelUnit::Pixel },
+                &Buttons::Rfb,
+                &mut 0x01,
+                &mut (5, 6),
+                &mut HashMap::new(),
+                &mut wheel,
+                false,
+            )
+        };
+        assert_eq!(send(48.0, -32.0), [vec![0xE5, 0, 0x00, 0x30, 0xFF, 0xE0]]);
+        assert!(send(0.0, 0.5).is_empty(), "less than a pixel is held");
+        assert_eq!(send(0.0, 0.5), [vec![0xE5, 0, 0, 0, 0, 1]]);
+        assert_eq!(send(0.0, 10_000.0), [vec![0xE5, 0, 0, 0, 0x02, 0x00]], "held to one event's cap");
     }
 
     /// One wheel event with `held` buttons down, as the masks it sends.

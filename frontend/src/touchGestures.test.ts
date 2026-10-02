@@ -18,6 +18,8 @@ import {
 type Handler = (e: TouchEvent) => void;
 
 const REMOTE = { w: 2000, h: 1000 };
+// Pixels the remote draws per point; a test changes it for a dense desktop.
+let remoteScale = 1;
 
 let sent: ClientMsg[] = [];
 let view: GestureView;
@@ -57,6 +59,15 @@ function dispatch(
 
 const wheels = () => sent.filter((msg) => msg.type === "wheel");
 
+// That many scroll ticks, each 32 remote px along one axis.
+const ticks = (count: number, dx: number, dy: number) =>
+  Array.from({ length: count }, () => ({
+    type: "wheel",
+    dx,
+    dy,
+    unit: "pixel",
+  }));
+
 // Two fingers, 50px apart, moved together by the given offsets in turn.
 function twoFingerDrag(steps: readonly { dx: number; dy: number }[]): void {
   dispatch("touchstart", [touch(1, 100, 400), touch(2, 150, 400)]);
@@ -70,11 +81,12 @@ function twoFingerDrag(steps: readonly { dx: number; dy: number }[]): void {
 
 beforeEach(() => {
   sent = [];
+  remoteScale = 1;
   view = { fit: 0.2, zoom: 1, pan: { x: 0, y: 0 } };
   handlers.clear();
   gestures = attachTouchGestures(element, {
     send: (msg) => sent.push(msg),
-    remoteSize: () => REMOTE,
+    remoteSize: () => ({ ...REMOTE, scale: remoteScale }),
     view: () => view,
     applyView: (zoom, pan) => {
       view = { fit: view.fit, zoom, pan };
@@ -84,15 +96,14 @@ beforeEach(() => {
 });
 
 test("fingers moving in parallel scroll, in the natural direction", () => {
-  // 12px classifies the gesture as a scroll and names its axis; the 32px that
-  // follow are the first tick's worth of travel.
+  // 12px classifies the gesture as a scroll and names its axis. The desktop is
+  // shown at a fifth of its size, so the 44px the fingers covered is 220px of
+  // it: six ticks, and 28px carried.
   twoFingerDrag([
     { dx: 0, dy: 12 },
     { dx: 0, dy: 44 },
   ]);
-  assert.deepEqual(wheels(), [
-    { type: "wheel", dx: 0, dy: -32, unit: "pixel" },
-  ]);
+  assert.deepEqual(wheels(), ticks(6, 0, -32));
   assert.equal(view.zoom, 1, "a scroll never zooms");
 });
 
@@ -100,11 +111,29 @@ test("a swipe delivered as one move scrolls by all of it", () => {
   // The browser is free to coalesce a fast swipe into a single touchmove: the
   // travel that classifies the gesture has to count, or a flick scrolls nothing.
   twoFingerDrag([{ dx: 0, dy: 100 }]);
-  assert.deepEqual(wheels(), [
-    { type: "wheel", dx: 0, dy: -32, unit: "pixel" },
-    { type: "wheel", dx: 0, dy: -32, unit: "pixel" },
-    { type: "wheel", dx: 0, dy: -32, unit: "pixel" },
+  assert.deepEqual(wheels(), ticks(15, 0, -32));
+});
+
+test("a zoomed-in view scrolls the less for the same travel", () => {
+  // Content follows the fingers: at 1:1 the 44px they covered is 44px of the
+  // desktop, one tick.
+  view = { fit: 0.2, zoom: 5, pan: { x: 0, y: 0 } };
+  twoFingerDrag([
+    { dx: 0, dy: 12 },
+    { dx: 0, dy: 44 },
   ]);
+  assert.deepEqual(wheels(), ticks(1, 0, -32));
+});
+
+test("a dense desktop scrolls by its points, not its pixels", () => {
+  // Drawn at two pixels a point, the 220 pixels the fingers covered are 110
+  // points: three ticks.
+  remoteScale = 2;
+  twoFingerDrag([
+    { dx: 0, dy: 12 },
+    { dx: 0, dy: 44 },
+  ]);
+  assert.deepEqual(wheels(), ticks(3, 0, -32));
 });
 
 test("a sideways drag scrolls sideways", () => {
@@ -112,9 +141,7 @@ test("a sideways drag scrolls sideways", () => {
     { dx: 12, dy: 0 },
     { dx: 44, dy: 0 },
   ]);
-  assert.deepEqual(wheels(), [
-    { type: "wheel", dx: -32, dy: 0, unit: "pixel" },
-  ]);
+  assert.deepEqual(wheels(), ticks(6, -32, 0));
 });
 
 test("a diagonal drag locks onto the axis it was classified on", () => {
@@ -124,9 +151,7 @@ test("a diagonal drag locks onto the axis it was classified on", () => {
     { dx: 4, dy: 12 },
     { dx: 60, dy: 44 },
   ]);
-  assert.deepEqual(wheels(), [
-    { type: "wheel", dx: 0, dy: -32, unit: "pixel" },
-  ]);
+  assert.deepEqual(wheels(), ticks(6, 0, -32));
 });
 
 test("fingers changing their distance pinch, and never scroll", () => {
@@ -142,9 +167,7 @@ test("a scroll that drifts apart stays a scroll", () => {
   dispatch("touchmove", [touch(1, 100, 412), touch(2, 150, 412)]);
   // The same downward travel, with the fingers spreading as they go.
   dispatch("touchmove", [touch(1, 60, 444), touch(2, 190, 444)]);
-  assert.deepEqual(wheels(), [
-    { type: "wheel", dx: 0, dy: -32, unit: "pixel" },
-  ]);
+  assert.deepEqual(wheels(), ticks(6, 0, -32));
   assert.equal(view.zoom, 1);
 });
 

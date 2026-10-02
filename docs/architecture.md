@@ -220,8 +220,10 @@ cropped picture. Two streams for Apple's All Displays are the planned way, in
 `subtype = "wlshare"` on a `vnc` target says the server is wlshare, and is the
 one thing that lists any of wlshare's extensions to it: its VP9 encoding, the
 density and output-list requests, the audio extension in a session started with
-sound, and with their keys the camera and microphone extensions. A plain `vnc`
-target lists none of them, whatever server
+sound, and with their keys the camera and microphone extensions. It is also what
+sends a scroll as wlshare's distance message rather than as wheel-button
+notches. A plain `vnc` target lists none of them and scrolls by the notch,
+whatever server
 answers: a wlshare behind one is read through the RFB baseline, ZRLE encoded
 here at 1x on the output it opened with, which is the fallback wlshare keeps for
 ordinary VNC clients. Do not list a wlshare extension on a plain target, or
@@ -2252,6 +2254,15 @@ The canvas is presented at the remote's point size, derived from framebuffer
 pixels and remote scale. Desktop clients scroll when necessary. Touch clients
 use fit-to-width presentation, pinch zoom, pan, a virtual cursor, and
 multi-finger gestures without changing framebuffer coordinates.
+
+A `wheel` message's pixels are points of the remote desktop: a pointer client
+sends the browser's deltas, which are that at 100%, and the touch layer sends
+two-finger travel through the scale the desktop is shown at, so content follows
+the fingers. Each engine spends the distance in what its wire has: RDP as
+proportional wheel rotation, an Apple target as as many wheel pulses as it is
+worth there, a `wlshare` target as the distance itself, in wlshare's scroll
+message (`0xE5`), which the compositor hands its applications as a touchpad's
+continuous axis. Plain VNC has only the wheel buttons, a notch an event.
 
 That touch layer is a trackpad, and there is a second one that is a touchscreen.
 When an engine's host opens a touch channel (MS-RDPEI on RDP), the gateway says
