@@ -21,7 +21,8 @@ while any client listens, has the desktop play into a PipeWire sink of its own
 rather than the host's, so the host is silent the way a remote desktop's is. It
 captures that sink's monitor — what the desktop is playing, whatever is playing
 it — and sends it in the format the client asked for, coded as the client asked:
-Opus packets, or FLAC frames.
+Opus packets, or FLAC frames. How it makes that sink and captures it is in its
+own [`docs/architecture.md`](https://github.com/andrewtheguy/wlshare/blob/main/docs/architecture.md#the-audio-extension).
 
 ## Configuration
 
@@ -62,113 +63,35 @@ pseudo-encoding is told nothing.
 
 ## The wire
 
-Two private pseudo-encodings and one private message type, beside the QEMU Audio
-extension's message type for everything else.
+The extension is wlshare's, and its messages and their layouts are in wlshare's
+own [`docs/architecture.md`](https://github.com/andrewtheguy/wlshare/blob/main/docs/architecture.md#the-audio-extension):
+two pseudo-encodings, `WLSF` for the sound and `WLOP` for it as Opus, the QEMU
+Audio extension's message type `255` for the controls, and message type `0xE4`
+for a frame. What the gateway asks of it:
 
-- **Pseudo-encoding** `0x574c5346`, `WLSF` in ASCII, listed in the client's
-  `SetEncodings` beside the standard ones. A server that does not know it
-  ignores it, as RFB requires. QEMU's own pseudo-encoding, `-259`, is not
-  listed: what it promises is raw samples.
-- **Pseudo-encoding** `0x574c4f50`, `WLOP`, listed beside the first: the sound
-  as Opus in place of FLAC. The gateway lists it unless the session was started
-  with its sound lossless. It rides `SetEncodings`, as the VP9 stream's choices
-  do, so the stream that begins is already the one asked for.
-- **Message type** `255` with **submessage** `1`, the QEMU extensions' shared
-  type, for the client's set-format, enable and disable and the server's begin
-  and end, and for wlshare's own set-bitrate beside them. Nothing else under type 255 is advertised by this client, and a
-  submessage or operation it does not know is fatal: the QEMU submessages share
-  no length field, so one that cannot be measured leaves the stream at an
+- **What it lists.** `WLSF`, and `WLOP` beside it unless the session was started
+  with its sound lossless. QEMU's own pseudo-encoding, `-259`, is not listed:
+  what it promises is raw samples.
+- **The format.** Signed 16-bit, 2 channels, 48 000 Hz, which is Opus's own
+  rate — wlshare codes Opus only at 8, 12, 16, 24 or 48 kHz — and one a browser
+  plays as it is. So every frame holds **960** samples, 20 ms, and nothing is
+  flipped, as an unsigned format's samples would be.
+- **When it speaks.** Set-format, set-bitrate and enable go out once, when the
+  announcement arrives, and a set-bitrate again each time the gateway's walk
+  moves.
+- **What it refuses.** Nothing else under type 255 is advertised by this client,
+  and a submessage or operation it does not know is fatal: the QEMU submessages
+  share no length field, so one that cannot be measured leaves the stream at an
   offset nothing recovers from. That includes QEMU's operation 2, raw data.
-- **Message type** `0xE4`, server → client, for the sound itself: one Opus
-  packet or one FLAC frame a message.
-
-### Server → client: the announcement
-
-An **empty pseudo-rectangle** of encoding `WLSF` inside a `FramebufferUpdate` —
-the only way support is announced, the same shape ExtendedDesktopSize uses.
-wlshare sends it as its own update, ahead of any pixels, on the first
-`SetEncodings` that lists the encoding.
-
-| Offset | Type | Field |
-|---|---|---|
-| 0 | U16 | x, 0 |
-| 2 | U16 | y, 0 |
-| 4 | U16 | width, 0 |
-| 6 | U16 | height, 0 |
-| 8 | S32 | encoding, `0x574c5346` |
-
-### Client → server: set format, set bitrate, enable, disable
-
-The format is the client's to choose — the server converts whatever the desktop
-plays into it — so there is nothing to negotiate. This gateway asks for
-**signed 16-bit, 2 channels, 48 000 Hz**, which is Opus's own rate — wlshare
-codes Opus only at 8, 12, 16, 24 or 48 kHz — and one a browser plays as it is.
-
-| Offset | Type | Field |
-|---|---|---|
-| 0 | U8 | `255` |
-| 1 | U8 | `1` |
-| 2 | U16 | operation: 0 enable, 1 disable, 2 set format |
-| 4 | U8 | sample format (set format only): 0 U8, 1 S8, 2 U16, **3 S16** |
-| 5 | U8 | channels, 1 or 2 |
-| 6 | U32 | frequency, 8 000 to 96 000 in wlshare |
-
-Four bytes for an enable or a disable, ten for a set-format. QEMU's 32-bit
-formats, 4 and 5, are refused by wlshare, since FLAC stores at most 24 bits.
-
-Set-bitrate is operation `3`, wlshare's own: the rate Opus is coded at, in bits
-per second, 6 000 to 510 000. wlshare starts at 96 000 where it is told none,
-and a running stream moves to a new rate at its next packet, with no restart
-and nothing said to the decoder. A FLAC stream has no rate to move.
-
-| Offset | Type | Field |
-|---|---|---|
-| 0 | U8 | `255` |
-| 1 | U8 | `1` |
-| 2 | U16 | operation, `3` |
-| 4 | U32 | bits per second |
-
-The gateway sends set-format, set-bitrate and enable, once, when the
-announcement arrives, and a set-bitrate again each time its walk moves.
-
-### Server → client: begin, end
-
-| Offset | Type | Field |
-|---|---|---|
-| 0 | U8 | `255` |
-| 1 | U8 | `1` |
-| 2 | U16 | operation: 0 end, 1 begin |
-
-### Server → client: a frame
-
-| Offset | Type | Field |
-|---|---|---|
-| 0 | U8 | `0xE4` |
-| 1 | U8[3] | padding |
-| 4 | U32 | length of the frame |
-| 8 | U8[] | one Opus packet or one FLAC frame |
-
-Sent between a begin and an end. Every frame holds exactly `frequency / 50`
-frames of samples — 20 ms, **960** at the gateway's 48 kHz.
+- **The headers nobody sends.** `OpusHead` is never on the wire: everything in it
+  follows from the format the gateway set, with the encoder's lookahead, 312
+  samples at 48 kHz, as the pre-skip, so the gateway states it to the browser
+  itself (`vnc_audio::PASSED_OPUS`). FLAC's `STREAMINFO` is not sent either, and
+  the page's decoder is held to the format and the 960-sample block.
 
 An Opus packet is the stream the gateway's own encoder makes of an RDP host's
-sound: both are [desktop-opus](https://github.com/andrewtheguy/desktop-opus), a
-repository of its own that the gateway and wlshare each pin by release tag —
-libopus tuned for music, constrained variable rate around the bitrate, at full
-effort, linked statically from a prebuilt archive. `OpusHead` is never sent:
-everything in it follows from the format the client set, with the encoder's
-lookahead, 312 samples at 48 kHz, as the pre-skip, so the gateway states it to
-the browser itself (`vnc_audio::PASSED_OPUS`). Silence is a few bytes a packet.
-
-A FLAC frame is in FLAC's
-fixed-blocking mode, and is numbered zero: wlshare makes each frame a FLAC
-stream of its own, one block long, so that none waits for the next. The FLAC stream header,
-`STREAMINFO`, is never sent: everything in it follows from the format the client
-set and that block size, so the page's decoder is held to it. An
-unsigned format has the top bit of every sample flipped before it is encoded,
-mapping it onto the signed range with silence on zero, and flipped back after;
-the gateway asks for a signed one, so nothing flips. Decoded samples are
-interleaved, little-endian, and bit for bit what wlshare captured.
+sound: both are [sound-opus](https://github.com/andrewtheguy/sound-opus), a
+repository of its own that the gateway and wlshare each pin by release tag.
 
 Opus is the one lossy step on the way to the browser, made once, by wlshare, and
 a session started with lossless sound (EXPERIMENTAL) has none
@@ -217,57 +140,15 @@ announces late is still taken.
   3840 bytes of samples before compression, and FLAC adds a few header bytes at
   worst, so anything larger is a server that has lost its framing.
 
-So the gateway needs no codec for wlshare's sound, and no library on its host:
-a `wlshare` target's Sound is never greyed at the picker for the want of one.
+So the gateway needs no codec for wlshare's sound.
 wlshare's FLAC encoder is libFLAC, through
-[desktop-flac](https://github.com/andrewtheguy/desktop-flac), which the gateway
+[sound-flac](https://github.com/andrewtheguy/sound-flac), which the gateway
 pins too, for the FLAC it codes of an RDP host's sound.
 
 Audio shares the TCP stream with the pixels, which is the one cost of carrying
 it in band. wlshare drains its capture queue before every framebuffer update, so
 sound is never held behind a ZRLE or VP9 frame it was ready before; the browser's
 300 ms lead clamp absorbs what is left.
-
-## What wlshare does
-
-While any client listens, the desktop plays into the **speaker**, a
-`support.null-audio-sink` named `wlshare-speaker` ("wlshare remote audio") that
-`crates/wlshare/src/audio.rs` makes with the first client's enable and removes
-with the last one's disable or disconnect. Its `priority.session` is 100000,
-above what WirePlumber gives any host sink, the one the user configured
-included, so it is the default while it exists and every stream that follows
-the default moves to it. Nothing on the host is muted and no default is
-written: the node belongs to wlshare's PipeWire connection, so when it goes —
-or wlshare dies — WirePlumber makes the host's sink the default again and the
-streams follow it back. A stream an application pinned to a sink of its own
-stays there and is heard on the host.
-
-`crates/wlshare/src/audio.rs` starts one PipeWire capture per client that
-enables audio, on a thread of its own, and stops it on a disable or when the
-client goes. The stream is a `Stream/Input/Audio` node with
-`stream.capture.sink = "true"` and `target.object` the speaker, which is what
-makes PipeWire connect it to the **speaker's monitor** rather than to a
-microphone, and `node.latency` asks
-for 20 ms buffers, one frame's worth in either codec. The process callback runs on that capture's own loop thread
-rather than on the graph's real-time one — `RT_PROCESS` is deliberately not set,
-since the callback encodes, allocates, takes a mutex and wakes a task, none of
-which is real-time safe: on the data thread it could stall the whole audio graph
-and give every application on the host an xrun. It encodes there,
-off the session's task, and queues each finished frame in a sixteen-deep queue.
-When a client cannot keep up, FLAC drops the oldest — a dropped frame is a
-20 ms hole, and a stalled capture callback is worse — and Opus leaves a buffer
-uncoded while the queue is full, so no packet it coded goes unsent and the
-decoder stays in step with the encoder. A set-format on a running stream, or a list that
-changes its codec, restarts the capture as now asked for; a set-bitrate moves
-the running encoder.
-
-PipeWire honours its own quantum before settling on the requested one, so the
-first buffers of a session are often smaller than 20 ms — 512 frames where 960
-were asked for, measured. The encoder keeps what does not fill a frame for the
-next buffer, so every frame on the wire is exactly 20 ms.
-
-A headless session needs no sink of its own, and no `null-sink` needs
-configuring: the speaker is one.
 
 ## Measured
 

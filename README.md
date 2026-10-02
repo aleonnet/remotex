@@ -139,7 +139,9 @@ The host's own stream, passed through to the browser for a LAN:
   by the gateway's own compositor built to WebAssembly, which takes nearly all of
   the picture's work off the gateway. It is **experimental**: run against one
   Windows 11 host, with sound and the clipboard beside it, and not yet with the
-  camera or the microphone.
+  camera or the microphone. A target with `egfx_h264 = true`, more experimental
+  still, lets the host draw video with H.264 on that pipeline, which the browser
+  decodes; without the key what is passed is lossless.
 - **macOS Screen Sharing's High Performance mode** (`ard-high-performance`), in a
   session started with the passthrough: the Mac's HEVC picture, to a browser
   that decodes it (Chrome and Safari; not Firefox). Its AAC-ELD sound is passed
@@ -333,8 +335,7 @@ shows the passthrough as already chosen, and a browser that cannot decode the
 HEVC cannot start the target. See
 [The media stream](docs/apple-vnc-889.md#the-media-stream-high-performances-picture-and-sound).
 
-Every Apple subtype supports the native Apple pasteboard when `clipboard =
-true`. In a session started with resize, the window continuously drives High
+Every Apple subtype carries the native Apple pasteboard. In a session started with resize, the window continuously drives High
 Performance's virtual display, using Apple's
 dynamic-resolution feature to replace its mode from client viewport reports.
 The size is chosen before the session starts and holds for it: there is no

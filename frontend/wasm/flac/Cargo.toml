@@ -1,8 +1,8 @@
 # The page's decoder for a session's lossless sound, as
 # a WebAssembly module of its own: one FLAC frame in, its samples out.
 #
-# It is the page's alone. The gateway's FLAC is libFLAC, loaded at run time
-# through `desktop-flac`, which a page cannot have, and the gateway decodes no
+# It is the page's alone. The gateway's FLAC is libFLAC, native code linked
+# through `sound-flac`, which a page cannot have, and the gateway decodes no
 # frame it sends on, so no crate is shared with it: the decoder is src/decoder.rs
 # and this is the binding around it.
 #

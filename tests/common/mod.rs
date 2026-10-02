@@ -237,8 +237,8 @@ pub fn init_logging() {
 ///
 /// `chroma=444` is what a browser whose decoder takes VP9 profile 1 states, and
 /// `apple_media=false` one that takes no Mac's stream; the session socket requires
-/// both answers, and no target here passes one, so these tests give the ordinary
-/// desktop ones.
+/// every answer, and no target here passes a stream, so these tests give the
+/// ordinary desktop ones.
 #[allow(dead_code)]
 pub async fn connect_ws(addr: SocketAddr, token: &str, cookie: &str) -> Ws {
     connect_ws_as(addr, token, cookie, "444").await
@@ -253,7 +253,8 @@ pub async fn connect_ws_as(addr: SocketAddr, token: &str, cookie: &str, chroma: 
 
 /// [`connect_ws_as`] stating too whether this browser decodes a High Performance
 /// Mac's stream, which a session started with it passed is served to no other. It
-/// composes an RDP host's graphics pipeline either way.
+/// composes an RDP host's graphics pipeline either way, and decodes no H.264 on
+/// one.
 #[allow(dead_code)]
 pub async fn connect_ws_stating(
     addr: SocketAddr,
@@ -265,7 +266,7 @@ pub async fn connect_ws_stating(
     use tokio_tungstenite::tungstenite::client::IntoClientRequest as _;
 
     let mut request = format!(
-        "ws://{addr}/ws?session={token}&chroma={chroma}&apple_media={apple_media}&rdp_graphics=true"
+        "ws://{addr}/ws?session={token}&chroma={chroma}&apple_media={apple_media}&rdp_graphics=true&rdp_h264=false"
     )
         .into_client_request()
         .unwrap();

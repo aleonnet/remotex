@@ -17,12 +17,14 @@ import {
   formatRate,
   highest,
   isThroughputWindow,
+  LIVE_HISTORY_SECS,
   liveSeries,
   liveTotals,
   localInputValue,
   type RateSeries,
   rateScale,
   recordedSeries,
+  seedLive,
   spanLabel,
   THROUGHPUT_PRESETS,
   THROUGHPUT_SOCKET_LABEL,
@@ -308,7 +310,9 @@ function RateChart({
   );
 }
 
-/// The meter: each direction's rate now over its graph of the range.
+/// The meter: each direction's rate now over its graph of the range. The directions
+/// are named by the browser's end: "sent" is the gateway's word for what it wrote to
+/// the browser, and on a page reads as the page's own sending.
 function Meter({
   rates,
   series,
@@ -326,14 +330,14 @@ function Meter({
     <section className="throughput-meter" aria-label="Rate right now">
       <div className="throughput-tiles">
         <RateTile
-          name="Sent"
+          name="To browser"
           direction="sent"
           now={rates === null ? null : rates.sent}
           series={series.sent}
           rangeLabel={rangeLabel}
         />
         <RateTile
-          name="Received"
+          name="From browser"
           direction="received"
           now={rates === null ? null : rates.received}
           series={series.received}
@@ -341,7 +345,7 @@ function Meter({
         />
       </div>
       <RateChart
-        name="Sent"
+        name="To browser"
         series={series.sent}
         stepSecs={series.stepSecs}
         spanSecs={series.spanSecs}
@@ -352,7 +356,7 @@ function Meter({
         ink={SENT_INK}
       />
       <RateChart
-        name="Received"
+        name="From browser"
         series={series.received}
         stepSecs={series.stepSecs}
         spanSecs={series.spanSecs}
@@ -642,13 +646,37 @@ export default function ThroughputPanel({
   // read out at a time: a tick while one is still out is skipped, so an answer never
   // lands after a later one. A read that fails shows nothing rather than a stale
   // number, and the clock moves on without a sample, which the graph draws as a gap;
-  // the next second tries again.
+  // the next second tries again. The seconds behind the first sample — before the view
+  // opened, or while it was paused — are read once from the recorded rows, after that
+  // sample, so the graph opens on the range rather than on the second it was opened in.
   useEffect(() => {
     if (paused) {
       return;
     }
     let cancelled = false;
     let reading = false;
+    let seeding: "due" | "out" | "done" = "due";
+    const seed = async () => {
+      if (seeding !== "due") {
+        return;
+      }
+      seeding = "out";
+      const result = await fetchThroughput({
+        within: LIVE_HISTORY_SECS,
+        end: null,
+      });
+      if (cancelled) {
+        return;
+      }
+      if (result.kind === "unauthorized") {
+        onUnauthorized();
+      } else if (result.kind === "ok") {
+        seeding = "done";
+        setHistory((kept) => seedLive(kept, result.report));
+      } else {
+        seeding = "due";
+      }
+    };
     const read = async () => {
       if (reading) {
         return;
@@ -666,6 +694,7 @@ export default function ThroughputPanel({
         setNow(result.live.at);
         setLive(result.live);
         setHistory((kept) => appendLive(kept, result.live));
+        void seed();
       } else {
         setNow(clockNow(anchor.current, Date.now()));
         setLive(null);

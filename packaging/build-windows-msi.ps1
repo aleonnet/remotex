@@ -10,14 +10,13 @@
 #   C:\Program Files\remotex\
 #   ├── VERSION
 #   ├── bin\remotex.exe
-#   ├── bin\libFLAC.dll
 #   └── share\doc\remotex\
 #       ├── remotex.example.toml
 #       └── LICENSE
 #
 # Runs on Windows under PowerShell 7 with cargo, the MSVC toolchain and WiX 5 on PATH
 # (`dotnet tool install --global wix --version 5.0.2`; the UI extension the wizard pages
-# come from is fetched below); the three C libraries arrive as
+# come from is fetched below); the C libraries arrive as
 # prebuilt static archives from their `-prebuilt` crates. `cargo build` compiles the frontend
 # from Cargo's OUT_DIR into the exe; release CI points REMOTEX_PREBUILT_FRONTEND at its shared
 # platform-independent bundle. packaging/verify-windows-msi.ps1 then installs the result, runs
@@ -71,20 +70,6 @@ try {
     if (Test-Path $stage) { Remove-Item -Recurse -Force $stage }
     New-Item -ItemType Directory -Force -Path "$stage\bin", "$stage\share\doc\remotex" | Out-Null
     Copy-Item $exe "$stage\bin\remotex.exe"
-    # libFLAC, which encodes a lossless "rdp" target's sound and is loaded at run time
-    # (desktop-flac), beside
-    # the exe, where Windows looks first. FLAC's own release build, checked against the digest
-    # of the file this was written against; it needs nothing but the system's own DLLs.
-    $flacZip = "$stage\flac-1.5.0-win.zip"
-    Invoke-WebRequest 'https://github.com/xiph/flac/releases/download/1.5.0/flac-1.5.0-win.zip' -OutFile $flacZip
-    $flacDigest = (Get-FileHash $flacZip -Algorithm SHA256).Hash
-    # `-ne` compares strings case-insensitively; Get-FileHash prints upper case.
-    if ($flacDigest -ne '53f1500f0d6e7c61379d7fee50d4a9f7f504c650009506d9ba015530d76c0dde') {
-        throw "flac-1.5.0-win.zip: sha256 is $flacDigest"
-    }
-    Expand-Archive -Path $flacZip -DestinationPath "$stage\flac"
-    Copy-Item "$stage\flac\flac-1.5.0-win\Win64\libFLAC.dll" "$stage\bin\libFLAC.dll"
-    Remove-Item -Recurse -Force $flacZip, "$stage\flac"
     Copy-Item 'remotex.example.toml', 'LICENSE' "$stage\share\doc\remotex\"
     # Bare LF and no BOM, like the tarball's VERSION.
     [System.IO.File]::WriteAllText("$stage\VERSION", "$version`n")

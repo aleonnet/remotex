@@ -13,6 +13,7 @@
 
 use anyhow::Result;
 
+use crate::avc::Picture;
 use crate::framebuffer::{Framebuffer, Rect};
 use crate::gfx::{Graphics, Update};
 
@@ -67,6 +68,17 @@ impl Compositor {
             }
         }
         Ok(composed)
+    }
+
+    /// The decoded picture of one H.264 access unit in the run composed next:
+    /// `unit` is its number in that run, as [`crate::avc::scan`] counts them. The
+    /// run's commands take the pictures in their turn, and one left over is dropped
+    /// with the run.
+    ///
+    /// A host sends H.264 only to a session that advertised it, and decoding it is
+    /// whoever composes the pipeline's to do — see [`crate::avc`].
+    pub fn supply(&mut self, unit: u32, picture: Picture) {
+        self.graphics.supply(unit, picture);
     }
 
     /// The picture as composed so far.

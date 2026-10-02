@@ -40,7 +40,12 @@ first `GRAPHICS` record, that every record is whole commands by their own
 headers' lengths, that the page acknowledges each batch once its paint worker has
 composed it, and that a page that reloads is given a pipeline from its first
 command rather than the one that was running. A compositor that refused a command
-says so in the DOM, which is what stands in for the picture here.
+says so in the DOM, which is what stands in for the picture here. Against a target
+with the EXPERIMENTAL `egfx_h264` key, and a host playing a video, it also asserts
+that the page said it decodes H.264, that the session says it carries it, and that
+a batch whose commands draw with H.264 is acknowledged: the acknowledgment follows
+the decode of every access unit in the batch, and a decoder that gave no picture
+says so in the DOM instead.
 
 `software-hevc.spec.ts` is the EXPERIMENTAL software HEVC decoder, in a High
 Performance session started with the Mac's stream passed and the page loaded with

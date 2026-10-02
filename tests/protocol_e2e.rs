@@ -1178,10 +1178,6 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
 }
 
 fn target(protocol: Protocol, port: u16) -> TargetConfig {
-    target_with_clipboard(protocol, port, false)
-}
-
-fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> TargetConfig {
     TargetConfig {
         name: "test-target".to_owned(),
         protocol,
@@ -1201,7 +1197,7 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         domain: None,
         size: Some((1280, 800)),
         egfx: None,
-        clipboard,
+        egfx_h264: false,
         camera: false,
         microphone: false,
         video_quality: None,
@@ -1223,7 +1219,6 @@ fn mac_target(port: u16) -> TargetConfig {
         password: MAC_PASSWORD.to_owned(),
         // No size: the virtual display opens at the screen the connect names.
         size: None,
-        clipboard: true,
         ..target(Protocol::Vnc, port)
     }
 }
@@ -1780,6 +1775,7 @@ struct ClipboardMessage {
     text: String,
     changed_at_ms: Option<u64>,
     requested: bool,
+    unconfirmed: bool,
 }
 
 /// Read from the socket until a timestamped `clipboard` control message
@@ -1796,6 +1792,7 @@ async fn expect_clipboard(ws: &mut Ws) -> ClipboardMessage {
                             text: parsed["text"].as_str().unwrap().to_owned(),
                             changed_at_ms: parsed["changedAtMs"].as_u64(),
                             requested: parsed["requested"].as_bool().unwrap(),
+                            unconfirmed: parsed["unconfirmed"].as_bool().unwrap(),
                         };
                     }
                 }
@@ -1813,13 +1810,13 @@ async fn expect_clipboard(ws: &mut Ws) -> ClipboardMessage {
 // reaches the browser when it asks, and what the browser sends becomes a
 // ClientCutText on the wire.
 #[tokio::test]
-async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
+async fn vnc_clipboard_round_trips() {
     // Latin-1 above ASCII on the way in (0xE9 is é, one byte on the wire), and
     // a character that has no latin-1 form on the way out — the two encoding
     // edges of RFB cut text.
     let (vnc_port, mut cut_texts) =
         spawn_fake_vnc_with_clipboard(Some(b"copied on caf\xE9")).await;
-    let addr = spawn_app(target_with_clipboard(Protocol::Vnc, vnc_port, true)).await;
+    let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
     let cookie = common::login(addr).await;
 
     let token = common::claim_session(addr, &cookie).await;
@@ -1850,6 +1847,7 @@ async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
         fetched.changed_at_ms, pushed.changed_at_ms,
         "Fetch must preserve the clipboard activity timestamp"
     );
+    assert!(!fetched.unconfirmed, "a server that sent cut text has a clipboard");
     assert!(fetched.requested, "Fetch replies must be marked requested");
 
     // Browser → remote. Latin-1 survives; anything beyond it becomes '?'.
@@ -1898,7 +1896,7 @@ async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
 #[tokio::test]
 async fn a_fetch_before_the_remote_has_copied_anything_is_still_answered() {
     let (vnc_port, _cut_texts) = spawn_fake_vnc_with_clipboard(None).await;
-    let addr = spawn_app(target_with_clipboard(Protocol::Vnc, vnc_port, true)).await;
+    let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
     let cookie = common::login(addr).await;
 
     let token = common::claim_session(addr, &cookie).await;
@@ -1916,54 +1914,10 @@ async fn a_fetch_before_the_remote_has_copied_anything_is_still_answered() {
             text: String::new(),
             changed_at_ms: None,
             requested: true,
+            // The fake announced no Extended Clipboard and has sent no cut text,
+            // which is all a base RFB server can show of having no clipboard.
+            unconfirmed: true,
         }
-    );
-}
-
-// The opt-out path: the flag off means the engine neither answers a fetch nor
-// writes to the remote, whatever the browser sends.
-#[tokio::test]
-async fn vnc_clipboard_is_inert_when_the_target_did_not_opt_in() {
-    let (vnc_port, mut cut_texts) = spawn_fake_vnc_with_clipboard(Some(b"secret")).await;
-    let addr = spawn_app(target_with_clipboard(Protocol::Vnc, vnc_port, false)).await;
-    let cookie = common::login(addr).await;
-
-    let token = common::claim_session(addr, &cookie).await;
-    let mut ws = connect_ws(addr, &token, &cookie).await;
-    common::connect_target(&mut ws, "test-target").await;
-    expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    expect_frame(&mut ws).await;
-
-    ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
-    ws.send(Message::text(r#"{"type":"clipboard","text":"leaked"}"#))
-        .await
-        .unwrap();
-
-    // Nothing may come back, and nothing may reach the server. A refresh acts
-    // as the fence: its frame can only arrive after both clipboard messages have
-    // been handled, so silence up to that point is silence for good.
-    ws.send(Message::text(r#"{"type":"refresh"}"#)).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
-            match msg.expect("websocket receive") {
-                Message::Text(text) => {
-                    assert!(
-                        !text.contains(r#""type":"clipboard""#),
-                        "clipboard answered for a target that did not opt in: {text}"
-                    );
-                }
-                Message::Binary(_) => return, // the refresh's frame: the fence
-                Message::Close(frame) => panic!("closed unexpectedly: {frame:?}"),
-                _ => {}
-            }
-        }
-        panic!("websocket ended while waiting for the refresh frame");
-    })
-    .await
-    .expect("timed out waiting for the refresh frame");
-    assert!(
-        cut_texts.try_recv().is_err(),
-        "a target that did not opt in must not write the remote's clipboard"
     );
 }
 

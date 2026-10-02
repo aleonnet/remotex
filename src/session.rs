@@ -419,7 +419,6 @@ impl Selected {
             protocol: target.protocol.name(),
             subtype: target.subtype.map(Subtype::name),
             resize: choices.resize(),
-            clipboard: target.clipboard,
             audio: target.sound(*choices),
             passthrough: plan.passthrough().map(Passthrough::name),
             camera: target.camera,
@@ -1740,7 +1739,6 @@ mod tests {
     struct Meta {
         protocol: Protocol,
         resize: bool,
-        clipboard: bool,
         audio: bool,
         camera: bool,
         microphone: bool,
@@ -1751,7 +1749,6 @@ mod tests {
             Self {
                 protocol,
                 resize: false,
-                clipboard: false,
                 audio: false,
                 camera: false,
                 microphone: false,
@@ -1776,11 +1773,6 @@ mod tests {
 
         const fn resize(mut self) -> Self {
             self.resize = true;
-            self
-        }
-
-        const fn clipboard(mut self) -> Self {
-            self.clipboard = true;
             self
         }
 
@@ -1810,7 +1802,7 @@ mod tests {
             domain: None,
             size: Some((1, 1)),
             egfx: None,
-            clipboard: meta.clipboard,
+            egfx_h264: false,
             camera: meta.camera,
             microphone: meta.microphone,
             video_quality: None,
@@ -1862,7 +1854,6 @@ mod tests {
                 subtype: Some(Subtype::Wlshare),
                 ..fake_target_with("vnc-resize", Meta::of(Protocol::Vnc))
             },
-            fake_target_with("vnc-clip", Meta::of(Protocol::Vnc).clipboard()),
             fake_target_with("rdp-audio", Meta::of(Protocol::Rdp)),
             fake_target_with("rdp-camera", Meta::of(Protocol::Rdp).camera()),
             fake_target_with("rdp-mic", Meta::of(Protocol::Rdp).microphone()),
@@ -1922,7 +1913,6 @@ mod tests {
                 // the wlshare target a window can drive.
                 subtype: _,
                 resize: got_resize,
-                clipboard: got_clipboard,
                 audio: got_audio,
                 passthrough: None,
                 camera: got_camera,
@@ -1932,7 +1922,6 @@ mod tests {
                 assert_eq!(got, name);
                 assert_eq!(got_protocol, meta.protocol.name(), "protocol for {name}");
                 assert_eq!(got_resize, meta.resize, "resize metadata for {name}");
-                assert_eq!(got_clipboard, meta.clipboard, "clipboard metadata for {name}");
                 assert_eq!(got_audio, meta.audio, "audio metadata for {name}");
                 assert_eq!(got_camera, meta.camera, "camera metadata for {name}");
                 assert_eq!(got_microphone, meta.microphone, "microphone metadata for {name}");
@@ -2101,15 +2090,6 @@ mod tests {
         let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
         expect_connected_meta(&mut att.events, "rdp-resize", rdp_resize).await;
 
-        // The clipboard flag travels the same way, and independently of resize:
-        // the vnc-clip fake target has clipboard on and resize off.
-        let (mgr, _hooks) = manager_with_fake_engine();
-        let token = mgr.claim(false, None).unwrap();
-        let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
-        expect_picker(&mut att.events).await;
-        mgr.connect(att.id, "vnc-clip", None, Choices::default()).await.unwrap();
-        expect_connected_meta(&mut att.events, "vnc-clip", Meta::of(Protocol::Vnc).clipboard()).await;
-
         // And so does audio, which is what tells the browser it may offer the toggle
         // that opens the audio socket.
         let (mgr, _hooks) = manager_with_fake_engine();
@@ -2221,7 +2201,7 @@ mod tests {
 
             assert_eq!(
                 hook_rx.try_recv().expect("connect spawns the engine"),
-                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_media: false, rdp_graphics: false },
+                RenderPlan { quality: 60, adaptive: true, chroma: want, apple_media: false, rdp_graphics: false, rdp_h264: false },
                 "the engine must be built for what the browser said it takes"
             );
             match recv(&mut att.events).await {
@@ -2286,7 +2266,7 @@ mod tests {
         let mut changed = mgr.attach(&token, Some(screen), Chroma::Subsampled.into()).await.unwrap();
         assert_eq!(
             hook_rx.try_recv().expect("a changed answer rebuilds the stream"),
-            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false },
+            RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false },
             "the rebuilt stream must follow the browser that came back"
         );
         assert_eq!(display_rx.try_iter().last(), Some(Some(screen)));
@@ -2299,8 +2279,8 @@ mod tests {
     }
 
     /// A browser that takes the Mac's stream, and one that does not.
-    const TAKES: Decoders = Decoders { chroma: Chroma::Full, apple_media: true, rdp_graphics: true };
-    const DECLINES: Decoders = Decoders { chroma: Chroma::Full, apple_media: false, rdp_graphics: true };
+    const TAKES: Decoders = Decoders { chroma: Chroma::Full, apple_media: true, rdp_graphics: true, rdp_h264: false };
+    const DECLINES: Decoders = Decoders { chroma: Chroma::Full, apple_media: false, rdp_graphics: true, rdp_h264: false };
 
     /// Assert the next event is the connected status of a Mac's session that passes
     /// its stream, sound included.
@@ -2472,7 +2452,7 @@ mod tests {
         let mut att = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
         expect_picker(&mut att.events).await;
         mgr.connect(att.id, "win", None, PASSED).await.unwrap();
-        assert!(matches!(hook_rx.try_recv(), Ok(RenderPlan { rdp_graphics: true, .. })));
+        assert!(matches!(hook_rx.try_recv(), Ok(RenderPlan { rdp_graphics: true, rdp_h264: false, .. })));
         let expect_passed_win = async |events: &mut mpsc::Receiver<AttachEvent>| match recv(events).await {
             AttachEvent::Msg(ServerMsg::Connected { name, passthrough, .. }) => {
                 assert_eq!(name, "win");
@@ -2484,14 +2464,14 @@ mod tests {
 
         let mut back = mgr.attach(&token, None, Chroma::Full.into()).await.unwrap();
         assert!(
-            matches!(hook_rx.try_recv(), Ok(RenderPlan { rdp_graphics: true, .. })),
+            matches!(hook_rx.try_recv(), Ok(RenderPlan { rdp_graphics: true, rdp_h264: false, .. })),
             "the same browser coming back is still given a pipeline from its start"
         );
         expect_passed_win(&mut back.events).await;
 
         // A page that cannot compose it is not given one, nor the desktop encoded
         // here instead: the session ends for it to choose again.
-        let cannot = Decoders { chroma: Chroma::Full, apple_media: true, rdp_graphics: false };
+        let cannot = Decoders { chroma: Chroma::Full, apple_media: true, rdp_graphics: false, rdp_h264: false };
         let mut ended = mgr.attach(&token, None, cannot).await.unwrap();
         assert!(hook_rx.try_recv().is_err());
         expect_beyond_then_picker(&mut ended.events, "graphics pipeline").await;
@@ -2554,7 +2534,7 @@ mod tests {
         for (target, meta) in [
             ("rdp-resize", Meta::of(Protocol::Rdp).resize()),
             ("vnc-resize", Meta::of(Protocol::Vnc).resize()),
-            ("vnc-clip", Meta::of(Protocol::Vnc).clipboard()),
+            ("fake", PLAIN),
         ] {
             let protocol = meta.protocol.name();
             let (mgr, hooks) = manager_with_fake_engine();

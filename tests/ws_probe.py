@@ -299,12 +299,12 @@ async def main() -> int:
     # The session socket requires the browser's answers about itself; the probe stands
     # in for a decoder that takes VP9 profile 1, as a desktop browser does, takes the
     # Mac's stream only with --apple-media and composes an RDP pipeline only with
-    # --rdp-graphics.
+    # --rdp-graphics. It decodes no H.264, so a pipeline passed to it carries none.
     apple_media = "true" if args.apple_media else "false"
     rdp_graphics = "true" if args.rdp_graphics else "false"
     url = (
         f"ws://127.0.0.1:{args.port}/ws?session={token}&chroma=444"
-        f"&apple_media={apple_media}&rdp_graphics={rdp_graphics}"
+        f"&apple_media={apple_media}&rdp_graphics={rdp_graphics}&rdp_h264=false"
     )
     choices = {
         "size": "window" if args.resize else "target",
@@ -630,15 +630,15 @@ async def main() -> int:
                         how = "fetched" if data["requested"] else "pushed"
                         oversized = data["oversizedBytes"]
                         size = f"  oversizedBytes={oversized}" if oversized else ""
+                        unconfirmed = "  unconfirmed" if data["unconfirmed"] else ""
                         print(
                             f"  clipboard ({how})  changedAtMs={data['changedAtMs']}"
-                            f"{size}  text={data['text']!r}"
+                            f"{size}{unconfirmed}  text={data['text']!r}"
                         )
                     elif kind == "connected":
                         print(
                             f"  connected  {data['name']}  resize={data['resize']}"
                             f"  audio={data['audio']}  passthrough={data['passthrough']}"
-                            f"  clipboard={data['clipboard']}"
                         )
                         if args.audio and audio_task is None:
                             audio_task = asyncio.create_task(listen_audio())

@@ -3,7 +3,7 @@
 //!
 //! Four endpoints, all presenting the claim token from `POST /api/session`.
 //!
-//! `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false`
+//! `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`
 //! is the session: it attaches to the single slot
 //! ([`crate::session::SessionManager`]). The URL also names what only this browser
 //! knows about itself — its screen (`w`/`h`/`scale`/`fit`, the same values `connect`
@@ -765,6 +765,11 @@ pub struct SessionParams {
     /// and a WebGL 2 canvas for its picture. Asked and required as
     /// [`Self::apple_media`] is.
     rdp_graphics: bool,
+    /// Whether this browser decodes the H.264 an RDP host may draw with on a passed
+    /// pipeline, into the compositor's memory. Asked and required as the others
+    /// are; it turns no session away, and decides only whether the host is told it
+    /// may send any.
+    rdp_h264: bool,
 }
 
 pub async fn handler(
@@ -788,6 +793,7 @@ pub async fn handler(
                 chroma: params.chroma,
                 apple_media: params.apple_media,
                 rdp_graphics: params.rdp_graphics,
+                rdp_h264: params.rdp_h264,
             },
             HEARTBEAT_TIMINGS,
             Arc::clone(&state.throughput.meters),
@@ -1507,35 +1513,41 @@ mod tests {
             Query::<SessionParams>::try_from_uri(&format!("/ws?{query}").parse::<Uri>().unwrap())
                 .map(|Query(p)| p)
         };
-        let full = parse("session=t&chroma=444&apple_media=true&rdp_graphics=false")
+        let full = parse("session=t&chroma=444&apple_media=true&rdp_graphics=false&rdp_h264=false")
             .expect("a browser that takes profile 1");
         assert_eq!(full.chroma, Chroma::Full);
         assert!(full.apple_media);
         assert!(!full.rdp_graphics);
+        assert!(!full.rdp_h264);
         assert_eq!(full.session.as_deref(), Some("t"));
         let subsampled =
-            parse("session=t&w=430&h=932&scale=300&fit=true&chroma=420&apple_media=false&rdp_graphics=true")
+            parse("session=t&w=430&h=932&scale=300&fit=true&chroma=420&apple_media=false&rdp_graphics=true&rdp_h264=true")
                 .expect("a browser that does not, naming its screen too");
         assert_eq!(subsampled.chroma, Chroma::Subsampled);
         assert!(!subsampled.apple_media);
         assert!(subsampled.rdp_graphics);
+        assert!(subsampled.rdp_h264);
         assert_eq!(
             (subsampled.w, subsampled.h, subsampled.scale, subsampled.fit),
             (Some(430), Some(932), Some(300), Some(true))
         );
         assert!(parse("session=t").is_err(), "a socket that does not say is not a client");
         assert!(
-            parse("session=t&chroma=444&rdp_graphics=true").is_err(),
+            parse("session=t&chroma=444&rdp_graphics=true&rdp_h264=true").is_err(),
             "nor one that does not say whether it takes the Mac's stream"
         );
         assert!(
-            parse("session=t&chroma=444&apple_media=true").is_err(),
+            parse("session=t&chroma=444&apple_media=true&rdp_h264=true").is_err(),
             "nor one that does not say whether it composes a pipeline"
+        );
+        assert!(
+            parse("session=t&chroma=444&apple_media=true&rdp_graphics=true").is_err(),
+            "nor one that does not say whether it decodes a pipeline's H.264"
         );
         // `auto` is a *target's* answer, not a browser's: a decoder takes one of two
         // profiles, and a client that named a question would leave the gateway
         // resolving one question with another.
-        let rest = "apple_media=false&rdp_graphics=false";
+        let rest = "apple_media=false&rdp_graphics=false&rdp_h264=false";
         assert!(parse(&format!("session=t&chroma=auto&{rest}")).is_err(), "the browser answers, it does not ask");
         assert!(parse(&format!("session=t&chroma=422&{rest}")).is_err(), "there are two profiles");
 
@@ -2028,7 +2040,7 @@ mod tests {
             domain: None,
             size: Some((1, 1)),
             egfx: None,
-            clipboard: false,
+            egfx_h264: false,
             camera: false,
             microphone: false,
             video_quality: None,

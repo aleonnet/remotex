@@ -666,6 +666,10 @@ struct DesktopState {
     /// by the full update a resize's rect earns, or by the one requested in a
     /// resize's place — see [`read_output_scale`].
     repaint_owed: bool,
+    /// The interval the Mac's unasked updates are armed with, in microseconds —
+    /// see [`vnc_apple::PushPace`], which moves it, and the layout that re-arms
+    /// with it.
+    push_interval_us: u32,
     /// A High Performance session's window-driven resizes — see [`HpResize`].
     hp: HpResize,
     /// A High Performance layout has arrived: the virtual display the session
@@ -1720,7 +1724,6 @@ async fn session(
         Flags {
             macos,
             resize: choices.resize(),
-            clipboard: config.clipboard,
             kept: (!apple && !choices.resize())
                 .then(|| config.opening_size(choices.size, display)),
             apple,
@@ -1763,7 +1766,6 @@ async fn session(
 struct Flags {
     macos: bool,
     resize: bool,
-    clipboard: bool,
     /// The size the session keeps, in points, on a plain or wlshare target that
     /// does not follow a window: the configured size or the default
     /// ([`TargetConfig::opening_size`]). The desktop is asked for it once, as
@@ -1813,14 +1815,6 @@ struct Flags {
     media: Option<(MediaStream, Pictures)>,
     /// See [`Connected::passthrough`].
     passthrough: Option<Arc<Listing>>,
-}
-
-/// What the read loop needs to know about the dialect it is reading. Two bools
-/// with names on them, because at the call site they are indistinguishable.
-#[derive(Clone, Copy)]
-struct ReadFlags {
-    clipboard: bool,
-    poll: bool,
 }
 
 /// An established, handshaken RFB link, plus what the handshake revealed about
@@ -2137,13 +2131,13 @@ async fn rfb38_preface(
     uplink.send(&set_pixel_format()).await?;
     let passthrough = if config.wlshare() {
         let audio = config.sound(choices).then(|| config.lossless(choices));
-        let encodings = wlshare_encoding_list(config.clipboard, audio, config.camera, config.microphone);
+        let encodings = wlshare_encoding_list(audio, config.camera, config.microphone);
         let lists = Listing::new(encodings, plan);
         let listed = if lists_wlshare_vp9((server.width, server.height)) { &lists.vp9 } else { &lists.plain };
         uplink.send(&set_encodings(listed)).await?;
         Some(Arc::new(lists))
     } else {
-        uplink.send(&set_encodings(&rfb38_encoding_list(config.clipboard))).await?;
+        uplink.send(&set_encodings(&rfb38_encoding_list())).await?;
         None
     };
 
@@ -2204,7 +2198,7 @@ fn with_wlshare_vp9(encodings: &[i32], plan: RenderPlan) -> Vec<i32> {
     listed
 }
 
-fn rfb38_encoding_list(clipboard: bool) -> Vec<i32> {
+fn rfb38_encoding_list() -> Vec<i32> {
     // A preference order, because a server reads it as one: it encodes with the
     // first entry it supports and keeps that choice for the session.
     //
@@ -2238,7 +2232,7 @@ fn rfb38_encoding_list(clipboard: bool) -> Vec<i32> {
     // for: the server measures the link by fences it asks this end to echo, and
     // cannot do that unless the pseudo-encoding is in this list. A server with
     // neither is unaffected: it says nothing, and the polling loop below never stops.
-    let mut encodings = vec![
+    vec![
         ENCODING_COPY_RECT,
         ENCODING_ZRLE,
         ENCODING_ZLIB,
@@ -2251,22 +2245,19 @@ fn rfb38_encoding_list(clipboard: bool) -> Vec<i32> {
         ENCODING_FENCE,
         ENCODING_EXTENDED_DESKTOP_SIZE,
         ENCODING_DESKTOP_SIZE,
-    ];
-    if clipboard {
         // Extended Clipboard is the only way generic RFB carries anything outside
         // latin-1. A server that ignores it never sends caps and the fallback stays
         // in use.
-        encodings.push(vnc_clipboard::ENCODING);
-    }
-    encodings
+        vnc_clipboard::ENCODING,
+    ]
 }
 
 /// What a `wlshare` target lists: the generic list, and after it wlshare's own
 /// extensions. A plain target lists none of them, whatever server answers it.
 /// `audio` is `Some` in a session started with sound, and says whether that
 /// sound is lossless.
-fn wlshare_encoding_list(clipboard: bool, audio: Option<bool>, camera: bool, microphone: bool) -> Vec<i32> {
-    let mut encodings = rfb38_encoding_list(clipboard);
+fn wlshare_encoding_list(audio: Option<bool>, camera: bool, microphone: bool) -> Vec<i32> {
+    let mut encodings = rfb38_encoding_list();
     if let Some(lossless) = audio {
         // wlshare's audio extension, on a target that asked for sound. wlshare
         // announces it with a rectangle of this encoding, and a server that does
@@ -2392,9 +2383,7 @@ async fn apple_preface(
     // data.
     sock.write_all(&vnc_apple::viewer_info()).await?;
     sock.write_all(&vnc_apple::set_mode_control()).await?;
-    if config.clipboard {
-        sock.write_all(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
-    }
+    sock.write_all(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     sock.write_all(&vnc_apple::set_encryption_start()).await?;
     sock.write_all(&vnc_apple::enable_inbound_record_decryption()).await?;
 
@@ -2421,7 +2410,7 @@ async fn apple_preface(
         // login or lock, which is why the full region is re-sent on every layout
         // too, and which is when Standard on the physical displays first arms it.
         uplink
-            .send(&vnc_apple::auto_framebuffer_update(server.size()))
+            .send(&vnc_apple::auto_framebuffer_update(push_interval_us(media_stream), server.size()))
             .await?;
     }
 
@@ -2519,7 +2508,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let Flags {
         macos,
         resize,
-        clipboard: clipboard_enabled,
         kept,
         apple,
         virtual_display,
@@ -2569,6 +2557,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
         following: false,
         declared: None,
         repaint_owed: false,
+        push_interval_us: push_interval_us(media_only),
         hp,
         laid_out: false,
         media_live: false,
@@ -2644,10 +2633,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
     let mut read_task = tokio::spawn(read_loop(
         downlink,
         shared,
-        ReadFlags {
-            clipboard: clipboard_enabled,
-            poll,
-        },
+        poll,
         apple.then(|| Apple::new(virtual_display, pictures)),
         sink.clone(),
     ));
@@ -2956,39 +2942,42 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                     }
                     send(&uplink, &update_request(false, size)).await
                 } else if matches!(input, ClientMsg::ClipboardRequest) {
-                    if clipboard_enabled && apple {
+                    if apple {
                         // Unlike standard RFB, Apple's pasteboard can be read on
                         // demand. Answer from the cache first so a silent Mac
                         // cannot strand the browser's read, then fetch so a later
                         // response refreshes that cache and the open panel.
                         request_apple_clipboard(&clipboard, &uplink, &sink).await
-                    } else if clipboard_enabled {
+                    } else {
                         // Standard RFB can only answer from the buffer the read
                         // loop fills. Empty means nothing has been copied there
-                        // yet during this session.
-                        let snapshot = clipboard
-                            .lock()
-                            .unwrap()
-                            .remote
-                            .clone()
-                            .unwrap_or_else(ClipboardSnapshot::unobserved);
+                        // yet during this session — or that the server has no
+                        // clipboard, which base RFB never says. A server that
+                        // announced no Extended Clipboard and has sent no cut
+                        // text is reported as unconfirmed, for the panel to show.
+                        let (snapshot, unconfirmed) = {
+                            let state = clipboard.lock().unwrap();
+                            (
+                                state.remote.clone().unwrap_or_else(ClipboardSnapshot::unobserved),
+                                state.server.is_none() && state.remote.is_none(),
+                            )
+                        };
                         if let Err(e) = sink
                             .msg(ServerMsg::Clipboard {
                                 text: snapshot.text,
                                 changed_at_ms: snapshot.changed_at_ms,
                                 requested: true,
                                 oversized_bytes: snapshot.oversized_bytes,
+                                unconfirmed,
                             })
                             .await
                         {
                             break Err(e);
                         }
                         Ok(())
-                    } else {
-                        Ok(())
                     }
                 } else if let ClientMsg::Clipboard { text } = &input {
-                    if clipboard_enabled && !clipboard_fits(text) {
+                    if !clipboard_fits(text) {
                         // Refused, as the RDP engine does: the remote
                         // keeps what it had rather than being handed a partial
                         // copy that looks whole. Also keeps an oversized string
@@ -2999,7 +2988,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                             text.len()
                         );
                         Ok(())
-                    } else if clipboard_enabled && apple {
+                    } else if apple {
                         let session_id = {
                             let mut state = clipboard.lock().unwrap();
                             state.local = Some(text.to_owned());
@@ -3009,7 +2998,7 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                             Ok(msg) => send(&uplink, &msg).await,
                             Err(e) => Err(e),
                         }
-                    } else if clipboard_enabled {
+                    } else {
                         // Extended when the server offered it, which is the
                         // only path that carries anything outside latin-1.
                         // Deferred by design: advertise now, hand the text over
@@ -3032,8 +3021,6 @@ async fn active_loop<R: AsyncRead + Unpin + Send + 'static>(
                                 None => Ok(()),
                             }
                         }
-                    } else {
-                        Ok(())
                     }
                 } else if let ClientMsg::SelectDisplay { id } = input {
                     // Handled here rather than in `translate_input`, which is a
@@ -3258,10 +3245,13 @@ async fn hp_resize_step(
             // Polling holds to one pixel only while a request is out, but the
             // armed region stays narrowed until a layout re-arms it.
             Some(HpStep::GiveUp) => {
-                let size = desktop.lock().unwrap().size;
+                let (size, interval) = {
+                    let d = desktop.lock().unwrap();
+                    (d.size, d.push_interval_us)
+                };
                 send_all(
                     uplink,
-                    &[vnc_apple::auto_framebuffer_update(size), update_request(false, size).to_vec()],
+                    &[vnc_apple::auto_framebuffer_update(interval, size), update_request(false, size).to_vec()],
                 )
                 .await?;
             }
@@ -3331,7 +3321,11 @@ async fn show_picture_held(
         info!("vnc: the picture now comes from the Mac's HEVC media stream");
         // The armed region too, or the Mac would go on pushing ZRLE for every
         // change on screen — and it reads nothing from this side while it writes.
-        send(&shared.uplink, &vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST)).await?;
+        send(
+            &shared.uplink,
+            &vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_MEDIA_US, HP_HOLD_REQUEST),
+        )
+        .await?;
     }
     uncover(shared, sink);
     if shown == picture.size {
@@ -3437,7 +3431,11 @@ async fn pass_unit(shared: &Shared, unit: PassedUnit, sink: &VideoSink, media: &
     if first {
         info!("vnc: the picture is now the Mac's HEVC media stream, passed to the browser");
         // As in `show_picture`: the Mac would otherwise go on pushing ZRLE.
-        send(&shared.uplink, &vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST)).await?;
+        send(
+            &shared.uplink,
+            &vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_MEDIA_US, HP_HOLD_REQUEST),
+        )
+        .await?;
     }
     let (w, h) = unit.size;
     let passed = crate::stream::Passed { decode: unit.decode, keyframe: unit.keyframe };
@@ -3577,11 +3575,10 @@ struct Shared {
 async fn read_loop<R: AsyncRead + Unpin>(
     mut reader: R,
     shared: Shared,
-    flags: ReadFlags,
+    poll: bool,
     mut apple: Option<Apple>,
     sink: VideoSink,
 ) -> anyhow::Result<()> {
-    let ReadFlags { clipboard: clipboard_enabled, poll } = flags;
     let Shared {
         uplink, desktop, clipboard, display, hp_wake, audio, audio_rate, camera, microphone, media, passthrough, ..
     } = &shared;
@@ -3624,6 +3621,11 @@ async fn read_loop<R: AsyncRead + Unpin>(
     // that keeps talking. The flag is BlockAfter, which stops the reading until that
     // fence is echoed.
     let mut held_fences: VecDeque<(tokio::time::Instant, bool, Vec<u8>)> = VecDeque::new();
+    let mut cycle = UpdateCycle::new();
+    // A Standard session's pushes follow what its updates cost to take. High
+    // Performance's picture is the media stream, and its pixel region is held to
+    // one pixel, so there is no cost here to follow.
+    let mut push_pace = (apple.is_some() && media.is_none()).then(vnc_apple::PushPace::default);
     loop {
         // Raced against the next message rather than awaited on its own, so a paced
         // video stream still hands over pixels the mirror is holding when the remote
@@ -3786,6 +3788,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
         match msg_type {
             // FramebufferUpdate
             0 => {
+                cycle.arrived();
                 reader.read_u8().await?; // padding
                 desktop.lock().unwrap().first_update();
                 // `0xffff` here means "as many as it takes, ended by a LastRect" —
@@ -3805,7 +3808,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         &shared,
                         &mut apple,
                         &mut decoders,
-                        clipboard_enabled,
                         &sink,
                     )
                     .await?;
@@ -3813,6 +3815,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     full_repaint_owed |= effect.full_repaint_owed;
                     audio_announced |= effect.audio_announced;
                     painted |= effect.pixels.is_some();
+                    cycle.rect(effect.pixels);
                     if let (Some(repaint), Some(rect)) = (&mut full_repaint, effect.pixels) {
                         repaint.accept(rect);
                     }
@@ -3858,7 +3861,25 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // protocol offers, and where a video stream is told to encode what it
                 // has. After the loop rather than inside it, so a `LastRect` breaking
                 // out still reaches it.
+                cycle.read();
                 sink.frame().await?;
+                cycle.framed();
+                // Not in an update that carried a layout: the layout armed the
+                // region it left, and the pixels it earns are a whole repaint.
+                if let Some(pace) = &mut push_pace
+                    && painted
+                    && !resized
+                    && !full_repaint_owed
+                    && let Some(interval) = pace.observe(cycle.cost(), std::time::Instant::now())
+                {
+                    let armed = {
+                        let mut d = desktop.lock().unwrap();
+                        d.push_interval_us = interval;
+                        d.poll_size()
+                    };
+                    debug!("vnc: arming auto framebuffer updates every {interval} µs");
+                    send(uplink, &vnc_apple::auto_framebuffer_update(interval, armed)).await?;
+                }
                 // wlshare's VP9 is a picture of the whole desktop, which past the
                 // ceiling is not video: off the list there, so wlshare does not code
                 // a stream nothing sends, and back on the list within it,
@@ -3895,7 +3916,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // of the display the change would replace. The answer ends an update
                 // too, and the change goes out at that one.
                 let hp_holding = if apple.as_ref().is_some_and(|a| a.virtual_display) {
-                    let (request, drained, holding) = {
+                    let (request, drained, holding, interval) = {
                         let mut d = desktop.lock().unwrap();
                         let draining = matches!(d.hp.phase, HpPhase::Draining(_));
                         let offer_out = media.as_ref().is_some_and(|m| m.lock().unwrap().pending());
@@ -3908,10 +3929,10 @@ async fn read_loop<R: AsyncRead + Unpin>(
                             }
                         }
                         let drained = draining && !matches!(d.hp.phase, HpPhase::Draining(_));
-                        (request, drained, d.hp.holds_pixels() || d.media_live)
+                        (request, drained, d.hp.holds_pixels() || d.media_live, d.push_interval_us)
                     };
                     if let Some(msg) = request {
-                        send_all(uplink, &[vnc_apple::auto_framebuffer_update(HP_HOLD_REQUEST), msg])
+                        send_all(uplink, &[vnc_apple::auto_framebuffer_update(interval, HP_HOLD_REQUEST), msg])
                             .await?;
                     }
                     if drained {
@@ -3983,6 +4004,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         }
                     }
                 }
+                cycle.finished();
             }
             // SetColourMapEntries — can't happen for the true-colour format we
             // set, but consume it correctly rather than desyncing the stream.
@@ -3998,7 +4020,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
             // browser as it arrives *and* stashed, because the two serve
             // different readers: the push drives automatic sync, the stash
             // answers a Fetch from a browser that attached later and so never
-            // saw the push. Drained and dropped when the target didn't opt in.
+            // saw the push.
             3 => {
                 let mut padding = [0u8; 3];
                 reader.read_exact(&mut padding).await?;
@@ -4007,10 +4029,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 // than latin-1 text.
                 let signed = reader.read_i32().await?;
                 let len = u64::from(signed.unsigned_abs());
-                if !clipboard_enabled {
-                    discard(&mut reader, len).await?;
-                    continue;
-                }
                 // Discard an oversized announcement and report its size instead
                 // of the first 512 KiB, which would look like the whole thing.
                 // The body is consumed either way: the stream position must stay
@@ -4032,6 +4050,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                             changed_at_ms: snapshot.changed_at_ms,
                             requested: false,
                             oversized_bytes: snapshot.oversized_bytes,
+                            unconfirmed: false,
                         })
                         .await
                         .is_err()
@@ -4064,6 +4083,7 @@ async fn read_loop<R: AsyncRead + Unpin>(
                         changed_at_ms: snapshot.changed_at_ms,
                         requested: false,
                         oversized_bytes: snapshot.oversized_bytes,
+                        unconfirmed: false,
                     })
                     .await
                     .is_err()
@@ -4290,13 +4310,13 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 }
                 let command = u16::from_be_bytes([body[2], body[3]]);
                 match command {
-                    2 if clipboard_enabled => {
+                    2 => {
                         let session_id = clipboard.lock().unwrap().begin_apple_fetch(true);
                         if let Some(session_id) = session_id {
                             send(uplink, &vnc_apple_clipboard::fetch(session_id)).await?;
                         }
                     }
-                    3 if clipboard_enabled => {
+                    3 => {
                         let local = {
                             let state = clipboard.lock().unwrap();
                             state
@@ -4332,9 +4352,6 @@ async fn read_loop<R: AsyncRead + Unpin>(
                 };
                 let Some(mut receiver) = receiver else {
                     discard(&mut reader, compressed).await?;
-                    if !clipboard_enabled {
-                        continue;
-                    }
                     let requested = finish_apple_clipboard_fetch(
                         clipboard,
                         desktop,
@@ -4367,12 +4384,9 @@ async fn read_loop<R: AsyncRead + Unpin>(
                     let n = left.min(chunk.len() as u64) as usize;
                     reader.read_exact(&mut chunk[..n]).await?;
                     left -= n as u64;
-                    if clipboard_enabled && received.is_ok() {
+                    if received.is_ok() {
                         received = receiver.feed(&chunk[..n]);
                     }
-                }
-                if !clipboard_enabled {
-                    continue;
                 }
                 let requested = finish_apple_clipboard_fetch(
                     clipboard,
@@ -4470,6 +4484,7 @@ async fn emit_clipboard(sink: &VideoSink, snapshot: ClipboardSnapshot, requested
         changed_at_ms: snapshot.changed_at_ms,
         requested,
         oversized_bytes: snapshot.oversized_bytes,
+        unconfirmed: false,
     })
     .await
     .is_err()
@@ -4499,6 +4514,7 @@ async fn request_apple_clipboard(
         changed_at_ms: snapshot.changed_at_ms,
         requested: true,
         oversized_bytes: snapshot.oversized_bytes,
+        unconfirmed: false,
     })
     .await?;
     if let Some(session_id) = fetch {
@@ -4581,6 +4597,7 @@ async fn extended_cut_text(
                     changed_at_ms: snapshot.changed_at_ms,
                     requested: false,
                     oversized_bytes: snapshot.oversized_bytes,
+                    unconfirmed: false,
                 })
                 .await
                 .is_err()
@@ -4607,6 +4624,7 @@ async fn extended_cut_text(
                     changed_at_ms: snapshot.changed_at_ms,
                     requested: false,
                     oversized_bytes: snapshot.oversized_bytes,
+                    unconfirmed: false,
                 })
                 .await
                 .is_err()
@@ -4640,6 +4658,117 @@ async fn extended_cut_text(
         }
     }
     Ok(false)
+}
+
+/// Where the read loop's time goes between one framebuffer update and the next,
+/// logged once a second at `debug`: how long passed between the end of one update
+/// and the start of the next, how long its rectangles took to read and decode, and
+/// how long the video sink held the loop. The first is mostly the server's time to
+/// answer, but it also holds whatever the loop did meanwhile: other server
+/// messages, a paced video flush, a fence echo. On a polled session the next
+/// request leaves only after all three, so the largest of them is what bounds the
+/// update rate.
+struct UpdateCycle {
+    mark: std::time::Instant,
+    since: std::time::Instant,
+    updates: u32,
+    rects: u32,
+    pixels: u64,
+    waited: Duration,
+    waited_most: Duration,
+    read: Duration,
+    read_most: Duration,
+    framed: Duration,
+    framed_most: Duration,
+    /// What the last update cost to take: its read and its video sink.
+    cost: Duration,
+}
+
+impl UpdateCycle {
+    fn new() -> Self {
+        let now = std::time::Instant::now();
+        Self {
+            mark: now,
+            since: now,
+            updates: 0,
+            rects: 0,
+            pixels: 0,
+            waited: Duration::ZERO,
+            waited_most: Duration::ZERO,
+            read: Duration::ZERO,
+            read_most: Duration::ZERO,
+            framed: Duration::ZERO,
+            framed_most: Duration::ZERO,
+            cost: Duration::ZERO,
+        }
+    }
+
+    fn lap(&mut self) -> Duration {
+        let now = std::time::Instant::now();
+        let lap = now - self.mark;
+        self.mark = now;
+        lap
+    }
+
+    /// An update's first byte arrived: the time since the last one ended, the
+    /// server's wait and the loop's other work together.
+    fn arrived(&mut self) {
+        let lap = self.lap();
+        self.waited += lap;
+        self.waited_most = self.waited_most.max(lap);
+    }
+
+    fn rect(&mut self, pixels: Option<Rect>) {
+        self.rects += 1;
+        if let Some(rect) = pixels {
+            self.pixels += u64::from(rect.w()) * u64::from(rect.h());
+        }
+    }
+
+    /// The update's rectangles are all read and decoded.
+    fn read(&mut self) {
+        let lap = self.lap();
+        self.read += lap;
+        self.read_most = self.read_most.max(lap);
+        self.cost = lap;
+    }
+
+    /// The video sink has returned.
+    fn framed(&mut self) {
+        let lap = self.lap();
+        self.framed += lap;
+        self.framed_most = self.framed_most.max(lap);
+        self.cost += lap;
+    }
+
+    fn cost(&self) -> Duration {
+        self.cost
+    }
+
+    /// The update is answered and the next request, if one is owed, is out.
+    fn finished(&mut self) {
+        self.updates += 1;
+        self.mark = std::time::Instant::now();
+        let span = self.mark - self.since;
+        if span < Duration::from_secs(1) {
+            return;
+        }
+        debug!(
+            "vnc: {:.1} updates/s, {} rects, {:.1} Mpx/s; between updates {} ms (longest {}), \
+             reading {} ms (longest {}), video sink {} ms (longest {}), over {} ms",
+            f64::from(self.updates) / span.as_secs_f64(),
+            self.rects,
+            self.pixels as f64 / 1e6 / span.as_secs_f64(),
+            self.waited.as_millis(),
+            self.waited_most.as_millis(),
+            self.read.as_millis(),
+            self.read_most.as_millis(),
+            self.framed.as_millis(),
+            self.framed_most.as_millis(),
+            span.as_millis(),
+        );
+        *self = Self::new();
+    }
 }
 
 /// Coverage of one non-incremental framebuffer request.
@@ -4783,7 +4912,6 @@ async fn read_rect<R: AsyncRead + Unpin>(
     shared: &Shared,
     apple: &mut Option<Apple>,
     decoders: &mut Decoders,
-    clipboard_enabled: bool,
     sink: &VideoSink,
 ) -> anyhow::Result<RectEffect> {
     let Shared { uplink, desktop, cursor, shadow, .. } = shared;
@@ -4848,7 +4976,6 @@ async fn read_rect<R: AsyncRead + Unpin>(
                 reader,
                 shared,
                 virtual_display,
-                clipboard_enabled && virtual_display,
                 sink,
             )
             .await?;
@@ -5553,7 +5680,6 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     reader: &mut R,
     shared: &Shared,
     virtual_display: bool,
-    rearm_pasteboard: bool,
     sink: &VideoSink,
 ) -> anyhow::Result<bool> {
     let Shared { uplink, desktop, shadow, display, hp_wake, .. } = shared;
@@ -5701,16 +5827,19 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
     // A layout that answered nothing leaves a High Performance change out, and
     // the region stays narrowed until the one that answers it — see
     // [`HP_HOLD_REQUEST`].
-    let armed = desktop.lock().unwrap().poll_size();
+    let (armed, interval) = {
+        let d = desktop.lock().unwrap();
+        (d.poll_size(), d.push_interval_us)
+    };
     let mut uplink = uplink.lock().await;
-    if rearm_pasteboard {
+    if virtual_display {
         uplink.send(&vnc_apple_clipboard::auto_pasteboard(true)).await?;
     }
     debug!(
         "vnc: arming auto framebuffer updates for {}x{}",
         armed.0, armed.1
     );
-    uplink.send(&vnc_apple::auto_framebuffer_update(armed)).await?;
+    uplink.send(&vnc_apple::auto_framebuffer_update(interval, armed)).await?;
     Ok(resized)
 }
 
@@ -6130,6 +6259,13 @@ fn set_encodings(encodings: &[i32]) -> Vec<u8> {
         msg.extend_from_slice(&encoding.to_be_bytes());
     }
     msg
+}
+
+/// The interval a session first arms the Mac's unasked updates with: High
+/// Performance's, whose pixels are never shown, or a Standard session's one
+/// video frame, which [`vnc_apple::PushPace`] then moves.
+fn push_interval_us(media_stream: bool) -> u32 {
+    if media_stream { vnc_apple::PUSH_INTERVAL_MEDIA_US } else { vnc_apple::PUSH_INTERVAL_US }
 }
 
 /// FramebufferUpdateRequest for the whole desktop.
@@ -7094,12 +7230,13 @@ mod tests {
             ENCODING_FENCE,
             ENCODING_EXTENDED_DESKTOP_SIZE,
             ENCODING_DESKTOP_SIZE,
+            vnc_clipboard::ENCODING,
         ];
-        assert_eq!(rfb38_encoding_list(false), generic);
+        assert_eq!(rfb38_encoding_list(), generic);
         // A wlshare target's is the same list with wlshare's requests after it.
         let mut wlshare = generic;
         wlshare.extend([ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-        assert_eq!(wlshare_encoding_list(false, None, false, false), wlshare);
+        assert_eq!(wlshare_encoding_list(None, false, false), wlshare);
 
         // Every pixel encoding advertised is one this side can be handed. A rect
         // header alone is enough to prove it: an unrecognised encoding bails with
@@ -7112,7 +7249,7 @@ mod tests {
         // ServerCutText, the density report and the output list as their own
         // messages, and the audio announcement is an empty rectangle with no
         // pixels behind it.
-        let pixel_encodings = wlshare_encoding_list(true, Some(false), true, true)
+        let pixel_encodings = wlshare_encoding_list(Some(false), true, true)
             .into_iter()
             .filter(|encoding| {
                 *encoding >= 0
@@ -7135,7 +7272,7 @@ mod tests {
             let err = read_loop(
                 std::io::Cursor::new(wire),
                 shared,
-                ReadFlags { clipboard: true, poll: false },
+                false,
                 None,
                 sink,
             )
@@ -7392,7 +7529,7 @@ mod tests {
     }
 
     /// The two wlshare requests, checked byte by byte against
-    /// docs/wlshare-density.md and docs/wlshare-outputs.md rather than through
+    /// wlshare's docs/architecture.md rather than through
     /// the encoder's own eyes. Both are asked of a `wlshare` target, after
     /// every encoding that decides pixels, and of no Mac (see
     /// `a_mac_is_asked_for_its_layout_and_zrle_and_no_generic_extension`).
@@ -7400,10 +7537,8 @@ mod tests {
     fn the_wlshare_extensions_are_asked_of_a_wlshare_target() {
         assert_eq!(ENCODING_WLSHARE_DENSITY, i32::from_be_bytes(*b"WLSH"));
         assert_eq!(ENCODING_WLSHARE_OUTPUTS, i32::from_be_bytes(*b"WLSO"));
-        for clipboard in [false, true] {
-            let wlshare = wlshare_encoding_list(clipboard, None, false, false);
-            assert_eq!(&wlshare[wlshare.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-        }
+        let wlshare = wlshare_encoding_list(None, false, false);
+        assert_eq!(&wlshare[wlshare.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
     }
 
     /// A plain target lists nothing of wlshare's, so a wlshare server reached as
@@ -7411,20 +7546,18 @@ mod tests {
     /// output list, no sound, camera or microphone.
     #[test]
     fn a_plain_target_lists_no_wlshare_extension() {
-        for clipboard in [false, true] {
-            let plain = rfb38_encoding_list(clipboard);
-            for encoding in [
-                ENCODING_WLSHARE_VP9,
-                ENCODING_WLSHARE_DENSITY,
-                ENCODING_WLSHARE_OUTPUTS,
-                vnc_audio::ENCODING,
-                vnc_camera::ENCODING,
-                vnc_mic::ENCODING,
-            ] {
-                assert!(!plain.contains(&encoding), "{encoding:#x}");
-            }
-            assert!(plain.contains(&ENCODING_ZRLE));
+        let plain = rfb38_encoding_list();
+        for encoding in [
+            ENCODING_WLSHARE_VP9,
+            ENCODING_WLSHARE_DENSITY,
+            ENCODING_WLSHARE_OUTPUTS,
+            vnc_audio::ENCODING,
+            vnc_camera::ENCODING,
+            vnc_mic::ENCODING,
+        ] {
+            assert!(!plain.contains(&encoding), "{encoding:#x}");
         }
+        assert!(plain.contains(&ENCODING_ZRLE));
     }
 
     /// The stream wlshare is asked for is the plan, listed beside its encoding at
@@ -7438,12 +7571,12 @@ mod tests {
         assert_eq!(ENCODING_WLSHARE_VP9_HELD, i32::from_be_bytes(*b"WLSD"));
         assert_eq!(ENCODING_WLSHARE_VP9_QUALITY_BASE, i32::from_be_bytes(*b"WLQ\0"));
         let rest = [ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY];
-        let walked = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false };
+        let walked = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false };
         assert_eq!(
             with_wlshare_vp9(&rest, walked),
             [ENCODING_WLSHARE_VP9, 0x574c_513c, ENCODING_WLSHARE_VP9_SUBSAMPLED, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
         );
-        let held = RenderPlan { quality: 90, adaptive: false, chroma: Chroma::Full, apple_media: false, rdp_graphics: false };
+        let held = RenderPlan { quality: 90, adaptive: false, chroma: Chroma::Full, apple_media: false, rdp_graphics: false, rdp_h264: false };
         assert_eq!(
             with_wlshare_vp9(&rest, held),
             [ENCODING_WLSHARE_VP9, 0x574c_515a, ENCODING_WLSHARE_VP9_HELD, ENCODING_ZRLE, ENCODING_WLSHARE_DENSITY]
@@ -7462,7 +7595,7 @@ mod tests {
     }
 
     /// The body of an `OutputList` after its message type, built from
-    /// docs/wlshare-outputs.md rather than from [`output_info`]'s own reading.
+    /// wlshare's docs/architecture.md rather than from [`output_info`]'s own reading.
     fn output_list_body(active: u32, outputs: &[Listed]) -> Vec<u8> {
         let mut body = vec![0u8]; // padding
         body.extend_from_slice(&(outputs.len() as u16).to_be_bytes());
@@ -7821,7 +7954,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             None,
             sink,
         )
@@ -7835,24 +7968,22 @@ mod tests {
     #[test]
     fn the_audio_extension_is_asked_only_where_sound_was() {
         assert_eq!(vnc_audio::ENCODING.to_be_bytes(), *b"WLSF");
-        for clipboard in [false, true] {
-            for lossless in [false, true] {
-                let asked = wlshare_encoding_list(clipboard, Some(lossless), false, false);
-                assert!(asked.contains(&vnc_audio::ENCODING));
-                assert_eq!(asked.contains(&vnc_audio::ENCODING_OPUS), !lossless, "FLAC is a list without Opus");
-                assert!(!asked.contains(&-259), "QEMU's raw samples are not taken");
-                assert_eq!(
-                    &asked[asked.len() - 2..],
-                    &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS],
-                    "the wlshare requests stay last, so audio never weighs on encoding preference"
-                );
-            }
-            let silent = wlshare_encoding_list(clipboard, None, false, false);
-            assert!(
-                !silent.contains(&vnc_audio::ENCODING) && !silent.contains(&vnc_audio::ENCODING_OPUS),
-                "a target without audio does not ask"
+        for lossless in [false, true] {
+            let asked = wlshare_encoding_list(Some(lossless), false, false);
+            assert!(asked.contains(&vnc_audio::ENCODING));
+            assert_eq!(asked.contains(&vnc_audio::ENCODING_OPUS), !lossless, "FLAC is a list without Opus");
+            assert!(!asked.contains(&-259), "QEMU's raw samples are not taken");
+            assert_eq!(
+                &asked[asked.len() - 2..],
+                &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS],
+                "the wlshare requests stay last, so audio never weighs on encoding preference"
             );
         }
+        let silent = wlshare_encoding_list(None, false, false);
+        assert!(
+            !silent.contains(&vnc_audio::ENCODING) && !silent.contains(&vnc_audio::ENCODING_OPUS),
+            "a target without audio does not ask"
+        );
     }
 
     /// The camera extension is asked of a wlshare target exactly where the target
@@ -7860,12 +7991,10 @@ mod tests {
     /// encoding preference: the density and outputs requests stay last.
     #[test]
     fn the_camera_extension_is_asked_only_where_a_camera_is_carried() {
-        for clipboard in [false, true] {
-            let asked = wlshare_encoding_list(clipboard, Some(false), true, false);
-            assert!(asked.contains(&vnc_camera::ENCODING));
-            assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            assert!(!wlshare_encoding_list(clipboard, Some(false), false, false).contains(&vnc_camera::ENCODING));
-        }
+        let asked = wlshare_encoding_list(Some(false), true, false);
+        assert!(asked.contains(&vnc_camera::ENCODING));
+        assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
+        assert!(!wlshare_encoding_list(Some(false), false, false).contains(&vnc_camera::ENCODING));
     }
 
     /// The microphone extension on the same terms: asked of a wlshare target exactly
@@ -7873,12 +8002,10 @@ mod tests {
     /// outputs requests.
     #[test]
     fn the_microphone_extension_is_asked_only_where_a_microphone_is_carried() {
-        for clipboard in [false, true] {
-            let asked = wlshare_encoding_list(clipboard, Some(false), true, true);
-            assert!(asked.contains(&vnc_mic::ENCODING));
-            assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
-            assert!(!wlshare_encoding_list(clipboard, Some(false), true, false).contains(&vnc_mic::ENCODING));
-        }
+        let asked = wlshare_encoding_list(Some(false), true, true);
+        assert!(asked.contains(&vnc_mic::ENCODING));
+        assert_eq!(&asked[asked.len() - 2..], &[ENCODING_WLSHARE_DENSITY, ENCODING_WLSHARE_OUTPUTS]);
+        assert!(!wlshare_encoding_list(Some(false), true, false).contains(&vnc_mic::ENCODING));
     }
 
     /// The announcement rectangle is answered with the format this client
@@ -7924,7 +8051,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(audio_announcement()),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             None,
             sink,
         )
@@ -8000,7 +8127,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             None,
             sink,
         )
@@ -8040,7 +8167,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(pixels_without_announcement()),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             None,
             sink.clone(),
         )
@@ -8090,7 +8217,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             None,
             sink,
         )
@@ -8522,6 +8649,7 @@ mod tests {
             following: false,
             declared: None,
             repaint_owed: false,
+            push_interval_us: vnc_apple::PUSH_INTERVAL_US,
             hp: HpResize::default(),
             laid_out: false,
             media_live: false,
@@ -8591,8 +8719,9 @@ mod tests {
             chroma: crate::config::Chroma::Subsampled,
             apple_media: false,
             rdp_graphics: false,
+            rdp_h264: false,
         };
-        Arc::new(Listing::new(wlshare_encoding_list(false, None, false, false), plan))
+        Arc::new(Listing::new(wlshare_encoding_list(None, false, false), plan))
     }
 
     /// The same, for a session that asked for the desktop's sound: the bridge
@@ -8625,6 +8754,7 @@ mod tests {
             chroma: crate::config::Chroma::Subsampled,
             apple_media: false,
             rdp_graphics: false,
+            rdp_h264: false,
         };
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Refuse);
         // Larger than any desktop these tests paint, so a rectangle lands in the
@@ -8695,7 +8825,7 @@ mod tests {
                 shared_desktop((1280, 800), None, None),
                 test_shadow((1280, 800)),
             ),
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink,
         )
@@ -10180,7 +10310,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(update(&rects)),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             None,
             sink.clone(),
         )
@@ -10230,7 +10360,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(update(&[zrle, raw])),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             None,
             sink.clone(),
         )
@@ -10571,7 +10701,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             None,
             sink.clone(),
         )
@@ -10606,7 +10736,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             None,
             sink.clone(),
         )
@@ -10650,7 +10780,7 @@ mod tests {
         let err = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             None,
             sink.clone(),
         )
@@ -10680,7 +10810,7 @@ mod tests {
         let err = read_loop(
             RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             Some(Apple::default()),
             sink.clone(),
         )
@@ -10708,7 +10838,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             Some(Apple::default()),
             sink.clone(),
         )
@@ -10775,7 +10905,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: true, poll: true },
+            true,
             Some(Apple::default()),
             sink,
         )
@@ -10809,7 +10939,7 @@ mod tests {
             let task = tokio::spawn(read_loop(
                 reader,
                 shared,
-                ReadFlags { clipboard: true, poll: true },
+                true,
                 Some(Apple::default()),
                 sink,
             ));
@@ -10823,7 +10953,7 @@ mod tests {
             before_idle.extend_from_slice(&client_fence(0, b"idle"));
             if repaint_pending {
                 server.write_all(&apple_layout_update(Some(11), (2, 2))).await.unwrap();
-                before_idle.extend_from_slice(&vnc_apple::auto_framebuffer_update((2, 2)));
+                before_idle.extend_from_slice(&vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_US, (2, 2)));
                 before_idle.extend_from_slice(&update_request(false, (2, 2)));
             }
             let mut observed = vec![0; before_idle.len()];
@@ -10872,7 +11002,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: true, poll: false },
+            false,
             Some(Apple::default()),
             sink.clone(),
         )
@@ -10888,45 +11018,6 @@ mod tests {
                 ..
             }) if text == "cached"
         ));
-    }
-
-    #[tokio::test]
-    async fn disabled_apple_pasteboards_do_not_consume_browser_requests() {
-        let ordinary = vnc_apple_clipboard::send(7, "ignored").unwrap();
-        // Declared past Apple's own limit, and so never inflated.
-        let mut oversized = vec![0x1f, 0, 0, 0];
-        oversized.extend_from_slice(&9u32.to_be_bytes());
-        oversized.extend_from_slice(&(vnc_apple_clipboard::MAX_ARCHIVE_BYTES + 1).to_be_bytes());
-        oversized.extend_from_slice(&4u32.to_be_bytes());
-        oversized.extend_from_slice(&[0; 4]);
-
-        for (wire, session_id) in [(ordinary, 7), (oversized, 9)] {
-            let (uplink, _sent) = test_uplink();
-            let (sink, _rx) = test_sink();
-            let shared = test_shared(
-                uplink,
-                shared_desktop((2, 2), None, None),
-                test_shadow((2, 2)),
-            );
-            {
-                let mut clipboard = shared.clipboard.lock().unwrap();
-                clipboard.apple_requests = 2;
-            }
-            let clipboard = shared.clipboard.clone();
-
-            let _ = read_loop(
-                std::io::Cursor::new(wire),
-                shared,
-                ReadFlags { clipboard: false, poll: false },
-                Some(Apple::default()),
-                sink,
-            )
-            .await;
-
-            let clipboard = clipboard.lock().unwrap();
-            assert_eq!(clipboard.apple_session_id, session_id);
-            assert_eq!(clipboard.apple_requests, 2);
-        }
     }
 
     /// When a server drives its own updates, a request per update would race that
@@ -10945,7 +11036,7 @@ mod tests {
             let _ = read_loop(
                 RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
                 shared,
-                ReadFlags { clipboard: false, poll },
+                poll,
                 Some(Apple::default()),
                 sink,
             )
@@ -11021,7 +11112,7 @@ mod tests {
             read_loop(
                 std::io::Cursor::new(updates),
                 shared,
-                ReadFlags { clipboard: false, poll: true },
+                true,
                 None,
                 sink,
             ),
@@ -11172,7 +11263,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(end_of_continuous_updates()),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink,
         )
@@ -11203,7 +11294,7 @@ mod tests {
             let _ = read_loop(
                 std::io::Cursor::new(wire),
                 shared,
-                ReadFlags { clipboard: false, poll: true },
+                true,
                 None,
                 sink,
             )
@@ -11237,7 +11328,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink,
         )
@@ -11271,7 +11362,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink,
         )
@@ -11303,7 +11394,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(server_fence(flags, b"marker")),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink,
         )
@@ -11335,7 +11426,7 @@ mod tests {
         let (mut server, client) = tokio::io::duplex(1 << 16);
         tokio::spawn(async move {
             server.write_all(&wire).await.unwrap();
-            let _ = read_loop(client, shared, ReadFlags { clipboard: false, poll: false }, None, sink).await;
+            let _ = read_loop(client, shared, false, None, sink).await;
             drop(server);
         })
     }
@@ -11460,7 +11551,7 @@ mod tests {
             server
         });
         let task = tokio::spawn(async move {
-            let _ = read_loop(client, shared, ReadFlags { clipboard: false, poll: false }, None, sink).await;
+            let _ = read_loop(client, shared, false, None, sink).await;
         });
 
         assert!(matches!(rx.recv().await, Some(ServerMsg::VideoFormat { .. })));
@@ -11486,12 +11577,12 @@ mod tests {
         let (small, big) = ((64, 32), (5376, 2288));
         let (uplink, sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Full, apple_media: false, rdp_graphics: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Full, apple_media: false, rdp_graphics: false, rdp_h264: false };
         let feedback = Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("vnc", frame_tx, plan, feedback, Oversize::Hold);
         sink.msg(ServerMsg::Resize { w: small.0, h: small.1, scale: UNSCALED }).await.unwrap();
         let mut shared = test_shared(uplink, shared_desktop(small, None, None), test_shadow(small));
-        let encodings = wlshare_encoding_list(false, None, false, false);
+        let encodings = wlshare_encoding_list(None, false, false);
         let lists = Arc::new(Listing::new(encodings, plan));
         shared.passthrough = Some(Arc::clone(&lists));
         let mut wire = update(&[geometry(0, 0, big.0, big.1, ENCODING_DESKTOP_SIZE)]);
@@ -11500,7 +11591,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: false },
+            false,
             None,
             sink,
         )
@@ -11538,7 +11629,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink,
         )
@@ -11605,7 +11696,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink.clone(),
         )
@@ -11641,7 +11732,7 @@ mod tests {
         let _ = read_loop(
             std::io::Cursor::new(wire),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             None,
             sink.clone(),
         )
@@ -11718,13 +11809,13 @@ mod tests {
         let _ = read_loop(
             RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             Some(apple),
             sink,
         )
         .await;
 
-        let mut expected = vnc_apple::auto_framebuffer_update((2, 2));
+        let mut expected = vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_US, (2, 2));
         expected.extend_from_slice(&update_request(false, (2, 2)));
         expected.extend_from_slice(&update_request(false, (2, 2)));
         expected.extend_from_slice(&update_request(false, (2, 2)));
@@ -11751,13 +11842,13 @@ mod tests {
         let _ = read_loop(
             RecordReader::new(std::io::Cursor::new(wire), apple_keys()),
             shared,
-            ReadFlags { clipboard: false, poll: true },
+            true,
             Some(apple),
             sink,
         )
         .await;
 
-        let mut expected = vnc_apple::auto_framebuffer_update((2, 2));
+        let mut expected = vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_US, (2, 2));
         for _ in 0..FULL_REPAINT_UPDATE_BUDGET {
             expected.extend_from_slice(&update_request(false, (2, 2)));
         }
@@ -11853,7 +11944,7 @@ mod tests {
             Some(11),
             &[(11, (1920, 1080), (3840, 2160), 0x01), (22, (1600, 1000), (1600, 1000), 0x00)],
         );
-        let resized = read_display_layout(&mut payload.as_slice(), &shared, false, false, &sink)
+        let resized = read_display_layout(&mut payload.as_slice(), &shared, false, &sink)
             .await
             .unwrap();
         assert!(resized);
@@ -11888,7 +11979,7 @@ mod tests {
         // update loop sends the paired full request after it has consumed every
         // rectangle in this FramebufferUpdate.
         let mut expected = vnc_apple::set_server_scaling(0.5);
-        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update((3840, 2160)));
+        expected.extend_from_slice(&vnc_apple::auto_framebuffer_update(vnc_apple::PUSH_INTERVAL_US, (3840, 2160)));
         assert_eq!(written(&sent), expected);
     }
 
@@ -11898,7 +11989,7 @@ mod tests {
     async fn all_displays_over_three_screens_is_held() {
         let (uplink, _sent) = test_uplink();
         let (frame_tx, mut rx) = mpsc::channel(64);
-        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Subsampled, apple_media: false, rdp_graphics: false };
+        let plan = crate::config::RenderPlan { quality: 60, adaptive: false, chroma: crate::config::Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false };
         let sink = VideoSink::new("vnc", frame_tx, plan, Arc::new(crate::feedback::LinkFeedback::new()), Oversize::Hold);
         let shared = test_shared(uplink, shared_desktop((1280, 800), None, None), test_shadow((1280, 800)));
         let screens: [TestScreen; 3] = [
@@ -11907,7 +11998,7 @@ mod tests {
             (3, (1280, 800), (1280, 800), 0x00),
         ];
         for current in [None, Some(2)] {
-            read_display_layout(&mut layout_payload(current, &screens).as_slice(), &shared, false, false, &sink)
+            read_display_layout(&mut layout_payload(current, &screens).as_slice(), &shared, false, &sink)
                 .await
                 .unwrap();
         }
@@ -11942,20 +12033,20 @@ mod tests {
 
         // A session opens on the combined view, which is what the Mac sends when
         // nothing has asked otherwise.
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, &sink)
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);
 
         // Then a screen, then back again. Each move is a layout, never a request.
-        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, &sink)
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, 22);
-        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, false, &sink)
+        read_display_layout(&mut layout(Some(22)).as_slice(), &shared, false, &sink)
             .await
             .unwrap();
-        read_display_layout(&mut layout(None).as_slice(), &shared, false, false, &sink)
+        read_display_layout(&mut layout(None).as_slice(), &shared, false, &sink)
             .await
             .unwrap();
         assert_eq!(shared.display.lock().unwrap().active, DisplayState::COMBINED);

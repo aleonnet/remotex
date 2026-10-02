@@ -313,16 +313,28 @@ password = "change-me"
 # every gateway makes it and a proxy that drops the two headers undoes.
 # EXPERIMENTAL. The compositor is the gateway's own and is tested as it is there,
 # and what is passed is checked against a real host, in a headless browser and by
-# hand. That is one Windows 11 host, with sound and `clipboard` beside it;
+# hand. That is one Windows 11 host, with sound and the clipboard beside it;
 # `camera` and `microphone` beside it have not been tried.
 #egfx = true
 
-# Clipboard bridge (opt-in): shares this target's clipboard with the browser.
+# EXPERIMENTAL. Let the host draw with H.264 on a pipeline that is passed to the
+# browser. A Windows host then hands the parts of the desktop that move like
+# video — a player, a scrolling page — to H.264 and draws the rest as before,
+# which is its own trade of detail for bitrate on those parts: without this key
+# everything a passed pipeline carries is lossless. The gateway decodes nothing;
+# the browser decodes the video with its own decoder and paints it through the
+# same compositor. It reaches only a session started with the passthrough, in a
+# browser that decodes H.264: any other session is as it was without the key.
+# Checked against one Windows 11 host without a GPU. RDP only, and refused beside
+# `egfx = false`.
+#egfx_h264 = true
+
+# The clipboard has no key: every target shares its clipboard with the browser.
 # Copying on the remote pushes the text out, and your local clipboard is sent
 # back whenever the tab regains focus — where the browser permits it, which
 # needs HTTPS or localhost, since a plain-HTTP page has no clipboard access at
-# all. On a target that transfers a clipboard, the Clipboard panel works
-# regardless, and is the way to move text when automatic sync cannot run.
+# all. The Clipboard panel works regardless, and is the way to move text when
+# automatic sync cannot run.
 # RDP carries Unicode text over MS-RDPECLIP. Both directions of that protocol are
 # lazy — a copy announces the formats it can be had in and the bytes follow on
 # request — which the gateway hides: a copy on the remote is fetched at once, and a
@@ -330,9 +342,10 @@ password = "change-me"
 # VNC carries full Unicode text on servers
 # implementing the Extended Clipboard extension (TigerVNC does); on servers that
 # do not (TightVNC), RFB falls back to latin-1 and anything outside it becomes "?".
+# A plain VNC server with no clipboard at all cannot say so; the Clipboard panel
+# notes when one has shown no sign of having it.
 # Every Apple subtype uses the Mac's native UTF-8 pasteboard protocol, carrying
 # its fetches and data inside the encrypted record transport.
-#clipboard = false
 
 # The remote's sound, in a session started with it as Opus, is sent in 20 ms
 # packets. The channel has to be negotiated when the connection is made, so such
@@ -480,7 +493,6 @@ password = "change-me"
 # host = "10.0.0.3"
 # username = "andrew"
 # password = "the-account-password"
-# clipboard = true
 
 # `subtype = "ard-high-performance"` is High Performance as Apple's own viewer has
 # it. Its virtual display handling and its media stream were reverse engineered
@@ -495,7 +507,7 @@ password = "change-me"
 # viewport reports continuously replace the virtual display's mode as the window
 # changes.
 # Apple's display-count and fixed-resolution-preset controls are not implemented.
-# `clipboard = true` enables the native Apple pasteboard in both directions.
+# The native Apple pasteboard is carried in both directions.
 #
 # The picture comes as HEVC and the sound as AAC-ELD, over the media stream the
 # Mac negotiates on the RFB connection and then sends over UDP with SRTP — the
@@ -543,7 +555,6 @@ password = "change-me"
 # host = "10.0.0.3"
 # username = "andrew"
 # password = "the-account-password"
-# clipboard = true
 
 # UNOFFICIAL: `subtype = "ard-mirror"` is the Mac's physical displays, as `ard`
 # shares them, with the picture and the sound over High Performance's media

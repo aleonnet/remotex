@@ -25,7 +25,7 @@ use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
-use desktop_vp9::walk::{LAG_CLEAR, QualityWalk};
+use screen_vp9::walk::{LAG_CLEAR, QualityWalk};
 
 use crate::config::{Chroma, RenderPlan};
 use crate::feedback::LinkFeedback;
@@ -1174,7 +1174,7 @@ mod tests {
         out
     }
 
-    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false };
+    const VIDEO: RenderPlan = RenderPlan { quality: 60, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false };
 
     /// A video sink that has been told how big the desktop is, which is the one thing
     /// it needs before it will accept any pixels.
@@ -1902,7 +1902,7 @@ mod tests {
     async fn an_adaptive_settle_waits_for_the_lag_to_clear() {
         let link = feedback();
         let (frame_tx, mut frame_rx) = mpsc::channel(64);
-        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false };
         let sink = VideoSink::new("test", frame_tx, plan, Arc::clone(&link), Oversize::Refuse);
         sink.msg(ServerMsg::Resize { w: 320, h: 240, scale: UNSCALED }).await.unwrap();
         sink.flush().await;
@@ -2028,7 +2028,7 @@ mod tests {
     /// dial.
     #[test]
     fn an_adaptive_plan_makes_the_walk_lag_aware() {
-        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false };
+        let plan = RenderPlan { quality: 60, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false };
         let shared = Shared::new(plan, feedback(), Oversize::Refuse);
         let video = shared.video.try_lock().expect("nothing else holds the stream");
         assert!(video.congestion.lag_aware(), "the walk ignores lag");

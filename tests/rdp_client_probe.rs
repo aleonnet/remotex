@@ -94,9 +94,27 @@
 //! REMOTEX_UAT_TARGET=<rdp target> REMOTEX_UAT_CAMERA_STREAM=tmp/camera_probe_640x480.h264 \
 //!   cargo test --test rdp_client_probe a_real_host_streams_the_camera -- --ignored --nocapture
 //! ```
+//!
+//! ## H.264
+//!
+//! A session that passes its pipeline may tell the host it takes H.264
+//! (`Connect::h264`), which the gateway does for a target with `egfx_h264 = true`
+//! and a browser that decodes it. A Windows host then draws what moves like video
+//! with it, so the fourth pipeline test, [`pass_h264`], needs a video playing on the
+//! host's desktop while it runs. Nothing here decodes: what it asserts is what the
+//! gateway passes and what the page is told of it — that the host's commands carry
+//! access units, that each surface's stream starts at a keyframe naming its
+//! profile, and that the commands compose with no picture supplied, their
+//! rectangles left as they were.
+//!
+//! ```sh
+//! REMOTEX_UAT_TARGET=<rdp target> \
+//!   cargo test --test rdp_client_probe a_real_host_draws_video_with_h264 -- --ignored --nocapture
+//! ```
 
 mod common;
 
+use std::collections::BTreeSet;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -106,6 +124,7 @@ use remotex::rdp_client::{
     AudioSink, Camera, CameraSink, Compositor, Connect, Event, Fed, Input, MicrophoneSink, Session,
 };
 use remotex::rdp_clipboard::{self, CF_UNICODETEXT};
+use remotex_rdp_graphics::avc::{Scanned, scan};
 use tokio::sync::mpsc::Receiver;
 
 /// Which target in `tmp/test_uat.toml` to drive — see the module docs.
@@ -330,7 +349,7 @@ fn connect_with_voice() -> (Session, Receiver<Event>, Arc<Ear>, Arc<Eye>, Arc<Vo
         resize: egfx(),
         egfx: egfx(),
         pass_graphics: false,
-        clipboard: true,
+        h264: false,
         audio: sound().then(|| Box::new(Listen(Arc::clone(&ear))) as Box<dyn AudioSink>),
         camera: Some(Camera { name: "Remotex Probe Camera".to_owned(), sink: Box::new(Watch(Arc::clone(&eye))) }),
         microphone: Some(Box::new(Speak(Arc::clone(&voice)))),
@@ -1003,7 +1022,7 @@ async fn pass_the_pipeline() {
         resize: true,
         egfx: true,
         pass_graphics: true,
-        clipboard: false,
+        h264: false,
         audio: None,
         camera: None,
         microphone: None,
@@ -1174,6 +1193,96 @@ async fn pass_the_pipeline() {
     }
     println!("  ended: {ended:?}");
     assert!(matches!(ended, Some(Ok(()))), "a disconnect this end asked for is an orderly end");
+}
+
+/// The pipeline, passed to a client that takes H.264: the host draws the video
+/// playing on it with H.264, and what is passed is what the page needs to decode
+/// it. See "H.264" in the module docs.
+async fn pass_h264() {
+    common::init_logging();
+    let name = std::env::var(TARGET_ENV).unwrap_or_else(|_| {
+        panic!("set {TARGET_ENV} to the name of an rdp target in tmp/test_uat.toml")
+    });
+    let target = common::uat_target(&name);
+    println!("rdp_client_probe: {name} ({}:{}), the pipeline passed with H.264", target.host, target.port);
+    let (session, mut events) = Session::start(Connect {
+        host: target.host.clone(),
+        port: target.port,
+        username: target.username.clone(),
+        password: target.password.clone(),
+        domain: target.domain.clone(),
+        width: OPENING.0,
+        height: OPENING.1,
+        scale_percent: 0,
+        resize: false,
+        egfx: true,
+        pass_graphics: true,
+        h264: true,
+        audio: None,
+        camera: None,
+        microphone: None,
+    });
+    let input = session.input().clone();
+    let mut compositor = Compositor::new();
+    // The surfaces whose streams have started, and what was counted.
+    let mut streams = BTreeSet::new();
+    let (mut runs, mut units, mut keys, mut bytes) = (0u64, 0u64, 0u64, 0u64);
+    let deadline = Instant::now() + Duration::from_secs(40);
+    // Long enough past the first unit to see a stream's deltas follow its keyframe.
+    while units < 30 {
+        let left = deadline.saturating_duration_since(Instant::now());
+        let Ok(event) = tokio::time::timeout(left, events.recv()).await else { break };
+        match event.expect("the event channel closed without an Ended") {
+            Event::FramesMarked => compositor = Compositor::new(),
+            Event::Graphics { commands, frame } => {
+                runs += 1;
+                for found in scan(&commands).expect("the passed commands scan") {
+                    match found {
+                        Scanned::Gone { surface } => {
+                            streams.remove(&surface);
+                        }
+                        Scanned::Unit(unit) => {
+                            let unit_bytes = &commands[unit.start..unit.end];
+                            assert!(
+                                unit_bytes.starts_with(&[0, 0, 1]) || unit_bytes.starts_with(&[0, 0, 0, 1]),
+                                "an access unit that is not Annex B: {:02x?}",
+                                &unit_bytes[..unit_bytes.len().min(8)]
+                            );
+                            if streams.insert(unit.surface) {
+                                assert!(unit.key, "surface {}'s stream did not start at a keyframe", unit.surface);
+                                let profile = unit.profile.expect("a keyframe carries its parameter sets");
+                                println!(
+                                    "  surface {}: a stream starts, avc1.{:02x}{:02x}{:02x}, showing {:?}",
+                                    unit.surface, profile[0], profile[1], profile[2], unit.window
+                                );
+                            }
+                            units += 1;
+                            keys += u64::from(unit.key);
+                            bytes += unit_bytes.len() as u64;
+                        }
+                    }
+                }
+                // No picture is supplied: the H.264 rectangles are left as they
+                // were, and every other command composes around them.
+                compositor.compose(&commands).expect("the passed commands compose");
+                if let Some(frame) = frame {
+                    input.frame_composed(frame);
+                }
+            }
+            Event::Ended(result) => panic!("the session ended: {result:?}"),
+            _ => {}
+        }
+    }
+    println!("  {runs} runs passed, carrying {units} access units ({keys} keyframes) in {bytes} bytes");
+    assert!(units > 0, "the host drew nothing with H.264: is a video playing on its desktop?");
+    assert!(keys > 0);
+    drop(session);
+}
+
+#[tokio::test]
+#[ignore = "drives a real RDP host named in tmp/test_uat.toml, with a video playing on its desktop"]
+async fn a_real_host_draws_video_with_h264() {
+    pass_h264().await;
 }
 
 #[tokio::test]

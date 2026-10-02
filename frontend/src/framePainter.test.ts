@@ -9,7 +9,8 @@
 // Run with `bun test src/framePainter.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
-import type { ComposedRun, EgfxCompositor } from "./egfxCompositor.ts";
+import type { ComposedRun, EgfxCompositor, Scanned } from "./egfxCompositor.ts";
+import type { EgfxVideo } from "./egfxVideo.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
 
 const OP_VIDEO = 0x03;
@@ -471,16 +472,67 @@ function graphicsFrame(runs: number[][]): ArrayBuffer {
 // A compositor that records what it was fed and paints what it is told to. What a
 // real one makes of the commands is egfxCompositor.test.ts; here it is the painter's
 // handling of one that is under test.
+//
+// A run whose first byte is `H264` carries H.264: its second byte is how many
+// access units, each one byte long, and its third a surface whose stream ended.
+const H264 = 200;
+function h264Runs(commands: Uint8Array): Scanned[] {
+  if (commands[0] !== H264) {
+    return [];
+  }
+  const found: Scanned[] = [];
+  if (commands[2] !== undefined) {
+    found.push({ gone: commands[2] });
+  }
+  for (let number = 0; number < commands[1]; number += 1) {
+    const start = 3 + number;
+    found.push({
+      unit: {
+        surface: 1,
+        start,
+        end: start + 1,
+        key: number === 0,
+        codec: number === 0 ? "avc1.4d4020" : null,
+        window: "whole",
+      },
+      number,
+    });
+  }
+  return found;
+}
+
 function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
-  const made: { fed: number[][]; closed: boolean }[] = [];
+  const made: {
+    fed: number[][];
+    closed: boolean;
+    /** Each picture supplied: its number in its run, and the unit's byte. */
+    supplied: number[][];
+  }[] = [];
   const load = () => {
     if (options.fail) {
       return Promise.reject(new Error("no module"));
     }
     return Promise.resolve((): EgfxCompositor => {
-      const record = { fed: [] as number[][], closed: false };
+      const record = {
+        fed: [] as number[][],
+        closed: false,
+        supplied: [] as number[][],
+      };
       made.push(record);
       return {
+        scan: h264Runs,
+        supply(number, _window, frame) {
+          assert.equal(
+            record.closed,
+            false,
+            "a closed compositor was supplied",
+          );
+          record.supplied.push([
+            number,
+            (frame as unknown as FakePicture).unit,
+          ]);
+          return Promise.resolve();
+        },
         compose(commands): ComposedRun {
           if (commands[0] === options.refuse) {
             throw new Error("a command that does not decode");
@@ -504,6 +556,66 @@ function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
   return { made, load };
 }
 
+/** A decoded picture: the byte of the unit it came from, and whether it is closed. */
+interface FakePicture {
+  unit: number;
+  closed: boolean;
+  close(): void;
+}
+
+/**
+ * A pipeline's H.264 decoders, recording what they were asked. `hold` keeps each
+ * decode waiting until `release` is called, and `fail` rejects every one.
+ */
+function fakeVideo(options: { fail?: boolean; hold?: boolean } = {}) {
+  const log: string[] = [];
+  const frames: FakePicture[] = [];
+  const held: (() => void)[] = [];
+  let made = 0;
+  const make = (): EgfxVideo => {
+    made += 1;
+    let closed = false;
+    return {
+      decode(unit, data) {
+        log.push(`decode ${unit.surface}:${data[0]}${unit.key ? " key" : ""}`);
+        return new Promise((resolve, reject) => {
+          const settle = () => {
+            if (options.fail || closed) {
+              reject(new Error("its H.264 decoder failed: nothing"));
+              return;
+            }
+            const frame: FakePicture = {
+              unit: data[0],
+              closed: false,
+              close() {
+                this.closed = true;
+              },
+            };
+            frames.push(frame);
+            resolve(frame as unknown as VideoFrame);
+          };
+          if (options.hold) {
+            held.push(settle);
+          } else {
+            settle();
+          }
+        });
+      },
+      drop(surface) {
+        log.push(`drop ${surface}`);
+      },
+      close() {
+        closed = true;
+        log.push("close");
+        for (const settle of held.splice(0)) {
+          settle();
+        }
+      },
+    };
+  };
+  return { make, log, frames, held, made: () => made };
+}
+
 /** The picture of a pipeline: what each run's upload named, painted or not. */
 let uploaded: number[][] = [];
 /** How many pictures were made, and how many closed. */
@@ -515,9 +627,18 @@ let shown: boolean[] = [];
 
 function graphicsPainter(
   load: ReturnType<typeof fakeCompositors>["load"],
-  options: { noPicture?: boolean; blankFails?: boolean } = {},
+  options: {
+    noPicture?: boolean;
+    blankFails?: boolean;
+    video?: () => EgfxVideo;
+  } = {},
 ) {
   return createFramePainter({
+    makeGraphicsVideo:
+      options.video ??
+      (() => {
+        throw new Error("a pipeline without H.264 made a decoder for it");
+      }),
     context: () => context,
     onVideoError: (error) => {
       videoErrors.push(error);
@@ -633,6 +754,88 @@ test("a picture that cannot be blanked ends its pipeline", async () => {
   assert.deepEqual(made[0].fed, [[1]]);
   const said = videoErrors.filter((error) => error !== null);
   assert.match(said[0] ?? "", /the GPU refused the picture/);
+});
+
+test("a run's H.264 is decoded and supplied before the run is composed", async () => {
+  const { made, load } = fakeCompositors();
+  const video = fakeVideo();
+  const p = graphicsPainter(load, { video: video.make });
+  p.startGraphics();
+  await p.draw(graphicsFrame([[1], [H264, 2, 5, 31, 32], [H264, 1, 5, 33]]));
+  assert.equal(video.made(), 1, "one set of decoders follows the pipeline");
+  // Each unit goes through in command order, the first of a stream as its key,
+  // and a surface's stream is ended before the units after it are decoded — once
+  // there are decoders for one to have been in.
+  assert.deepEqual(video.log, [
+    "decode 1:31 key",
+    "decode 1:32",
+    "drop 5",
+    "decode 1:33 key",
+  ]);
+  assert.deepEqual(
+    made[0].supplied,
+    [
+      [0, 31],
+      [1, 32],
+      [0, 33],
+    ],
+    "each picture under its unit's number in its own run",
+  );
+  assert.deepEqual(
+    made[0].fed.map((run) => run[0]),
+    [1, H264, H264],
+  );
+  assert.ok(
+    video.frames.every((frame) => frame.closed),
+    "a picture handed over is closed",
+  );
+  assert.deepEqual(
+    videoErrors.filter((error) => error !== null),
+    [],
+  );
+  p.clear();
+  assert.equal(video.log.at(-1), "close");
+});
+
+test("an H.264 unit that gives no picture ends the pipeline and says so", async () => {
+  const { made, load } = fakeCompositors();
+  const video = fakeVideo({ fail: true });
+  const p = graphicsPainter(load, { video: video.make });
+  p.startGraphics();
+  await p.draw(graphicsFrame([[1], [H264, 1, 5, 31], [3]]));
+  assert.deepEqual(made[0].fed, [[1]], "the run was not composed without it");
+  assert.equal(made[0].closed, true);
+  const said = videoErrors.filter((error) => error !== null);
+  assert.equal(said.length, 1);
+  assert.match(said[0] ?? "", /could not compose the host's graphics/);
+  assert.match(said[0] ?? "", /H\.264 decoder failed/);
+  assert.deepEqual(
+    videoKeyframeAsks,
+    [],
+    "a host sends no keyframe on request",
+  );
+});
+
+test("an attachment that ends while a unit decodes leaves its compositor alone", async () => {
+  const { made, load } = fakeCompositors();
+  const video = fakeVideo({ hold: true });
+  const p = graphicsPainter(load, { video: video.make });
+  p.startGraphics();
+  const late = p.draw(graphicsFrame([[H264, 1, 5, 31]]));
+  while (video.held.length === 0) {
+    await new Promise((resolve) => setTimeout(resolve, 0));
+  }
+  // The clear closes the decoders, which settles the unit the run waits on.
+  p.clear();
+  await late;
+  assert.equal(made[0].closed, true);
+  assert.deepEqual(made[0].supplied, []);
+  assert.deepEqual(made[0].fed, []);
+  assert.deepEqual(
+    videoErrors.filter((error) => error !== null),
+    [],
+    "an ended attachment has nothing to say",
+  );
 });
 
 test("a run with no pipeline started is dropped", async () => {

@@ -56,70 +56,29 @@ offers RSA-AES or None and nothing else, so a target with `username` and
 
 ## The wire
 
-One pseudo-encoding and one message type, private and unregistered.
+The extension is wlshare's, and its messages and their layout are in wlshare's
+own [`docs/architecture.md`](https://github.com/andrewtheguy/wlshare/blob/main/docs/architecture.md#the-density-extension):
+the pseudo-encoding `WLSH` and message type `0xE0` in both directions,
+`OutputScale` from the server and `ClientDensity` from the client, each the
+framebuffer's size in pixels and a scale. What the gateway makes of them:
 
-- **Pseudo-encoding** `0x574c5348`, the ASCII bytes `WLSH`, listed in the
-  client's `SetEncodings` beside the standard ones. A server that does not know
-  it ignores it, as RFB requires.
-- **Message type** `0xE0` in both directions, outside every registered client
-  and server message type.
-- **Scale** is 16.16 unsigned fixed point: `0x0002_0000` is 2.0, `0x0001_8000`
-  is 1.5. The server sends the compositor's exact value, fractional included.
-
-### Server → client: OutputScale
-
-Sent as the answer to a `SetEncodings` carrying the pseudo-encoding — the only
-way support is announced, the same pattern as ContinuousUpdates — and again
-whenever the captured output's scale or size changes, or the capture moves to
-another output. The size is the framebuffer's, in pixels.
-
-| Offset | Type | Field |
-|---|---|---|
-| 0 | U8 | `0xE0` |
-| 1 | U8 | padding |
-| 2 | U16 | width, pixels |
-| 4 | U16 | height, pixels |
-| 6 | U32 | scale, 16.16 fixed |
-
-Ten bytes. wlshare sends it as soon as the compositor reports the output's new
-scale or mode, before the frame at the new size has been captured, so on a resize
-the report precedes the `ExtendedDesktopSize` rectangle that carries the new
-framebuffer.
-
-### Client → server: ClientDensity
-
-Sent once the first `OutputScale` has arrived, whenever the client's screen
-changes density (`hostDisplay`), and on a switch of shared output — only in a
-session started with resize, because the answer changes the output. It carries
-the density the browser would like the desktop rendered at, quantized to 1x or
-2x like every other engine's request ([`protocol::render_density`]), *and* the
-window in pixels at that density, every time. A scale alone would change the
-desktop's logical size until a resize followed, and every application on it
-would redraw twice; carrying both makes a density change one output
-configuration. A resize at an unchanged density is still `SetDesktopSize`.
-
-wlshare sets the captured output's mode and scale to them in one
-wlr-output-management configuration, asking only for what differs, under the
-rules its `SetDesktopSize` handling already has — a headless output and resizing
-enabled — and **answers every declaration with an `OutputScale`**: after the
-compositor has applied the change, or at once with the output as it is when
-nothing is to be changed or nothing can be (resizing disabled, a density out of
-the 0.5–8 range, an empty size, a client without `ExtendedDesktopSize`, a
-configuration the compositor rejects). A configuration the compositor accepts
-without changing the head's scale is answered too: wlshare follows the
-`succeeded` with one round trip and reports the output as it is when no head
-change arrived by then. The gateway relies on that answer arriving. A new size
-then arrives as an `ExtendedDesktopSize` rectangle whose reason is this client.
-
-| Offset | Type | Field |
-|---|---|---|
-| 0 | U8 | `0xE0` |
-| 1 | U8 | padding |
-| 2 | U16 | width, pixels |
-| 4 | U16 | height, pixels |
-| 6 | U32 | scale, 16.16 fixed |
-
-Ten bytes: `OutputScale`'s layout in the other direction.
+- **`OutputScale`** is the answer to the `SetEncodings` that lists the
+  pseudo-encoding, which is the only way support is announced, and comes again
+  whenever the shared output's scale or size changes or the capture moves to
+  another output. On a resize it precedes the `ExtendedDesktopSize` rectangle
+  that carries the new framebuffer.
+- **`ClientDensity`** is sent once the first `OutputScale` has arrived, whenever
+  the client's screen changes density (`hostDisplay`), and on a switch of shared
+  output — only in a session started with resize, because the answer changes the
+  output. It carries the density the browser would like the desktop rendered at,
+  quantized to 1x or 2x like every other engine's request
+  ([`protocol::render_density`]), *and* the window in pixels at that density,
+  every time, so a density change is one output configuration. A resize at an
+  unchanged density is still `SetDesktopSize`.
+- **Every declaration is answered** with an `OutputScale`, after the change or at
+  once with the output as it is when wlshare refuses or has nothing to change.
+  The gateway relies on that answer arriving. A new size then arrives as an
+  `ExtendedDesktopSize` rectangle whose reason is this client.
 
 ## What the gateway does with it
 

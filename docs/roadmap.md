@@ -1,7 +1,7 @@
 # Roadmap
 
-What is merely *designed* belongs in the architecture docs; what is *planned*
-belongs here. A defect that has been fixed needs no entry anywhere — the commit
+What is merely *designed* belongs in the architecture docs; what is *planned*,
+or under consideration, belongs here. A defect that has been fixed needs no entry anywhere — the commit
 that fixed it, and the test that holds it fixed, are the record. The limitations
 imposed on us from outside are recorded beside the mechanism they constrain, which
 is the only place they can be read in context.
@@ -11,16 +11,9 @@ is the only place they can be read in context.
 ### What the RDP client does not carry yet
 
 The client carries the desktop, the pointer, keyboard, mouse, resize, the
-clipboard, sound, and the browser's camera and microphone. Touch was carried by the engine before it, from FreeRDP's
-`rdpei` plugin, and is not carried *here*: `proto` is the gateway's own now, so it
-is a channel to write rather than a dependency to configure, and it is refused
-where it would otherwise build a control with nothing behind it, by having no key
-at all — whether touch exists is the host's answer, and this client never asks.
-
-Everything on either side of the channel is already written and shipped: the
-browser's touch passthrough layer (`touchPassthrough.ts`), `ServerMsg::TouchReady`
-and `ClientMsg::Touch` are protocol-agnostic. Nothing below the wire needs
-designing for it.
+clipboard, sound, and the browser's camera and microphone. Touch is not carried,
+and is [under consideration](#touch-on-an-rdp-target-ms-rdpei) rather than
+planned.
 
 The clipboard, sound, camera, and microphone are done. Their protocol and engine
 paths are recorded in [The RDP client](rdp-client.md) rather than here;
@@ -31,24 +24,8 @@ EGFX is in, as [The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
 describes; what is left of it
 beyond the decoders is under
 [H.264 in the RDP graphics pipeline](#h264-in-the-rdp-graphics-pipeline)
-rather than here, because that payoff is a transcode removed, not a control
+rather than here, because that payoff is a picture's cost, not a control
 restored.
-
-#### Touch (MS-RDPEI)
-
-MS-RDPEI is a *dynamic* channel and that transport is already here:
-`proto/dvc.rs` carries Display Control over `drdynvc`, and the session answers
-every Create Request it does not want with `NO_LISTENER` (`session.rs`). Accepting a second name, the RDPEI PDUs — client ready, and a
-touch event's contact frames — and the contact state machine are the work.
-
-The rest is waiting for it. A host that opens the channel becomes
-`Event::TouchReady`, which the engine forwards as `ServerMsg::TouchReady` and
-re-sends to each client that attaches; the browser offers the passthrough toggle
-only after that, and `rdp.rs` drops a `ClientMsg::Touch` today because no engine
-can report one. Held contacts must be released when a client goes away, or the
-remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI and
-xrdp never does, which is the reason this stays an always-offered capability
-rather than a key.
 
 #### Licensing on a Remote Desktop Session Host
 
@@ -152,23 +129,27 @@ a replay of the backlog.
 
 ### H.264 in the RDP graphics pipeline
 
-The one codec a current Windows host offers that the RDP client refuses. It could
-remove upstream bytes, but takes a new decoder and accepts a lossy source, and it
-is not near-term. It is here so that "why not this one" has an answer rather than
-being rediscovered.
+A host draws with H.264 only on a passed pipeline, for the page to decode, behind
+a target's experimental `egfx_h264` key
+([RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)).
+What is not done:
 
-The RDP client carries the pipeline — the channel, ZGFX, the surface compositor
-with its caches and copies, the frame marks, and the decoders a current Windows
-host draws with: ClearCodec with NSCodec inside it, RemoteFX Progressive, planar
-and uncompressed ([The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
-describes each). H.264, which a host hands the parts of the desktop that move
-like video, is refused with `AVC_DISABLED` on purpose: a lossy video codec loses
-detail before the gateway ever encodes the picture, and the source is to stay
-lossless. Supporting it would add an H.264 decoder per surface to the shared
-compositor used in both the gateway and the page. Even on a passed pipeline it is
-not a standalone video stream: the host masks each picture by rectangles and
-mixes it with the other codecs and drawing commands on one surface. It is not
-taken up without the operator accepting a lossy source.
+- **The gateway does not decode it, and is not going to.** A pipeline composed
+  here refuses H.264 with `AVC_DISABLED` on purpose: a lossy video codec loses
+  detail before the gateway ever encodes the picture, and decoding it only to
+  encode VP9 is a second lossy pass. It is here so that "why not this one" has an
+  answer rather than being rediscovered.
+- **A choice at the picker.** It is a config key while it is experimental. Once
+  it is not, whether a session takes a lossy source is the kind of thing the
+  picker asks.
+- **AVC444 against a host.** Both layouts are implemented and tested from the
+  specification's tables. The one host tried sent AVC420 by region, and with
+  `AVC_THINCLIENT`, which this client does not set, luma views alone.
+- **Large video.** Every decoded picture is copied into the compositor's memory
+  and converted there, which was measured at a 1280×800 desktop and not above,
+  and from a hardware decoder that copy is a readback off the GPU. Presenting a
+  decoded picture on the GPU, and reading it back only when a later command
+  copies from it, is the step after that if a large one proves slow.
 
 ### Two streams for Apple's All Displays
 
@@ -183,6 +164,60 @@ paint window order two chains, and how each stream starts over are the work.
 
 Two screens is the limit, as it is today: All Displays over three or more is held
 with the notice whatever its size.
+
+## Under consideration
+
+### Touch on an RDP target (MS-RDPEI)
+
+Taken up if the need for it shows. Touch was carried by the engine before this
+client, from FreeRDP's `rdpei` plugin, and is not carried *here*: `proto` is the
+gateway's own now, so it is a channel to write rather than a dependency to
+configure, and it is refused where it would otherwise build a control with
+nothing behind it, by having no key at all — whether touch exists is the host's
+answer, and this client never asks.
+
+Everything on either side of the channel is already written and shipped: the
+browser's touch passthrough layer (`touchPassthrough.ts`), `ServerMsg::TouchReady`
+and `ClientMsg::Touch` are protocol-agnostic. Nothing below the wire needs
+designing for it.
+
+MS-RDPEI is a *dynamic* channel and that transport is already here:
+`proto/dvc.rs` carries Display Control over `drdynvc`, and the session answers
+every Create Request it does not want with `NO_LISTENER` (`session.rs`). Accepting a second name, the RDPEI PDUs — client ready, and a
+touch event's contact frames — and the contact state machine are the work.
+
+The rest is waiting for it. A host that opens the channel becomes
+`Event::TouchReady`, which the engine forwards as `ServerMsg::TouchReady` and
+re-sends to each client that attaches; the browser offers the passthrough toggle
+only after that, and `rdp.rs` drops a `ClientMsg::Touch` today because no engine
+can report one. Held contacts must be released when a client goes away, or the
+remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI and
+xrdp never does, which is the reason this stays an always-offered capability
+rather than a key.
+
+### Not forwarding silence in a passed sound stream
+
+A quiet RDP host sends no sound, so its browser receives no packets until
+something plays. The two passed streams do not behave that way: a High
+Performance Mac and a `wlshare` target go on sending units while nothing plays,
+and the gateway forwards each one (`AudioListener::into_passed` in
+`src/audio.rs`). Holding the silent ones back would make all three alike.
+
+- **The Mac's AAC-ELD.** Silence can be told without a decoder. A quiet Mac sends
+  one unit a hundred times a second, the four bytes `00 68 34 00`: `max_sfb` 0,
+  so no band carries a coefficient, and a `global_gain` for each channel. A unit
+  whose `max_sfb` is 0, or whose every section names the zero codebook, is
+  silence by its header, read before anything Huffman-coded. That was captured
+  on macvm; a physical Mac has not been.
+- **wlshare's sound.** wlshare holds the PCM before it codes it, so the silence is
+  its to withhold rather than the gateway's to detect in Opus or FLAC.
+
+What it saves is small: the Mac's silence is 400 bytes a second of payload
+against about 320 kbit/s while it plays. What it costs is on the page, which
+must take a stop in the units as silence rather than as a stream that fell
+behind, and in a few silent units still forwarded after the sound ends, since
+AAC-ELD's window overlaps the frames before it. Whether the framing around each
+unit makes the saving worth that has not been measured.
 
 ## Not planned
 
@@ -201,8 +236,9 @@ through is what a `wlshare` target has.
 ### `THINCLIENT` in the graphics capability advertise
 
 `caps_advertise` in the graphics crate's `proto/gfx.rs` sends versions 8 and 10 with the small cache
-and, on version 10, `AVC_DISABLED`, and leaves `RDPGFX_CAPS_FLAG_THINCLIENT`
-unset. A current Windows host, the only host this client targets, ignores the
+and, on version 10, `AVC_DISABLED` — or, for a passed pipeline that takes H.264,
+every set to 10.7 without it — and leaves `RDPGFX_CAPS_FLAG_THINCLIENT`
+unset either way. A current Windows host, the only host this client targets, ignores the
 flag; the hosts that acted on it, choosing the classic RemoteFX codec over the
 progressive form, are not supported, so there is nothing for the flag to change.
 The decision is recorded in

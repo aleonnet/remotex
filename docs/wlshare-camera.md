@@ -39,23 +39,11 @@ of the same switch.
 
 ## The wire
 
-One private pseudo-encoding and one private message type, in both directions.
-
-- **Pseudo-encoding** `0x574c5343`, the ASCII bytes `WLSC`, listed in
-  `SetEncodings` beside the audio request and ahead of the density and outputs
-  requests, which stay last.
-- **Message type** `0xE2`. Every message is the type, an operation, two more bytes,
-  and what the operation carries. Integers are big-endian.
-
-| Direction | Operation | Bytes 2–3 | Then |
-| --------- | --------- | --------- | ---- |
-| client → server | 0, plug | padding | `u16` width, `u16` height, `u32` frame-rate numerator, `u32` denominator |
-| client → server | 1, unplug | padding | nothing |
-| client → server | 2, sample | flags (bit 0: keyframe), padding | `u32` length, one Annex B access unit |
-| server → client | 0, available | padding | nothing |
-| server → client | 1, start | padding | the plugged format, as a plug lays it out |
-| server → client | 2, stop | padding | nothing |
-| server → client | 3, keyframe | padding | nothing |
+The extension is wlshare's, and its messages and their layouts are in wlshare's
+own [`docs/architecture.md`](https://github.com/andrewtheguy/wlshare/blob/main/docs/architecture.md#the-camera-extension):
+the pseudo-encoding `WLSC` and message type `0xE2` in both directions. The
+gateway lists `WLSC` in `SetEncodings` beside the audio request and ahead of the
+density and outputs requests, which stay last.
 
 wlshare answers *every* `SetEncodings` that lists the encoding with *available*,
 and only the first is news. A server operation this client does not know is fatal:
@@ -114,7 +102,7 @@ that opening it sends `cameraStart` with the plugged format and leaving it sends
 closing the socket removes the node.
 
 Measured 2026-09-14 against wlshare on a sway session with PipeWire 1.4.2, without
-the gateway: a probe client speaking the wire above plugged 640x480 at 15/1 and
+the gateway: a probe client speaking the extension plugged 640x480 at 15/1 and
 sent libx264 Constrained Baseline, and a PipeWire consumer linked to
 `wlshare-camera-1`. The consumer negotiated I420 640x480 at 15/1 and received
 whole pictures; wlshare sent start as it linked and stop as it left. The path

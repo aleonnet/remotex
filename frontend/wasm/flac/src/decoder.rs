@@ -4,11 +4,11 @@
 //! A session started with lossless sound is sent FLAC instead of Opus:
 //! wlshare's own frames passed as they came, or an RDP host's PCM coded by the
 //! gateway with libFLAC. Either way a packet on the audio socket is one FLAC
-//! frame, a stream of its own one block long (`desktop-flac` makes them so), and
+//! frame, a stream of its own one block long (`sound-flac` makes them so), and
 //! no browser's WebCodecs is asked to read that: this decodes it.
 //!
-//! It is here and nowhere else. The gateway's FLAC is libFLAC, loaded at run
-//! time, which a page cannot have, and the gateway never decodes a frame it
+//! It is here and nowhere else. The gateway's FLAC is libFLAC, native code
+//! linked into it, which a page cannot have, and the gateway never decodes a frame it
 //! sends on. So the decoder is this module's alone, tested through the binding
 //! against frames libFLAC made (`frontend/src/flacDecoder.test.ts`).
 //!

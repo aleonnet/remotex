@@ -37,22 +37,11 @@ key (default `false`) is the server's side of the same switch.
 
 ## The wire
 
-One private pseudo-encoding and one private message type, in both directions.
-
-- **Pseudo-encoding** `0x574c534d`, the ASCII bytes `WLSM`, listed in
-  `SetEncodings` after the camera request and ahead of the density and outputs
-  requests, which stay last.
-- **Message type** `0xE3`. Every message is the type, an operation, two more bytes,
-  and what the operation carries. Integers are big-endian.
-
-| Direction | Operation | Bytes 2–3 | Then |
-| --------- | --------- | --------- | ---- |
-| client → server | 0, plug | padding | nothing |
-| client → server | 1, unplug | padding | nothing |
-| client → server | 2, sample | padding | `u32` length, interleaved signed 16-bit little-endian PCM |
-| server → client | 0, available | padding | nothing |
-| server → client | 1, start | padding | `u16` channels, `u16` padding, `u32` frequency |
-| server → client | 2, stop | padding | nothing |
+The extension is wlshare's, and its messages and their layouts are in wlshare's
+own [`docs/architecture.md`](https://github.com/andrewtheguy/wlshare/blob/main/docs/architecture.md#the-microphone-extension):
+the pseudo-encoding `WLSM` and message type `0xE3` in both directions. The
+gateway lists `WLSM` in `SetEncodings` after the camera request and ahead of the
+density and outputs requests, which stay last.
 
 wlshare answers *every* `SetEncodings` that lists the encoding with *available*,
 and only the first is news. The format is the server's to name, as a host's is over
@@ -103,7 +92,7 @@ packets of a 440 Hz tone. It asserts that wlshare lends the desktop a node, that
 was recorded is loudest at 440 Hz, and that closing the socket removes the node.
 
 Measured 2026-09-14 against wlshare on a labwc session with PipeWire 1.4.2,
-without the gateway: a probe client speaking the wire above plugged a microphone
+without the gateway: a probe client speaking the extension plugged a microphone
 and sent a 440 Hz tone while `pw-record --target wlshare-microphone-1` recorded.
 wlshare sent start as the recorder linked and stop as it left, and the recording
 held the tone without gaps past the node's 60 ms prefill. The path through the

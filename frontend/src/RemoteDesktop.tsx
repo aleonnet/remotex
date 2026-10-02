@@ -161,7 +161,6 @@ export default function RemoteDesktop({
     renderPlan,
     oversize,
     connection,
-    canClipboard,
     canAudio,
     audioEnabled,
     audioError,
@@ -280,7 +279,6 @@ export default function RemoteDesktop({
           onSwitchTarget={switchTarget}
           sendKeyCombo={sendKeyCombo}
           onKeyboardInset={setBottomInset}
-          canClipboard={canClipboard}
           remoteClipboard={remoteClipboard}
           onFetchClipboard={requestClipboard}
           onSendClipboard={sendClipboard}
