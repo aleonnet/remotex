@@ -4427,10 +4427,13 @@ async fn extended_cut_text(
 }
 
 /// Where the read loop's time goes between one framebuffer update and the next,
-/// logged once a second at `debug`: how long the server took to answer, how long
-/// its rectangles took to read and decode, and how long the video sink held the
-/// loop. On a polled session the next request leaves only after all three, so the
-/// largest of them is what bounds the update rate.
+/// logged once a second at `debug`: how long passed between the end of one update
+/// and the start of the next, how long its rectangles took to read and decode, and
+/// how long the video sink held the loop. The first is mostly the server's time to
+/// answer, but it also holds whatever the loop did meanwhile: other server
+/// messages, a paced video flush, a fence echo. On a polled session the next
+/// request leaves only after all three, so the largest of them is what bounds the
+/// update rate.
 struct UpdateCycle {
     mark: std::time::Instant,
     since: std::time::Instant,
@@ -4470,8 +4473,8 @@ impl UpdateCycle {
         lap
     }
 
-    /// An update's first byte arrived: the time since the last one ended was the
-    /// server's.
+    /// An update's first byte arrived: the time since the last one ended, the
+    /// server's wait and the loop's other work together.
     fn arrived(&mut self) {
         let lap = self.lap();
         self.waited += lap;
@@ -4508,7 +4511,7 @@ impl UpdateCycle {
             return;
         }
         debug!(
-            "vnc: {:.1} updates/s, {} rects, {:.1} Mpx/s; waiting on the server {} ms (longest {}), \
+            "vnc: {:.1} updates/s, {} rects, {:.1} Mpx/s; between updates {} ms (longest {}), \
              reading {} ms (longest {}), video sink {} ms (longest {}), over {} ms",
             f64::from(self.updates) / span.as_secs_f64(),
             self.rects,
