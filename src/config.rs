@@ -328,6 +328,11 @@ pub struct RenderPlan {
     /// only the picture of a host that answers the offer of the pipeline with
     /// bitmap updates, which is encoded here as always.
     pub rdp_graphics: bool,
+    /// The host may draw with H.264 on that passed pipeline, for the browser to
+    /// decode: [`TargetConfig::egfx_h264`], in a session that passes the pipeline
+    /// to a browser that decodes it ([`Decoders::rdp_h264`]). Never set without
+    /// [`Self::rdp_graphics`].
+    pub rdp_h264: bool,
 }
 
 /// A remote's own stream, passed to the browser as it came instead of decoded
@@ -497,7 +502,7 @@ pub struct NotOffered {
 
 /// What the attached browser said it can take, from its session socket
 /// ([`crate::ws`]): the questions the page asks once at load and states on every
-/// session socket it opens. The chroma *selects* a stream. The other two say which
+/// session socket it opens. The chroma *selects* a stream. The two after it say which
 /// passthrough this browser can be served, which is what the picker greys a choice
 /// by and what ends a session whose owner comes back unable to take its own
 /// ([`TargetConfig::beyond`]).
@@ -512,6 +517,11 @@ pub struct Decoders {
     /// ([`Passthrough::RdpGraphics`]): the page's compositor needs shared memory,
     /// so a cross-origin isolated page, and a WebGL 2 canvas to present on.
     pub rdp_graphics: bool,
+    /// Whether it decodes the H.264 an RDP host may draw with on that pipeline
+    /// ([`TargetConfig::egfx_h264`]): a `VideoDecoder` that takes it and hands its
+    /// pictures into the compositor's memory. Unlike the two above it turns no
+    /// session away: a browser that says no is passed a pipeline without H.264.
+    pub rdp_h264: bool,
 }
 
 impl Decoders {
@@ -529,7 +539,7 @@ impl Decoders {
 #[cfg(test)]
 impl From<Chroma> for Decoders {
     fn from(chroma: Chroma) -> Self {
-        Self { chroma, apple_media: true, rdp_graphics: true }
+        Self { chroma, apple_media: true, rdp_graphics: true, rdp_h264: true }
     }
 }
 
@@ -561,7 +571,8 @@ impl RenderPlan {
     /// [`TargetConfig::render_summary`], the only caller that passes anything.
     fn card(&self, chroma_slot: Option<&str>) -> String {
         if let Some(passthrough) = self.passthrough() {
-            return format!("{}, passed through", passthrough.stream());
+            let h264 = if self.rdp_h264 { " with H.264" } else { "" };
+            return format!("{}{h264}, passed through", passthrough.stream());
         }
         // Always named, because with `auto` the default there is no chroma a card
         // may leave unsaid: an unnamed one would read as 4:2:0 selected on a
@@ -691,6 +702,30 @@ pub struct TargetConfig {
     /// ([`TargetConfig::egfx`]).
     #[serde(default)]
     pub egfx: Option<bool>,
+    /// EXPERIMENTAL. Let the host draw with H.264 on a pipeline that is passed
+    /// ([`Passthrough::RdpGraphics`]), for the browser to decode. Refused on a
+    /// target that is not RDP and beside `egfx = false`, which have no pipeline to
+    /// carry it.
+    ///
+    /// A Windows host told its client takes H.264 hands the parts of the desktop
+    /// that move like video — a player, a scrolling page — to it, and goes on
+    /// drawing the rest with the lossless codecs in the same frames. That is the
+    /// host's own trade of detail for bitrate on those parts, which is why it is a
+    /// key and off unless set: without it every passed pipeline is lossless.
+    ///
+    /// It reaches only a session started with the passthrough, and only a browser
+    /// that said it decodes H.264 ([`Decoders::rdp_h264`]); every other session of
+    /// the target is told what it always was, that the client takes none. The
+    /// gateway decodes nothing: the access units ride in the commands it passes,
+    /// and the page decodes them with the browser's `VideoDecoder` and paints them
+    /// through its compositor ([`remotex_rdp_graphics::avc`]).
+    ///
+    /// A key rather than a choice at the picker while it is experimental. Checked
+    /// against one Windows 11 host without a GPU, whose stream is Main profile and
+    /// AVC420 by region; AVC444, which a host policy may select, is implemented
+    /// from the specification and has not been seen from a host.
+    #[serde(default)]
+    pub egfx_h264: bool,
     /// Offer the remote a redirected camera: MS-RDPECAM on RDP, and on a
     /// `wlshare` target the wlshare camera extension ([`crate::vnc_camera`]),
     /// listed the way its audio extension is. Rejected on a plain `vnc`
@@ -903,7 +938,8 @@ impl TargetConfig {
         let passthrough = self.passthrough(choices);
         let apple_media = passthrough == Some(Passthrough::AppleMedia);
         let rdp_graphics = passthrough == Some(Passthrough::RdpGraphics);
-        RenderPlan { quality, adaptive, chroma, apple_media, rdp_graphics }
+        let rdp_h264 = rdp_graphics && self.egfx_h264 && decoders.rdp_h264;
+        RenderPlan { quality, adaptive, chroma, apple_media, rdp_graphics, rdp_h264 }
     }
 
     /// The choices the picker shows under this target.
@@ -998,7 +1034,7 @@ impl TargetConfig {
             ChromaChoice::Auto => Some("chroma auto"),
             ChromaChoice::Subsampled | ChromaChoice::Full => None,
         };
-        let decoders = Decoders { chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false };
+        let decoders = Decoders { chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false };
         self.render_plan(Choices::default(), decoders).card(slot)
     }
 
@@ -1704,6 +1740,14 @@ impl ConfigFile {
                  to switch. Remove the key.",
                 target.name,
                 target.protocol.name()
+            );
+            // H.264 rides the pipeline, so it needs one: an RDP target's, left on.
+            anyhow::ensure!(
+                !target.egfx_h264 || (target.protocol == Protocol::Rdp && target.egfx()),
+                "target {:?} sets egfx_h264, which only an rdp target with its graphics pipeline \
+                 on can take: H.264 is drawn on that pipeline. Remove the key{}.",
+                target.name,
+                if target.protocol == Protocol::Rdp { ", or egfx = false" } else { "" }
             );
             // The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
             // `wlshare` target. Neither Apple's Screen Sharing nor a VNC server read
@@ -3062,6 +3106,7 @@ mod tests {
                     chroma: decoder,
                     apple_media: false,
                     rdp_graphics: false,
+                    rdp_h264: false,
                 }
             );
         }
@@ -3078,6 +3123,7 @@ mod tests {
                 chroma: Chroma::Subsampled,
                 apple_media: false,
                 rdp_graphics: false,
+                rdp_h264: false,
             }
         );
     }
@@ -3106,6 +3152,7 @@ mod tests {
             chroma,
             apple_media: false,
             rdp_graphics: false,
+            rdp_h264: false,
         };
         assert_eq!(video("", Chroma::Full), stream(Chroma::Full));
         assert_eq!(video("", Chroma::Subsampled), stream(Chroma::Subsampled));
@@ -3428,8 +3475,8 @@ mod tests {
             .remove(0)
         };
         let hp = mac("ard-high-performance");
-        let takes = Decoders { chroma: Chroma::Full, apple_media: true, rdp_graphics: false };
-        let declines = Decoders { chroma: Chroma::Full, apple_media: false, rdp_graphics: false };
+        let takes = Decoders { chroma: Chroma::Full, apple_media: true, rdp_graphics: false, rdp_h264: false };
+        let declines = Decoders { chroma: Chroma::Full, apple_media: false, rdp_graphics: false, rdp_h264: false };
         let passed = Choices { passthrough: true, ..Choices::default() };
 
         assert_eq!(hp.offers().passthrough, Some(Passthrough::AppleMedia));
@@ -3890,6 +3937,33 @@ mod tests {
         assert!(!config.targets[0].egfx(), "the bitmap path is one key away");
     }
 
+    /// H.264 is drawn on the graphics pipeline, so the key is refused where there
+    /// is none: on a VNC target, and on an RDP target with the pipeline off.
+    #[test]
+    fn egfx_h264_needs_a_pipeline_to_ride() {
+        let parse = |target: &str| {
+            ConfigFile::parse(&format!(
+                r#"
+                [server]
+                {}
+
+                [[targets]]
+                name = "nope"
+                host = "10.0.0.5"
+                {target}
+                egfx_h264 = true
+                "#,
+                site_passwd_line()
+            ))
+        };
+        let vnc = format!("{:#}", parse("protocol = \"vnc\"").unwrap_err());
+        assert!(vnc.contains("egfx_h264") && vnc.contains("rdp"), "{vnc}");
+        let rdp = "protocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"";
+        let bitmap = format!("{:#}", parse(&format!("{rdp}\negfx = false")).unwrap_err());
+        assert!(bitmap.contains("egfx_h264") && bitmap.contains("egfx = false"), "{bitmap}");
+        assert!(parse(rdp).unwrap().targets[0].egfx_h264);
+    }
+
     /// The pipeline is passed in a session started with the passthrough, to a page
     /// that composes it, and offered only by a target with a pipeline to pass. So
     /// is an RDP resize, which is a graphics reset: the bitmap path offers neither.
@@ -3923,16 +3997,31 @@ mod tests {
             Offers { resize: true, audio: true, passthrough: Some(Passthrough::RdpGraphics) }
         );
         for chroma in [Chroma::Subsampled, Chroma::Full] {
-            let composes = Decoders { chroma, apple_media: false, rdp_graphics: true };
+            let composes = Decoders { chroma, apple_media: false, rdp_graphics: true, rdp_h264: false };
             let plan = win.render_plan(passed, composes);
             assert!(plan.rdp_graphics);
             assert_eq!(plan.describe(), "the host's graphics pipeline, passed through");
             assert_eq!(win.beyond(passed, composes), None);
-            let cannot = Decoders { rdp_graphics: false, ..composes };
+            let cannot = Decoders { rdp_graphics: false, rdp_h264: false, ..composes };
             assert_eq!(win.beyond(passed, cannot), Some(Passthrough::RdpGraphics));
             assert!(!win.render_plan(Choices::default(), composes).rdp_graphics);
         }
         assert_eq!(win.render_summary(), "video q90 chroma auto · adaptive");
+
+        // H.264 on the passed pipeline is the target's key, the session's choice
+        // and the browser's answer together, and none of them alone.
+        let h264 = rdp("egfx_h264 = true");
+        let decodes = Decoders { chroma: Chroma::Full, apple_media: false, rdp_graphics: true, rdp_h264: true };
+        let plan = h264.render_plan(passed, decodes);
+        assert!(plan.rdp_graphics && plan.rdp_h264);
+        assert_eq!(plan.describe(), "the host's graphics pipeline with H.264, passed through");
+        assert_eq!(h264.offers(), win.offers(), "the key adds no choice to the picker");
+        let cannot = Decoders { rdp_h264: false, ..decodes };
+        let lossless = h264.render_plan(passed, cannot);
+        assert!(lossless.rdp_graphics && !lossless.rdp_h264, "a browser that cannot is passed a pipeline without it");
+        assert_eq!(h264.beyond(passed, cannot), None, "and is not turned away");
+        assert!(!h264.render_plan(Choices::default(), decodes).rdp_h264, "a composed session never takes it");
+        assert!(!win.render_plan(passed, decodes).rdp_h264, "nor a target without the key");
 
         let bitmap = rdp("egfx = false");
         assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: None });
@@ -4104,7 +4193,7 @@ mod tests {
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false });
         assert_eq!(plan.describe(), "video q80 4:2:0 · adaptive");
     }
 
@@ -4116,7 +4205,7 @@ mod tests {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false });
         assert_eq!(plan.describe(), "video q80 4:2:0");
     }
 

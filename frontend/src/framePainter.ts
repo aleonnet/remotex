@@ -4,6 +4,7 @@ import {
   loadEgfx,
 } from "./egfxCompositor.ts";
 import type { GraphicsPicture } from "./egfxPicture.ts";
+import { createEgfxVideo, type EgfxVideo } from "./egfxVideo.ts";
 import type { HevcPicture } from "./hevcPicture.ts";
 import { type DecodedPicture, isHevcPlanes } from "./hevcWasmDecoder.ts";
 import {
@@ -95,6 +96,12 @@ export function createFramePainter(options: {
    */
   makePicture?: () => GraphicsPicture;
   /**
+   * EXPERIMENTAL: what decodes the H.264 a pipeline may carry (egfxVideo.ts): the
+   * browser's `VideoDecoder`, a stream for each surface. Injectable for a test,
+   * which has no decoder.
+   */
+  makeGraphicsVideo?: () => EgfxVideo;
+  /**
    * EXPERIMENTAL: where the software HEVC decoder's pictures are drawn, the same
    * canvas (hevcPicture.ts). A painter given none presents none.
    */
@@ -125,6 +132,8 @@ export function createFramePainter(options: {
   interface Pipeline {
     compositor: EgfxCompositor | null;
     picture: GraphicsPicture | null;
+    /** Its H.264 decoders, made by the first access unit it carries. */
+    video: EgfxVideo | null;
     /** Whether the page has been told to show the picture. */
     shown: boolean;
     broken: boolean;
@@ -132,6 +141,7 @@ export function createFramePainter(options: {
   }
   let pipeline: Pipeline | null = null;
   const loadCompositor = options.loadCompositor ?? (() => loadEgfx());
+  const makeGraphicsVideo = options.makeGraphicsVideo ?? createEgfxVideo;
   const makePicture =
     options.makePicture ??
     (() => {
@@ -142,6 +152,10 @@ export function createFramePainter(options: {
   // stays where it is, showing what was last drawn.
   const stop = (done: Pipeline) => {
     done.broken = true;
+    // Settles the unit a run is waiting on, which is what lets a run that this
+    // ended in mid-decode come back and find it ended.
+    done.video?.close();
+    done.video = null;
     done.compositor?.close();
     done.compositor = null;
   };
@@ -282,6 +296,41 @@ export function createFramePainter(options: {
     options.onVideoNeedsKeyframe("a malformed batch was dropped");
   };
 
+  // A run's H.264, where it has any, ahead of composing it: each access unit
+  // through its surface's decoder in command order, and the picture handed to the
+  // compositor, which paints it where the run's commands say. Every wait is one
+  // the pipeline may end during, and an ended one's compositor is not to be
+  // touched: false then, and the run is dropped.
+  const decodeUnits = async (
+    current: Pipeline,
+    compositor: EgfxCompositor,
+    commands: Uint8Array,
+  ): Promise<boolean> => {
+    for (const found of compositor.scan(commands)) {
+      if ("gone" in found) {
+        current.video?.drop(found.gone);
+        continue;
+      }
+      const { unit, number } = found;
+      current.video ??= makeGraphicsVideo();
+      const frame = await current.video.decode(
+        unit,
+        commands.subarray(unit.start, unit.end),
+      );
+      try {
+        if (!current.broken) {
+          await compositor.supply(number, unit.window, frame);
+        }
+      } finally {
+        frame.close();
+      }
+      if (current.broken) {
+        return false;
+      }
+    }
+    return true;
+  };
+
   // One run of the pipeline, composed and painted when its turn comes. Everything a
   // run needs is what the runs before it left, so nothing here starts early: the
   // module's load is waited for in place, and a run for a pipeline that has been
@@ -303,6 +352,9 @@ export function createFramePainter(options: {
     }
     let run: ReturnType<EgfxCompositor["compose"]>;
     try {
+      if (!(await decodeUnits(current, compositor, record.data))) {
+        return;
+      }
       run = compositor.compose(record.data);
       picture.upload(run);
     } catch (error) {
@@ -433,6 +485,7 @@ export function createFramePainter(options: {
       const starting: Pipeline = {
         compositor: null,
         picture: null,
+        video: null,
         shown: false,
         broken: false,
         ready: Promise.resolve(),

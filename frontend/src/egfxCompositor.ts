@@ -17,6 +17,11 @@
 // A memory that is shared needs a page that is cross-origin isolated, which the
 // gateway's two headers make of every page it serves (src/assets.rs).
 //
+// H.264 is the one codec the module does not decode (EXPERIMENTAL, rdpH264.ts): a
+// run's access units are found by `scan`, decoded by the browser (egfxVideo.ts),
+// and each picture's samples copied into the module's memory by `supply`, before
+// the run is composed and paints them.
+//
 // The framebuffer stays in the module's memory, and a canvas takes no image data
 // out of a shared one; a WebGL texture takes an upload from one. So `pixels` is a
 // view on the framebuffer where it is, good until the next `compose`, and the
@@ -58,7 +63,69 @@ export interface ComposedRun {
   pixels: Uint8ClampedArray;
 }
 
+/** The part of a picture, in its own pixels, right and bottom exclusive. */
+export interface PictureWindow {
+  left: number;
+  top: number;
+  right: number;
+  bottom: number;
+}
+
+/** One H.264 access unit in a run of commands. */
+export interface H264Unit {
+  /** The surface whose stream it belongs to. */
+  surface: number;
+  /** Where its bytes are in the commands, Annex B. */
+  start: number;
+  end: number;
+  /** Whether a decoder can start at it. */
+  key: boolean;
+  /**
+   * The codec string its parameter sets name, `avc1.` and their profile,
+   * constraint and level bytes; null for a unit that carries none.
+   */
+  codec: string | null;
+  /**
+   * How much of its picture the compositor paints from: a part, the whole, or
+   * null for none. A unit that shows nothing is still part of its stream.
+   */
+  window: PictureWindow | "whole" | null;
+}
+
+/** What a scan finds in a run, in command order. */
+export type Scanned =
+  /** An access unit, and its number in the run, which `supply` takes. */
+  | { unit: H264Unit; number: number }
+  /** A surface was created or deleted: its stream is over. */
+  | { gone: number };
+
+/**
+ * What `supply` needs of a decoded picture, which is a `VideoFrame`'s own: the
+ * samples' layout, where the picture lies in what was coded, and a copy of a
+ * part of it.
+ */
+export type DecodedFrame = Pick<
+  VideoFrame,
+  "format" | "visibleRect" | "allocationSize" | "copyTo"
+>;
+
 export interface EgfxCompositor {
+  /**
+   * Find the H.264 access units in one GRAPHICS record's commands, and the
+   * surfaces whose streams end in it. Throws for a command that does not decode,
+   * as `compose` would.
+   */
+  scan(commands: Uint8Array): Scanned[];
+  /**
+   * Hand over the decoded picture of unit `number` of the record composed next:
+   * the samples its window names, copied into the module's memory. Throws for a
+   * picture laid out in a way the compositor does not read.
+   */
+  supply(
+    number: number,
+    window: H264Unit["window"],
+    frame: DecodedFrame,
+  ): Promise<void>;
   /**
    * Compose one GRAPHICS record's commands. Throws for a command that does not
    * decode, after which this compositor is no longer the host's picture of its
@@ -152,6 +219,60 @@ function coalesce(painted: Uint32Array): Uint32Array {
   return Uint32Array.from(merged.flat());
 }
 
+/** How many numbers the module says each thing a scan found in. */
+const SCAN_FIELDS = 10;
+/** The window the module names for the whole of a picture. */
+const WHOLE = 0xffffffff;
+
+/** What the module's scan found, read out of its numbers (`Egfx::units`). */
+function scanned(fields: Uint32Array): Scanned[] {
+  const found: Scanned[] = [];
+  let number = 0;
+  for (let at = 0; at + SCAN_FIELDS <= fields.length; at += SCAN_FIELDS) {
+    const [kind, surface, start, end, key, profile, left, top, right, bottom] =
+      fields.subarray(at, at + SCAN_FIELDS);
+    if (kind === 1) {
+      found.push({ gone: surface });
+      continue;
+    }
+    let window: H264Unit["window"] = { left, top, right, bottom };
+    if (left === WHOLE) {
+      window = "whole";
+    } else if (right === 0) {
+      window = null;
+    }
+    // `0x01PPCCLL`: the marker byte, then the three a codec string is made of.
+    const codec =
+      profile === 0
+        ? null
+        : `avc1.${(profile & 0xffffff).toString(16).padStart(6, "0")}`;
+    found.push({
+      unit: { surface, start, end, key: key === 1, codec, window },
+      number,
+    });
+    number += 1;
+  }
+  return found;
+}
+
+/**
+ * The part of a decoded picture a window names, widened to whole chroma samples
+ * and kept to the picture; null when nothing of it is inside.
+ */
+function windowRect(
+  window: PictureWindow | "whole",
+  visible: DOMRectReadOnly,
+): PictureWindow | null {
+  if (window === "whole") {
+    return { left: 0, top: 0, right: visible.width, bottom: visible.height };
+  }
+  const left = window.left & ~1;
+  const top = window.top & ~1;
+  const right = Math.min(window.right + (window.right & 1), visible.width);
+  const bottom = Math.min(window.bottom + (window.bottom & 1), visible.height);
+  return left < right && top < bottom ? { left, top, right, bottom } : null;
+}
+
 /**
  * The module, fetched and compiled once for the page, its threads started, and
  * what makes compositors out of it. `source` is the module's bytes for a runtime
@@ -169,7 +290,57 @@ export function loadEgfx(
       }
       return () => {
         const egfx = new Egfx();
+        // The module's memory is given back by `close`, and not from under a copy
+        // the browser is still writing into it.
+        let closed = false;
+        let copying: Promise<unknown> | null = null;
         return {
+          scan(commands: Uint8Array): Scanned[] {
+            return scanned(egfx.units(commands));
+          },
+          async supply(
+            number: number,
+            window: H264Unit["window"],
+            frame: DecodedFrame,
+          ): Promise<void> {
+            const visible = frame.visibleRect;
+            const part = window && visible && windowRect(window, visible);
+            if (!part) {
+              return;
+            }
+            const format = frame.format;
+            if (format !== "I420" && format !== "NV12") {
+              throw new Error(`its H.264 decoder's pictures are ${format}`);
+            }
+            const rect = {
+              x: visible.x + part.left,
+              y: visible.y + part.top,
+              width: part.right - part.left,
+              height: part.bottom - part.top,
+            };
+            const size = frame.allocationSize({ rect });
+            // The room first: making it may grow the memory, and the buffer read
+            // before that is the memory as it was.
+            const at = egfx.reserve(size);
+            const room = new Uint8Array(memory.buffer, at, size);
+            const copy = frame.copyTo(room, { rect });
+            copying = copy.catch(() => {});
+            const layout = await copy;
+            copying = null;
+            if (closed) {
+              return;
+            }
+            egfx.supply(
+              number,
+              part.left,
+              part.top,
+              rect.width,
+              rect.height,
+              Uint32Array.from(
+                layout.flatMap((plane) => [plane.offset, plane.stride]),
+              ),
+            );
+          },
           compose(commands: Uint8Array): ComposedRun {
             egfx.compose(commands);
             const width = egfx.width();
@@ -188,7 +359,12 @@ export function loadEgfx(
             };
           },
           close() {
-            egfx.free();
+            closed = true;
+            if (copying) {
+              void copying.then(() => egfx.free());
+            } else {
+              egfx.free();
+            }
           },
         };
       };

@@ -14,13 +14,14 @@
 //!
 //! Uncompressed rectangles and the planar codec of [`planar`] — the same codec a
 //! bitmap update uses, the rows the right way up this time; ClearCodec and
-//! RemoteFX Progressive. H.264 is not among them and is not meant to be: the
-//! capability advertise tells the host not to send it, so no part of the desktop
-//! is lost to a video codec before it is encoded here. Every other codec a server
-//! names is counted and left unpainted, with the first sighting of each said once
-//! in the log: that count is what decides which decoder is written next, and a
-//! codec this client cannot read is a hole in the picture rather than the end of
-//! the session.
+//! RemoteFX Progressive. H.264 is not among them: a host sends it only to a session
+//! whose capability advertise takes it, which is a passed pipeline's
+//! ([`gfx::caps_advertise`]), and its access units are decoded by whoever composes
+//! that pipeline and painted here from the pictures they supply
+//! ([`Graphics::supply`], [`crate::avc`]). Every other codec a server names is
+//! counted and left unpainted, with the first sighting of each said once in the
+//! log: that count is what decides which decoder is written next, and a codec this
+//! client cannot read is a hole in the picture rather than the end of the session.
 //!
 //! [`Graphics::receive`] is the whole of it: one channel PDU in, and out come the
 //! things the session has to act on that the framebuffer cannot show — the output
@@ -31,6 +32,7 @@ use std::collections::BTreeMap;
 use anyhow::{Context as _, Result};
 use log::{debug, info, warn};
 
+use crate::avc::{self, Avc, Picture};
 use crate::framebuffer::{Framebuffer, Rect, affordable, stage};
 use crate::proto::bitmap::MAX_DESKTOP_BYTES;
 use crate::proto::gfx::{self, Message, Point16, Rect16};
@@ -79,6 +81,9 @@ struct Surface {
     mapped: Option<(u32, u32)>,
     /// Rectangles of the surface drawn into since the last EndFrame.
     invalid: Vec<Rect>,
+    /// What its H.264 stream leaves between units, made on the first one: every
+    /// surface a host draws H.264 into has a stream of its own.
+    avc: Option<Box<Avc>>,
 }
 
 impl Surface {
@@ -267,6 +272,11 @@ pub struct Graphics {
     /// Whether the commands are passed on rather than composed here — see
     /// [`Self::passing`].
     pass: bool,
+    /// The pictures supplied for the next run's H.264 access units, by the unit's
+    /// number in the run ([`Self::supply`]).
+    supplied: BTreeMap<u32, Picture>,
+    /// How many access units the run being composed has reached.
+    unit: u32,
 }
 
 impl Default for Graphics {
@@ -292,6 +302,8 @@ impl Graphics {
             clear: None,
             progressive: None,
             pass: false,
+            supplied: BTreeMap::new(),
+            unit: 0,
         }
     }
 
@@ -343,13 +355,27 @@ impl Graphics {
         self.compose(buffer, framebuffer)
     }
 
-    /// Act on a buffer of commands that is already unwrapped.
+    /// Act on a buffer of commands that is already unwrapped. The pictures supplied
+    /// for it are its own: whichever it did not take are dropped with it.
     pub(crate) fn compose(&mut self, commands: &[u8], framebuffer: &Framebuffer) -> Result<Vec<Update>> {
+        self.unit = 0;
+        let outcome = self.compose_run(commands, framebuffer);
+        self.supplied.clear();
+        outcome
+    }
+
+    fn compose_run(&mut self, commands: &[u8], framebuffer: &Framebuffer) -> Result<Vec<Update>> {
         let mut updates = Vec::new();
         for message in gfx::messages(commands) {
             self.act(message?, framebuffer, &mut updates)?;
         }
         Ok(updates)
+    }
+
+    /// The decoded picture of one H.264 access unit in the run composed next,
+    /// under the unit's number in that run as [`avc::scan`] counts them.
+    pub(crate) fn supply(&mut self, unit: u32, picture: Picture) {
+        self.supplied.insert(unit, picture);
     }
 
     /// A buffer of commands for whoever composes them, cut where the session has
@@ -448,6 +474,7 @@ impl Graphics {
                     pixels: vec![0; bytes],
                     mapped: None,
                     invalid: Vec::new(),
+                    avc: None,
                 };
                 // A server may create a surface under a number still in use; the
                 // new one replaces the old.
@@ -499,7 +526,13 @@ impl Graphics {
             Message::WireToSurface1 { surface, codec, format, rect, data } => {
                 self.tally.command(gfx::CMD_WIRE_TO_SURFACE_1);
                 self.tally.codec(codec);
-                self.draw(surface, codec, format, rect, data);
+                if avc::carries(codec) {
+                    // The picture is the surface, masked; the command's rectangle
+                    // says nothing the metablock does not.
+                    self.draw_avc(surface, codec, data);
+                } else {
+                    self.draw(surface, codec, format, rect, data);
+                }
             }
             Message::WireToSurface2 { surface, codec, format, data, .. } => {
                 self.tally.command(gfx::CMD_WIRE_TO_SURFACE_2);
@@ -613,6 +646,43 @@ impl Graphics {
             Ok(bgrx) => found.write(rect, bgrx),
             // One rectangle the server will draw again; not the session.
             Err(e) => warn!("rdp: leaving a {width}x{height} {} rectangle unpainted: {e}", gfx::codec_name(codec)),
+        }
+    }
+
+    /// An H.264 stream for a surface: its masked rectangles, painted from the
+    /// pictures supplied for its access units.
+    ///
+    /// The units are counted before anything can turn the stream away, so that the
+    /// numbers stay [`avc::scan`]'s whatever becomes of one stream. A stream whose
+    /// picture was not supplied, or does not hold what it says, costs its
+    /// rectangles and not the session.
+    fn draw_avc(&mut self, surface: u16, codec: u16, data: &[u8]) {
+        let stream = match avc::Stream::read(codec, data) {
+            Ok(stream) => stream,
+            Err(e) => {
+                warn!("rdp: leaving a {} stream unpainted: {e}", gfx::codec_name(codec));
+                return;
+            }
+        };
+        let first = self.unit;
+        self.unit += stream.units();
+        let (luma, chroma) = stream.numbers();
+        let luma = luma.and_then(|at| self.supplied.remove(&(first + at)));
+        let chroma = chroma.and_then(|at| self.supplied.remove(&(first + at)));
+        let Some(found) = self.surfaces.get_mut(&surface) else {
+            warn!("rdp: the host drew into graphics surface {surface}, which does not exist");
+            return;
+        };
+        // Lifted out of the surface for the call, so the paints can borrow the
+        // surface's pixels.
+        let mut state = found.avc.take().unwrap_or_default();
+        let size = (found.width, found.height);
+        let outcome = state.draw(&stream, luma.as_ref(), chroma.as_ref(), size, &mut |rect, rows, stride| {
+            found.copy_rows(to_rect(rect), rows, stride);
+        });
+        found.avc = Some(state);
+        if let Err(e) = outcome {
+            warn!("rdp: leaving a {} stream's rectangles unpainted: {e:#}", gfx::codec_name(codec));
         }
     }
 
@@ -1365,5 +1435,77 @@ mod tests {
     fn a_fresh_pipeline_keeps_whether_it_passes() {
         assert!(Graphics::passing().fresh().pass);
         assert!(!Graphics::new().fresh().pass);
+    }
+
+    /// H.264 is painted from the pictures supplied for a run's access units, each
+    /// under its number in the run — which counts every unit that reads, whatever
+    /// becomes of its stream — and a unit with no picture leaves its rectangles as
+    /// they were.
+    #[test]
+    fn h264_is_painted_from_the_pictures_supplied_for_its_units() {
+        use crate::avc::testing::{close, flat, rgb_of};
+        use crate::avc::{Scanned, scan};
+        use crate::proto::avc::tests::{metablock, wrap444};
+        use crate::proto::gfx::{CODEC_AVC420, CODEC_AVC444};
+
+        let framebuffer = Framebuffer::new();
+        let mut graphics = Graphics::new();
+        receive(&mut graphics, &framebuffer, &[reset(64, 32), create(1, 32, 32), map(1, 0, 0), create(2, 32, 32), map(2, 32, 0)]);
+        let masked = |rect: (u16, u16, u16, u16)| [metablock(&[(rect, 20, 100)]), vec![0, 0, 1, 0x65]].concat();
+        let whole = (0, 0, 32, 32);
+        let run = [
+            start(1),
+            // Unit 0, on the first surface.
+            wire(1, CODEC_AVC420, whole, &masked((2, 2, 30, 20))),
+            // No unit: a metablock that does not read.
+            wire(1, CODEC_AVC420, whole, &[9, 0, 0, 0]),
+            // Unit 1, for a surface that does not exist: counted all the same.
+            wire(7, CODEC_AVC420, whole, &masked((0, 0, 8, 8))),
+            // Units 2 and 3, the two views of one picture on the second surface.
+            wire(2, CODEC_AVC444, whole, &wrap444(Some(&masked((0, 0, 16, 16))), Some(&masked((0, 0, 16, 16))))),
+            // Unit 4, which is supplied no picture.
+            wire(2, CODEC_AVC420, whole, &masked((16, 16, 32, 32))),
+            end(1),
+        ]
+        .concat();
+        let units = scan(&run).unwrap().into_iter().filter(|found| matches!(found, Scanned::Unit(_))).count();
+        assert_eq!(units, 5, "the scan numbers what the compositor counts");
+
+        let (first, second) = ([140u8, 90, 170], [100u8, 80, 160]);
+        graphics.supply(0, flat(32, 32, first));
+        graphics.supply(2, flat(32, 32, second));
+        // One flat colour in both views: under the first layout each macroblock of
+        // the chroma view's luma plane holds U's odd rows in its top eight rows and
+        // V's in its bottom eight, and its chroma planes the odd columns.
+        let mut aux = flat(32, 32, [0, second[1], second[2]]);
+        for (row, luma) in aux.data[..32 * 32].as_chunks_mut::<32>().0.iter_mut().enumerate() {
+            luma.fill(if row & 15 < 8 { second[1] } else { second[2] });
+        }
+        graphics.supply(3, aux);
+        let updates = graphics.compose(&run, &framebuffer).unwrap();
+        let painted = [Rect { x: 2, y: 2, width: 28, height: 18 }, Rect { x: 32, y: 0, width: 16, height: 16 }];
+        assert_eq!(updates, vec![Update::Paint(painted[0]), Update::Paint(painted[1]), Update::Frame { id: 1, decoded: 1 }]);
+        framebuffer.with(|frame| {
+            for (rect, yuv) in painted.iter().zip([first, second]) {
+                for row in frame.rows(*rect) {
+                    for px in row.as_chunks::<4>().0 {
+                        assert!(close(&px[..3], rgb_of(yuv)), "{px:?} vs {:?}", rgb_of(yuv));
+                    }
+                }
+            }
+            assert_eq!(&frame.pixels[..4], &[0, 0, 0, 0], "outside the mask is untouched");
+            let unsupplied = &frame.pixels[(20 * 64 + 52) * 4..][..4];
+            assert_eq!(unsupplied, &[0, 0, 0, 0], "a unit with no picture paints nothing");
+        });
+        assert!(graphics.supplied.is_empty(), "a run's pictures do not outlive it");
+
+        // The next run counts from nothing again, and a picture left over from
+        // this one is not there to be taken by it.
+        graphics.supply(1, flat(32, 32, first));
+        let next = [start(2), wire(1, CODEC_AVC420, whole, &masked((0, 0, 4, 4))), end(2)].concat();
+        assert_eq!(graphics.compose(&next, &framebuffer).unwrap(), vec![Update::Frame { id: 2, decoded: 2 }]);
+        graphics.supply(0, flat(32, 32, second));
+        let updates = graphics.compose(&next, &framebuffer).unwrap();
+        assert_eq!(updates[0], Update::Paint(Rect { x: 0, y: 0, width: 4, height: 4 }));
     }
 }

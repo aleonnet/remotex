@@ -167,7 +167,7 @@ pub async fn run(
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = VideoSink::new("rdp", frame_tx, plan, feedback, Oversize::Refuse);
-    session(config, choices.size, plan.rdp_graphics, display, input_rx, audio, uplinks, &sink).await;
+    session(config, choices.size, plan, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }
 
@@ -199,7 +199,7 @@ impl AudioSink for Sound {
 async fn session(
     config: TargetConfig,
     sizing: Sizing,
-    pass_graphics: bool,
+    plan: RenderPlan,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     audio: Option<Arc<AudioBridge>>,
@@ -209,7 +209,7 @@ async fn session(
     let resize = sizing == Sizing::Window;
     let opening = opening_layout(&config, sizing, display);
     let (session, mut events) =
-        Session::start(connect_config(&config, resize, opening, pass_graphics, audio, &uplinks));
+        Session::start(connect_config(&config, resize, opening, plan, audio, &uplinks));
     // The feeds exist from here, so the camera and mic sockets' traffic has somewhere to
     // go before the desktop does: a plug made while the host is still connecting waits in
     // the session's queue for the enumeration channel.
@@ -249,7 +249,7 @@ async fn session(
     if let Err(e) = active_loop(
         &session,
         events,
-        Flags { resize, pass_graphics },
+        Flags { resize, pass_graphics: plan.rdp_graphics },
         (width, height),
         applied,
         input_rx,
@@ -363,7 +363,7 @@ fn connect_config(
     config: &TargetConfig,
     resize: bool,
     opening: Layout,
-    pass_graphics: bool,
+    plan: RenderPlan,
     audio: Option<Arc<AudioBridge>>,
     uplinks: &Uplinks,
 ) -> Connect {
@@ -381,7 +381,8 @@ fn connect_config(
         scale_percent: if resize { opening.density.percent() } else { 0 },
         resize,
         egfx: config.egfx(),
-        pass_graphics,
+        pass_graphics: plan.rdp_graphics,
+        h264: plan.rdp_h264,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
         camera: uplinks.camera.as_ref().map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
         microphone: uplinks.microphone.as_ref().map(|bridge| rdp_mic::sink(Arc::clone(bridge))),
@@ -1969,6 +1970,7 @@ mod tests {
             chroma: crate::config::Chroma::Subsampled,
             apple_media: false,
             rdp_graphics: false,
+            rdp_h264: false,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("test", frame_tx, plan, feedback, crate::encode::Oversize::Refuse);

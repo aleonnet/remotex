@@ -104,6 +104,7 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         domain: None,
         size: None,
         egfx: None,
+        egfx_h264: false,
         camera: true,
         microphone: true,
         video_quality: None,
