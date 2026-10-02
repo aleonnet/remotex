@@ -380,7 +380,8 @@ impl Backlog {
 
 /// Pointer motion and scrolling held back while the uplink is behind, in the one
 /// form in which each can wait: a position a newer one replaces, and a distance a
-/// later one adds to.
+/// later one adds to — in the unit it came in, because a wheel's notches and a
+/// glide's pixels are spent differently and a sum of the two would be neither.
 ///
 /// Both are worthless late. A server that reads slowly — a Mac reads hardly at all
 /// while it is pushing pixels — would otherwise be sent every position the pointer
@@ -394,13 +395,17 @@ impl Backlog {
 #[derive(Default)]
 struct HeldMotion {
     pointer: Option<(i32, i32)>,
-    /// Pixels of scroll intent, whatever unit they were reported in.
-    wheel: (f32, f32),
+    /// Scroll intent, a sum for each of [`Self::UNITS`]; a page is held as the
+    /// lines it is worth.
+    wheel: [(f32, f32); 3],
 }
 
 impl HeldMotion {
+    /// The units a scroll is held in, and re-sent in, in the order of `wheel`.
+    const UNITS: [WheelUnit; 3] = [WheelUnit::Pixel, WheelUnit::Line, WheelUnit::Notch];
+
     fn is_empty(&self) -> bool {
-        self.pointer.is_none() && self.wheel == (0.0, 0.0)
+        self.pointer.is_none() && self.wheel == [(0.0, 0.0); 3]
     }
 
     /// Take `input` if it is motion, or hand it back.
@@ -410,11 +415,30 @@ impl HeldMotion {
             ClientMsg::Wheel { dx, dy, unit } => {
                 // Held under the cap a single event is spent under, so what is
                 // shed is shed here rather than carried as a number that only grows.
-                let add = |held: f32, delta: f32| {
-                    let sum = held + Wheel::pixels(delta, unit);
-                    if sum.is_finite() { sum.clamp(-Wheel::MAX_PX, Wheel::MAX_PX) } else { held }
+                let (slot, scale) = match unit {
+                    WheelUnit::Pixel => (0, 1.0),
+                    WheelUnit::Line => (1, 1.0),
+                    WheelUnit::Page => (1, Wheel::PAGE_LINES),
+                    WheelUnit::Notch => (2, 1.0),
                 };
-                self.wheel = (add(self.wheel.0, dx), add(self.wheel.1, dy));
+                // One cap for the units together: each is re-sent as an event of
+                // its own, and a hand that went from trackpad to wheel must not
+                // be owed an event's worth for each.
+                let px = Wheel::pixels(1.0, Self::UNITS[slot]);
+                let others = |axis: fn(&(f32, f32)) -> f32| -> f32 {
+                    (self.wheel.iter().zip(Self::UNITS).enumerate())
+                        .filter(|&(i, _)| i != slot)
+                        .map(|(_, (held, unit))| Wheel::pixels(axis(held), unit).abs())
+                        .sum()
+                };
+                let room = (others(|held| held.0), others(|held| held.1));
+                let add = |held: f32, delta: f32, room: f32| {
+                    let max = (Wheel::MAX_PX - room).max(0.0) / px;
+                    let sum = held + delta * scale;
+                    if sum.is_finite() { sum.clamp(-max, max) } else { held }
+                };
+                let held = &mut self.wheel[slot];
+                *held = (add(held.0, dx, room.0), add(held.1, dy, room.1));
             }
             other => return Some(other),
         }
@@ -424,10 +448,13 @@ impl HeldMotion {
     /// What was held, as the inputs it stands for: the position first, because a
     /// scroll lands where the pointer is.
     fn take(&mut self) -> impl Iterator<Item = ClientMsg> + use<> {
-        let Self { pointer, wheel: (dx, dy) } = std::mem::take(self);
+        let Self { pointer, wheel } = std::mem::take(self);
         let pointer = pointer.map(|(x, y)| ClientMsg::MouseMove { x, y });
-        let wheel = ((dx, dy) != (0.0, 0.0))
-            .then_some(ClientMsg::Wheel { dx, dy, unit: WheelUnit::Pixel });
+        let wheel = wheel
+            .into_iter()
+            .zip(Self::UNITS)
+            .filter(|&(held, _)| held != (0.0, 0.0))
+            .map(|((dx, dy), unit)| ClientMsg::Wheel { dx, dy, unit });
         pointer.into_iter().chain(wheel)
     }
 }
@@ -5480,16 +5507,22 @@ async fn read_display_layout<R: AsyncRead + Unpin>(
 ///
 /// wlshare is ours, so there the vocabulary was widened instead: a `wlshare`
 /// target is sent the distance itself ([`MSG_WLSHARE_SCROLL`]), which the
-/// compositor hands its applications the way it hands them a touchpad's.
+/// compositor hands its applications the way it hands them a touchpad's. Only a
+/// distance, though — a glide's pixels. A wheel's notches, lines and pages are
+/// still wheel-button pulses there, a notch apiece, which the compositor hands
+/// on as the wheel they are: an application spends a notch as its own step,
+/// and sent the ~100 pixels a browser calls one it scrolls several times that.
 enum Wheel {
     /// One pulse per event, whatever the delta.
     Notch,
     /// Pulses proportional to the distance asked for, holding the sub-pulse
     /// remainder per axis between events.
     Apple { pending: (f32, f32) },
-    /// The distance itself, in whole pixels, holding the sub-pixel remainder
-    /// per axis between events.
-    Wlshare { pending: (f32, f32) },
+    /// The distance itself, in whole pixels, for a delta in pixels, and whole
+    /// notches as pulses for one that is not, holding the remainder of each per
+    /// axis between events. The two remainders are apart: a reversal starts
+    /// over only the one its own unit spends, and the other's fraction stays.
+    Wlshare { pending: (f32, f32), notches: (f32, f32) },
 }
 
 impl Wheel {
@@ -5498,6 +5531,14 @@ impl Wheel {
     const LINE_PX: f32 = 16.0;
     /// A `page` delta, in lines: a screenful, which is what the DOM means by it.
     const PAGE_LINES: f32 = 20.0;
+    /// The distance a `notch` delta is worth: what Chromium reports for a mouse
+    /// notch, so a notch costs an Apple target what its pixels did.
+    const NOTCH_PX: f32 = 100.0;
+    /// The lines a notch is: the three a desktop scrolls by default, which is
+    /// what a browser reporting lines counts.
+    const NOTCH_LINES: f32 = 3.0;
+    /// The most one event may spend on a `wlshare` target, in notches.
+    const MAX_NOTCHES: f32 = 5.0;
     /// The most one event may spend, in pixels of intent: a single absurd delta —
     /// a flick, or a client that reports a whole document — must not turn into
     /// thousands of pointer events queued ahead of everything else on the uplink.
@@ -5522,7 +5563,7 @@ impl Wheel {
     /// A `wlshare` target's: not merely a wlshare server, since one reached as
     /// plain `vnc` is read through the RFB baseline.
     fn wlshare() -> Self {
-        Self::Wlshare { pending: (0.0, 0.0) }
+        Self::Wlshare { pending: (0.0, 0.0), notches: (0.0, 0.0) }
     }
 
     /// A delta in the pixels it stands for, whatever unit it was reported in.
@@ -5531,11 +5572,23 @@ impl Wheel {
             WheelUnit::Pixel => delta,
             WheelUnit::Line => delta * Self::LINE_PX,
             WheelUnit::Page => delta * Self::PAGE_LINES * Self::LINE_PX,
+            WheelUnit::Notch => delta * Self::NOTCH_PX,
+        }
+    }
+
+    /// A delta in the wheel notches it stands for, or `None` for one in pixels,
+    /// which is a distance and no wheel's.
+    fn notches(delta: f32, unit: WheelUnit) -> Option<f32> {
+        match unit {
+            WheelUnit::Pixel => None,
+            WheelUnit::Line => Some(delta / Self::NOTCH_LINES),
+            WheelUnit::Page => Some(delta * Self::PAGE_LINES / Self::NOTCH_LINES),
+            WheelUnit::Notch => Some(delta),
         }
     }
 
     /// Whole pulses to send for one wheel event, as (horizontal, vertical) —
-    /// or, for wlshare, whole pixels.
+    /// or, for wlshare and a delta in pixels, whole pixels.
     fn pulses(&mut self, dx: f32, dy: f32, unit: WheelUnit) -> (i32, i32) {
         let px = |delta: f32| Self::pixels(delta, unit);
         match self {
@@ -5548,10 +5601,16 @@ impl Wheel {
                     Self::spend(&mut pending.1, px(dy) / step, max),
                 )
             }
-            Self::Wlshare { pending } => (
-                Self::spend(&mut pending.0, px(dx), Self::MAX_PX),
-                Self::spend(&mut pending.1, px(dy), Self::MAX_PX),
-            ),
+            Self::Wlshare { pending, notches } => match (Self::notches(dx, unit), Self::notches(dy, unit)) {
+                (Some(x), Some(y)) => (
+                    Self::spend(&mut notches.0, x, Self::MAX_NOTCHES),
+                    Self::spend(&mut notches.1, y, Self::MAX_NOTCHES),
+                ),
+                _ => (
+                    Self::spend(&mut pending.0, px(dx), Self::MAX_PX),
+                    Self::spend(&mut pending.1, px(dy), Self::MAX_PX),
+                ),
+            },
         }
     }
 
@@ -5689,7 +5748,9 @@ fn translate_input(
             // is the input to every constant above, and it varies by browser,
             // by pointing device and by platform.
             debug!("vnc: wheel dx={dx} dy={dy} {unit:?} -> {px} + {py} pulses");
-            if let Wheel::Wlshare { .. } = wheel {
+            // A distance goes to wlshare as one; a wheel's notches are pulses
+            // there as anywhere.
+            if matches!(wheel, Wheel::Wlshare { .. }) && unit == WheelUnit::Pixel {
                 if (px, py) == (0, 0) {
                     return Vec::new();
                 }
@@ -8019,6 +8080,37 @@ mod tests {
         assert!(send(0.0, 0.5).is_empty(), "less than a pixel is held");
         assert_eq!(send(0.0, 0.5), [vec![0xE5, 0, 0, 0, 0, 1]]);
         assert_eq!(send(0.0, 10_000.0), [vec![0xE5, 0, 0, 0, 0x02, 0x00]], "held to one event's cap");
+    }
+
+    /// A wheel is not a glide: its notches reach a `wlshare` target as the
+    /// wheel-button pulses they are everywhere else, one a notch, and never as
+    /// the distance a browser prices a notch at.
+    #[test]
+    fn a_wlshare_target_is_sent_a_wheel_as_notches() {
+        let mut wheel = Wheel::wlshare();
+        let mut send = |dx, dy, unit| {
+            translate_input(
+                ClientMsg::Wheel { dx, dy, unit },
+                &Buttons::Rfb,
+                &mut 0x01,
+                &mut (5, 6),
+                &mut HashMap::new(),
+                &mut wheel,
+                false,
+            )
+        };
+        let masks = |msgs: Vec<Vec<u8>>| msgs.iter().map(|m| m[1]).collect::<Vec<_>>();
+        assert_eq!(masks(send(0.0, 1.0, WheelUnit::Notch)), [0x11, 0x01]);
+        assert_eq!(masks(send(0.0, -2.0, WheelUnit::Notch)), [0x09, 0x01, 0x09, 0x01]);
+        assert_eq!(masks(send(1.0, 0.0, WheelUnit::Notch)), [0x41, 0x01]);
+        // Three lines are a notch, and fewer wait for the rest of one.
+        assert_eq!(masks(send(0.0, 3.0, WheelUnit::Line)), [0x11, 0x01]);
+        assert!(send(0.0, 1.5, WheelUnit::Line).is_empty());
+        assert_eq!(masks(send(0.0, 1.5, WheelUnit::Line)), [0x11, 0x01]);
+        assert_eq!(masks(send(0.0, 1.0, WheelUnit::Page)).len(), 10, "a page, held to one event's cap");
+        assert_eq!(masks(send(0.0, 1_000.0, WheelUnit::Notch)).len(), 10);
+        // A glide between two notches is still a distance.
+        assert_eq!(send(0.0, 7.0, WheelUnit::Pixel), [vec![0xE5, 0, 0, 0, 0, 7]]);
     }
 
     /// One wheel event with `held` buttons down, as the masks it sends.
@@ -10446,17 +10538,29 @@ mod tests {
         assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 30.0, unit: WheelUnit::Pixel }).is_none());
         assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 2.0, unit: WheelUnit::Line }).is_none());
         assert!(held.hold(ClientMsg::Wheel { dx: -4.0, dy: -12.0, unit: WheelUnit::Pixel }).is_none());
+        assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 1.0, unit: WheelUnit::Page }).is_none());
+        assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 0.25, unit: WheelUnit::Notch }).is_none());
+        assert!(held.hold(ClientMsg::Wheel { dx: 0.0, dy: 0.75, unit: WheelUnit::Notch }).is_none());
         assert!(!held.is_empty());
 
         // The position first: the scroll lands where the pointer is.
         let out: Vec<ClientMsg> = held.take().collect();
         assert!(matches!(out[0], ClientMsg::MouseMove { x: 99, y: 198 }));
-        let line = Wheel::LINE_PX;
+        // Then the scroll, each unit's sum in its own: a wheel's notches are not
+        // a glide's pixels.
         assert!(matches!(
             out[1],
-            ClientMsg::Wheel { dx, dy, unit: WheelUnit::Pixel } if dx == -4.0 && dy == 18.0 + 2.0 * line
+            ClientMsg::Wheel { dx, dy, unit: WheelUnit::Pixel } if dx == -4.0 && dy == 18.0
         ));
-        assert_eq!(out.len(), 2);
+        assert!(matches!(
+            out[2],
+            ClientMsg::Wheel { dx, dy, unit: WheelUnit::Line } if dx == 0.0 && dy == 2.0 + Wheel::PAGE_LINES
+        ));
+        assert!(matches!(
+            out[3],
+            ClientMsg::Wheel { dx, dy, unit: WheelUnit::Notch } if dx == 0.0 && dy == 1.0
+        ));
+        assert_eq!(out.len(), 4);
         assert!(held.is_empty(), "taken is no longer held");
     }
 
@@ -10474,6 +10578,26 @@ mod tests {
             out[..],
             [ClientMsg::Wheel { dx, dy, .. }] if dx == 0.0 && dy == Wheel::MAX_PX
         ));
+
+        // The cap is the units' together: a hand that changed from trackpad to
+        // wheel behind the link is still owed one event's worth, not one each.
+        held.hold(ClientMsg::Wheel { dx: 0.0, dy: 200.0, unit: WheelUnit::Pixel });
+        held.hold(ClientMsg::Wheel { dx: 0.0, dy: -1.0, unit: WheelUnit::Notch });
+        for unit in [WheelUnit::Line, WheelUnit::Page, WheelUnit::Notch, WheelUnit::Pixel] {
+            for _ in 0..50 {
+                held.hold(ClientMsg::Wheel { dx: 0.0, dy: 300.0, unit });
+            }
+        }
+        let out: Vec<ClientMsg> = held.take().collect();
+        assert_eq!(out.len(), 3, "a unit each");
+        let owed: f32 = out
+            .iter()
+            .map(|msg| match msg {
+                ClientMsg::Wheel { dy, unit, .. } => Wheel::pixels(*dy, *unit).abs(),
+                _ => panic!("only scroll was held"),
+            })
+            .sum();
+        assert!((owed - Wheel::MAX_PX).abs() < 0.01, "{owed}");
 
         let key = ClientMsg::Key { code: "KeyA".into(), pressed: true, caps: false };
         assert!(matches!(held.hold(key), Some(ClientMsg::Key { .. })));

@@ -57,7 +57,7 @@ import {
   mouseButtonBit,
   mouseButtonFromEvent,
   type RemoteClipboard,
-  wheelUnitFromEvent,
+  wheelFromEvent,
 } from "./protocol.ts";
 import { composesRdpGraphics } from "./rdpGraphics.ts";
 import { tabletGuestSize } from "./tabletGuestSize.ts";
@@ -2480,12 +2480,7 @@ export function useRemoteDesktop(
       releaseLiftedButtons(e);
       releaseLapsedPointer(e);
       moveTo(e);
-      send({
-        type: "wheel",
-        dx: e.deltaX,
-        dy: e.deltaY,
-        unit: wheelUnitFromEvent(e.deltaMode),
-      });
+      send({ type: "wheel", ...wheelFromEvent(e) });
     };
     const onContextMenu = (e: MouseEvent) => e.preventDefault();
     // WebKit's page zoom, which it fires as non-standard `gesture*` events that

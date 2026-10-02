@@ -14,6 +14,7 @@ import {
   decodeBatchFrame,
   mouseButtonBit,
   mouseButtonFromEvent,
+  wheelFromEvent,
   wheelUnitFromEvent,
 } from "./protocol.ts";
 
@@ -109,6 +110,107 @@ test("a wheel delta says which unit it is in", () => {
   assert.equal(wheelUnitFromEvent(2), "page");
   // Anything else is what every browser on macOS actually sends.
   assert.equal(wheelUnitFromEvent(7), "pixel");
+});
+
+test("a mouse wheel reported in pixels is sent as its notches", () => {
+  // Chromium: a notch is 100 pixels and a legacy delta of 120.
+  assert.deepEqual(
+    wheelFromEvent({
+      deltaX: 0,
+      deltaY: 100,
+      deltaMode: 0,
+      wheelDeltaX: 0,
+      wheelDeltaY: -120,
+    }),
+    { dx: 0, dy: 1, unit: "notch" },
+  );
+  assert.deepEqual(
+    wheelFromEvent({
+      deltaX: 0,
+      deltaY: -200,
+      deltaMode: 0,
+      wheelDeltaX: 0,
+      wheelDeltaY: 240,
+    }),
+    { dx: 0, dy: -2, unit: "notch" },
+  );
+  // Shift turns the wheel sideways.
+  assert.deepEqual(
+    wheelFromEvent({
+      deltaX: 100,
+      deltaY: 0,
+      deltaMode: 0,
+      wheelDeltaX: -120,
+      wheelDeltaY: 0,
+    }),
+    { dx: 1, dy: 0, unit: "notch" },
+  );
+});
+
+test("a glide stays the distance it is", () => {
+  assert.deepEqual(
+    wheelFromEvent({
+      deltaX: 1,
+      deltaY: 7,
+      deltaMode: 0,
+      wheelDeltaX: -3,
+      wheelDeltaY: -21,
+    }),
+    { dx: 1, dy: 7, unit: "pixel" },
+  );
+  // A trackpad's legacy delta is three times its pixels, so 40 of them land
+  // on a notch's 120 without being one.
+  assert.deepEqual(
+    wheelFromEvent({
+      deltaX: 0,
+      deltaY: 40,
+      deltaMode: 0,
+      wheelDeltaX: 0,
+      wheelDeltaY: -120,
+    }),
+    { dx: 0, dy: 40, unit: "pixel" },
+  );
+  // The legacy delta is a whole number, so a fraction of a pixel either side
+  // of 40 lands on 120 as well.
+  for (const deltaY of [39.7, 40.1, 40.3]) {
+    assert.deepEqual(
+      wheelFromEvent({
+        deltaX: 0,
+        deltaY,
+        deltaMode: 0,
+        wheelDeltaX: 0,
+        wheelDeltaY: -120,
+      }),
+      { dx: 0, dy: deltaY, unit: "pixel" },
+    );
+  }
+  // One axis off a notch is no wheel.
+  assert.deepEqual(
+    wheelFromEvent({
+      deltaX: 5,
+      deltaY: 100,
+      deltaMode: 0,
+      wheelDeltaX: -6,
+      wheelDeltaY: -120,
+    }),
+    { dx: 5, dy: 100, unit: "pixel" },
+  );
+  // Nothing to go by, and a wheel already in its own unit.
+  assert.deepEqual(wheelFromEvent({ deltaX: 0, deltaY: 100, deltaMode: 0 }), {
+    dx: 0,
+    dy: 100,
+    unit: "pixel",
+  });
+  assert.deepEqual(
+    wheelFromEvent({
+      deltaX: 0,
+      deltaY: 3,
+      deltaMode: 1,
+      wheelDeltaX: 0,
+      wheelDeltaY: -120,
+    }),
+    { dx: 0, dy: 3, unit: "line" },
+  );
 });
 
 // The layout mirrors `audio` in src/protocol.rs, whose `frame` and `gap` write
