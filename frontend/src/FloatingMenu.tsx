@@ -355,8 +355,7 @@ function useViewOnly(
 // useRemoteDesktop), and says which of the two it is doing. Takes the pointer
 // rather than passing it through — the surface underneath hides the browser's own
 // cursor, and a menu is no place to be without one — and a click on it closes the
-// drawer, as one beside any menu does. The clipboard panel is closed by its own
-// Close, and the cover stays under it until then.
+// drawer and the clipboard panel, as one beside any menu does.
 function ViewOnlyCover({
   over,
   onDismiss,
@@ -369,7 +368,7 @@ function ViewOnlyCover({
     return null;
   }
   return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: click-outside dismiss; the ✕ covers keyboard users
+    // biome-ignore lint/a11y/useKeyWithClickEvents: click-outside dismiss; the ✕ of the drawer and of the panel cover keyboard users
     // biome-ignore lint/a11y/noStaticElementInteractions: the cover behind the drawer
     <div className="view-only" onClick={onDismiss}>
       <span className="view-only-label">
@@ -1398,11 +1397,16 @@ export default function FloatingMenu({
   }, [resolvedPosition, viewport, floor]);
 
   const viewOnly = useViewOnly(open, hidden, modal, panel, onViewOnlyChange);
-  const closeDrawer = useCallback(() => setOpen(false), []);
+  // A click on the cover takes down what put it there. A modal card has a
+  // backdrop of its own over the cover, and the other panels never raise one.
+  const dismissCover = useCallback(() => {
+    setOpen(false);
+    setPanel((current) => (current === "clipboard" ? null : current));
+  }, [setPanel]);
 
   return (
     <>
-      <ViewOnlyCover over={viewOnly} onDismiss={closeDrawer} />
+      <ViewOnlyCover over={viewOnly} onDismiss={dismissCover} />
 
       {/* The button and its drawer go together: a toolbar anchored to a button
           that isn't there reads as a bug. Both keep their state while hidden, so

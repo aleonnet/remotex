@@ -993,8 +993,8 @@ body {
    above the framebuffer it covers. It takes the pointer instead of letting it
    through: the input overlay beneath hides the browser's own cursor for engines
    that composite their own into the pixels, and while the menu is up that cursor
-   is the one the user needs back. A click on it closes the drawer. See
-   FloatingMenu.tsx. */
+   is the one the user needs back. A click on it closes the drawer and the
+   clipboard panel. See FloatingMenu.tsx. */
 .view-only {
   position: fixed;
   inset: 0;
