@@ -81,9 +81,8 @@ export interface GestureView {
 export interface GestureDeps {
   send(msg: ClientMsg): void;
   // The remote framebuffer size, and how many of its pixels the remote draws
-  // per point of its desktop (absent means one); null before the first resize
-  // message.
-  remoteSize(): { w: number; h: number; scale?: number } | null;
+  // per point of its desktop; null before the first resize message.
+  remoteSize(): { w: number; h: number; scale: number } | null;
   // The current view transform, after clamping.
   view(): GestureView;
   // Clamp the requested zoom/pan and restyle the canvas.
@@ -226,14 +225,14 @@ export function attachTouchGestures(
   // Whether the gesture layer is holding the remote left button down.
   let leftHeld = false;
 
-  function remoteSize(): { w: number; h: number } {
-    return deps.remoteSize() ?? { w: 1, h: 1 };
+  function remoteSize(): { w: number; h: number; scale: number } {
+    return deps.remoteSize() ?? { w: 1, h: 1, scale: 1 };
   }
 
   // CSS pixels per point of the remote desktop, the unit a scroll is sent in —
   // what a wheel event's own pixels are on a desktop shown at 100%.
   function pointScale(): number {
-    return effectiveScale() * (deps.remoteSize()?.scale ?? 1);
+    return effectiveScale() * remoteSize().scale;
   }
 
   function effectiveScale(): number {
