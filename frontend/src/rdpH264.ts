@@ -28,25 +28,16 @@ let answer: boolean | null = null;
 
 /**
  * How a decoder for the host's stream is configured: for one picture out for each
- * access unit in, which is what composing in command order needs, and in software
- * where the browser has such a decoder. Every picture is read back into memory,
- * which costs a hardware decoder's far more than its decode saved.
+ * access unit in, which is what composing in command order needs. Which decoder
+ * that is, the GPU's or one in software, is left to the browser, as it is for the
+ * desktop's own stream (videoDecoder.ts). Null where the browser has none.
  */
 export async function rdpH264Config(
   codec: string,
 ): Promise<VideoDecoderConfig | null> {
-  const plain: VideoDecoderConfig = { codec, optimizeForLatency: true };
-  const software: VideoDecoderConfig = {
-    ...plain,
-    hardwareAcceleration: "prefer-software",
-  };
-  for (const config of [software, plain]) {
-    const support = await VideoDecoder.isConfigSupported(config);
-    if (support.supported === true) {
-      return config;
-    }
-  }
-  return null;
+  const config: VideoDecoderConfig = { codec, optimizeForLatency: true };
+  const support = await VideoDecoder.isConfigSupported(config);
+  return support.supported === true ? config : null;
 }
 
 /** Whether a decoded picture's samples can be copied into shared memory. */

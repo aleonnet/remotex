@@ -879,10 +879,12 @@ the pipeline.
   (`crates/remotex-rdp-graphics/src/avc.rs`). The conversion to RGB is the
   compositor's, full-range BT.709 as MS-RDPEGFX has it, and never the browser's:
   measured, Chrome labels this stream BT.601 from its software decoder and
-  limited-range BT.709 from a hardware one. The decoder is asked for in software
-  where the browser has one, because every picture is read back into memory:
-  measured on an Intel GPU at 1280×800, a hardware decoder's picture took 6 to
-  9 ms to copy out where the decode itself took half a millisecond. A decoder
+  limited-range BT.709 from a hardware one. Which decoder is the browser's
+  choice, as it is for the desktop's own stream ([The codec](#the-codec)): the
+  configuration states no `hardwareAcceleration`. A hardware decoder's picture
+  is read back from the GPU to be composed: measured on an Intel GPU at
+  1280×800, that copy took 6 to 9 ms where the decode itself took half a
+  millisecond. A decoder
   that fails or gives no picture ends the pipeline, as a command that does not
   decode does: the host sends no keyframe on request.
 

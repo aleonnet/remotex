@@ -112,11 +112,7 @@ test("each surface's stream goes through a decoder of its own, a picture a unit"
   const first = video.decode(key(1), Uint8Array.of(11));
   await submitted(() => decoders[0], 1);
   assert.deepEqual(decoders[0].configured, [
-    {
-      codec: "avc1.4d4020",
-      optimizeForLatency: true,
-      hardwareAcceleration: "prefer-software",
-    },
+    { codec: "avc1.4d4020", optimizeForLatency: true },
   ]);
   const picture = decoders[0].output();
   assert.equal(await first, picture as unknown as VideoFrame);

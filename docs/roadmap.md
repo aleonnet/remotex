@@ -146,9 +146,10 @@ What is not done:
   specification's tables. The one host tried sent AVC420 by region, and with
   `AVC_THINCLIENT`, which this client does not set, luma views alone.
 - **Large video.** Every decoded picture is copied into the compositor's memory
-  and converted there, which was measured at a 1280×800 desktop and not above.
-  Presenting a decoded picture on the GPU, and reading it back only when a later
-  command copies from it, is the step after that if a large one proves slow.
+  and converted there, which was measured at a 1280×800 desktop and not above,
+  and from a hardware decoder that copy is a readback off the GPU. Presenting a
+  decoded picture on the GPU, and reading it back only when a later command
+  copies from it, is the step after that if a large one proves slow.
 
 ### Two streams for Apple's All Displays
 

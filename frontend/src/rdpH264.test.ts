@@ -69,13 +69,8 @@ test("a browser with a decoder whose pictures copy into shared memory says yes",
   browserWith(() => true);
   assert.equal(await chooseRdpH264(), true);
   assert.equal(decodesRdpH264(), true);
-  assert.deepEqual(asked, [
-    {
-      codec: "avc1.4d4020",
-      optimizeForLatency: true,
-      hardwareAcceleration: "prefer-software",
-    },
-  ]);
+  // For one picture a unit, and with no say in which decoder the browser uses.
+  assert.deepEqual(asked, [{ codec: "avc1.4d4020", optimizeForLatency: true }]);
   assert.deepEqual(
     frames.map((frame) => frame.closed),
     [true],
@@ -85,14 +80,13 @@ test("a browser with a decoder whose pictures copy into shared memory says yes",
   assert.equal(asked.length, 1);
 });
 
-test("a decoder is in software where the browser has one, and its own otherwise", async () => {
-  browserWith((config) => config.hardwareAcceleration === undefined);
+test("a decoder is configured for the stream's own profile, the browser's choice of decoder", async () => {
+  browserWith(() => true);
   assert.deepEqual(await rdpH264Config("avc1.640028"), {
     codec: "avc1.640028",
     optimizeForLatency: true,
   });
-  assert.equal(asked.length, 2, "software was asked for first");
-  assert.equal(await chooseRdpH264(), true);
+  assert.equal(asked.length, 1);
 });
 
 test("a browser with no decoder for the stream says no", async () => {
