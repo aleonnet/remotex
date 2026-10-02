@@ -16,8 +16,10 @@ export type MouseButton = "left" | "middle" | "right" | "back" | "forward";
 // What a wheel delta is measured in: the DOM's deltaMode, by name. Carried
 // because only the browser knows — the remote cannot tell a three-pixel trackpad
 // glide from a three-line wheel notch, and treating every delta as lines is what
-// made trackpad scrolling jump.
-export type WheelUnit = "pixel" | "line" | "page";
+// made trackpad scrolling jump. A "notch" is a wheel's step the browser priced
+// in pixels and wheelFromEvent recognised anyway: a remote that takes a
+// distance as a distance scrolls a notch's ~100 pixels several steps too far.
+export type WheelUnit = "pixel" | "line" | "page" | "notch";
 
 // What a touch contact did: MS-RDPEI's four contact transitions, which are
 // also exactly the DOM's four touch events. `cancel` is lost rather than
@@ -641,6 +643,57 @@ export function wheelUnitFromEvent(deltaMode: number): WheelUnit {
     default:
       return "pixel";
   }
+}
+
+// What of a WheelEvent this reads. `wheelDeltaX`/`wheelDeltaY` are the legacy
+// pair every browser still fills in and lib.dom leaves out.
+export interface WheelDeltas {
+  deltaX: number;
+  deltaY: number;
+  deltaMode: number;
+  wheelDeltaX?: number;
+  wheelDeltaY?: number;
+}
+
+// The legacy wheelDelta of one notch, in every browser.
+const WHEEL_DELTA_NOTCH = 120;
+
+// One axis of a notched wheel, as notches (positive down and right, like
+// deltaX/deltaY), or null if this axis did not come from one. A wheel's legacy
+// delta is whole notches of 120 whatever the pixels beside it, where a
+// trackpad's follows its pixels — three times them, on macOS, which is the one
+// way a glide lands on 120 and is told apart here.
+function axisNotches(delta: number, legacy: number | undefined): number | null {
+  if (legacy === undefined || !Number.isFinite(legacy)) {
+    return null;
+  }
+  if (legacy === 0) {
+    return delta === 0 ? 0 : null;
+  }
+  if (legacy % WHEEL_DELTA_NOTCH !== 0 || legacy === -3 * delta) {
+    return null;
+  }
+  return -legacy / WHEEL_DELTA_NOTCH;
+}
+
+// A WheelEvent as the wheel message it sends. Lines and pages are a wheel's
+// own units and go as they are. Pixels are a trackpad's, except that Chromium
+// and WebKit report a mouse wheel in them too, as the distance a notch is
+// worth locally; that one goes as the notches it was.
+export function wheelFromEvent(e: WheelDeltas): {
+  dx: number;
+  dy: number;
+  unit: WheelUnit;
+} {
+  const unit = wheelUnitFromEvent(e.deltaMode);
+  if (unit === "pixel") {
+    const dx = axisNotches(e.deltaX, e.wheelDeltaX);
+    const dy = axisNotches(e.deltaY, e.wheelDeltaY);
+    if (dx !== null && dy !== null && (dx !== 0 || dy !== 0)) {
+      return { dx, dy, unit: "notch" };
+    }
+  }
+  return { dx: e.deltaX, dy: e.deltaY, unit };
 }
 
 // The bit a button holds in DOM `MouseEvent.buttons`, which numbers them

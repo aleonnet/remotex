@@ -1578,6 +1578,7 @@ impl WheelRotation {
             WheelUnit::Line => delta / Self::NOTCH_LINES,
             // Windows' "one screen at a time" setting sends a notch per page.
             WheelUnit::Page => delta,
+            WheelUnit::Notch => delta,
         };
         // The DOM's deltaY is positive downward and RDP's rotation positive
         // upward; both agree that positive x is rightward.
@@ -2240,7 +2241,9 @@ mod tests {
     /// A mouse notch is one notch whichever unit the browser counts it in.
     #[test]
     fn a_mouse_notch_is_one_notch_in_every_unit() {
-        for (delta, unit) in [(100.0, WheelUnit::Pixel), (3.0, WheelUnit::Line), (1.0, WheelUnit::Page)] {
+        for (delta, unit) in
+            [(100.0, WheelUnit::Pixel), (3.0, WheelUnit::Line), (1.0, WheelUnit::Page), (1.0, WheelUnit::Notch)]
+        {
             let wheel = &mut WheelRotation::default();
             assert_eq!(scroll(wheel, 0.0, delta, unit), vec![vertical(-WHEEL_NOTCH)], "{unit:?}");
         }

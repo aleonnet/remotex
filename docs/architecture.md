@@ -221,7 +221,7 @@ cropped picture. Two streams for Apple's All Displays are the planned way, in
 one thing that lists any of wlshare's extensions to it: its VP9 encoding, the
 density and output-list requests, the audio extension in a session started with
 sound, and with their keys the camera and microphone extensions. It is also what
-sends a scroll as wlshare's distance message rather than as wheel-button
+sends a glide's scroll as wlshare's distance message rather than as wheel-button
 notches. A plain `vnc` target lists none of them and scrolls by the notch,
 whatever server
 answers: a wlshare behind one is read through the RFB baseline, ZRLE encoded
@@ -2264,6 +2264,18 @@ proportional wheel rotation, an Apple target as as many wheel pulses as it is
 worth there, a `wlshare` target as the distance itself, in wlshare's scroll
 message (`0xE5`), which the compositor hands its applications as a touchpad's
 continuous axis. Plain VNC has only the wheel buttons, a notch an event.
+
+That is a distance, and a mouse wheel has none: it has notches, which an
+application spends as a step of its own. A browser reports them in lines or
+pages, or — Chromium and WebKit — in pixels, as the ~100 a notch is worth
+locally, which a `wlshare` target sent as a distance scrolled several steps too
+far. So the pointer client tells the two apart: a pixel delta whose legacy
+`wheelDelta` is whole multiples of 120, and not the three times its pixels a
+macOS trackpad reports, is sent in the unit `notch`. A `wlshare` target is sent
+`notch`, `line` (three to a notch) and `page` deltas as wheel-button notches,
+which wlshare injects as a wheel's discrete axis, and only `pixel` deltas as the
+distance. RDP counts a `notch` as one notch of rotation and an Apple target as
+the 100 pixels it stood for, which is what each made of it before.
 
 That touch layer is a trackpad, and there is a second one that is a touchscreen.
 When an engine's host opens a touch channel (MS-RDPEI on RDP), the gateway says
