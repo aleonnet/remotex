@@ -158,8 +158,8 @@ Both modes connect the same way until the record layer is up.
 6. **The mode.** High Performance sends `SetDisplayConfiguration`, both modes send
    `SetPixelFormat` and the same `SetEncodings`, and High Performance then arms
    `AutoFrameBufferUpdate`. Standard arms it when the first layout names the
-   screen being sent, and arms it for every frame where a virtual display is
-   armed for one push a second (see [Other messages](#other-messages)).
+   screen being sent. Both arm it for every frame (see
+   [Other messages](#other-messages)).
 
 ### Other login types
 
@@ -546,8 +546,7 @@ Three behaviours of the Mac shape how remotex resizes:
   multi-megabyte repaint slowly therefore leaves its own messages unread until the
   repaint is through. A debug-build gateway saw 20–30 s stalls; a release build
   sees changes answered in about 2.5 s. Updates the Mac pushes unasked hold the
-  same lock, which is why remotex paces them on a virtual display (see
-  [Other messages](#other-messages)).
+  same lock (see [Other messages](#other-messages)).
 
 ## Input
 
@@ -607,15 +606,14 @@ rectangle.
   nothing after the update asked for.
 - **The interval paces the pushes.** At 1,000,000 the Mac pushed about one update
   a second. The daemon pushes once the interval has passed since its last push.
-- **Apple's viewer arms a running session with 0.** It sends the all-ones value
-  below only while the session is paused, and no interval in between.
+- **Apple's viewer arms a running session with 0,** in both of its modes. It
+  sends the all-ones value below only while the session is paused, and no
+  interval in between. Remotex arms with 0 too, in every Apple session.
 - **A physical display needs the pushes.** In Standard mode on a physical display
-  an incremental request alone is answered late: a scrolling window drew 2–9
-  updates a second with the Mac silent for a second at a time, the push interval
-  remotex then armed, where the same scroll on a virtual display drew 20–30. With
-  the interval at 0 the physical display is smooth. So remotex arms Standard on
-  the physical displays with 0, as Apple's viewer does, and a session on a
-  virtual display, in either mode, with 1,000,000.
+  an incremental request alone is answered late: armed at 1,000,000, a scrolling
+  window drew 2–9 updates a second with the Mac silent for a second at a time,
+  where the same scroll on a virtual display drew 20–30. With the interval at 0
+  the physical display is smooth.
 - **`0xffffffff` turns the pushes off.** The daemon records whether the word is
   the all-ones value and pushes nothing while it is. A published description reads
   the word as a screen id, with all-ones meaning all displays. It is not one:
@@ -631,11 +629,13 @@ arrived as hundreds of queued events in one second. Apple's viewer never meets
 this: in High Performance mode it takes the picture from the media stream
 (encoding `0x3f2`), and the daemon's framebuffer sender skips such a viewer.
 Remotex does too once the stream is up, and then arms and polls one pixel —
-see [RFB while the stream runs](#rfb-while-the-stream-runs). That freeze was
-measured on a virtual display, which answers requests promptly and so loses
-nothing to the paced interval. Standard on the physical displays is armed as
-Apple's viewer arms it and shares what that viewer risks: a gateway that drains
-the connection more slowly than the Mac captures has its input read late.
+see [RFB while the stream runs](#rfb-while-the-stream-runs). Before the stream
+is up, and in Standard mode throughout, remotex is armed as Apple's viewer is and
+shares what that viewer risks: a gateway that drains the connection more slowly
+than the Mac captures has its input read late. An interval of 1,000,000 ended
+that freeze on a virtual display, which answers requests promptly and lost
+nothing to it; it is what to go back to, for the affected mode alone, if the
+freeze returns there.
 
 Arming the full framebuffer at setup and after every layout is still required,
 because it keeps cursor updates alive across logins and locks. Its rectangle is
