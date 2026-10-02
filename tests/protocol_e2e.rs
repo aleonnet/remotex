@@ -443,6 +443,10 @@ enum MacRequest {
     /// The address the gateway connected from, reported first, and only by a fake
     /// set to [`MacStream::Hold`].
     From(std::net::IpAddr),
+    /// The interval an arming asks the Mac's pushes to keep, in microseconds,
+    /// reported ahead of its [`MacRequest::AutoFramebuffer`], and only by a fake
+    /// set to [`MacStream::Hold`].
+    PushInterval(u32),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -1031,6 +1035,10 @@ async fn serve_fake_mac_records(
                     u16::from_be_bytes([body[11], body[12]]),
                     u16::from_be_bytes([body[13], body[14]]),
                 );
+                if matches!(answer, MacStream::Hold) {
+                    let interval = u32::from_be_bytes([body[3], body[4], body[5], body[6]]);
+                    let _ = requests.send(MacRequest::PushInterval(interval));
+                }
                 let _ = requests.send(MacRequest::AutoFramebuffer(size));
             }
             // High Performance repeats AutoPasteboard after the virtual display's
@@ -2331,6 +2339,9 @@ async fn mirror_fits_the_screen_to_the_window_and_points_in_the_macs_pixels() {
         None => eprintln!("not checked: this host has no address but its loopback"),
     }
     assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
+    // Armed as a session whose picture is the media stream is: one push a second,
+    // not Standard's one a video frame.
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::PushInterval(1_000_000));
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
