@@ -17,6 +17,7 @@ import {
   parseLocalInput,
   rateScale,
   recordedSeries,
+  seedLive,
   spanLabel,
   THROUGHPUT_PRESETS,
   type ThroughputLive,
@@ -115,6 +116,49 @@ test("the history keeps one sample per second, newest last, as long as the longe
   }
   assert.equal(history.length, LIVE_HISTORY_SECS);
   assert.equal(history[0].at, 105, "the oldest fall off");
+});
+
+test("the seconds behind the newest sample are filled from the recorded rows, and the ones read are left alone", () => {
+  const report: ThroughputReport = {
+    now: 1010,
+    intervalSecs: 60,
+    maxRecords: 10,
+    hasSeconds: true,
+    records: [
+      record("mac", "audio", 0, 0, 940, 1000, [
+        [58, 700, 0],
+        [59, 800, 0],
+      ]),
+    ],
+    open: [
+      record("mac", "audio", 0, 0, 1000, 1010, [
+        [0, 900, 0],
+        [6, 500, 0],
+        [9, 999, 0],
+      ]),
+      record("mac", "session", 0, 0, 1000, 1010, [[0, 40, 4]]),
+    ],
+  };
+  assert.deepEqual(seedLive([], report), [], "nothing read to seed behind");
+  const read = sample(1007, rate("mac", "audio", 1, 0));
+  const history = seedLive([read, sample(1008)], report);
+  assert.equal(history.length, LIVE_HISTORY_SECS);
+  assert.equal(history[0].at, 1008 - LIVE_HISTORY_SECS + 1);
+  const at = (second: number) => history.find((s) => s.at === second);
+  assert.deepEqual(at(999)?.rates, [rate("mac", "audio", 700, 0)]);
+  assert.deepEqual(
+    at(1001)?.rates,
+    [rate("mac", "audio", 900, 0), rate("mac", "session", 40, 4)],
+    "a second begun at the timeframe's start is the sample a second later",
+  );
+  assert.deepEqual(at(1002)?.rates, [], "a second nothing moved in");
+  assert.equal(at(1007), read, "a second that was read stays as read");
+  assert.equal(history.at(-1)?.at, 1008, "nothing past the newest sample");
+  assert.equal(
+    seedLive([read], { ...report, hasSeconds: false })[0],
+    read,
+    "a report without the seconds seeds nothing",
+  );
 });
 
 /// A sampled series: its busiest second is its highest point, and its mean is that of

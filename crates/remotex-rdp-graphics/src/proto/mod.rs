@@ -15,7 +15,10 @@
 //!   repeated.
 //! - [`progressive`] — RemoteFX Progressive, which a host draws pictures and motion
 //!   with.
+//! - [`avc`] — what wraps the H.264 a host draws video with, in a session that
+//!   takes it: the region mask and the access units, which are decoded elsewhere.
 
+pub mod avc;
 pub mod bitmap;
 pub mod clear;
 pub mod gfx;

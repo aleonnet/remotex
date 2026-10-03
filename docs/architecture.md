@@ -34,7 +34,9 @@ or in High Performance with `ard-high-performance` (a virtual display, with its
 picture and sound over the Mac's media stream, as Apple's viewer takes them),
 whose AAC-ELD sound every session passes to the browser, and whose HEVC a session
 started with the passthrough passes too rather than re-encoding it — see
-[Apple's media stream, passed through](#apples-media-stream-passed-through). An RDP
+[Apple's media stream, passed through](#apples-media-stream-passed-through). The
+unofficial `ard-mirror` takes that stream for the Mac's own displays and fits its
+picture to the viewer's window. An RDP
 session started with its passthrough is not decoded here either: the host's
 graphics pipeline is passed on for the browser to compose, which is experimental — see
 [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
@@ -137,7 +139,9 @@ area and points here; read the area's section before changing what it covers.
   [Switching outputs over VNC with wlshare](wlshare-outputs.md).
 - Pointer clients present the remote desktop at 100%; oversized desktops scroll.
   Do not add fit-to-window, zoom-to-fit, or viewport-derived scaling. Mobile,
-  gated by `CAN_PINCH_ZOOM`, is the sole fit-to-width/pinch-zoom exception.
+  gated by `CAN_PINCH_ZOOM`, is the sole fit-to-width/pinch-zoom exception in
+  the browser. The gateway fits one picture itself, an `ard-mirror` session's,
+  under the rule below.
 - Neither the gateway nor the browser rescales what a remote sends: frames are
   presented at `w / scale` by the density the remote confirmed. When the size or
   density is wrong for the browser, ask the remote to render the right one and
@@ -145,8 +149,28 @@ area and points here; read the area's section before changing what it covers.
   over screens of different densities: the gateway sends a `mosaic` and the
   browser composes each screen at its points (`frontend/src/mosaic.ts`). Do not
   extend it to another engine, view or density.
+- The gateway resamples a remote's pixels in one place: an `ard-mirror`
+  session's decoded pictures, reduced to the viewer's window and the video
+  ceiling before they are encoded (`video::fit_within`, `video::Reducer`). The
+  rule above cannot be kept there, because the remote cannot be asked: a Mac
+  sends its media stream at the physical screen's own pixels whatever the offer
+  names and whatever server scaling is in force
+  ([measured](apple-vnc-889.md#the-stream-on-the-physical-displays)). The
+  reduction only ever makes a picture smaller, keeps its shape, and is the
+  gateway's alone: the browser is told the reduced size in `Resize` and shows it
+  as any other, and the pointer it sends back is mapped to the screen's pixels
+  (`DesktopState::to_native`). In a session that follows the window, that
+  `Resize` carries the one `scale` that is a fit factor: the picture's pixels
+  over the points of the window it was fitted to, never more than the Mac's own
+  density, so the whole screen shows with nothing to scroll, whether it had to
+  lose pixels or not (`DesktopState::present`). A Mac's screen cannot be sized to
+  the window, so scrolling one is all the 100% rule would buy. In any other
+  session the picture keeps the Mac's own size in points. A passed stream is not
+  reduced, and is shown at the Mac's size and density. Do not extend the
+  reduction to another subtype, to ZRLE pixels, or to the browser.
 - `ClientMsg::Viewport` is in CSS points. `ServerMsg::Resize.scale` is remote
-  pixel density, not a fit factor. A session started with resize has the window
+  pixel density, not a fit factor, save an `ard-mirror` picture fitted to its
+  window (above). A session started with resize has the window
   continuously driving the remote size, and any other keeps the size it opened
   at; the choice is made once, at the picker, so do not add a resize toggle to
   the session, and do not offer the window to a plain `vnc` target, whose answer
@@ -168,9 +192,9 @@ area and points here; read the area's section before changing what it covers.
 
 A session's picture reaches the browser one of two ways, both ordinary:
 - **Encoded here** as VP9 by the gateway's one video encoder, the
-  `desktop-vp9` crate wlshare codes its own stream with, pinned by release tag
+  `screen-vp9` crate wlshare codes its own stream with, pinned by release tag
   in `Cargo.toml`. A libvpx setting, the conversion in front of it, the codec
-  string or the quality walk changes in the desktop-vp9 repository and reaches
+  string or the quality walk changes in the screen-vp9 repository and reaches
   here as a pin bump.
 - **Passed untouched**, as the remote made it, for the browser to decode or
   compose: today wlshare's VP9 on a `wlshare` target, and in a session started
@@ -183,13 +207,16 @@ The gateway keeps to one encoder: whatever it transcodes goes to VP9, and a
 second encoder (H.264, AV1 or any other), a codec probe, or a codec key that
 selects one is not added as a side effect of other work.
 
-#### The browser's three answers
+#### The browser's four answers
 
-The browser is asked three questions, each once at page load and stated on the
+The browser is asked four questions, each once at page load and stated on the
 session socket: which VP9 profile its decoder takes (for
 `render_chroma = "auto"`), whether it decodes a High Performance Mac's HEVC,
-and whether it composes an RDP host's graphics pipeline. The
+whether it composes an RDP host's graphics pipeline, and whether it decodes the
+H.264 such a pipeline may carry. The
 gateway *selects* a chroma on the first and never refuses a client for it. The
+last refuses nobody either: it decides only whether a passed pipeline's host is
+told it may draw with H.264, on a target whose `egfx_h264` key allows it. The
 other two say which passthrough the browser can take. They grey the choice at
 the picker, where a browser that says no starts the target encoded here; they
 refuse a `connect` that asks for the passthrough all the same; and they end the
@@ -211,7 +238,9 @@ Displays over more than two screens, whatever its size. On VNC started without
 resize the session stays up and the page says so, offering the remote's displays; every
 other source ends on the ceiling's refusal. Do not carry such a desktop some
 other way, in the gateway or the page: rectangles as images, a scaled or a
-cropped picture. Two streams for Apple's All Displays are the planned way, in
+cropped picture. The one desktop the ceiling never refuses is an `ard-mirror`
+Mac's, whose decoded picture is reduced to it
+([Apple High Performance](#apple-high-performance)). Two streams for Apple's All Displays are the planned way, in
 [the roadmap](roadmap.md#two-streams-for-apples-all-displays). See
 [Past the ceiling](#past-the-ceiling).
 
@@ -251,7 +280,7 @@ that selects the stream. See
   here, save a High Performance Mac's AAC-ELD, which every session passes as it
   came and the gateway never decodes; do not add a decoder for the Mac's sound.
   A `wlshare` target's is always passed too: wlshare codes it, as Opus with the
-  encoder the gateway codes an RDP host's with (`desktop-opus`) at the rate the
+  encoder the gateway codes an RDP host's with (`sound-opus`) at the rate the
   target's audio keys and their walk arrive at, or as FLAC in a lossless session.
   Do not decode or re-encode wlshare's sound here, and do not give wlshare a
   codec key of its own: the format is the gateway's to ask for.
@@ -308,6 +337,34 @@ that selects the stream. See
   every other target, and everything but the display follows `ard`. Call it
   unofficial wherever it is named, and tested with macOS 26 only; do not present
   it as a mode of Apple's viewer or grow it into a third subtype.
+- `ard-mirror` is the other unofficial combination, and a subtype of its own:
+  the Mac's physical displays, as `ard` shares them, with High Performance's
+  media stream carrying the picture and the sound. The session never sends
+  `SetDisplayConfiguration` or a server-scaling request; it offers the stream
+  once the physical layout has arrived, one offer at a time, and drops a display
+  selection made while an offer is unanswered, leaving the checkmark where it
+  was. It composes no mosaic: All Displays is the stream's one picture, shown as
+  it came. The Mac mutes its own output for the
+  session, as under High Performance, and the picker offers no choice of sound.
+  In a session that follows the window, the window sizes the picture the gateway
+  shows and never the Mac's screen; `size` and `virtual_display` are refused. A
+  decoded picture past the ceiling is reduced to it rather than refused, and the
+  passthrough forwards the Mac's HEVC at the screen's size, past the ceiling
+  included, since no encoder here touches it. Everything else about the stream
+  follows `ard-high-performance`. Call it unofficial wherever it is named, and
+  measured with macOS 27 on single-display Macs only.
+- A media-stream target on the gateway's own host is dialled from another of the
+  host's addresses, so that the stream's two ends differ: at one address the
+  gateway's keyframe requests and reports come back to itself and never reach
+  the Mac. Do not dial such a target as any other, and do not bind the stream's
+  sockets to an address the Mac's end also holds. See
+  [A gateway on the Mac it reaches](apple-vnc-889.md#a-gateway-on-the-mac-it-reaches).
+- A gateway on a MacBook it serves turns the built-in display back off after a
+  session on a virtual display ends with the lid closed, and on again when the lid
+  opens or the gateway stops: macOS enables every physical display when the
+  virtual one goes and does not apply the closed lid again until the lid moves.
+  Keep it to that case. See
+  [A MacBook's displays after a session on its own virtual display](apple-vnc-889.md#a-macbooks-displays-after-a-session-on-its-own-virtual-display).
 - The passthrough on `ard-high-performance` passes the Mac's picture
   unaltered, for a LAN: HEVC access units on the session socket. It is offered
   at the picker to a browser that said it decodes the HEVC; a session started
@@ -338,9 +395,18 @@ not write a second one there. The page, which already carries a software HEVC
 decoder of its own, may decode, compose or present the pipeline its own way
 (on the GPU, say) where that brings a measured gain. The host answers a
 repaint out of its caches, so a reattach starts such a session over; do not
-resume one on a repaint. H.264 stays refused in the capability advertise, and
-a host that draws with bitmap updates is encoded here as VP9. Call it
-experimental wherever it is named to an operator. See
+resume one on a repaint. A host that draws with bitmap updates is encoded here
+as VP9. Call it experimental wherever it is named to an operator.
+
+H.264 stays refused in the capability advertise of every pipeline the gateway
+composes: a host would hand the parts of the desktop that move like video to a
+lossy codec before the gateway encodes the picture, and the gateway has no
+decoder for it. Do not give it one. A passed pipeline may carry it, behind the
+target's experimental `egfx_h264` key and only to a page that said it decodes
+it: the access units ride inside the pipeline's commands, the page decodes them
+with the browser's `VideoDecoder`, and the compositor paints the pictures. It is
+a target key and not a row at the picker while it is experimental; it adds no
+wire format, no record and no second stream. See
 [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
 
 #### Camera and microphone
@@ -375,8 +441,8 @@ experimental wherever it is named to an operator. See
 | `camera.rs`, `mic.rs` | browser camera and microphone bridges into the active engine |
 | `shadow.rs` | change detection: what the client already has |
 | `encode.rs`, `stream.rs`, `video.rs` | the ordered, paced, congestion-aware stream: its mirror, its rounds, and the picture limits |
-| `vp9.rs` | the VP9 stream over the mirror, coded by the `desktop-vp9` crate wlshare shares — the one place libvpx is spoken to for either side |
-| `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding by the `desktop-opus` crate wlshare codes its own sound with, resampling, the FLAC coding of a lossless target's PCM, and the passing of a remote's own stream |
+| `vp9.rs` | the VP9 stream over the mirror, coded by the `screen-vp9` crate wlshare shares — the one place libvpx is spoken to for either side |
+| `audio.rs`, `opus_stream.rs`, `pcm48.rs` | PCM queue, Opus encoding by the `sound-opus` crate wlshare codes its own sound with, resampling, the FLAC coding of a lossless target's PCM, and the passing of a remote's own stream |
 | `frontend/wasm/flac/` | the page's FLAC decoder for a session's lossless sound, a WebAssembly module of its own |
 | `keymap.rs` | DOM key codes to RDP scancodes or X11 keysyms |
 
@@ -430,7 +496,7 @@ sends the Mac's HEVC, or the RDP host's pipeline, as it came.
 
 The engines never see the config keys. They and the session's choices collapse
 to one `RenderPlan` (`quality`, `adaptive`, `chroma`, `apple_media`,
-`rdp_graphics`) at the config boundary in
+`rdp_graphics`, `rdp_h264`) at the config boundary in
 `TargetConfig::render_plan`, which reaches the encoder through the engine-agnostic
 `VideoSink` in `src/encode.rs`:
 
@@ -522,7 +588,7 @@ decoder: no browser's hardware VP9 path takes profile 1 — Intel's media engine
 from Ice Lake on decode it, but Chromium's D3D11 and VA-API decoders advertise
 profiles 0 and 2 only — so it always decodes in software, and a browser with no software VP9 at all, which is iOS and
 iPadOS, refuses the configuration by name the way it would refuse any other.
-`a_444_stream_keeps_the_colour_420_averages_away` in `desktop-vp9` is the round
+`a_444_stream_keeps_the_colour_420_averages_away` in `screen-vp9` is the round
 trip that pins the difference, through the archive's own decoder.
 
 #### Past the ceiling
@@ -570,7 +636,7 @@ and its stream starts from an announcement and a keyframe.
 wlshare has a VP9 encoding of its own, `WLSV` (`0x574c5356`), made for its desktop
 clients and for this gateway: every update one rectangle over the whole desktop, a
 `u32` length and one frame of a single stream. That stream is the one this gateway
-would encode from the same pixels — coded by the same `desktop-vp9` crate at the
+would encode from the same pixels — coded by the same `screen-vp9` crate at the
 same speed, screen tuning and dial, 8-bit at either chroma, BT.601 at studio swing
 declared in its keyframes, so the two are one stream by construction — so on a
 `wlshare` target the gateway lists it for every browser, tells wlshare what the
@@ -841,8 +907,52 @@ the pipeline.
   `RDPGFX` PDUs, headers and all, in order, each run ending at a frame's end or
   where the host's own packet did, and naming the frame it ends. The engine
   queues each as a `GRAPHICS` record, which takes its share of `QUEUE_BUDGET`
-  like an access unit. H.264 stays refused in the capability advertise, passed
-  or composed.
+  like an access unit.
+- **H.264, where the target's key allows it** (`egfx_h264 = true`,
+  EXPERIMENTAL). Without the key the host is told its client takes none, passed
+  or composed, and every pipeline is lossless. With it, a passed session whose
+  page said it decodes H.264 advertises the capability sets that take it
+  (`caps_advertise` in the graphics crate's `proto/gfx.rs`), and a Windows host
+  then draws what moves like video with AVC420, in the same frames as the other
+  codecs: one H.264 stream for each surface, each access unit behind a mask of
+  the rectangles it shows. The gateway does nothing with them: they are bytes in
+  the commands it passes. The page says whether it can on its session socket,
+  `rdp_h264=true|false` (`frontend/src/rdpH264.ts`), and finds out by doing it
+  when it loads: three access units of a stream of its own, shaped like a Windows
+  host's, go through the decoders a session uses, and each has to give its
+  picture before the next unit is handed over, laid out as the compositor reads
+  it, and copy into shared memory. A decoder that holds a picture back for the
+  units after it gives none in time, which is a no: a run cannot wait on units
+  the host has not sent. A page that says no is not turned away; its host is told
+  to send none.
+
+  A run that carries H.264 is composed in three steps, and its batch is
+  acknowledged after the third, so the host is still paced by what the page has
+  drawn. The compositor scans the run for its access units (`avc::scan`). Each is
+  decoded by its surface's own `VideoDecoder` (`frontend/src/egfxVideo.ts`), as
+  the host sent it — Annex B, parameter sets inline, the codec string made from
+  the stream's own profile and level — and its picture awaited: the decoder is
+  asked for low latency, and the page's answer is that it then gives one picture
+  for one unit. The part of the picture the
+  unit's mask shows is copied into the compositor's memory, and the run is then
+  composed, painting those rectangles from the samples
+  (`crates/remotex-rdp-graphics/src/avc.rs`). The conversion to RGB is the
+  compositor's, full-range BT.709 as MS-RDPEGFX has it, and never the browser's:
+  measured, Chrome labels this stream BT.601 from its software decoder and
+  limited-range BT.709 from a hardware one. Which decoder is the browser's
+  choice, as it is for the desktop's own stream ([The codec](#the-codec)): the
+  configuration states no `hardwareAcceleration`. A hardware decoder's picture
+  is read back from the GPU to be composed: measured on an Intel GPU at
+  1280×800, that copy took 6 to 9 ms where the decode itself took half a
+  millisecond. A decoder
+  that fails or gives no picture ends the pipeline, as a command that does not
+  decode does: the host sends no keyframe on request.
+
+  Checked against one Windows 11 host without a GPU, whose stream is Main
+  profile, AVC420 by region. AVC444 and AVC444v2, which a host policy selects for
+  the whole desktop, are implemented from the specification and tested against
+  pictures built from its tables; no host has been seen to send both of their
+  views.
 - **The page paces the host.** A frame is acknowledged to the host when the
   page has composed it, not when the gateway read it. Nothing between the host
   and the page can drop a frame — every command is state the next one draws
@@ -977,7 +1087,7 @@ saturated colour a little off. Nothing on the wire carries it; the decoder reads
 from the bitstream.
 
 The dial is a **ceiling**, and that framing is what makes adaptation tractable here.
-The walk is shared with wlshare — `QualityWalk` in the `desktop-vp9` crate, the one walk both
+The walk is shared with wlshare — `QualityWalk` in the `screen-vp9` crate, the one walk both
 run, driven from `src/encode.rs`. It watches one local signal — how long queueing an
 access unit blocked — and walks the 1–100 dial down to its floor of 20 when the link is
 behind, then the frame rate, and back up towards the configured quality when it is
@@ -1120,7 +1230,7 @@ would not take.
 #### The codec
 
 The gateway **encodes VP9 only** (`src/vp9.rs`), and there is no codec key: one
-encoder is one to maintain. The encoder is the `desktop-vp9` crate, its own
+encoder is one to maintain. The encoder is the `screen-vp9` crate, its own
 repository pinned by release tag here and in wlshare, and the one place libvpx is
 spoken to for this gateway and for wlshare's own stream: the quantizer pinned to the dial, screen-content
 tuning, no lag, no dropped frames, no keyframe unasked, the colour declared in the
@@ -1157,10 +1267,12 @@ any fault anywhere near the path — a serde field-name mismatch, for one — su
 as an accusation against the browser and sent the reader to the wrong half of the
 system.
 
-What survives of asking is three questions. One selects rather than refuses: how
+What survives of asking is four questions. One selects rather than refuses: how
 much colour this decoder takes, for `render_chroma = "auto"` to resolve against
 ([choosing a chroma](#choosing-a-chroma)). A wrong answer to it costs a picture,
-not a desktop. The other two say which passthrough the browser can take: a High
+not a desktop. One decides what a host is told and nothing else: whether this
+browser decodes the H.264 a passed RDP pipeline may carry. The other two say
+which passthrough the browser can take: a High
 Performance Mac's HEVC, and an RDP host's graphics pipeline. They
 decide what the picker offers before a session starts, where a "no" starts the
 target encoded here, and they keep a session started with a passthrough from
@@ -1183,12 +1295,13 @@ Authentication and desktop ownership are separate:
    and `GET /api/targets`' state the gateway's version in `X-Remotex-Version`,
    and a page whose own differs, a tab left open across an upgrade, opens no
    session and lists no target: it says both versions and offers a reload.
-3. `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false`
+3. `/ws?session=<token>&chroma=420|444&apple_media=true|false&rdp_graphics=true|false&rdp_h264=true|false`
    attaches to the slot and reports the target picker or the current connected
-   target. `chroma`, `apple_media`
-   and `rdp_graphics` are required: the most colour this browser's video decoder
-   takes, whether it decodes a High Performance Mac's HEVC, and
-   whether it composes an RDP host's graphics pipeline; see
+   target. `chroma`, `apple_media`, `rdp_graphics`
+   and `rdp_h264` are required: the most colour this browser's video decoder
+   takes, whether it decodes a High Performance Mac's HEVC,
+   whether it composes an RDP host's graphics pipeline, and whether it decodes
+   the H.264 such a pipeline may carry; see
    [Choosing a chroma](#choosing-a-chroma),
    [Apple's media stream, passed through](#apples-media-stream-passed-through) and
    [RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through).
@@ -1248,6 +1361,7 @@ and `GET /api/targets` carries it:
 | `vnc`, `ard` | no | hidden | hidden |
 | `vnc`, `ard` with `virtual_display` | yes | hidden | hidden |
 | `vnc`, `ard-high-performance` | yes | hidden: always carried | shown: the Mac's media stream |
+| `vnc`, `ard-mirror` | yes: the window sizes the picture, not the Mac's screen | hidden: always carried | shown: the Mac's media stream |
 
 - **The size is shown before Start.** A desktop is sized one of three ways
   (`Sizing` in `src/config.rs`): kept at the target's size, which is its
@@ -1290,10 +1404,7 @@ and `GET /api/targets` carries it:
   also says, as `passthroughOnly`, where a gateway's host lacks FFmpeg
   and so cannot decode a Mac's picture at all: there the picture can only
   be passed, the row shows it chosen, and where the browser cannot take it
-  either Start is greyed and says why, before the Mac is dialled. It says as
-  `losslessUnavailable` where the host lacks libFLAC and the target's lossless
-  sound needs it — to code an RDP host's as FLAC, and never for wlshare's, which
-  is passed: Lossless is greyed and names the library, and Opus stays a choice.
+  either Start is greyed and says why, before the Mac is dialled.
   A `connect`
   that asks for a passthrough the browser said it cannot take is refused like an
   unoffered one.
@@ -1343,7 +1454,7 @@ Control and input messages are tagged JSON. Server messages cover picker and
 connected state, desktop size, display selection, cursor shape, clipboard,
 audio format, and errors. The `connected` message says what the session was
 started with — `resize`, `audio` and `passthrough` — and includes the
-`clipboard`, `camera`, and `microphone` capability flags, so clients
+`camera` and `microphone` capability flags, so clients
 expose only supported controls.
 
 It also carries two things a client cannot work out and nothing else reveals:
@@ -1358,7 +1469,7 @@ one. Both appear on the client's session card, which
 (`mediaLabel.ts`).
 
 `GET /api/targets` carries `subtype` too, beside the options each target offers
-(`resize`, `audio`, `losslessUnavailable`, `passthrough` and `passthroughOnly`) and the sizes it keeps
+(`resize`, `audio`, `passthrough` and `passthroughOnly`) and the sizes it keeps
 (`size`, the configured one, and `defaultSize`), so the picker names it one step
 earlier — the difference between two Macs in that list is a choice being made,
 not something to discover after connecting. The row uses the config spelling
@@ -1568,30 +1679,28 @@ milliseconds of it, and each packet is one FLAC frame. It is a choice at the pic
 `rdp` or a `wlshare` target, and not a config key; the target's Opus keys do
 nothing in such a session, since there is no rate to set or walk.
 
-| Target | What the gateway does | `audioFormat` | libFLAC on the host |
-|---|---|---|---|
-| `wlshare` | passes wlshare's frames as they came | 48 kHz, 960 frames | not needed |
-| `rdp` | codes the host's PCM as FLAC | 44.1 kHz, 882 frames | needed |
-| `ard-high-performance` | not supported: the Mac's AAC-ELD is passed | | |
-| any other | not supported: no sound | | |
+| Target | What the gateway does | `audioFormat` |
+|---|---|---|
+| `wlshare` | passes wlshare's frames as they came | 48 kHz, 960 frames |
+| `rdp` | codes the host's PCM as FLAC | 44.1 kHz, 882 frames |
+| `ard-high-performance` | not supported: the Mac's AAC-ELD is passed | |
+| any other | not supported: no sound | |
 
 - **wlshare's frames are passed**, as its Opus packets are in a session started
   with Opus: the engine lists the audio encoding without the Opus one beside it,
   which is how wlshare is asked for FLAC. It reads each frame message and
   queues the frame undecoded (`AudioBridge::unit`), between a begin and an end as
   ever, and the audio socket hands the units on (`vnc_audio::PASSED_FLAC`,
-  `AudioListener::into_passed`). No decoder is made, so such a session needs no
-  libFLAC and Lossless at the picker is never greyed for the want of it. Nothing
+  `AudioListener::into_passed`). No decoder is made. Nothing
   here checks a frame but its length, which must fit the socket's 16-bit packet
   length: the page's decoder is what refuses a bad one.
 - **An RDP host's PCM is coded here.** `AudioListener::into_flac` takes the wave
   buffers as they come, at the 44.1 kHz the host sends with no resampler in the
   way, and makes a frame of every 882, each a FLAC stream of its own as
-  wlshare's are (`desktop-flac`'s encoder). What does not fill a block waits for
+  wlshare's are (`sound-flac`'s encoder). What does not fill a block waits for
   the next buffer, and is dropped with a buffer the queue dropped, so no frame
-  joins samples that were never neighbours. It needs libFLAC: the picker greys
-  Lossless where the host has none, and a session started with it all the same
-  ends before the host is dialled.
+  joins samples that were never neighbours. libFLAC is linked into the gateway
+  statically, so the host needs none installed.
 - **The page decodes in a module of its own.** `frontend/wasm/flac` is a Rust
   FLAC frame decoder built to WebAssembly, loaded by the first FLAC stream
   (`frontend/src/flacDecoder.ts`). WebCodecs is not asked: what travels is bare
@@ -1776,7 +1885,10 @@ permits a pointer client to scale the canvas to fit.
 `ClientMsg::Viewport` is the window's CSS size in points, including immediately
 after a connect when no remote scale has been announced. `ServerMsg::Resize`
 reports framebuffer pixels and the remote density; the browser presents it at
-`w / scale` by `h / scale` CSS pixels. The scale is never a fit factor.
+`w / scale` by `h / scale` CSS pixels. The scale is never a fit factor, except
+for an `ard-mirror` session that follows the window, whose gateway labels the
+picture it reduced so that the Mac's screen fits the window's points
+([Input and display](#input-and-display)).
 
 A session started with resize has the window drive the remote's size,
 continuously and on every engine alike: an engine that has it applies every
@@ -1894,7 +2006,8 @@ layer injects it after attaching to an existing engine.
 
 ### Clipboard
 
-Clipboard support is a per-target opt-in available on all engines. The backend
+Every session bridges the clipboard, on all engines; no target key turns it on
+or off. The backend
 holds the latest remote value and its observed change time:
 
 - plain and wlshare VNC forward and buffer `ServerCutText` or Extended Clipboard
@@ -1915,6 +2028,12 @@ missed earlier pushes. Replies to that explicit request are marked separately
 from unsolicited changes. Only unsolicited changes are eligible for automatic
 remote-to-local synchronization; an explicit fetch fills the UI until the user
 chooses Copy.
+
+Base RFB acknowledges nothing and announces no clipboard, so a plain VNC server
+without one looks like one where nothing has been copied. The reply to a fetch
+carries `unconfirmed` while such a server has announced no Extended Clipboard
+and sent no cut text, and the Clipboard panel says so. Every other engine's
+clipboard is negotiated and never reports it.
 
 Transfers are capped at 512 KiB and refused rather than truncated. Browser
 clipboard integration is best effort because Safari's permission rules, and an
@@ -1962,7 +2081,7 @@ announced only by a host that opens MS-RDPEI, which this client never asks for. 
 
 Static virtual channels are asked for by what the session needs: `drdynvc` for a
 session started with resize, the default `egfx = true`, `camera = true`, or
-`microphone = true`; `cliprdr` for `clipboard = true`; and `rdpsnd` with `rdpdr`
+`microphone = true`; `cliprdr` always; and `rdpsnd` with `rdpdr`
 for a session started with sound.
 Under the Graphics Pipeline (MS-RDPEGFX) the server draws through surfaces on a
 dynamic channel, marks every frame's end — which is the engine's flush signal, with
@@ -1975,7 +2094,8 @@ not made the end of the session. H.264 is refused in the capability advertise: a
 host would hand the parts of the desktop that move like video to it, and a lossy
 video codec would lose detail before the gateway ever encodes the picture. In a
 session started with the passthrough the same channel is answered and acknowledged here and
-composed in the browser
+composed in the browser, which also decodes the H.264 a target with the
+experimental `egfx_h264` key lets the host draw with
 ([RDP's graphics pipeline, passed through](#rdps-graphics-pipeline-passed-through)).
 `egfx = false` is the bitmap path: the
 server draws with bitmap updates, damage is flushed on the 16 ms guess because those

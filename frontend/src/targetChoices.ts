@@ -48,11 +48,6 @@ export interface TargetInfo {
   defaultSize: Points | null;
   /** Whether the remote's sound is a choice. */
   audio: boolean;
-  /**
-   * Whether this gateway cannot send that sound lossless: an RDP host's, which
-   * it codes as FLAC, on a host without libFLAC.
-   */
-  losslessUnavailable: boolean;
   /** The stream this target can pass, null where it has none. */
   passthrough: Passthrough | null;
   /**
@@ -114,9 +109,8 @@ export interface SizeOption {
 export interface SoundFormat {
   value: Exclude<Sound, "off">;
   label: string;
-  /** What choosing it does, or why it cannot be chosen here. */
+  /** What choosing it does. */
   note: string;
-  disabled: boolean;
 }
 
 /** Whether a target's sound is taken, and the formats a ticked one chooses between. */
@@ -252,19 +246,31 @@ const FOLLOWS: Record<"window" | "screen", SizeOption> = {
  *   offers the configured size beside that where there is one.
  * - A phone has nothing a desktop could follow, so there the choice is between the
  *   configured size and the default.
+ * - A target that shares its displays as they are is shown at their size. Where
+ *   the window can still drive it — a Mac mirroring its screens over its media
+ *   stream, whose picture the gateway fits to the viewer — the window comes
+ *   first, and the screens' own size is the other choice.
  */
 function sizeOptions(
   target: TargetInfo,
   follows: Abilities["follows"],
 ): SizeOption[] {
   if (!target.defaultSize) {
-    return [
-      {
-        value: "target",
-        label: "The remote's own size",
-        note: "This target shares its displays as they are.",
-      },
-    ];
+    const own: SizeOption = {
+      value: "target",
+      label: "The remote's own size",
+      note: "This target shares its displays as they are.",
+    };
+    if (target.resize && follows) {
+      const fitted: Record<"window" | "screen", string> = {
+        window:
+          "The remote's displays, fitted to the window as it changes. Passed through, they keep their own size.",
+        screen:
+          "The remote's displays, fitted to this screen once. Passed through, they keep their own size.",
+      };
+      return [{ ...FOLLOWS[follows], note: fitted[follows] }, own];
+    }
+    return [own];
   }
   // A plain VNC server is asked, and whether it takes a size is known only once
   // it is dialled.
@@ -293,8 +299,8 @@ function sizeOptions(
 
 /**
  * `target`'s sound as the picker shows it: nothing where it offers none, and
- * otherwise a tick and, under a ticked one, Opus or lossless, which is greyed
- * where the gateway would have to code it and cannot. Ticking it takes Opus.
+ * otherwise a tick and, under a ticked one, Opus or lossless. Ticking it takes
+ * Opus.
  */
 function soundRow(
   target: TargetInfo,
@@ -308,21 +314,16 @@ function soundRow(
       value: "opus",
       label: "Opus",
       note: "Compressed, at a rate that follows the link.",
-      disabled: false,
     },
     {
       value: "flac",
       label: "Lossless (experimental)",
-      note: target.losslessUnavailable
-        ? "This gateway cannot code this target's sound as FLAC. Install libFLAC on the gateway's host."
-        : "FLAC, about a megabit a second of music. For a LAN.",
-      disabled: target.losslessUnavailable,
+      note: "FLAC, about a megabit a second of music. For a LAN.",
     },
   ];
-  // What was chosen last time, where it can still be chosen here.
+  // What was chosen last time.
   const audio =
-    formats.find((format) => format.value === remembered && !format.disabled)
-      ?.value ?? "off";
+    formats.find((format) => format.value === remembered)?.value ?? "off";
   return {
     row: {
       label: "Sound",

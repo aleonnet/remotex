@@ -49,10 +49,10 @@ echo ">> building release binary"
 # build.rs creates the frontend in Cargo's OUT_DIR. Release CI sets
 # REMOTEX_PREBUILT_FRONTEND=frontend/dist so each target stages the one
 # platform-independent bundle built by the frontend job instead of running Bun.
-# No env coaxing here for either prebuilt C library. Remote audio links
-# `opus-prebuilt` and VP9 links `libvpx-prebuilt` — each pulls a prebuilt static
-# archive rather than compiling vendored C, so neither needs cmake, pkg-config, a
-# system library or a `*_STATIC` variable set. The RDP client's TLS is rustls over
+# No env coaxing here for any prebuilt C library. Remote audio links
+# `opus-prebuilt` and `libflac-prebuilt`, and VP9 links `libvpx-prebuilt` — each
+# pulls a prebuilt static archive rather than compiling vendored C, so none needs
+# cmake, pkg-config, a system library or a `*_STATIC` variable set. The RDP client's TLS is rustls over
 # `ring`, so there is no libssl to find either. The binary runs on
 # debian:trixie-slim, and there is no cmake_minimum_required for CMake 4 to reject.
 cargo build --release

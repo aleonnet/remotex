@@ -33,7 +33,7 @@
 //!
 //! Nothing is decoded or coded here. An Opus packet is what the browser's own
 //! decoder takes, so it goes to the bridge as it came ([`PASSED_OPUS`]), made by
-//! the encoder this gateway codes an RDP host's sound with (`desktop-opus`), at
+//! the encoder this gateway codes an RDP host's sound with (`sound-opus`), at
 //! the rate the target's audio keys and their walk arrive at. A FLAC frame goes
 //! the same way in a session started with lossless sound (EXPERIMENTAL), for
 //! the page's own decoder ([`PASSED_FLAC`]). Neither stream's header is sent by
@@ -241,8 +241,8 @@ pub const PASSED_FLAC: crate::audio::PassedFormat = crate::audio::PassedFormat {
 /// An Opus stream's packets as the browser is told of them: the same stream an
 /// encoder here makes of an RDP host's sound, behind the `OpusHead` wlshare
 /// never sends — two channels, the encoder's lookahead as the pre-skip
-/// ([`desktop_opus::PRE_SKIP`], 312) and [`SOURCE_FORMAT`]'s rate, as
-/// [`desktop_opus::Stream::head`] lays it out.
+/// ([`sound_opus::PRE_SKIP`], 312) and [`SOURCE_FORMAT`]'s rate, as
+/// [`sound_opus::Stream::head`] lays it out.
 pub const PASSED_OPUS: crate::audio::PassedFormat = crate::audio::PassedFormat {
     codec: crate::opus_stream::OPUS_CODEC,
     sample_rate: SOURCE_FORMAT.sample_rate,
@@ -335,8 +335,8 @@ mod tests {
     /// encoder lays out for this format, and FLAC has none.
     #[test]
     fn a_passed_stream_is_described_as_the_format_that_was_asked_for() {
-        let stream = desktop_opus::Stream { rate: SOURCE_FORMAT.sample_rate, channels: SOURCE_FORMAT.channels as u8 };
-        assert_eq!(PASSED_OPUS.head, stream.head(desktop_opus::PRE_SKIP, SOURCE_FORMAT.sample_rate).unwrap());
+        let stream = sound_opus::Stream { rate: SOURCE_FORMAT.sample_rate, channels: SOURCE_FORMAT.channels as u8 };
+        assert_eq!(PASSED_OPUS.head, stream.head(sound_opus::PRE_SKIP, SOURCE_FORMAT.sample_rate).unwrap());
         assert_eq!(stream.block(), usize::from(BLOCK_FRAMES));
         for format in [PASSED_OPUS, PASSED_FLAC] {
             assert_eq!((format.sample_rate, format.channels, format.packet_frames), (48_000, 2, 960));

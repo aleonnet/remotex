@@ -167,21 +167,7 @@ pub async fn run(
     feedback: Arc<crate::feedback::LinkFeedback>,
 ) {
     let sink = VideoSink::new("rdp", frame_tx, plan, feedback, Oversize::Refuse);
-    // A session started with its sound lossless codes the host's PCM with
-    // libFLAC. The picker says so before Start where this host lacks it; a session
-    // started with it all the same is told here, before the host is dialled.
-    if config.needs_libflac(choices)
-        && audio.is_some()
-        && let Err(e) = crate::audio::load_libflac()
-    {
-        warn!("rdp: refusing a session with sound as FLAC: {e:#}");
-        let _ = sink
-            .msg(ServerMsg::Error { message: format!("This remotex cannot code the host's sound as FLAC: {e:#}") })
-            .await;
-        sink.finish().await;
-        return;
-    }
-    session(config, choices.size, plan.rdp_graphics, display, input_rx, audio, uplinks, &sink).await;
+    session(config, choices.size, plan, display, input_rx, audio, uplinks, &sink).await;
     sink.finish().await;
 }
 
@@ -213,7 +199,7 @@ impl AudioSink for Sound {
 async fn session(
     config: TargetConfig,
     sizing: Sizing,
-    pass_graphics: bool,
+    plan: RenderPlan,
     display: Option<HostDisplay>,
     input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     audio: Option<Arc<AudioBridge>>,
@@ -223,7 +209,7 @@ async fn session(
     let resize = sizing == Sizing::Window;
     let opening = opening_layout(&config, sizing, display);
     let (session, mut events) =
-        Session::start(connect_config(&config, resize, opening, pass_graphics, audio, &uplinks));
+        Session::start(connect_config(&config, resize, opening, plan, audio, &uplinks));
     // The feeds exist from here, so the camera and mic sockets' traffic has somewhere to
     // go before the desktop does: a plug made while the host is still connecting waits in
     // the session's queue for the enumeration channel.
@@ -263,11 +249,7 @@ async fn session(
     if let Err(e) = active_loop(
         &session,
         events,
-        Flags {
-            resize,
-            pass_graphics,
-            clipboard: config.clipboard,
-        },
+        Flags { resize, pass_graphics: plan.rdp_graphics },
         (width, height),
         applied,
         input_rx,
@@ -381,7 +363,7 @@ fn connect_config(
     config: &TargetConfig,
     resize: bool,
     opening: Layout,
-    pass_graphics: bool,
+    plan: RenderPlan,
     audio: Option<Arc<AudioBridge>>,
     uplinks: &Uplinks,
 ) -> Connect {
@@ -399,8 +381,8 @@ fn connect_config(
         scale_percent: if resize { opening.density.percent() } else { 0 },
         resize,
         egfx: config.egfx(),
-        pass_graphics,
-        clipboard: config.clipboard,
+        pass_graphics: plan.rdp_graphics,
+        h264: plan.rdp_h264,
         audio: audio.map(|bridge| Box::new(Sound(bridge)) as Box<dyn AudioSink>),
         camera: uplinks.camera.as_ref().map(|bridge| rdp_camera::camera(Arc::clone(bridge))),
         microphone: uplinks.microphone.as_ref().map(|bridge| rdp_mic::sink(Arc::clone(bridge))),
@@ -415,11 +397,6 @@ struct Flags {
     /// Whether the host's graphics pipeline is passed to the browser rather than
     /// composed here ([`RenderPlan::rdp_graphics`]).
     pass_graphics: bool,
-    /// Whether this target bridges its clipboard ([`TargetConfig::clipboard`]), which
-    /// is what opened the channel — so a browser that sends the clipboard pair anyway
-    /// is answered as a session with no clipboard rather than as one with an empty
-    /// one.
-    clipboard: bool,
 }
 
 /// How dense a desktop this session has asked the RDP server to render.
@@ -886,6 +863,7 @@ impl ClipboardState {
             changed_at_ms: snapshot.changed_at_ms,
             requested: false,
             oversized_bytes: snapshot.oversized_bytes,
+            unconfirmed: false,
         })
         .await
     }
@@ -900,7 +878,7 @@ async fn active_loop(
     mut input_rx: mpsc::UnboundedReceiver<ClientMsg>,
     sink: &VideoSink,
 ) -> anyhow::Result<()> {
-    let Flags { resize, pass_graphics, clipboard: clipboard_enabled } = flags;
+    let Flags { resize, pass_graphics } = flags;
     let input = session.input();
     let framebuffer = session.framebuffer();
 
@@ -941,8 +919,7 @@ async fn active_loop(
     let mut pending_layout: Option<PendingLayout> = None;
     let mut layout_retry_at: Option<Instant> = None;
 
-    // Both ends of the clipboard bridge. Empty on a target that did not opt in, where
-    // no channel was opened and none of the events below can arrive.
+    // Both ends of the clipboard bridge.
     let mut clipboard = ClipboardState::default();
 
     // Damage accumulated toward the next flush into the mirror, and its deadline. A busy RDP
@@ -1264,29 +1241,21 @@ async fn active_loop(
                 }
                 // The clipboard pair, intercepted here for the same reason as the
                 // two above: they act on a virtual channel rather than translating to
-                // input. Both are no-ops on a target that did not opt in — the
-                // browser hides the panel then, so this is the belt to that UI's
-                // braces — except that a Fetch is still answered, because a panel
-                // that asked is waiting.
+                // input.
                 if let ClientMsg::Clipboard { text } = &msg {
-                    if clipboard_enabled {
-                        clipboard.take(input, text);
-                    }
+                    clipboard.take(input, text);
                     continue;
                 }
                 if matches!(msg, ClientMsg::ClipboardRequest) {
                     // Answered from what the channel last carried, which is empty
-                    // until the remote copies something — and on a target with no
-                    // clipboard at all, empty for the life of the session.
-                    let snapshot = match clipboard_enabled {
-                        true => clipboard.snapshot(),
-                        false => ClipboardSnapshot::unobserved(),
-                    };
+                    // until the remote copies something.
+                    let snapshot = clipboard.snapshot();
                     sink.msg(ServerMsg::Clipboard {
                         text: snapshot.text,
                         changed_at_ms: snapshot.changed_at_ms,
                         requested: true,
                         oversized_bytes: snapshot.oversized_bytes,
+                        unconfirmed: false,
                     }).await?;
                     continue;
                 }
@@ -2001,6 +1970,7 @@ mod tests {
             chroma: crate::config::Chroma::Subsampled,
             apple_media: false,
             rdp_graphics: false,
+            rdp_h264: false,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         let sink = VideoSink::new("test", frame_tx, plan, feedback, crate::encode::Oversize::Refuse);

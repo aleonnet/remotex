@@ -436,8 +436,17 @@ enum MacRequest {
     Fence { flags: u32, payload: Vec<u8> },
     ClipboardFetch(u32),
     ClipboardSend { session_id: u32, text: String },
-    /// A PointerEvent's button mask.
-    Pointer(u8),
+    /// A PointerEvent's button mask, and where it points.
+    Pointer(u8, (u16, u16)),
+    /// A media-stream offer, reported only by a fake set to [`MacStream::Hold`].
+    Offer,
+    /// The address the gateway connected from, reported first, and only by a fake
+    /// set to [`MacStream::Hold`].
+    From(std::net::IpAddr),
+    /// The interval an arming asks the Mac's pushes to keep, in microseconds,
+    /// reported ahead of its [`MacRequest::AutoFramebuffer`], and only by a fake
+    /// set to [`MacStream::Hold`].
+    PushInterval(u32),
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -465,6 +474,9 @@ enum MacStream {
     /// With error message 3 of type 2, what a Mac sends for an offer it cannot
     /// build a configuration from.
     Refuse,
+    /// With nothing: the offer stays out, which a session ends on once its answer
+    /// is overdue. Each offer is reported as [`MacRequest::Offer`].
+    Hold,
 }
 
 /// [`spawn_fake_mac`], with the command bitmap its ServerInit sends and its answer
@@ -483,7 +495,10 @@ async fn spawn_fake_mac_with(
     let (tx, rx) = mpsc::unbounded_channel();
     let (action_tx, action_rx) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
-        let (stream, _) = listener.accept().await?;
+        let (stream, from) = listener.accept().await?;
+        if matches!(answer, MacStream::Hold) {
+            let _ = tx.send(MacRequest::From(from.ip()));
+        }
         serve_fake_mac(stream, commands, answer, tx, action_rx).await
     });
     (port, rx, action_tx, task)
@@ -740,6 +755,7 @@ fn fake_mac_answer(answer: MacStream) -> Vec<u8> {
             rect.extend_from_slice(&[0u8; 6]); // audio, video 1, video 2: empty
             rect.extend_from_slice(&0u32.to_be_bytes());
         }
+        MacStream::Hold => unreachable!("a held offer is never answered"),
         MacStream::Refuse => {
             rect.extend_from_slice(&16u16.to_be_bytes());
             rect.extend_from_slice(&3u16.to_be_bytes()); // an error
@@ -1001,7 +1017,8 @@ async fn serve_fake_mac_records(
             5 => {
                 let mut body = [0u8; 5];
                 records.read_exact(&mut body).await?;
-                let _ = requests.send(MacRequest::Pointer(body[0]));
+                let at = (u16::from_be_bytes([body[1], body[2]]), u16::from_be_bytes([body[3], body[4]]));
+                let _ = requests.send(MacRequest::Pointer(body[0], at));
             }
             // SetServerScaling: a reserved byte and a big-endian `f64`, which the
             // Standard session asks for whenever its density differs from the
@@ -1018,6 +1035,10 @@ async fn serve_fake_mac_records(
                     u16::from_be_bytes([body[11], body[12]]),
                     u16::from_be_bytes([body[13], body[14]]),
                 );
+                if matches!(answer, MacStream::Hold) {
+                    let interval = u32::from_be_bytes([body[3], body[4], body[5], body[6]]);
+                    let _ = requests.send(MacRequest::PushInterval(interval));
+                }
                 let _ = requests.send(MacRequest::AutoFramebuffer(size));
             }
             // High Performance repeats AutoPasteboard after the virtual display's
@@ -1105,6 +1126,9 @@ async fn serve_fake_mac_records(
                 assert!(!offer_pending, "a second media-stream offer while one was out");
                 match answer {
                     MacStream::Accept => offer_pending = true,
+                    MacStream::Hold => {
+                        let _ = requests.send(MacRequest::Offer);
+                    }
                     MacStream::Refuse => {
                         let mut update = vec![0u8, 0];
                         update.extend_from_slice(&1u16.to_be_bytes());
@@ -1162,10 +1186,6 @@ async fn spawn_app(target: TargetConfig) -> SocketAddr {
 }
 
 fn target(protocol: Protocol, port: u16) -> TargetConfig {
-    target_with_clipboard(protocol, port, false)
-}
-
-fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> TargetConfig {
     TargetConfig {
         name: "test-target".to_owned(),
         protocol,
@@ -1185,7 +1205,7 @@ fn target_with_clipboard(protocol: Protocol, port: u16, clipboard: bool) -> Targ
         domain: None,
         size: Some((1280, 800)),
         egfx: None,
-        clipboard,
+        egfx_h264: false,
         camera: false,
         microphone: false,
         video_quality: None,
@@ -1207,7 +1227,6 @@ fn mac_target(port: u16) -> TargetConfig {
         password: MAC_PASSWORD.to_owned(),
         // No size: the virtual display opens at the screen the connect names.
         size: None,
-        clipboard: true,
         ..target(Protocol::Vnc, port)
     }
 }
@@ -1764,6 +1783,7 @@ struct ClipboardMessage {
     text: String,
     changed_at_ms: Option<u64>,
     requested: bool,
+    unconfirmed: bool,
 }
 
 /// Read from the socket until a timestamped `clipboard` control message
@@ -1780,6 +1800,7 @@ async fn expect_clipboard(ws: &mut Ws) -> ClipboardMessage {
                             text: parsed["text"].as_str().unwrap().to_owned(),
                             changed_at_ms: parsed["changedAtMs"].as_u64(),
                             requested: parsed["requested"].as_bool().unwrap(),
+                            unconfirmed: parsed["unconfirmed"].as_bool().unwrap(),
                         };
                     }
                 }
@@ -1797,13 +1818,13 @@ async fn expect_clipboard(ws: &mut Ws) -> ClipboardMessage {
 // reaches the browser when it asks, and what the browser sends becomes a
 // ClientCutText on the wire.
 #[tokio::test]
-async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
+async fn vnc_clipboard_round_trips() {
     // Latin-1 above ASCII on the way in (0xE9 is é, one byte on the wire), and
     // a character that has no latin-1 form on the way out — the two encoding
     // edges of RFB cut text.
     let (vnc_port, mut cut_texts) =
         spawn_fake_vnc_with_clipboard(Some(b"copied on caf\xE9")).await;
-    let addr = spawn_app(target_with_clipboard(Protocol::Vnc, vnc_port, true)).await;
+    let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
     let cookie = common::login(addr).await;
 
     let token = common::claim_session(addr, &cookie).await;
@@ -1834,6 +1855,7 @@ async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
         fetched.changed_at_ms, pushed.changed_at_ms,
         "Fetch must preserve the clipboard activity timestamp"
     );
+    assert!(!fetched.unconfirmed, "a server that sent cut text has a clipboard");
     assert!(fetched.requested, "Fetch replies must be marked requested");
 
     // Browser → remote. Latin-1 survives; anything beyond it becomes '?'.
@@ -1882,7 +1904,7 @@ async fn vnc_clipboard_round_trips_when_the_target_opted_in() {
 #[tokio::test]
 async fn a_fetch_before_the_remote_has_copied_anything_is_still_answered() {
     let (vnc_port, _cut_texts) = spawn_fake_vnc_with_clipboard(None).await;
-    let addr = spawn_app(target_with_clipboard(Protocol::Vnc, vnc_port, true)).await;
+    let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
     let cookie = common::login(addr).await;
 
     let token = common::claim_session(addr, &cookie).await;
@@ -1900,54 +1922,10 @@ async fn a_fetch_before_the_remote_has_copied_anything_is_still_answered() {
             text: String::new(),
             changed_at_ms: None,
             requested: true,
+            // The fake announced no Extended Clipboard and has sent no cut text,
+            // which is all a base RFB server can show of having no clipboard.
+            unconfirmed: true,
         }
-    );
-}
-
-// The opt-out path: the flag off means the engine neither answers a fetch nor
-// writes to the remote, whatever the browser sends.
-#[tokio::test]
-async fn vnc_clipboard_is_inert_when_the_target_did_not_opt_in() {
-    let (vnc_port, mut cut_texts) = spawn_fake_vnc_with_clipboard(Some(b"secret")).await;
-    let addr = spawn_app(target_with_clipboard(Protocol::Vnc, vnc_port, false)).await;
-    let cookie = common::login(addr).await;
-
-    let token = common::claim_session(addr, &cookie).await;
-    let mut ws = connect_ws(addr, &token, &cookie).await;
-    common::connect_target(&mut ws, "test-target").await;
-    expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
-    expect_frame(&mut ws).await;
-
-    ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();
-    ws.send(Message::text(r#"{"type":"clipboard","text":"leaked"}"#))
-        .await
-        .unwrap();
-
-    // Nothing may come back, and nothing may reach the server. A refresh acts
-    // as the fence: its frame can only arrive after both clipboard messages have
-    // been handled, so silence up to that point is silence for good.
-    ws.send(Message::text(r#"{"type":"refresh"}"#)).await.unwrap();
-    tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
-            match msg.expect("websocket receive") {
-                Message::Text(text) => {
-                    assert!(
-                        !text.contains(r#""type":"clipboard""#),
-                        "clipboard answered for a target that did not opt in: {text}"
-                    );
-                }
-                Message::Binary(_) => return, // the refresh's frame: the fence
-                Message::Close(frame) => panic!("closed unexpectedly: {frame:?}"),
-                _ => {}
-            }
-        }
-        panic!("websocket ended while waiting for the refresh frame");
-    })
-    .await
-    .expect("timed out waiting for the refresh frame");
-    assert!(
-        cut_texts.try_recv().is_err(),
-        "a target that did not opt in must not write the remote's clipboard"
     );
 }
 
@@ -2236,7 +2214,7 @@ async fn standard_speaks_apples_revision_on_the_physical_screen() {
             let mask = loop {
                 match next_mac_request(&mut requests).await {
                     MacRequest::IncrementalFramebuffer => {}
-                    MacRequest::Pointer(mask) => break mask,
+                    MacRequest::Pointer(mask, _) => break mask,
                     other => panic!("expected the {button} button, got {other:?}"),
                 }
             };
@@ -2251,6 +2229,164 @@ async fn standard_speaks_apples_revision_on_the_physical_screen() {
         .expect("the fake Mac task panicked")
         .expect("the fake Mac task failed");
     assert!(configurations.is_empty(), "Standard asked for a virtual display: {configurations:?}");
+}
+
+/// The unofficial `ard-mirror`: the Mac's own screen, as Standard shares it, with
+/// High Performance's media stream offered for it. No virtual display is asked for,
+/// and the offer goes out once the screen's layout has come — the fake is set to
+/// refuse any offer, so the session ending on that refusal is the offer having
+/// been made.
+#[tokio::test]
+async fn mirror_opens_on_the_physical_displays_and_offers_the_stream() {
+    let (mac_port, mut requests, _actions, fake_mac) =
+        spawn_fake_mac_with(MAC_COMMANDS, MacStream::Refuse).await;
+    let addr = spawn_app(TargetConfig {
+        subtype: Some(remotex::config::Subtype::ArdMirror),
+        ..mac_target(mac_port)
+    })
+    .await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_mac_ws(addr, &token, &cookie).await;
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}},"choices":{MAC_CHOICES}}}"#
+    )))
+    .await
+    .unwrap();
+
+    // Standard's opening, not High Performance's: the prelude's pasteboard enable,
+    // then straight to the arming that answers the physical screen's layout.
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
+    );
+
+    let error = expect_error(&mut ws).await;
+    assert!(
+        error.contains("the Mac refused the media stream (error type 2, sub-code 0)"),
+        "{error}"
+    );
+    let configurations = fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+    assert!(configurations.is_empty(), "a mirror session asked for a virtual display: {configurations:?}");
+}
+
+/// The next pointer event the fake Mac was sent, past the polling around it. Any
+/// other request in between fails the test: a display selection above all.
+async fn next_mac_pointer(rx: &mut mpsc::UnboundedReceiver<MacRequest>) -> (u16, u16) {
+    loop {
+        match next_mac_request(rx).await {
+            MacRequest::IncrementalFramebuffer | MacRequest::HeldFramebuffer => {}
+            MacRequest::Pointer(_, at) => return at,
+            other => panic!("expected a pointer event, got {other:?}"),
+        }
+    }
+}
+
+/// The next `resize` of `(w, h)` the browser is sent, and its scale.
+async fn expect_resize_to(ws: &mut Ws, size: (u16, u16)) -> f64 {
+    loop {
+        let resize = expect_resize_msg(ws).await;
+        if (resize["w"].as_u64(), resize["h"].as_u64()) == (Some(size.0.into()), Some(size.1.into())) {
+            return resize["scale"].as_f64().expect("a scale");
+        }
+    }
+}
+
+/// A mirror session whose picture is decoded here is wired to the window: the
+/// browser is told the size the Mac's screen is reduced to as its window and its
+/// density change, a pointer position on that picture reaches the Mac in the
+/// Mac's own pixels, and a display selection made while the offer is out is not
+/// sent to the Mac. The fake holds the offer, so the session is driven inside the
+/// ten seconds an answer may take.
+///
+/// Decoding takes the host's FFmpeg, which the session checks before it dials; a
+/// host without it cannot start this session, and the test has nothing to drive.
+#[tokio::test]
+async fn mirror_fits_the_screen_to_the_window_and_points_in_the_macs_pixels() {
+    if remotex::libav::api().is_err() {
+        eprintln!("skipped: no FFmpeg on this host to decode a mirror session's picture");
+        return;
+    }
+    let (mac_port, mut requests, _actions, fake_mac) =
+        spawn_fake_mac_with(MAC_COMMANDS, MacStream::Hold).await;
+    let addr = spawn_app(TargetConfig {
+        subtype: Some(remotex::config::Subtype::ArdMirror),
+        ..mac_target(mac_port)
+    })
+    .await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}},"choices":{RESIZE}}}"#
+    )))
+    .await
+    .unwrap();
+
+    // A Mac on this host is reached from another of the host's addresses, so the
+    // stream's two ends differ: asked of the kernel here, apart from the gateway.
+    let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+    let routed = probe.connect("192.0.2.1:9").ok().map(|()| probe.local_addr().unwrap().ip());
+    let MacRequest::From(from) = next_mac_request(&mut requests).await else {
+        panic!("the fake reports where the gateway connected from first");
+    };
+    match routed.filter(|ip| !ip.is_loopback() && !ip.is_unspecified()) {
+        Some(routed) => assert_eq!(from, routed, "a media-stream target on this host, dialled from its own address"),
+        None => eprintln!("not checked: this host has no address but its loopback"),
+    }
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
+    // Armed as a session whose picture is the media stream is: one push a second,
+    // not Standard's one a video frame.
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::PushInterval(1_000_000));
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_DESKTOP, MAC_DESKTOP))
+    );
+    // The offer is out from here to the end of the test.
+    loop {
+        match next_mac_request(&mut requests).await {
+            MacRequest::Offer => break,
+            MacRequest::IncrementalFramebuffer | MacRequest::HeldFramebuffer => {}
+            other => panic!("expected the media-stream offer, got {other:?}"),
+        }
+    }
+
+    // A window of half the screen, on a 1x browser: half the pixels, at 1x.
+    let half = MAC_DESKTOP / 2;
+    ws.send(Message::text(format!(r#"{{"type":"viewport","w":{half},"h":{half}}}"#))).await.unwrap();
+    assert_eq!(expect_resize_to(&mut ws, (half, half)).await, 1.0);
+    ws.send(Message::text(r#"{"type":"mouseMove","x":8,"y":4}"#)).await.unwrap();
+    assert_eq!(next_mac_pointer(&mut requests).await, (16, 8), "the Mac's pixels, not the picture's");
+
+    // The same window on a 2x browser holds every pixel of the screen, shown whole.
+    ws.send(Message::text(format!(
+        r#"{{"type":"hostDisplay","w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":200}}"#
+    )))
+    .await
+    .unwrap();
+    assert_eq!(expect_resize_to(&mut ws, (MAC_DESKTOP, MAC_DESKTOP)).await, 2.0);
+    ws.send(Message::text(r#"{"type":"mouseMove","x":8,"y":4}"#)).await.unwrap();
+    assert_eq!(next_mac_pointer(&mut requests).await, (8, 4), "a picture shown as it came");
+
+    // A selection made while the offer is out never reaches the Mac: the next
+    // thing it is sent is the pointer event behind it.
+    ws.send(Message::text(format!(r#"{{"type":"selectDisplay","id":{MAC_PHYSICAL_DISPLAY}}}"#)))
+        .await
+        .unwrap();
+    ws.send(Message::text(r#"{"type":"mouseMove","x":3,"y":5}"#)).await.unwrap();
+    assert_eq!(next_mac_pointer(&mut requests).await, (3, 5));
+
+    ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
+    expect_picker(&mut ws).await;
+    let configurations = fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+    assert!(configurations.is_empty(), "a mirror session asked for a virtual display: {configurations:?}");
 }
 
 /// The whole `ard-high-performance` RFB wire, end to end: authentication, record setup,

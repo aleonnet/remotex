@@ -308,7 +308,7 @@ mod tests {
 
     const MONO_48K: MicFormat = MicFormat { channels: 1, sample_rate: 48_000 };
 
-    /// A client message as docs/wlshare-microphone.md lays it out, read back without
+    /// A client message as wlshare's docs/architecture.md lays it out, read back without
     /// the builders.
     #[derive(Debug, PartialEq, Eq)]
     enum Sent {

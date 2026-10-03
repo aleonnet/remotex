@@ -115,8 +115,8 @@ filenames, which the container build selects by release version.
 The Linux x86-64 binary targets the baseline x86-64 ISA and dispatches SIMD at
 run time. Neither Cargo configuration nor packaging and CI set `target-cpu`, and
 the prebuilt archives downloaded by the sys crates must use the same baseline
-with their hand-written kernels selected by CPUID: libvpx's rtcd tables and
-opus's `MAY_HAVE` dispatch. The sys crates fetch
+with their hand-written kernels selected by CPUID: libvpx's rtcd tables,
+opus's `MAY_HAVE` dispatch and libFLAC's own CPU detection. The sys crates fetch
 each dependency repository's latest release, so that release's archives—not the
 tag pinned in this repository's `Cargo.toml`—set the effective CPU floor.
 
@@ -131,11 +131,13 @@ binary's global CPU floor.
 
 ## Prebuilt native dependencies
 
-Release builds link `opus-prebuilt` and `libvpx-prebuilt`. Their sys crates
-download static archives instead of building vendored C and C++, so this project
-needs no CMake, assembler, pkg-config, libclang, vcpkg, or system copies of
-those libraries. `LIBVPX_PREBUILT_DIR` and `LIBOPUS_PREBUILT_DIR` select locally
-built archives.
+Release builds link `opus-prebuilt`, `libvpx-prebuilt` and, under
+[sound-flac](https://github.com/andrewtheguy/sound-flac), `libflac-prebuilt`.
+Their sys crates download static archives instead of building vendored C and
+C++, so this project needs no CMake, assembler, pkg-config, libclang, vcpkg, or
+system copies of those libraries, and no artifact carries or depends on one.
+`LIBVPX_PREBUILT_DIR`, `LIBOPUS_PREBUILT_DIR` and `LIBFLAC_PREBUILT_DIR` select
+locally built archives.
 
 `ard-high-performance` targets decode the Mac's picture with a decoder whose
 licence keeps it out of every artifact: FFmpeg's libavcodec
@@ -150,23 +152,6 @@ carry it and the private one `publish-full-image.sh` builds carries Debian's;
 elsewhere the operator installs it, as
 [High Performance decoder](../docs/high-performance-decoder.md) says for each
 platform.
-
-An `rdp` session started with lossless sound has it coded by libFLAC,
-which [desktop-flac](https://github.com/andrewtheguy/desktop-flac) loads at run
-time and nothing links (`src/audio.rs`); wlshare's sound is passed as wlshare
-coded it and needs none. Every artifact brings it, FLAC 1.5's or
-1.4's:
-
-| Artifact | libFLAC |
-|---|---|
-| `.deb` | `Depends: libflac14 \| libflac12t64`, the distribution's |
-| `.rpm` | `Requires: (libFLAC.so.14()(64bit) or libFLAC.so.12()(64bit))`, the distribution's |
-| container image | Debian's `libflac14`, installed by the `Dockerfile` |
-| `.pkg` | `/usr/local/lib/remotex/libFLAC.14.dylib`, built by `build-native-packages.sh` from FLAC's release source without Ogg, for macOS 11; building the package takes CMake |
-| `.msi` | `bin\libFLAC.dll` beside the executable, from FLAC's own Windows release |
-
-The source and the Windows release are each checked against a SHA-256 the
-script pins.
 
 The non-default `apple-hp-media-static` feature links private static archives
 instead, and is in no release artifact. No artifact holds the EXPERIMENTAL

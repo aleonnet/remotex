@@ -349,7 +349,7 @@ mod tests {
     const VGA: CameraFormat = CameraFormat { width: 640, height: 480, fps_numerator: 30_000, fps_denominator: 1_001 };
     const QVGA: CameraFormat = CameraFormat { width: 320, height: 240, fps_numerator: 15, fps_denominator: 1 };
 
-    /// A client message as docs/wlshare-camera.md lays it out, read back without
+    /// A client message as wlshare's docs/architecture.md lays it out, read back without
     /// the builders.
     #[derive(Debug, PartialEq, Eq)]
     enum Sent {

@@ -77,14 +77,12 @@ pub struct Connect {
     /// and nothing for a host that answers the offer with bitmap updates, which are
     /// decoded into the framebuffer as always.
     pub pass_graphics: bool,
-    /// Whether to open MS-RDPECLIP, which is what makes the clipboard side of
-    /// [`Input`] do anything.
-    ///
-    /// A server opens the channel a moment after the desktop and says so with
-    /// [`Event::ClipboardReady`]; nothing crosses it until one end announces a copy.
-    /// A session that did not ask for the channel reports none of the clipboard
-    /// events and drops every clipboard command.
-    pub clipboard: bool,
+    /// Whether the host may draw with H.264 on a passed pipeline: the capability
+    /// advertise takes it ([`gfx_proto::caps_advertise`]), and the access units
+    /// ride in the commands handed on, for whoever composes them to decode.
+    /// Means nothing without [`Connect::pass_graphics`]: this client has no H.264
+    /// decoder, so a pipeline it composes itself always refuses the codec.
+    pub h264: bool,
     /// Where the remote's sound goes, for a target that asked for it (MS-RDPEA).
     ///
     /// Asked for, the client names the `rdpsnd` channel, takes the dynamic channel a
@@ -712,6 +710,9 @@ struct Dynamics {
     resize: bool,
     /// Whether the Graphics channel is wanted at all — [`Connect::egfx`].
     egfx: bool,
+    /// Whether the host is told it may draw with H.264 — [`Connect::h264`], on a
+    /// pipeline that is passed.
+    h264: bool,
     /// Display Control, once the server has opened it.
     control: Option<u32>,
     /// What Display Control said it would lay out, which arrives after the channel
@@ -904,6 +905,7 @@ impl<'a> Active<'a> {
             dynamics: Dynamics {
                 resize: config.resize && config.egfx,
                 egfx: config.egfx,
+                h264: config.pass_graphics && config.h264,
                 audio: wants_audio,
                 ..Dynamics::default()
             },
@@ -1789,7 +1791,7 @@ fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<
                 // Client-to-server graphics PDUs go raw: the host reads the RDPGFX
                 // header off the channel directly, and only the server-to-client
                 // direction is bulk-compressed.
-                let caps = gfx_proto::caps_advertise();
+                let caps = gfx_proto::caps_advertise(dynamics.h264);
                 vec![dvc::create_response(channel, dvc::ACCEPTED), dvc::data(channel, &caps)?]
             } else if name == rdpsnd::DVC_NAME && dynamics.audio {
                 debug!("rdp: the host opened sound redirection on dynamic channel {channel}");
@@ -1887,8 +1889,15 @@ mod tests {
         let reply = answer(dvc::Message::Create { channel: 12, name: gfx_proto::CHANNEL_NAME }, &mut dynamics).unwrap();
         assert_eq!(reply.len(), 2);
         assert_eq!(reply[0], dvc::create_response(12, dvc::ACCEPTED));
-        assert_eq!(reply[1], dvc::data(12, &gfx_proto::caps_advertise()).unwrap());
+        assert_eq!(reply[1], dvc::data(12, &gfx_proto::caps_advertise(false)).unwrap());
         assert_eq!(dynamics.graphics, Some(12));
+
+        // Only a session that passes its pipeline to a page that decodes H.264
+        // tells the host it may draw with it.
+        let mut takes = Dynamics { egfx: true, h264: true, ..Dynamics::default() };
+        let reply = answer(dvc::Message::Create { channel: 12, name: gfx_proto::CHANNEL_NAME }, &mut takes).unwrap();
+        assert_eq!(reply[1], dvc::data(12, &gfx_proto::caps_advertise(true)).unwrap());
+        assert_ne!(gfx_proto::caps_advertise(true), gfx_proto::caps_advertise(false));
 
         // A session that asked for neither refuses both by name.
         let mut none = Dynamics::default();

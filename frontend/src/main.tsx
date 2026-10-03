@@ -4,6 +4,7 @@ import App from "./App.tsx";
 import "./index.css";
 import { chooseAppleMedia } from "./appleMedia.ts";
 import { startupPermitted } from "./preflight.ts";
+import { chooseRdpH264 } from "./rdpH264.ts";
 import { chooseVideoChroma } from "./videoChroma.ts";
 
 const root = document.getElementById("root");
@@ -14,12 +15,13 @@ if (!root) {
 // Before `App`, which asks the gateway who this is on its first render: a session
 // claimed from a page that cannot decode its own video is a session taken away from
 // wherever it was working. See preflight.ts. Then, with a decoder known to exist, the
-// two questions asked of it — how much colour it takes, and whether it takes a High
-// Performance Mac's HEVC — whose answers every session socket this page opens
-// carries (videoChroma.ts, appleMedia.ts). Awaited here so that nothing
-// downstream has to wait on it or carry a path for its absence.
+// questions asked of it — how much colour it takes, whether it takes a High
+// Performance Mac's HEVC, and whether it takes the H.264 of an RDP host's pipeline
+// — whose answers every session socket this page opens carries (videoChroma.ts,
+// appleMedia.ts, rdpH264.ts). Awaited here so that nothing downstream has to wait
+// on it or carry a path for its absence.
 if (startupPermitted(root)) {
-  await Promise.all([chooseVideoChroma(), chooseAppleMedia()]);
+  await Promise.all([chooseVideoChroma(), chooseAppleMedia(), chooseRdpH264()]);
   createRoot(root).render(
     <StrictMode>
       <App />

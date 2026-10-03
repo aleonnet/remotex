@@ -333,8 +333,7 @@ pub enum ClientMsg {
     /// engine.
     Disconnect,
     /// Put `text` on the remote's clipboard (the clipboard panel's "Send", or
-    /// the browser's automatic push when the tab regains focus). Ignored by
-    /// engines whose target did not opt in (`clipboard` in the target profile).
+    /// the browser's automatic push when the tab regains focus).
     Clipboard { text: String },
     /// Ask for the remote's current clipboard text (the panel's "Fetch"); the
     /// engine answers with [`ServerMsg::Clipboard`]. Still worth having
@@ -958,6 +957,12 @@ pub enum ServerMsg {
     /// resample that to its own display, which is what keeps a remote the same
     /// physical size on a 1x screen and a Retina one. A size that arrived without
     /// its density would be presented at the wrong size until the next message.
+    ///
+    /// One exception: an `ard-mirror` session that follows the window is sent the
+    /// picture the gateway reduced for it, labelled so the Mac's screen fits the
+    /// window's points, never more than the Mac's own density. There `scale` is
+    /// that fit, not the remote's density (docs/architecture.md, "Input and
+    /// display").
     Resize { w: u16, h: u16, scale: f32 },
     /// The remote pointer shape changed, and with it the fact that **the
     /// browser** owns pointer rendering for this session — a server that
@@ -998,7 +1003,6 @@ pub enum ServerMsg {
         /// somebody which of them they are on.
         subtype: Option<&'static str>,
         resize: bool,
-        clipboard: bool,
         audio: bool,
         /// The remote's own stream this session passes untouched, by
         /// [`crate::config::Passthrough::name`], or `None` for a desktop encoded
@@ -1095,6 +1099,12 @@ pub enum ServerMsg {
         /// `Some(len)` when the remote's clipboard was refused for exceeding
         /// [`MAX_CLIPBOARD_BYTES`] — see [`ClipboardSnapshot::oversized_bytes`].
         oversized_bytes: Option<u64>,
+        /// The remote has shown no sign of a clipboard: a plain RFB server that
+        /// announced no Extended Clipboard and has sent no cut text. Base RFB
+        /// acknowledges nothing, so this is the most an engine can know, and it
+        /// is said in the answer to a Fetch, where the panel can show it. Every
+        /// other engine's clipboard is negotiated, and says `false`.
+        unconfirmed: bool,
     },
     /// How to play what follows, sent before the first packet.
     ///
@@ -1227,7 +1237,6 @@ enum ControlMsg<'a> {
         protocol: &'a str,
         subtype: Option<&'a str>,
         resize: bool,
-        clipboard: bool,
         audio: bool,
         passthrough: Option<&'a str>,
         camera: bool,
@@ -1245,6 +1254,7 @@ enum ControlMsg<'a> {
         requested: bool,
         #[serde(rename = "oversizedBytes")]
         oversized_bytes: Option<u64>,
+        unconfirmed: bool,
     },
     Displays {
         active: u32,
@@ -1340,7 +1350,6 @@ impl ServerMsg {
                 protocol,
                 subtype,
                 resize,
-                clipboard,
                 audio,
                 passthrough,
                 camera,
@@ -1351,7 +1360,6 @@ impl ServerMsg {
                 protocol,
                 subtype: *subtype,
                 resize: *resize,
-                clipboard: *clipboard,
                 audio: *audio,
                 passthrough: *passthrough,
                 camera: *camera,
@@ -1419,6 +1427,7 @@ impl ServerMsg {
                 changed_at_ms,
                 requested,
                 oversized_bytes,
+                unconfirmed,
             } => {
                 let refused = (!clipboard_fits(text)).then_some(text.len() as u64);
                 control(&ControlMsg::Clipboard {
@@ -1426,6 +1435,7 @@ impl ServerMsg {
                     changed_at_ms: *changed_at_ms,
                     requested: *requested,
                     oversized_bytes: oversized_bytes.or(refused),
+                    unconfirmed: *unconfirmed,
                 })
             }
         })
@@ -1636,7 +1646,7 @@ mod tests {
     /// a client that received them in the other order would decode nothing.
     #[test]
     fn the_audio_format_is_text_and_the_packets_are_not() {
-        let head = desktop_opus::Stream { rate: 48_000, channels: 2 }.head(312, 44_100).unwrap().to_vec();
+        let head = sound_opus::Stream { rate: 48_000, channels: 2 }.head(312, 44_100).unwrap().to_vec();
         let json = (ServerMsg::AudioFormat {
             codec: "opus",
             sample_rate: 48_000,
@@ -1761,7 +1771,6 @@ mod tests {
             protocol: "vnc",
             subtype: Some("ard"),
             resize: false,
-            clipboard: true,
             audio: false,
             passthrough: None,
             camera: false,
@@ -1772,7 +1781,7 @@ mod tests {
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"clipboard":true,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 4:4:4 · adaptive"}"#
+                r#"{"type":"connected","name":"mac","protocol":"vnc","subtype":"ard","resize":false,"audio":false,"passthrough":null,"camera":false,"microphone":false,"render":"video q90 4:4:4 · adaptive"}"#
             ),
             None => panic!("connected must be a text frame"),
         }
@@ -1783,7 +1792,6 @@ mod tests {
             protocol: "rdp",
             subtype: None,
             resize: true,
-            clipboard: false,
             audio: false,
             passthrough: Some("rdp-graphics"),
             camera: false,
@@ -1901,13 +1909,14 @@ mod tests {
             changed_at_ms: Some(1_721_234_567_890),
             requested: false,
             oversized_bytes: None,
+            unconfirmed: false,
         })
         .text_frame()
         {
             Some(json) => {
                 assert_eq!(
                     json,
-                    r#"{"type":"clipboard","text":"hi \"there\"","changedAtMs":1721234567890,"requested":false,"oversizedBytes":null}"#
+                    r#"{"type":"clipboard","text":"hi \"there\"","changedAtMs":1721234567890,"requested":false,"oversizedBytes":null,"unconfirmed":false}"#
                 );
             }
             None => panic!("clipboard must be a text frame"),
@@ -1917,13 +1926,14 @@ mod tests {
             changed_at_ms: None,
             requested: true,
             oversized_bytes: None,
+            unconfirmed: false,
         })
         .text_frame()
         {
             Some(json) => {
                 assert_eq!(
                     json,
-                    r#"{"type":"clipboard","text":"","changedAtMs":null,"requested":true,"oversizedBytes":null}"#
+                    r#"{"type":"clipboard","text":"","changedAtMs":null,"requested":true,"oversizedBytes":null,"unconfirmed":false}"#
                 );
             }
             None => panic!("clipboard must be a text frame"),
@@ -1946,13 +1956,14 @@ mod tests {
             changed_at_ms: Some(42),
             requested: true,
             oversized_bytes: None,
+            unconfirmed: false,
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
                 format!(
-                    r#"{{"type":"clipboard","text":"","changedAtMs":42,"requested":true,"oversizedBytes":{oversized}}}"#
+                    r#"{{"type":"clipboard","text":"","changedAtMs":42,"requested":true,"oversizedBytes":{oversized},"unconfirmed":false}}"#
                 )
             ),
             None => panic!("clipboard must be a text frame"),
@@ -1965,12 +1976,13 @@ mod tests {
             changed_at_ms: Some(42),
             requested: false,
             oversized_bytes: Some(209_715_200),
+            unconfirmed: false,
         })
         .text_frame()
         {
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"clipboard","text":"","changedAtMs":42,"requested":false,"oversizedBytes":209715200}"#
+                r#"{"type":"clipboard","text":"","changedAtMs":42,"requested":false,"oversizedBytes":209715200,"unconfirmed":false}"#
             ),
             None => panic!("clipboard must be a text frame"),
         }

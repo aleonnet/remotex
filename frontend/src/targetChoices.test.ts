@@ -39,7 +39,6 @@ function target(offers: Partial<TargetInfo>): TargetInfo {
     size: null,
     defaultSize: DEFAULT_SIZE,
     audio: false,
-    losslessUnavailable: false,
     passthrough: null,
     passthroughOnly: false,
     ...offers,
@@ -131,6 +130,39 @@ test("a Mac sharing its physical displays is shown at their size", () => {
   assert.match(standard.sizes[0].label, /own size/);
 });
 
+test("a Mac mirroring its screens is fitted to the window, or shown at their size", () => {
+  // The Mac's own screens over its media stream: nothing sizes them, and the
+  // gateway fits their picture to a window it follows.
+  const mirror = target({
+    subtype: "ard-mirror",
+    resize: true,
+    defaultSize: null,
+    passthrough: "apple-media",
+  });
+  assert.deepEqual(sizes(mirror, ABLE), [
+    ["window", "This window's size"],
+    ["target", "The remote's own size"],
+  ]);
+  assert.deepEqual(sizes(mirror, TABLET), [
+    ["window", "This screen's size"],
+    ["target", "The remote's own size"],
+  ]);
+  // The window is the size until somebody chooses the screens' own.
+  const options = targetOptions(mirror, undefined, ABLE);
+  assert.equal(options.choices.size, "window");
+  assert.match(options.sizes[0].note, /fitted/);
+  assert.equal(
+    targetOptions(mirror, { size: "target" }, ABLE).choices.size,
+    "target",
+  );
+  // A phone has no window a picture could follow.
+  assert.deepEqual(sizes(mirror, PHONE), [["target", "The remote's own size"]]);
+  // Standard mode's screens are still only ever their own size.
+  assert.deepEqual(sizes(target({ subtype: "ard", defaultSize: null }), ABLE), [
+    ["target", "The remote's own size"],
+  ]);
+});
+
 test("only what the target's type offers has a row", () => {
   const rdp = targetOptions(RDP, undefined, ABLE);
   assert.deepEqual(keys(rdp.rows), ["passthrough"]);
@@ -169,7 +201,6 @@ test("nothing is ticked until somebody ticks it", () => {
   assert.equal(options.sound, false);
   assert.ok(options.rows.every((row) => !row.checked && !row.disabled));
   assert.equal(options.soundRow?.checked, false);
-  assert.ok(options.soundRow?.formats.every((format) => !format.disabled));
 });
 
 test("what was chosen last time is what Start sends", () => {
@@ -231,39 +262,6 @@ test("a passthrough this browser cannot take is greyed, with the reason", () => 
     assert.equal(options.choices.passthrough, false);
     assert.equal(options.blocked, null, "the target still starts, encoded");
   }
-});
-
-test("a lossless sound the gateway cannot code is greyed, with the reason", () => {
-  const without = { ...RDP, losslessUnavailable: true };
-  // Chosen last time, on a gateway that could code it.
-  const options = targetOptions(without, { audio: "flac" }, ABLE);
-  const lossless = options.soundRow?.formats.find(
-    (format) => format.value === "flac",
-  );
-  assert.ok(lossless);
-  assert.equal(lossless.disabled, true);
-  assert.match(lossless.note, /libFLAC/);
-  assert.equal(options.choices.audio, "off");
-  assert.equal(options.soundRow?.checked, false);
-  assert.equal(options.sound, false);
-  assert.equal(options.blocked, null, "the target still starts, without sound");
-  // Opus is coded by the gateway itself, and is still a choice.
-  assert.equal(
-    options.soundRow?.formats.find((format) => format.value === "opus")
-      ?.disabled,
-    false,
-  );
-  assert.equal(
-    targetOptions(without, { audio: "opus" }, ABLE).choices.audio,
-    "opus",
-  );
-
-  const able = targetOptions(RDP, { audio: "flac" }, ABLE);
-  assert.equal(
-    able.soundRow?.formats.find((format) => format.value === "flac")?.disabled,
-    false,
-  );
-  assert.equal(able.choices.audio, "flac");
 });
 
 test("a gateway that cannot decode the Mac's picture can only pass it", () => {

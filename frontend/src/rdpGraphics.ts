@@ -1,6 +1,6 @@
 // Whether this page composes an RDP host's graphics pipeline: the third question
 // about itself the gateway is told, beside the chroma (videoChroma.ts) and the
-// Mac's stream (appleMedia.ts).
+// Mac's stream (appleMedia.ts), and ahead of the pipeline's H.264 (rdpH264.ts).
 //
 // A session started with the pipeline passed is composed here, by the gateway's own
 // compositor compiled to WebAssembly (egfxCompositor.ts). That needs two things of

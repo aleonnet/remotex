@@ -8,7 +8,9 @@ belong in the linked documentation.
 
 - The project prioritizes integration with the native remote desktop servers
   of Windows and macOS: Windows' own Remote Desktop over RDP, and macOS's
-  built-in Screen Sharing in both of its modes (`ard`, `ard-high-performance`).
+  built-in Screen Sharing in both of its modes (`ard`, `ard-high-performance`),
+  and, in this fork, the unofficial `ard-mirror`: the physical displays over the
+  media stream.
   On Linux it prioritizes [wlshare](https://github.com/andrewtheguy/wlshare), our
   own wlroots VNC server (`../wlshare`), reached as `subtype = "wlshare"`.
 - Design, QA and optimization start from these three. Behavior specific to one
@@ -59,7 +61,8 @@ area's section before changing what it covers:
   session's life.
 - [Input and display](docs/architecture.md#input-and-display): the two touch
   layers, the display picker as the remote's, presentation at 100%, density as
-  the wire's word, and the Apple mosaic as the one rescale.
+  the wire's word, and the Apple mosaic and the `ard-mirror` reduction as the
+  two rescales.
 - [Media paths](docs/architecture.md#media-paths): one VP9 encoder or passed
   untouched, with a rule for each passthrough, a desktop past the ceiling, audio,
   camera and microphone.

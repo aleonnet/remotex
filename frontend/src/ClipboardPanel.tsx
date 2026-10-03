@@ -63,6 +63,10 @@ export function ClipboardPanel({
     isRemoteMetadataMode && remoteClipboard
       ? remoteClipboard.oversizedBytes
       : null;
+  // A plain VNC server that has shown no clipboard at all. Said for as long as
+  // that holds, whichever view the panel is in: it bears on Send as much as on
+  // the empty card, and the next reply or push that proves otherwise clears it.
+  const unconfirmed = remoteClipboard?.unconfirmed ?? false;
   const remoteBytes = useMemo(
     () => encoder.encode(remoteClipboard?.text ?? ""),
     [remoteClipboard?.text],
@@ -148,8 +152,14 @@ export function ClipboardPanel({
       return;
     }
     onSend(clipboardInput);
-    setNotice("Clipboard sent to remote");
-  }, [clipboardInput, isRemoteMetadataMode, onSend]);
+    // Neither is an acknowledgement — no engine gets one — but only the second
+    // has a reason to doubt.
+    setNotice(
+      unconfirmed
+        ? "Sent, but this server may ignore it"
+        : "Clipboard sent to remote",
+    );
+  }, [clipboardInput, isRemoteMetadataMode, onSend, unconfirmed]);
 
   const handleCopy = useCallback(async () => {
     const text =
@@ -267,6 +277,12 @@ export function ClipboardPanel({
           Copy
         </button>
       </div>
+
+      {unconfirmed && (
+        <p className="cb-unconfirmed" role="note">
+          This server has not announced a clipboard. Text may not transfer.
+        </p>
+      )}
 
       <div className="cb-status">
         {!isRemoteMetadataMode && (

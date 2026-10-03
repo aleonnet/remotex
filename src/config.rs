@@ -79,8 +79,8 @@ pub enum Subtype {
     /// High Performance Screen Sharing uses a virtual display rather than the
     /// Mac's physical displays. This gateway requests one virtual display at the
     /// session's opening size ([`TargetConfig::opening_size`]). Apple's native
-    /// pasteboard payloads are carried inside the encrypted record transport
-    /// when `clipboard` is enabled. In a session that follows the window,
+    /// pasteboard payloads are carried inside the encrypted record transport.
+    /// In a session that follows the window,
     /// viewport reports replace the virtual display's one advertised mode and the
     /// Mac answers with its new layout.
     ///
@@ -92,6 +92,26 @@ pub enum Subtype {
     /// lacks it can only pass the picture ([`Passthrough::AppleMedia`]), to a
     /// browser that decodes it.
     ArdHighPerformance,
+    /// UNOFFICIAL. The Mac's physical displays, as [`Subtype::Ard`] shares them,
+    /// with the picture and the sound over High Performance's media stream instead
+    /// of ZRLE rectangles: the session asks for no virtual display, the Mac's own
+    /// screens stay lit and show what the viewer sees, and the Mac codes them as
+    /// the HEVC it codes a virtual display as. A combination Apple's viewer never
+    /// makes; measured against macOS 27 alone (docs/apple-vnc-889.md, "Mirror").
+    ///
+    /// The Mac sends each screen at its own pixels, whatever the offer names and
+    /// whatever server scaling is in force, so a picture the gateway decodes is
+    /// reduced here to the viewer's window and the video ceiling
+    /// ([`crate::video::fit_within`]) — the one place the gateway resamples a
+    /// remote's pixels. In a session that follows the window the window drives
+    /// that size; in any other the ceiling alone holds it. A picture passed
+    /// through ([`Passthrough::AppleMedia`]) reaches the browser as the Mac sent
+    /// it, at the screen's size.
+    ///
+    /// As on [`Subtype::ArdHighPerformance`], the picture and the sound go
+    /// together and the Mac mutes its own output while the sound leg runs: whoever
+    /// sits at the Mac hears nothing for the session's length.
+    ArdMirror,
     /// [wlshare](https://github.com/andrewtheguy/wlshare), our own wlroots VNC
     /// server, spoken to as what it is: RFB 3.8 with wlshare's private extensions
     /// listed. Its picture is its own VP9 stream, passed to the browser untouched
@@ -113,6 +133,7 @@ impl Subtype {
         match self {
             Subtype::Ard => "ard",
             Subtype::ArdHighPerformance => "ard-high-performance",
+            Subtype::ArdMirror => "ard-mirror",
             Subtype::Wlshare => "wlshare",
         }
     }
@@ -121,7 +142,7 @@ impl Subtype {
     pub fn media_stream(self) -> bool {
         match self {
             Subtype::Ard | Subtype::Wlshare => false,
-            Subtype::ArdHighPerformance => true,
+            Subtype::ArdHighPerformance | Subtype::ArdMirror => true,
         }
     }
 
@@ -131,7 +152,7 @@ impl Subtype {
     /// `wlshare` one is.
     pub fn apple(self) -> bool {
         match self {
-            Subtype::Ard | Subtype::ArdHighPerformance => true,
+            Subtype::Ard | Subtype::ArdHighPerformance | Subtype::ArdMirror => true,
             Subtype::Wlshare => false,
         }
     }
@@ -205,7 +226,7 @@ pub enum Chroma {
 
 /// The encoder's own word for it: the config's chroma is a key and a wire answer, the
 /// crate's is a VP9 profile, and this is the one place the first becomes the second.
-impl From<Chroma> for desktop_vp9::Chroma {
+impl From<Chroma> for screen_vp9::Chroma {
     fn from(chroma: Chroma) -> Self {
         match chroma {
             Chroma::Subsampled => Self::Subsampled,
@@ -328,6 +349,11 @@ pub struct RenderPlan {
     /// only the picture of a host that answers the offer of the pipeline with
     /// bitmap updates, which is encoded here as always.
     pub rdp_graphics: bool,
+    /// The host may draw with H.264 on that passed pipeline, for the browser to
+    /// decode: [`TargetConfig::egfx_h264`], in a session that passes the pipeline
+    /// to a browser that decodes it ([`Decoders::rdp_h264`]). Never set without
+    /// [`Self::rdp_graphics`].
+    pub rdp_h264: bool,
 }
 
 /// A remote's own stream, passed to the browser as it came instead of decoded
@@ -352,7 +378,7 @@ pub enum Passthrough {
     /// **Experimental.** The compositor the page runs is the gateway's own and is
     /// unit tested as it is there, and what is passed is checked against a real
     /// host, by the probe and by a headless browser. That is one Windows 11 host,
-    /// with sound and [`TargetConfig::clipboard`] beside it;
+    /// with sound and the clipboard beside it;
     /// [`TargetConfig::camera`] and [`TargetConfig::microphone`] beside it have not
     /// been tried.
     RdpGraphics,
@@ -497,7 +523,7 @@ pub struct NotOffered {
 
 /// What the attached browser said it can take, from its session socket
 /// ([`crate::ws`]): the questions the page asks once at load and states on every
-/// session socket it opens. The chroma *selects* a stream. The other two say which
+/// session socket it opens. The chroma *selects* a stream. The two after it say which
 /// passthrough this browser can be served, which is what the picker greys a choice
 /// by and what ends a session whose owner comes back unable to take its own
 /// ([`TargetConfig::beyond`]).
@@ -512,6 +538,11 @@ pub struct Decoders {
     /// ([`Passthrough::RdpGraphics`]): the page's compositor needs shared memory,
     /// so a cross-origin isolated page, and a WebGL 2 canvas to present on.
     pub rdp_graphics: bool,
+    /// Whether it decodes the H.264 an RDP host may draw with on that pipeline
+    /// ([`TargetConfig::egfx_h264`]): a `VideoDecoder` that takes it and hands its
+    /// pictures into the compositor's memory. Unlike the two above it turns no
+    /// session away: a browser that says no is passed a pipeline without H.264.
+    pub rdp_h264: bool,
 }
 
 impl Decoders {
@@ -529,7 +560,7 @@ impl Decoders {
 #[cfg(test)]
 impl From<Chroma> for Decoders {
     fn from(chroma: Chroma) -> Self {
-        Self { chroma, apple_media: true, rdp_graphics: true }
+        Self { chroma, apple_media: true, rdp_graphics: true, rdp_h264: true }
     }
 }
 
@@ -561,7 +592,8 @@ impl RenderPlan {
     /// [`TargetConfig::render_summary`], the only caller that passes anything.
     fn card(&self, chroma_slot: Option<&str>) -> String {
         if let Some(passthrough) = self.passthrough() {
-            return format!("{}, passed through", passthrough.stream());
+            let h264 = if self.rdp_h264 { " with H.264" } else { "" };
+            return format!("{}{h264}, passed through", passthrough.stream());
         }
         // Always named, because with `auto` the default there is no chroma a card
         // may leave unsaid: an unnamed one would read as 4:2:0 selected on a
@@ -691,17 +723,30 @@ pub struct TargetConfig {
     /// ([`TargetConfig::egfx`]).
     #[serde(default)]
     pub egfx: Option<bool>,
-    /// Clipboard bridge: let the browser read and write this target's
-    /// clipboard, through the floating menu's Clipboard panel. Off by default —
-    /// a remote desktop's clipboard often holds whatever was last copied there,
-    /// so exposing it is a per-target decision rather than a default.
+    /// EXPERIMENTAL. Let the host draw with H.264 on a pipeline that is passed
+    /// ([`Passthrough::RdpGraphics`]), for the browser to decode. Refused on a
+    /// target that is not RDP and beside `egfx = false`, which have no pipeline to
+    /// carry it.
     ///
-    /// Supported by both engines, though what reaches the far side differs:
-    /// generic VNC uses the UTF-8 Extended Clipboard extension when available and
-    /// falls back to latin-1 `ServerCutText`/`ClientCutText`; Apple VNC uses the
-    /// native pasteboard protocol; RDP uses MS-RDPECLIP `CF_UNICODETEXT`.
+    /// A Windows host told its client takes H.264 hands the parts of the desktop
+    /// that move like video — a player, a scrolling page — to it, and goes on
+    /// drawing the rest with the lossless codecs in the same frames. That is the
+    /// host's own trade of detail for bitrate on those parts, which is why it is a
+    /// key and off unless set: without it every passed pipeline is lossless.
+    ///
+    /// It reaches only a session started with the passthrough, and only a browser
+    /// that said it decodes H.264 ([`Decoders::rdp_h264`]); every other session of
+    /// the target is told what it always was, that the client takes none. The
+    /// gateway decodes nothing: the access units ride in the commands it passes,
+    /// and the page decodes them with the browser's `VideoDecoder` and paints them
+    /// through its compositor ([`remotex_rdp_graphics::avc`]).
+    ///
+    /// A key rather than a choice at the picker while it is experimental. Checked
+    /// against one Windows 11 host without a GPU, whose stream is Main profile and
+    /// AVC420 by region; AVC444, which a host policy may select, is implemented
+    /// from the specification and has not been seen from a host.
     #[serde(default)]
-    pub clipboard: bool,
+    pub egfx_h264: bool,
     /// Offer the remote a redirected camera: MS-RDPECAM on RDP, and on a
     /// `wlshare` target the wlshare camera extension ([`crate::vnc_camera`]),
     /// listed the way its audio extension is. Rejected on a plain `vnc`
@@ -914,7 +959,8 @@ impl TargetConfig {
         let passthrough = self.passthrough(choices);
         let apple_media = passthrough == Some(Passthrough::AppleMedia);
         let rdp_graphics = passthrough == Some(Passthrough::RdpGraphics);
-        RenderPlan { quality, adaptive, chroma, apple_media, rdp_graphics }
+        let rdp_h264 = rdp_graphics && self.egfx_h264 && decoders.rdp_h264;
+        RenderPlan { quality, adaptive, chroma, apple_media, rdp_graphics, rdp_h264 }
     }
 
     /// The choices the picker shows under this target.
@@ -943,6 +989,13 @@ impl TargetConfig {
             }
             // The sound comes with the picture, so it is not a choice.
             (Protocol::Vnc, Some(Subtype::ArdHighPerformance)) => Offers {
+                resize: true,
+                audio: false,
+                passthrough: Some(Passthrough::AppleMedia),
+            },
+            // The same stream, of the Mac's own screens: the window drives the size
+            // the gateway reduces the picture to, not the Mac's display.
+            (Protocol::Vnc, Some(Subtype::ArdMirror)) => Offers {
                 resize: true,
                 audio: false,
                 passthrough: Some(Passthrough::AppleMedia),
@@ -1009,7 +1062,7 @@ impl TargetConfig {
             ChromaChoice::Auto => Some("chroma auto"),
             ChromaChoice::Subsampled | ChromaChoice::Full => None,
         };
-        let decoders = Decoders { chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false };
+        let decoders = Decoders { chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false };
         self.render_plan(Choices::default(), decoders).card(slot)
     }
 
@@ -1017,18 +1070,6 @@ impl TargetConfig {
     /// lossless, as FLAC ([`Sound::Flac`]).
     pub fn lossless(&self, choices: Choices) -> bool {
         self.offers().audio && choices.audio == Sound::Flac
-    }
-
-    /// Whether this target's lossless sound is coded here, which takes libFLAC on
-    /// this host: an RDP host's PCM. wlshare's sound is passed, Opus or FLAC, and
-    /// needs none.
-    pub fn codes_flac(&self) -> bool {
-        self.protocol == Protocol::Rdp
-    }
-
-    /// Whether a session started with `choices` needs libFLAC on this host.
-    pub fn needs_libflac(&self, choices: Choices) -> bool {
-        self.codes_flac() && self.lossless(choices)
     }
 
     /// Whether the Opus bitrate walks with the link — on unless the operator
@@ -1102,7 +1143,7 @@ impl TargetConfig {
         match (self.protocol, self.subtype) {
             (Protocol::Vnc, Some(Subtype::ArdHighPerformance)) => true,
             (Protocol::Vnc, Some(Subtype::Ard)) => self.virtual_display,
-            (Protocol::Vnc, None | Some(Subtype::Wlshare)) | (Protocol::Rdp, _) => false,
+            (Protocol::Vnc, None | Some(Subtype::Wlshare | Subtype::ArdMirror)) | (Protocol::Rdp, _) => false,
         }
     }
 }
@@ -1574,7 +1615,7 @@ impl ConfigFile {
                      always opens a virtual display: the key is subtype \"ard\"'s. Remove it.",
                     target.name
                 ),
-                (Protocol::Vnc, None | Some(Subtype::Wlshare)) | (Protocol::Rdp, _) => anyhow::bail!(
+                (Protocol::Vnc, None | Some(Subtype::Wlshare | Subtype::ArdMirror)) | (Protocol::Rdp, _) => anyhow::bail!(
                     "target {:?} sets virtual_display, which only subtype \"ard\" takes: it \
                      opens Standard Screen Sharing on one of the Mac's virtual displays, \
                      and nothing else here has one to open. Remove the key.",
@@ -1701,9 +1742,11 @@ impl ConfigFile {
             // size there is one no session would ever state.
             anyhow::ensure!(
                 target.size.is_none() || target.sized(),
-                "target {:?} sets size on subtype \"ard\", which shares the Mac's physical \
-                 displays and never sizes them. Remove the key, or set virtual_display = true.",
-                target.name
+                "target {:?} sets size on subtype {:?}, which shares the Mac's physical \
+                 displays and never sizes them. Remove the key{}.",
+                target.name,
+                target.subtype.map_or("", Subtype::name),
+                if target.subtype == Some(Subtype::Ard) { ", or set virtual_display = true" } else { "" }
             );
             // A virtual display opens at the client's density under a ceiling of
             // pixels, so a size past the ceiling's points at 2x would be shrunk for
@@ -1727,6 +1770,14 @@ impl ConfigFile {
                  to switch. Remove the key.",
                 target.name,
                 target.protocol.name()
+            );
+            // H.264 rides the pipeline, so it needs one: an RDP target's, left on.
+            anyhow::ensure!(
+                !target.egfx_h264 || (target.protocol == Protocol::Rdp && target.egfx()),
+                "target {:?} sets egfx_h264, which only an rdp target with its graphics pipeline \
+                 on can take: H.264 is drawn on that pipeline. Remove the key{}.",
+                target.name,
+                if target.protocol == Protocol::Rdp { ", or egfx = false" } else { "" }
             );
             // The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
             // `wlshare` target. Neither Apple's Screen Sharing nor a VNC server read
@@ -1809,7 +1860,7 @@ impl ConfigFile {
             // credential is refused where it cannot be used rather than quietly
             // ignored, which is how a password ends up authenticating nobody.
             match (target.protocol, target.subtype) {
-                (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdHighPerformance))) => {
+                (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdHighPerformance | Subtype::ArdMirror))) => {
                     let name = subtype.name();
                     anyhow::ensure!(
                         !target.username.is_empty() && !target.password.is_empty(),
@@ -2248,16 +2299,6 @@ fn installed_layout() -> Option<InstalledLayout> {
     installed_layout_for_exe(&running_exe()?)
 }
 
-/// The folder the macOS package carries libFLAC in, for a gateway that package
-/// installed: one of its own, so it neither replaces nor is replaced by a FLAC
-/// the operator installed. The Linux packages depend on the distribution's, and
-/// the Windows package puts the DLL beside the executable, where the system's
-/// loader looks first, so neither has a folder to name.
-pub fn carried_libflac() -> Option<PathBuf> {
-    let packaged = cfg!(target_os = "macos") && running_exe()?.parent()? == Path::new("/usr/local/bin");
-    packaged.then(|| PathBuf::from("/usr/local/lib/remotex"))
-}
-
 fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     let bin_dir = exe.parent()?;
 
@@ -2426,7 +2467,6 @@ mod tests {
         assert_eq!(t.kept_size(), DEFAULT_SIZE);
         assert_eq!((t.username.as_str(), t.password.as_str(), t.domain.as_deref()), ("u", "p", None));
         assert!(t.egfx(), "the graphics pipeline is on unless turned off");
-        assert!(!t.clipboard, "the clipboard bridge is opt-in");
         assert!(!t.sound(Choices::default()), "the remote's sound is taken only where it is chosen");
     }
 
@@ -3096,6 +3136,7 @@ mod tests {
                     chroma: decoder,
                     apple_media: false,
                     rdp_graphics: false,
+                    rdp_h264: false,
                 }
             );
         }
@@ -3112,6 +3153,7 @@ mod tests {
                 chroma: Chroma::Subsampled,
                 apple_media: false,
                 rdp_graphics: false,
+                rdp_h264: false,
             }
         );
     }
@@ -3140,6 +3182,7 @@ mod tests {
             chroma,
             apple_media: false,
             rdp_graphics: false,
+            rdp_h264: false,
         };
         assert_eq!(video("", Chroma::Full), stream(Chroma::Full));
         assert_eq!(video("", Chroma::Subsampled), stream(Chroma::Subsampled));
@@ -3271,7 +3314,7 @@ mod tests {
     }
 
     /// The Apple subtypes.
-    const APPLE_SUBTYPES: &[&str] = &["ard", "ard-high-performance"];
+    const APPLE_SUBTYPES: &[&str] = &["ard", "ard-high-performance", "ard-mirror"];
 
     /// A `vnc` target body, with whatever keys the case is about.
     fn vnc_toml(extra: &str) -> String {
@@ -3347,9 +3390,6 @@ mod tests {
         let standard = &ard("username = \"andrew\"\npassword = \"h\"").unwrap().targets[0];
         assert_eq!(standard.offers(), Offers { resize: false, audio: false, passthrough: None });
 
-        // Both Apple subtypes use Apple's native pasteboard messages.
-        assert!(ard("username = \"andrew\"\npassword = \"h\"\nclipboard = true").is_ok());
-
         // And it is a VNC subtype only.
         let err = ConfigFile::parse(&format!(
             r#"
@@ -3424,24 +3464,20 @@ mod tests {
         assert!(format!("{err:#}").contains("only subtype \"ard\" takes"), "{err:#}");
     }
 
-    /// The high-performance subtype carries the same account credentials and native
-    /// Apple pasteboard as plain `ard`, and requests a virtual display at the
-    /// configured size.
+    /// The high-performance subtype carries the same account credentials as plain
+    /// `ard`, and requests a virtual display at the configured size.
     #[test]
-    fn the_high_performance_subtype_accepts_clipboard_and_offers_resize() {
+    fn the_high_performance_subtype_offers_resize() {
         let hp = |extra: &str| {
             ConfigFile::parse(&vnc_toml(&format!(
                 "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
             )))
         };
 
-        let target = &hp("size = \"1600x1000\"\nclipboard = true")
-            .unwrap()
-            .targets[0];
+        let target = &hp("size = \"1600x1000\"").unwrap().targets[0];
         assert_eq!(target.subtype, Some(Subtype::ArdHighPerformance));
         assert_eq!(target.size, Some((1600, 1000)));
         assert!(target.offers().resize);
-        assert!(target.clipboard);
         // The name is what a config file writes, hyphens and all — the enum is
         // kebab-case, not lowercase, and this is what pins that.
         assert_eq!(target.subtype.unwrap().name(), "ard-high-performance");
@@ -3451,6 +3487,42 @@ mod tests {
             "subtype = \"ard-high-performance\"\nvnc_password = \"other\"",
         ))
         .unwrap_err();
+        assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
+    }
+
+    /// The mirror subtype is the Mac's own displays over its media stream: an
+    /// account's credentials, the stream's sound and passthrough, a window to
+    /// follow, and neither a size nor a virtual display to state.
+    #[test]
+    fn ard_mirror_is_the_macs_own_displays_over_its_stream() {
+        let mirror = |extra: &str| {
+            ConfigFile::parse(&vnc_toml(&format!(
+                "subtype = \"ard-mirror\"\nusername = \"andrew\"\npassword = \"h\"\n{extra}"
+            )))
+        };
+        let target = &mirror("").unwrap().targets[0];
+        assert_eq!(target.subtype, Some(Subtype::ArdMirror));
+        assert_eq!(target.subtype.unwrap().name(), "ard-mirror");
+        assert!(target.apple());
+        assert!(target.media_stream(), "the picture and the sound are the stream's");
+        assert!(!target.has_virtual_display(), "the Mac's own screens");
+        assert!(!target.sized());
+        assert_eq!(
+            target.offers(),
+            Offers { resize: true, audio: false, passthrough: Some(Passthrough::AppleMedia) }
+        );
+        assert!(target.sound(Choices::default()), "the sound comes with the picture");
+        let window = Choices { size: Sizing::Window, ..Choices::default() };
+        assert_eq!(target.accepts(window), Ok(()));
+        assert_eq!(target.accepts(Choices { passthrough: true, ..Choices::default() }), Ok(()));
+
+        let err = mirror("size = \"1600x1000\"").unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("\"ard-mirror\"") && msg.contains("never sizes them"), "{msg}");
+        assert!(!msg.contains("virtual_display"), "the key is not this subtype's to set: {msg}");
+        let err = mirror("virtual_display = true").unwrap_err();
+        assert!(format!("{err:#}").contains("only subtype \"ard\" takes"), "{err:#}");
+        let err = ConfigFile::parse(&vnc_toml("subtype = \"ard-mirror\"\nvnc_password = \"other\"")).unwrap_err();
         assert!(format!("{err:#}").contains("no username and password"), "{err:#}");
     }
 
@@ -3469,8 +3541,8 @@ mod tests {
             .remove(0)
         };
         let hp = mac("ard-high-performance");
-        let takes = Decoders { chroma: Chroma::Full, apple_media: true, rdp_graphics: false };
-        let declines = Decoders { chroma: Chroma::Full, apple_media: false, rdp_graphics: false };
+        let takes = Decoders { chroma: Chroma::Full, apple_media: true, rdp_graphics: false, rdp_h264: false };
+        let declines = Decoders { chroma: Chroma::Full, apple_media: false, rdp_graphics: false, rdp_h264: false };
         let passed = Choices { passthrough: true, ..Choices::default() };
 
         assert_eq!(hp.offers().passthrough, Some(Passthrough::AppleMedia));
@@ -3697,12 +3769,12 @@ mod tests {
         }
     }
 
-    /// The clipboard is every engine's: generic VNC's Extended Clipboard, Apple's
-    /// pasteboard, and MS-RDPECLIP on the RDP client's own channel.
+    /// The clipboard is every engine's and always bridged, so a target has no key
+    /// for it.
     #[test]
-    fn clipboard_is_taken_by_every_protocol() {
+    fn clipboard_is_not_a_target_key() {
         for (protocol, host) in [("vnc", "10.0.0.4"), ("rdp", "10.0.0.5")] {
-            let config = ConfigFile::parse(&format!(
+            let err = ConfigFile::parse(&format!(
                 r#"
                 [server]
                 {}
@@ -3717,10 +3789,8 @@ mod tests {
                 "#,
                 site_passwd_line()
             ))
-            .unwrap()
-            .resolve()
-            .unwrap();
-            assert!(config.targets[0].clipboard, "{protocol}");
+            .unwrap_err();
+            assert!(format!("{err:#}").contains("clipboard"), "{protocol}: {err:#}");
         }
     }
 
@@ -3933,6 +4003,33 @@ mod tests {
         assert!(!config.targets[0].egfx(), "the bitmap path is one key away");
     }
 
+    /// H.264 is drawn on the graphics pipeline, so the key is refused where there
+    /// is none: on a VNC target, and on an RDP target with the pipeline off.
+    #[test]
+    fn egfx_h264_needs_a_pipeline_to_ride() {
+        let parse = |target: &str| {
+            ConfigFile::parse(&format!(
+                r#"
+                [server]
+                {}
+
+                [[targets]]
+                name = "nope"
+                host = "10.0.0.5"
+                {target}
+                egfx_h264 = true
+                "#,
+                site_passwd_line()
+            ))
+        };
+        let vnc = format!("{:#}", parse("protocol = \"vnc\"").unwrap_err());
+        assert!(vnc.contains("egfx_h264") && vnc.contains("rdp"), "{vnc}");
+        let rdp = "protocol = \"rdp\"\nusername = \"u\"\npassword = \"p\"";
+        let bitmap = format!("{:#}", parse(&format!("{rdp}\negfx = false")).unwrap_err());
+        assert!(bitmap.contains("egfx_h264") && bitmap.contains("egfx = false"), "{bitmap}");
+        assert!(parse(rdp).unwrap().targets[0].egfx_h264);
+    }
+
     /// The pipeline is passed in a session started with the passthrough, to a page
     /// that composes it, and offered only by a target with a pipeline to pass. So
     /// is an RDP resize, which is a graphics reset: the bitmap path offers neither.
@@ -3966,16 +4063,31 @@ mod tests {
             Offers { resize: true, audio: true, passthrough: Some(Passthrough::RdpGraphics) }
         );
         for chroma in [Chroma::Subsampled, Chroma::Full] {
-            let composes = Decoders { chroma, apple_media: false, rdp_graphics: true };
+            let composes = Decoders { chroma, apple_media: false, rdp_graphics: true, rdp_h264: false };
             let plan = win.render_plan(passed, composes);
             assert!(plan.rdp_graphics);
             assert_eq!(plan.describe(), "the host's graphics pipeline, passed through");
             assert_eq!(win.beyond(passed, composes), None);
-            let cannot = Decoders { rdp_graphics: false, ..composes };
+            let cannot = Decoders { rdp_graphics: false, rdp_h264: false, ..composes };
             assert_eq!(win.beyond(passed, cannot), Some(Passthrough::RdpGraphics));
             assert!(!win.render_plan(Choices::default(), composes).rdp_graphics);
         }
         assert_eq!(win.render_summary(), "video q90 chroma auto · adaptive");
+
+        // H.264 on the passed pipeline is the target's key, the session's choice
+        // and the browser's answer together, and none of them alone.
+        let h264 = rdp("egfx_h264 = true");
+        let decodes = Decoders { chroma: Chroma::Full, apple_media: false, rdp_graphics: true, rdp_h264: true };
+        let plan = h264.render_plan(passed, decodes);
+        assert!(plan.rdp_graphics && plan.rdp_h264);
+        assert_eq!(plan.describe(), "the host's graphics pipeline with H.264, passed through");
+        assert_eq!(h264.offers(), win.offers(), "the key adds no choice to the picker");
+        let cannot = Decoders { rdp_h264: false, ..decodes };
+        let lossless = h264.render_plan(passed, cannot);
+        assert!(lossless.rdp_graphics && !lossless.rdp_h264, "a browser that cannot is passed a pipeline without it");
+        assert_eq!(h264.beyond(passed, cannot), None, "and is not turned away");
+        assert!(!h264.render_plan(Choices::default(), decodes).rdp_h264, "a composed session never takes it");
+        assert!(!win.render_plan(passed, decodes).rdp_h264, "nor a target without the key");
 
         let bitmap = rdp("egfx = false");
         assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: None });
@@ -4106,8 +4218,7 @@ mod tests {
     }
 
     /// Lossless sound is a session's choice, on the two targets whose sound is
-    /// one, and not a key of the file. Only an RDP host's PCM coded as FLAC needs
-    /// libFLAC: wlshare's sound is passed in either format.
+    /// one, and not a key of the file.
     #[test]
     fn lossless_sound_is_chosen_at_the_picker_where_there_is_sound_to_choose() {
         let wlshare = parse_audio_target("").unwrap().targets[0].clone();
@@ -4117,13 +4228,10 @@ mod tests {
         for target in [&wlshare, &rdp] {
             for audio in [Sound::Off, Sound::Opus] {
                 assert!(!target.lossless(chose(audio)));
-                assert!(!target.needs_libflac(chose(audio)));
             }
             assert_eq!(target.accepts(chose(Sound::Flac)), Ok(()));
             assert!(target.sound(chose(Sound::Flac)) && target.lossless(chose(Sound::Flac)));
         }
-        assert!(!wlshare.needs_libflac(chose(Sound::Flac)), "passed frames need no codec here");
-        assert!(rdp.needs_libflac(chose(Sound::Flac)));
 
         assert!(parse_target("audio_format = \"flac\"").is_err(), "not a key of the file");
         assert!(serde_json::from_str::<Sound>("\"pcm\"").is_err(), "no third format");
@@ -4151,7 +4259,7 @@ mod tests {
     fn render_adaptive_resolves_into_the_plan() {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = true").expect("adaptive video");
         let plan = cfg.targets[0].render_plan(Choices::default(), Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: true, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false });
         assert_eq!(plan.describe(), "video q80 4:2:0 · adaptive");
     }
 
@@ -4163,7 +4271,7 @@ mod tests {
         let cfg = parse_target("video_quality = 80\nrender_adaptive = false")
             .expect("video with the walk off");
         let plan = cfg.targets[0].render_plan(Choices::default(), Chroma::Subsampled.into());
-        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false });
+        assert_eq!(plan, RenderPlan { quality: 80, adaptive: false, chroma: Chroma::Subsampled, apple_media: false, rdp_graphics: false, rdp_h264: false });
         assert_eq!(plan.describe(), "video q80 4:2:0");
     }
 

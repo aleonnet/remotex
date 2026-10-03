@@ -90,7 +90,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             // SetDesktopSize support, after it has announced its own.
             size: Some((DEFAULT_W as u16, DEFAULT_H as u16)),
             egfx: None,
-            clipboard: true,          // exercise the clipboard bridge
+            egfx_h264: false,
             camera: false,
             microphone: false,
             video_quality: None,

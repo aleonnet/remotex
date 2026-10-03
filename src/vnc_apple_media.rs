@@ -1648,6 +1648,9 @@ pub struct MediaStream {
     asked: bool,
     /// An offer is out that the Mac has not answered.
     pending: bool,
+    /// The Mac has named the ports of the offer last made. It names them ahead of
+    /// its answer or behind it, so an answered offer may still be owed them.
+    named: bool,
     /// The size the live (or starting) stream was offered for; `None` while there
     /// is none, as after a display change.
     offered: Option<(u16, u16)>,
@@ -1731,6 +1734,7 @@ impl MediaStream {
             local: local.ip(),
             asked: false,
             pending: false,
+            named: false,
             offered: None,
             owed: Owed::Nothing,
             offer_made: std::sync::Arc::default(),
@@ -1761,6 +1765,7 @@ impl MediaStream {
             return None;
         }
         self.pending = true;
+        self.named = false;
         self.offered = Some(size);
         self.owed = Owed::Stream { offered: std::time::Instant::now(), pictured: None };
         self.offer_made.notify_one();
@@ -1912,16 +1917,23 @@ impl MediaStream {
     /// which is what it does after a display change of its own, with no stream
     /// behind the announcement.
     ///
+    /// An offer's ports and its answer come in either order. Ports behind the
+    /// answer are that offer's still: read as an unasked announcement they took
+    /// the stream down, and the offer made in its place was answered with no
+    /// ports at all, the Mac having named them once.
+    ///
     /// An error ends the session: the Mac refused the stream, or described one this
     /// side cannot receive. Apple's viewer shows the refusal and closes.
     pub fn on_reply(&mut self, body: &[u8]) -> anyhow::Result<bool> {
         match parse_media_reply(body)? {
             MediaReply::Ports { audio_port, video_port } => {
-                if !self.pending {
+                let owed = matches!(self.owed, Owed::Stream { .. }) && !self.named;
+                if !self.pending && !owed {
                     log::debug!("vnc: the Mac re-announced its media streams unasked; they are down until offered");
                     self.stopped();
                     return Ok(true);
                 }
+                self.named = true;
                 let ports = (audio_port, video_port);
                 // The Mac names the same ports every time, and the receiver carries
                 // on across display changes.
@@ -2396,6 +2408,68 @@ impl Receiver {
             }
         }
     }
+}
+
+/// A 256×256 picture of 4:4:4 HEVC, one access unit in Annex B, made with
+/// `ffmpeg -f lavfi -i color=c=gray:s=256x256:r=1 -frames:v 1 -c:v libx265
+/// -pix_fmt yuv444p -x265-params keyint=1:range=full -bsf:v hevc_mp4toannexb -f hevc`.
+const WARMUP: &[u8] = include_bytes!("hevc_warmup.h265");
+
+/// Decode [`WARMUP`] once in this process, on a thread of its own, ahead of any
+/// session. A process's first picture through the decoder costs it the setting up
+/// of VideoToolbox: measured on a Mac mini, 85–108 ms for a session's first
+/// 1600×900 picture against 9–12 ms in every later session of the same process,
+/// and 82 ms for this picture, after which the first session's first picture
+/// took 12 ms. At 5120×2880 that first picture held the decoder long enough for
+/// eight more to queue behind it, and the ninth was dropped ([`DECODE_QUEUE`]).
+pub fn warm() {
+    static WARMED: std::sync::Once = std::sync::Once::new();
+    WARMED.call_once(|| {
+        let spawned = std::thread::Builder::new().name("hevc-warm".into()).spawn(|| {
+            let started = std::time::Instant::now();
+            match warm_decoder() {
+                Ok(_) => log::debug!("vnc: the HEVC decoder is warmed, in {:?}", started.elapsed()),
+                Err(e) => log::warn!("vnc: could not warm the HEVC decoder: {e:#}"),
+            }
+        });
+        if let Err(e) = spawned {
+            log::warn!("vnc: could not start the HEVC decoder's warming: {e}");
+        }
+    });
+}
+
+/// Decode [`WARMUP`] on a decoder of its own, the way a session's would be set up,
+/// and say the size it came to.
+fn warm_decoder() -> anyhow::Result<(u16, u16)> {
+    let mut decoder = Hevc::new(true)?;
+    let picture = decoder.decode(&warmup_unit())?.context("the warm-up unit completed no picture")?;
+    Ok(picture.size)
+}
+
+/// [`WARMUP`] as the decoder takes a unit: its NAL units, without start codes.
+fn warmup_unit() -> AccessUnit {
+    let mut nals = Vec::new();
+    let mut start = None;
+    let mut at = 0;
+    while at + 3 <= WARMUP.len() {
+        let code = if WARMUP[at..].starts_with(&[0, 0, 0, 1]) {
+            4
+        } else if WARMUP[at..].starts_with(&[0, 0, 1]) {
+            3
+        } else {
+            at += 1;
+            continue;
+        };
+        if let Some(from) = start {
+            nals.push(WARMUP[from..at].to_vec());
+        }
+        at += code;
+        start = Some(at);
+    }
+    if let Some(from) = start {
+        nals.push(WARMUP[from..].to_vec());
+    }
+    nals
 }
 
 /// Where the receiver sends each access unit it reassembles.
@@ -3056,6 +3130,22 @@ mod tests {
         MediaStream::new(peer, local, false).0
     }
 
+    /// The embedded picture the decoder is warmed on is one access unit of 4:4:4
+    /// HEVC, as the Mac sends, and it decodes: what warming pays for is the
+    /// process's first use of the decoder, which a session's first picture would
+    /// otherwise pay for.
+    #[test]
+    fn the_decoder_is_warmed_on_the_embedded_picture() {
+        let unit = warmup_unit();
+        assert!(unit.len() >= 4, "parameter sets and a picture: {} NAL units", unit.len());
+        assert!(unit.iter().any(|nal| is_random_access(nal_type(nal[0]))), "a picture to start at");
+        if crate::libav::api().is_err() {
+            eprintln!("skipped: no FFmpeg on this host to decode the warm-up picture");
+            return;
+        }
+        assert_eq!(warm_decoder().unwrap(), (256, 256));
+    }
+
     /// One offer out at a time, one per display, and the encodings ahead of the
     /// first.
     #[test]
@@ -3089,6 +3179,28 @@ mod tests {
 
         let mut m = media();
         let ports = unhex("0001000100000000170c00000001170d0000000100000000000000000000000000000000");
+        assert!(m.on_reply(&ports).unwrap());
+        assert!(m.offer((1600, 1000)).is_some());
+    }
+
+    /// The Mac names an offer's ports ahead of its answer or behind it, and either
+    /// way they are that offer's: named behind the answer they open the stream, and
+    /// do not read as the unasked announcement a display change of the Mac's own
+    /// sends, which is what the next one is.
+    #[test]
+    fn ports_named_after_the_answer_open_the_stream() {
+        let answer = unhex("000200020000000000000000000000000000");
+        let ports = unhex("0001000100000000170c00000001170d0000000100000000000000000000000000000000");
+        let mut m = media();
+        m.offer((1600, 1000)).unwrap();
+        assert!(!m.on_reply(&answer).unwrap());
+        // Taken as the offer's ports: binding them is what fails here, at an
+        // address that is not this host's.
+        let opened = m.on_reply(&ports).unwrap_err();
+        assert!(format!("{opened:#}").contains("for the Mac's media stream"), "{opened:#}");
+        assert!(m.offer((1600, 1000)).is_none(), "the stream is still offered for this display");
+
+        // Named again with no offer out, they are the Mac's own display change.
         assert!(m.on_reply(&ports).unwrap());
         assert!(m.offer((1600, 1000)).is_some());
     }

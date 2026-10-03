@@ -28,6 +28,7 @@ layer.
 | `ard` | Standard, the physical displays | ZRLE | none; the Mac's own output is left alone |
 | `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, covered until it is up | AAC-ELD over the media stream |
 | `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | ZRLE | none; the Mac's own output is left alone |
+| `ard-mirror` | Unofficial: the physical displays, over High Performance's media stream | HEVC over the media stream, reduced by the gateway to the viewer's window | AAC-ELD over the media stream; the Mac's own output is muted |
 
 `ard-high-performance` is High Performance as Apple's viewer has it. Decoding its
 picture needs FFmpeg on the gateway's host; without it the gateway runs it only
@@ -41,6 +42,12 @@ offered. Apple's viewer never offers a virtual display without the stream, so
 nothing but remotex exercises the Mac's side of this combination. It was tested
 against macOS 26 only, and a macOS update is free to break it while leaving both
 official modes alone.
+
+**Unofficial:** `ard-mirror` is the opposite combination: the media stream
+offered with no `SetDisplayConfiguration` ever sent, so the picture and the sound
+are High Performance's and the displays are Standard's. Apple's viewer never
+makes it either. What the Mac does with it is under
+[The stream on the physical displays](#the-stream-on-the-physical-displays).
 
 ## Summary
 
@@ -158,7 +165,8 @@ Both modes connect the same way until the record layer is up.
 6. **The mode.** High Performance sends `SetDisplayConfiguration`, both modes send
    `SetPixelFormat` and the same `SetEncodings`, and High Performance then arms
    `AutoFrameBufferUpdate`. Standard arms it when the first layout names the
-   screen being sent.
+   screen being sent. Both arm it for one push a video frame at most (see
+   [Other messages](#other-messages)).
 
 ### Other login types
 
@@ -545,8 +553,7 @@ Three behaviours of the Mac shape how remotex resizes:
   multi-megabyte repaint slowly therefore leaves its own messages unread until the
   repaint is through. A debug-build gateway saw 20–30 s stalls; a release build
   sees changes answered in about 2.5 s. Updates the Mac pushes unasked hold the
-  same lock, which is why remotex paces them (see
-  [Other messages](#other-messages)).
+  same lock (see [Other messages](#other-messages)).
 
 ## Input
 
@@ -605,8 +612,32 @@ rectangle.
   a second, 15–33 MB/s of zlib, for two requests. Unarmed, the same screen drew
   nothing after the update asked for.
 - **The interval paces the pushes.** At 1,000,000 the Mac pushed about one update
-  a second, which is what remotex arms with. The daemon pushes once the interval
-  has passed since its last push.
+  a second. The daemon pushes once the interval has passed since its last update
+  finished, so any interval above 0 leaves its sender idle that long after each
+  one.
+- **Apple's viewer arms a running session with 0,** in both of its modes. It
+  sends the all-ones value below only while the session is paused, and no
+  interval in between.
+- **The Mac throttles itself, by what the connection drains.** Each time it
+  sends, the daemon estimates the link's bytes a second from how fast its socket
+  empties, and holds the next update, pushed or asked for, while more than a
+  tenth of that is still queued. The viewer does no pacing of its own.
+- **A physical display needs the pushes.** In Standard mode on a physical display
+  an incremental request alone is answered late: armed at 1,000,000, a scrolling
+  window drew 2–9 updates a second with the Mac silent for a second at a time,
+  where the same scroll on a virtual display drew 20–30. With the interval at 0
+  the physical display is smooth.
+- **Remotex arms with 33,333 or more.** 33,333 is one frame of its video stream:
+  it shows no more than a frame in that time however often the Mac pushes, and
+  the gap after each update is when the Mac reads its input (below). A Standard
+  session widens the gap as it falls behind. It arms again with what an update
+  costs it to take — the time to read it, decode it and hand it to the video
+  stream, the browser's link included where that holds the stream — smoothed over
+  a few updates, up to 1,000,000, and comes back to 33,333 as the cost falls. It
+  arms again only when the interval moves by half, and at most twice a second.
+  High Performance arms 1,000,000: its picture is the media stream and the Mac's
+  pixel updates are stepped over undecoded, so one a second is the least it can
+  be made to push before the stream is up and across a display change.
 - **`0xffffffff` turns the pushes off.** The daemon records whether the word is
   the all-ones value and pushes nothing while it is. A published description reads
   the word as a screen id, with all-ones meaning all displays. It is not one:
@@ -614,15 +645,29 @@ rectangle.
 
 Unpaced pushes cost a client its input. The Mac
 [reads nothing while it writes an update](#resizing-a-high-performance-display-as-measured),
-and pushed updates follow one another for as long as the screen changes. A client
-that drains the connection more slowly than the Mac captures — a busy gateway, a
-slow link — has its clicks, keys and display changes left unread for the length of
-the video. On a Mac playing one, input went unread for 35–104 s at a time and then
-arrived as hundreds of queued events in one second. Apple's viewer never meets
-this: in High Performance mode it takes the picture from the media stream
-(encoding `0x3f2`), and the daemon's framebuffer sender skips such a viewer.
-Remotex does too once the stream is up, and then arms and polls one pixel —
-see [RFB while the stream runs](#rfb-while-the-stream-runs).
+and at interval 0 pushed updates follow one another for as long as the screen
+changes. A client that drains the connection more slowly than the Mac captures — a
+busy gateway, a slow link — has its clicks, keys and display changes left unread
+for the length of the animation. On a Mac playing a video, input went unread for
+35–104 s at a time and then arrived as hundreds of queued events in one second.
+Apple's viewer never meets this in High Performance mode: it takes the picture
+from the media stream (encoding `0x3f2`), and the daemon's framebuffer sender
+skips such a viewer. Remotex does too once the stream is up, and then arms and
+polls one pixel — see [RFB while the stream runs](#rfb-while-the-stream-runs).
+
+The interval is what keeps the input moving everywhere else. With the gateway
+held to 15% of a core, Standard mode on a display of the Mac's own, an animation and a
+scrolling window on the Mac and the pointer sweeping, sampled once a second:
+
+| Interval | Seconds with input unread, of about 53 | Most unread | Picture |
+|---|---|---|---|
+| 0 | 47 | 41,616 bytes | 4.8 Mpx/s |
+| 33,333 | 4 | 1,190 bytes | 4.7 Mpx/s |
+| 1,000,000 | 2 | 2,856 bytes | 1.4 Mpx/s |
+| following the cost | 3 | 3,230 bytes | 4.1 Mpx/s |
+
+Following the cost, that gateway armed between 50,000 and 240,000. Unheld, it
+never left 33,333.
 
 Arming the full framebuffer at setup and after every layout is still required,
 because it keeps cursor updates alive across logins and locks. Its rectangle is
@@ -1199,6 +1244,128 @@ the same ports, under a new SSRC, with an IDR at the new size. Remotex offers on
 the display has settled, and the resize's cover stays up until that IDR is on its
 way to the browser.
 
+An offer's two replies come in either order: message 1, which names the ports,
+ahead of message 2, the answer, or behind it. Remotex once read ports behind the
+answer as the unasked announcement above, took the stream down and offered
+again; the Mac answered that offer with no ports, having named them once, and
+the session ended ten seconds later. In eleven High Performance sessions opened
+right after a mirror session, the Mac sent the answer first in two.
+
+### The stream on the physical displays
+
+Measured on 2026-10-02 against macOS 27, on a Mac mini with one 1600×900 display
+and a MacBook Pro driving one 5120×2880 display, each with a single display
+attached. This is what `ard-mirror` rests on.
+
+- **The Mac accepts the offer with no virtual display.** A session that never
+  sends `SetDisplayConfiguration` and offers the stream once the physical layout
+  has arrived is answered as a High Performance one is: message 1, then the
+  picture on UDP 5901 and the sound on 5900. The physical screens stay lit and
+  show what the viewer sees.
+- **The picture is the screen's own pixels, always.** 1600×900 and 5120×2880
+  respectively. The width and height an offer names are ignored, and so is
+  server-side scaling (`SetServerScaling`, `0x08`): the stream's size did not
+  change under either. Nothing a viewer sends makes the Mac send this stream
+  smaller.
+- **The pointer lands where it is sent**, in the screen's pixels.
+- **The sound comes with it and the Mac's own output is muted**, as under High
+  Performance.
+- **A PLI is answered here too**: a session on the Mac mini asked for keyframes
+  and the picture went on.
+- **Rate.** The MacBook's 5120×2880 screen came at 33 to 38 pictures a second.
+
+Because the Mac will not reduce it, remotex does: each decoded picture is
+resampled to the viewer's window and the video ceiling before it is encoded
+(`video::fit_within`, `video::Reducer`), and the pointer is mapped back to the
+screen's pixels. Reducing one 5120×2880 picture took 10.2 ms to 3840×2160,
+5.6 ms to 2560×1440 and 5.8 ms to 1920×1080 on an M3 Max with the work spread
+over its cores, and 61 ms on one core. A passed stream is not touched.
+
+A mirror session arms the Mac's pushes as a High Performance one does, at one a
+second (`PUSH_INTERVAL_MEDIA_US`): its picture is the stream's, and its pixel
+region is held to one pixel once the stream is up.
+
+Not measured: a Mac with more than one display attached. Until it is, a mirror
+session composes no mosaic for All Displays over mixed densities, whose regions
+are in the Mac's pixels and not the reduced picture's: the stream's picture is
+shown as it came.
+
+The first session after the gateway starts has the decoder fall eight pictures
+behind in its first second on the 5120×2880 screen, which drops a picture and
+asks for a keyframe; why its start is slow has not been measured. On a gateway
+running on the Mac it reached, that request never arrived, and the picture
+stayed still until the session was started again: see
+[A gateway on the Mac it reaches](#a-gateway-on-the-mac-it-reaches).
+
+### A gateway on the Mac it reaches
+
+The media stream runs between the two addresses of the RFB connection, on one
+port number at both ends: the Mac's `avconferenced` binds its address and
+connects to the viewer's (`192.168.1.13:5901->192.168.1.171:5901` in `lsof`
+during a session), and the gateway does the mirror image. A gateway that
+dials `127.0.0.1` on the Mac it runs on has both ends at `127.0.0.1:5901`, and
+the two ask for one and the same UDP association. Measured on macOS 27 with two
+sockets on one port: whichever connects first holds it, the other's `connect`
+fails with `EADDRINUSE`, and every packet for that pair is delivered to the
+holder, its own included. The gateway connects first, so it receives the stream,
+and everything it sends on those ports comes back to itself: the Mac hears no
+PLI, no receiver report and no rate report. The returned packets fail
+authentication and are dropped without a line in the log.
+
+Nothing shows until a picture is lost. In three sessions against `127.0.0.1`
+the first lost picture ended the picture for good, with 11 to 16 keyframe
+requests unanswered; against another host's address the same request was
+answered.
+
+So a media-stream target on the gateway's own host is dialled from another of
+the host's addresses (`engine::connect`'s `apart`): `127.0.0.1` from the
+address the host routes the network from, and the host's own network address
+from `127.0.0.1`. The pairs then differ, both ends connect, and each receives
+only what the other sends. With the gateway on a Mac mini reaching itself, a
+repaint of a passed stream, which is a PLI, was followed by 1 access unit
+before the change, with 11 requests unanswered, and by 40 after it, with the one
+request answered. Where a name resolves to several addresses, one whose
+ends can be set apart is tried first, and a connection that cannot be made from
+the chosen address is made as any other. A host with no address but its
+loopback is dialled as before, and the log says that the two ends are at one
+address and what that costs. Measured over IPv4 only. The session now runs from
+the host's network address, so it ends if that address goes away, where one
+between two loopbacks would not.
+
+### A MacBook's displays after a session on its own virtual display
+
+Measured on macOS 27.0.1, a MacBook Pro driving a Studio Display with its lid
+closed. When the connection closes, the agent destroys the virtual display at
+once (`screensharingd: reached eof`, then `-[SLVirtualDisplay destroy]` a
+millisecond later), and `WindowServer` enables every physical display in the same
+millisecond: `Display 1 setEnabled:1`, the built-in one under the closed lid, then
+the external one. Creating the virtual display had disabled only the external
+display. With both on, macOS applies the arrangement it keeps for the pair, and
+the Studio Display went from 2560×1440 to 3200×1800 points. Nothing undoes it but
+the lid: `powerd` logs `Clamshell state changed` as the lid is lifted and lowered,
+and only then is the built-in display disabled again; untouched, it was still on
+70 seconds later.
+
+A gateway on that Mac therefore turns the built-in display back off itself after
+such a session, while the lid stays closed, and on again when the lid opens or
+the gateway stops (`src/mac_displays.rs`). There is no public call that disables a
+display; it uses `CGSConfigureDisplayEnabled`, looked up when needed, and
+completes the change for its own process alone (`kCGConfigureForAppOnly`), which
+Apple's header documents as reverted when the process ends: a gateway killed
+outright leaves the display on, as macOS left it, never dark. The watch starts
+from the session's connect, so a session that ends by any way out is covered,
+and one gateway thread holds the display at a time.
+
+### The decoder's first picture
+
+A process's first picture through VideoToolbox pays for setting it up: on a Mac
+mini, 85–108 ms for a session's first 1600×900 picture against 9–12 ms in later
+sessions of the same process. At 5120×2880 that held the decoder long enough for
+its queue of eight to fill, and the first session dropped a picture and stood
+still until a keyframe came. The gateway decodes a 256×256 4:4:4 picture once,
+ahead of any session, when it loads the decoder (82 ms); the first session's first
+picture then took 12 ms.
+
 ### Reaching the gateway
 
 The Mac sends from its own address to the viewer's address on the TCP connection,
@@ -1223,6 +1390,7 @@ is 10 s overdue.
 - **Four-tile frames**: how Apple's viewer places each strip.
 - **Cases the test Mac could not show:**
   - a non-console user;
+  - the media stream on physical displays when more than one is attached;
   - hardware mirroring;
   - a display record whose density is 0.0.
 

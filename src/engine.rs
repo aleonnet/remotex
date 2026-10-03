@@ -83,7 +83,38 @@ pub fn keepalive_budget() -> Duration {
 /// wedges behind a kernel which still answers reads as an idle desktop, and RFB
 /// offers no probe to close that gap.
 pub async fn tcp_connect(dest: &str) -> anyhow::Result<TcpStream> {
-    let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, TcpStream::connect(dest))
+    connect(dest, false).await
+}
+
+/// [`tcp_connect`], and with `apart` for a remote that answers over UDP between the
+/// connection's two addresses, on one port number at both ends: a Mac's media
+/// stream.
+///
+/// A gateway on the Mac it reaches would otherwise sit at the Mac's own address,
+/// and there the two ends ask for one and the same UDP association. The kernel
+/// gives it to whichever connects first and delivers everything to that one,
+/// its own packets included (measured, macOS 27): the gateway receives the
+/// stream, and its keyframe requests and reports come back to itself and never
+/// reach the Mac. So a destination on this host is dialled from another of its
+/// addresses ([`source_apart`]), and the two ends differ.
+async fn connect(dest: &str, apart: bool) -> anyhow::Result<TcpStream> {
+    let dial = async {
+        if !apart {
+            return TcpStream::connect(dest).await;
+        }
+        let resolved = tokio::net::lookup_host(dest).await?.collect();
+        let mut last = None;
+        for (from, to) in dial_order(resolved, source_apart) {
+            match connect_from(from, to).await {
+                Ok(stream) => return Ok(stream),
+                Err(e) => last = Some(e),
+            }
+        }
+        Err(last.unwrap_or_else(|| {
+            std::io::Error::new(std::io::ErrorKind::InvalidInput, "could not resolve to any address")
+        }))
+    };
+    let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, dial)
         .await
         .map_err(|_| {
             anyhow::anyhow!(
@@ -102,6 +133,110 @@ pub async fn tcp_connect(dest: &str) -> anyhow::Result<TcpStream> {
     Ok(stream)
 }
 
+/// The addresses a name resolved to, each with the address it is dialled from
+/// (`source`), in the order they are tried: those whose two ends can be set apart
+/// first, in the resolver's order, then the rest. `localhost` resolves to `::1`
+/// ahead of `127.0.0.1`, and a host with no IPv6 route can set only the second
+/// apart.
+fn dial_order(
+    resolved: Vec<std::net::SocketAddr>,
+    source: impl Fn(std::net::IpAddr) -> Option<std::net::IpAddr>,
+) -> Vec<(Option<std::net::IpAddr>, std::net::SocketAddr)> {
+    let mut order: Vec<_> = resolved.into_iter().map(|to| (source(to.ip()), to)).collect();
+    // Stable: the resolver's order holds within each half.
+    order.sort_by_key(|(from, _)| from.is_none());
+    order
+}
+
+/// How long a connection from a chosen source may go unanswered before it is made
+/// as any other. Only a destination on this host is dialled that way, which
+/// crosses no network and answers at once or not at all: a packet filter that
+/// drops what comes to the loopback from another address leaves it unanswered,
+/// and must not use up [`TCP_CONNECT_TIMEOUT`] before the connection that works
+/// is tried.
+const APART_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// `attempt`, failed as timed out where it has not answered in `wait`.
+async fn answered_within<T>(
+    wait: Duration,
+    attempt: impl Future<Output = std::io::Result<T>>,
+) -> std::io::Result<T> {
+    tokio::time::timeout(wait, attempt)
+        .await
+        .unwrap_or_else(|_| Err(std::io::Error::new(std::io::ErrorKind::TimedOut, "no answer")))
+}
+
+/// Connect to `to`, from `from` where one is named. A connection that cannot be
+/// made from there is made as any other: choosing the source must never cost a
+/// session the kernel's own choice would have had, where a packet filter passes
+/// the loopback only from itself, by refusing or by dropping
+/// ([`APART_TIMEOUT`]), or where the address was not this host's after all
+/// ([`source_apart`]).
+async fn connect_from(from: Option<std::net::IpAddr>, to: std::net::SocketAddr) -> std::io::Result<TcpStream> {
+    let Some(from) = from else {
+        return TcpStream::connect(to).await;
+    };
+    let bound = async {
+        let socket = if to.is_ipv4() { tokio::net::TcpSocket::new_v4()? } else { tokio::net::TcpSocket::new_v6()? };
+        socket.bind(std::net::SocketAddr::new(from, 0))?;
+        socket.connect(to).await
+    };
+    match answered_within(APART_TIMEOUT, bound).await {
+        Ok(stream) => Ok(stream),
+        Err(e) => {
+            warn!("engine: could not reach {to} from {from} ({e}); connecting as any other target");
+            TcpStream::connect(to).await
+        }
+    }
+}
+
+/// Whether `dest`, a `host:port` as [`host_port`] formats it, names this host:
+/// any address it resolves to is a loopback, the unspecified address, or one a
+/// socket binds. Resolved on the calling thread.
+#[cfg(target_os = "macos")]
+pub fn is_this_host(dest: &str) -> bool {
+    use std::net::ToSocketAddrs as _;
+    dest.to_socket_addrs().is_ok_and(|mut addrs| {
+        addrs.any(|addr| {
+            let ip = addr.ip();
+            ip.is_loopback() || ip.is_unspecified() || std::net::UdpSocket::bind((ip, 0)).is_ok()
+        })
+    })
+}
+
+/// The address a connection to `to` leaves from so that its two ends differ, where
+/// `to` is this host's own: the loopback is reached from the address this host
+/// routes the network from, and any other address of this host from the loopback.
+/// The unspecified address is the loopback's: a connection to it lands on this
+/// host. `None` for another host's address, which the kernel's own choice already
+/// differs from, and for a loopback on a host with no other address.
+///
+/// "This host's" is "an address a socket binds", which a Linux host with
+/// `ip_nonlocal_bind` answers yes to for any address: [`connect_from`] falls back
+/// to the kernel's choice when the source it was given does not connect.
+fn source_apart(to: std::net::IpAddr) -> Option<std::net::IpAddr> {
+    use std::net::{IpAddr, Ipv4Addr, Ipv6Addr, UdpSocket};
+    if to.is_loopback() || to.is_unspecified() {
+        // A UDP socket's connect sends nothing: it asks the kernel which address
+        // routes to an address outside this host. The documentation prefixes
+        // (RFC 5737, RFC 3849) are no host's own.
+        let (any, outside): (IpAddr, IpAddr) = match to {
+            IpAddr::V4(_) => (Ipv4Addr::UNSPECIFIED.into(), Ipv4Addr::new(192, 0, 2, 1).into()),
+            IpAddr::V6(_) => (Ipv6Addr::UNSPECIFIED.into(), Ipv6Addr::new(0x2001, 0xdb8, 0, 0, 0, 0, 0, 1).into()),
+        };
+        let probe = UdpSocket::bind((any, 0)).ok()?;
+        probe.connect((outside, 9)).ok()?;
+        let routed = probe.local_addr().ok()?.ip();
+        return (!routed.is_loopback() && !routed.is_unspecified()).then_some(routed);
+    }
+    // Only an address of this host can be bound.
+    UdpSocket::bind((to, 0)).ok()?;
+    Some(match to {
+        IpAddr::V4(_) => Ipv4Addr::LOCALHOST.into(),
+        IpAddr::V6(_) => Ipv6Addr::LOCALHOST.into(),
+    })
+}
+
 /// Connect to a remote and run its handshake, reporting any failure to the client.
 ///
 /// The two engines that need this had the same fifteen lines each: bound the
@@ -117,9 +252,11 @@ pub async fn tcp_connect(dest: &str) -> anyhow::Result<TcpStream> {
 ///
 /// `protocol` is the log-line prefix (`"rdp"`); the client-facing message
 /// uppercases it, which is the form both engines already used.
+/// `apart` is for a Mac's media stream: see [`connect`].
 pub async fn connect_and_handshake<T, F, Fut>(
     protocol: &str,
     dest: &str,
+    apart: bool,
     budget: Duration,
     sink: &VideoSink,
     handshake: F,
@@ -131,7 +268,7 @@ where
     let report = async |message: String| {
         let _ = sink.msg(ServerMsg::Error { message }).await;
     };
-    let stream = match tcp_connect(dest).await {
+    let stream = match connect(dest, apart).await {
         Ok(stream) => stream,
         Err(e) => {
             warn!("{protocol}: connect failed: {e:#}");
@@ -248,6 +385,7 @@ mod tests {
             chroma: crate::config::Chroma::Subsampled,
             apple_media: false,
             rdp_graphics: false,
+            rdp_h264: false,
         };
         let feedback = std::sync::Arc::new(crate::feedback::LinkFeedback::new());
         (VideoSink::new("test", frame_tx, plan, feedback, crate::encode::Oversize::Refuse), frame_rx)
@@ -282,6 +420,103 @@ mod tests {
         let _ = accept.await.unwrap();
     }
 
+    /// A Mac's media stream runs between the two addresses of the TCP connection,
+    /// on one port number at both ends, so a gateway on the Mac it reaches must not
+    /// sit at the Mac's own address: a connection to this host leaves from another
+    /// of its addresses, in both directions.
+    #[tokio::test]
+    async fn a_connection_to_this_host_leaves_from_another_of_its_addresses() {
+        let loopback = std::net::IpAddr::from(std::net::Ipv4Addr::LOCALHOST);
+        // Asked of the kernel here too, so that a host with a network cannot pass
+        // by finding none.
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let routed = probe.connect("192.0.2.1:9").ok().map(|()| probe.local_addr().unwrap().ip());
+        let Some(routed) = routed.filter(|ip| !ip.is_loopback() && !ip.is_unspecified()) else {
+            eprintln!("skipped: this host has no address but its loopback");
+            return;
+        };
+        assert_eq!(source_apart(loopback), Some(routed), "the loopback is reached from the network's address");
+        assert_eq!(source_apart(routed), Some(loopback), "its own address is reached from the loopback");
+
+        for (to, from) in [(loopback, routed), (routed, loopback)] {
+            let listener = tokio::net::TcpListener::bind("0.0.0.0:0").await.unwrap();
+            let dest = std::net::SocketAddr::new(to, listener.local_addr().unwrap().port()).to_string();
+            let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+            let stream = connect(&dest, true).await.unwrap();
+            let (_held, peer) = accept.await.unwrap();
+            assert_eq!(peer.ip(), from, "what the remote at {to} sees connecting");
+            assert_eq!(stream.peer_addr().unwrap().ip(), to);
+            assert_ne!(stream.local_addr().unwrap().ip(), to, "the two ends are apart");
+            assert!(stream.nodelay().unwrap(), "the same socket settings as any connection");
+        }
+    }
+
+    /// An address whose ends can be set apart is tried ahead of one whose ends
+    /// cannot, whatever order the resolver gave them in, and a source that does
+    /// not connect costs nothing: the connection is made as any other.
+    #[tokio::test]
+    async fn an_address_that_can_be_set_apart_is_tried_first_and_a_bad_source_falls_back() {
+        let source: std::net::IpAddr = "192.0.2.7".parse().unwrap();
+        let (v6, v4): (std::net::SocketAddr, std::net::SocketAddr) =
+            ("[::1]:5900".parse().unwrap(), "127.0.0.1:5900".parse().unwrap());
+        // `localhost` on a host with no IPv6 route: `::1` first, and only the
+        // IPv4 loopback with another address to leave from.
+        let only_v4 = |to: std::net::IpAddr| to.is_ipv4().then_some(source);
+        assert_eq!(dial_order(vec![v6, v4], only_v4), [(Some(source), v4), (None, v6)]);
+        // With nothing to choose between, the resolver's order holds.
+        assert_eq!(dial_order(vec![v6, v4], |_| None), [(None, v6), (None, v4)]);
+        assert_eq!(dial_order(vec![v6, v4], |_| Some(source)), [(Some(source), v6), (Some(source), v4)]);
+
+        // TEST-NET-1 is no address of this host: the bound connect fails, and the
+        // plain one is made.
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let to = listener.local_addr().unwrap();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let stream = connect_from(Some(source), to).await.unwrap();
+        let (_held, peer) = accept.await.unwrap();
+        assert!(peer.ip().is_loopback(), "connected as any other target: {peer}");
+        assert_eq!(stream.peer_addr().unwrap(), to);
+
+        // And an attempt that is never answered, a dropped SYN, fails as one that
+        // was refused does, well inside the whole connect's budget.
+        let unanswered = answered_within(Duration::from_millis(20), std::future::pending::<std::io::Result<()>>());
+        assert_eq!(unanswered.await.unwrap_err().kind(), std::io::ErrorKind::TimedOut);
+        assert!(APART_TIMEOUT < TCP_CONNECT_TIMEOUT / 2, "the plain connect keeps most of the budget");
+    }
+
+    /// A destination is this host when it resolves to an address this host holds.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn this_host_is_told_from_another() {
+        assert!(is_this_host("127.0.0.1:5900"));
+        assert!(is_this_host("localhost:5900"));
+        assert!(!is_this_host("192.0.2.1:5900"), "TEST-NET-1 is no host's own address");
+        // The host's own network address, asked of the kernel apart from the code
+        // under test: the case a target addressed by it decides.
+        let probe = std::net::UdpSocket::bind("0.0.0.0:0").unwrap();
+        let routed = probe.connect("192.0.2.1:9").ok().map(|()| probe.local_addr().unwrap().ip());
+        match routed.filter(|ip| !ip.is_loopback() && !ip.is_unspecified()) {
+            Some(own) => assert!(is_this_host(&host_port(&own.to_string(), 5900)), "{own} is this host's"),
+            None => eprintln!("not checked: this host has no address but its loopback"),
+        }
+    }
+
+    /// Only a destination on this host is reached from a chosen address: another
+    /// host is dialled as the kernel routes it, and so is every connection that
+    /// did not ask to be apart.
+    #[tokio::test]
+    async fn a_connection_to_another_host_is_left_alone() {
+        // TEST-NET-1 (RFC 5737): no host's own address.
+        assert_eq!(source_apart("192.0.2.1".parse().unwrap()), None);
+
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let dest = listener.local_addr().unwrap().to_string();
+        let accept = tokio::spawn(async move { listener.accept().await.unwrap() });
+        let _stream = tcp_connect(&dest).await.unwrap();
+        let (_held, peer) = accept.await.unwrap();
+        assert!(peer.ip().is_loopback(), "a plain connection to the loopback leaves from it");
+    }
+
     /// A listener that accepts one connection and holds it, so a handshake can be
     /// exercised without a real server behind it.
     ///
@@ -302,7 +537,7 @@ mod tests {
         let (dest, accept) = accepting_listener().await;
         let (sink, mut frame_rx) = sink();
 
-        let value = connect_and_handshake("test", &dest, HANDSHAKE_TIMEOUT, &sink, |_stream| {
+        let value = connect_and_handshake("test", &dest, false, HANDSHAKE_TIMEOUT, &sink, |_stream| {
             std::future::ready(Ok(7u8))
         })
         .await;
@@ -324,6 +559,7 @@ mod tests {
         let value: Option<()> = connect_and_handshake(
             "test",
             &dest,
+            false,
             Duration::from_millis(50),
             &sink,
             |_stream| std::future::pending(),
@@ -353,6 +589,7 @@ mod tests {
         let value: Option<()> = connect_and_handshake(
             "test",
             &dest,
+            false,
             HANDSHAKE_TIMEOUT,
             &sink,
             |_stream| std::future::ready(Ok(())),
