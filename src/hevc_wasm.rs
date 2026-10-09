@@ -1,12 +1,14 @@
-//! EXPERIMENTAL: the page's software HEVC decoder, for a browser whose own
+//! BETA: the page's software HEVC decoder, for a browser whose own
 //! `VideoDecoder` refuses a High Performance Mac's 4:4:4 picture
 //! (`frontend/src/hevcWasmDecoder.ts`).
 //!
-//! It is libavcodec's HEVC decoder compiled to WebAssembly, a release of
-//! andrewtheguy/hevc-wasm published to the private
-//! andrewtheguy/hevc-wasm-archives, and no build of this binary holds it: an
-//! operator who wants it downloads the release archive into the gateway's data
-//! directory, or anywhere else and names it in `[hevc_wasm]`. The
+//! It is andrewtheguy/hevc-wasm's decoder, written for the Mac's stream and
+//! compiled to WebAssembly, a release published to the private
+//! andrewtheguy/hevc-wasm-archives, and no build of this binary holds it, since
+//! its licence keeps it out of every artifact as the native decoder's keeps that
+//! out ([`crate::libav`]): an operator who wants it downloads the release archive
+//! into the gateway's data directory, or anywhere else and names it in
+//! `[hevc_wasm]`. The
 //! gateway reads that archive once at start-up, refuses it unless it is exactly the
 //! release pinned here — the page's worker calls the module's exports as this
 //! version has them, so any other build is one the page cannot drive — and serves
@@ -21,11 +23,13 @@ use bytes::Bytes;
 use flate2::read::GzDecoder;
 use sha2::{Digest as _, Sha256};
 
+use crate::cause::{Cause, Caused as _};
+
 /// The hevc-wasm release this gateway's page is written against.
-pub const VERSION: &str = "0.0.1";
+pub const VERSION: &str = "0.0.3";
 
 /// The SHA-256 of that release's archive, as its `SHA256SUMS` publishes it.
-const SHA256: &str = "4a1a758d5157a53e5478982d2a0e2658de31e3a8955496e1c003eaf61a5906f4";
+const SHA256: &str = "b973fb00a981dd5a81919fe4cad86099a0ea02e83cbc37e571c2773f43a85ab9";
 
 /// The archive's name as released, which is also `[hevc_wasm].archive`'s default.
 pub fn archive_name() -> String {
@@ -52,7 +56,7 @@ pub struct DecoderFile {
 /// The decoder's two files, held for the life of the gateway.
 #[derive(Clone, Debug)]
 pub struct HevcDecoder {
-    /// `hevc.js`, Emscripten's ES module glue, which also starts the slice threads.
+    /// `hevc.js`, wasm-bindgen's ES module glue.
     js: DecoderFile,
     /// `hevc.wasm`.
     wasm: DecoderFile,
@@ -68,13 +72,20 @@ impl HevcDecoder {
                 archive.display(),
                 download_command()
             )
-        })?;
+        })
+        .cause(|| Cause::new("AL-9418").with("path", archive.display()).with("command", download_command()))?;
         Self::from_archive(&bytes, SHA256).with_context(|| {
             format!(
                 "{} ([hevc_wasm].archive) is not hevc-wasm v{VERSION} — download it with `{}`",
                 archive.display(),
                 download_command()
             )
+        })
+        .cause(|| {
+            Cause::new("AL-9419")
+                .with("path", archive.display())
+                .with("version", VERSION)
+                .with("command", download_command())
         })
     }
 

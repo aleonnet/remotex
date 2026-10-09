@@ -20,9 +20,9 @@ use std::time::Duration;
 
 use common::{Ws, connect_ws};
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, TargetConfig};
-use remotex::protocol::MAX_CLIPBOARD_BYTES;
-use remotex::server;
+use alumia::config::{AppConfig, Protocol, TargetConfig};
+use alumia::protocol::MAX_CLIPBOARD_BYTES;
+use alumia::server;
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 use tokio::net::{TcpListener, TcpStream};
 use tokio::sync::mpsc;
@@ -187,11 +187,11 @@ async fn serve_fake_vnc(
     }
 }
 
-// ── Continuous Updates, Fence and CopyRect, scripted ────────────────────────
+// ── Continuous Updates and Fence, scripted ──────────────────────────────────
 //
 // A second RFB 3.8 server, separate from the one above rather than a flag on it,
 // because it plays a different game: it announces the ContinuousUpdates extension,
-// pushes updates the client never asked for, and moves a region with CopyRect.
+// and pushes updates the client never asked for.
 //
 // Written from the extension's own definition, not from `src/vnc.rs` — the point of
 // an e2e here is that two independent readings of the wire agree.
@@ -201,7 +201,8 @@ const ENCODING_FENCE: i32 = -312;
 const ENCODING_CONTINUOUS_UPDATES: i32 = -313;
 const MSG_END_OF_CONTINUOUS_UPDATES: u8 = 150;
 const MSG_FENCE: u8 = 248;
-/// The half of the fake desktop that is painted, then copied to the other half.
+/// The half of the fake desktop that is painted on request; the other half is
+/// painted unasked.
 const SCROLL_W: u16 = FAKE_DESKTOP / 2;
 
 /// What the scripted server saw the client do, in wire order.
@@ -215,7 +216,7 @@ enum ScrollRequest {
     Fence { flags: u32, payload: Vec<u8> },
 }
 
-/// A scripted RFB 3.8 server that supports Continuous Updates and scrolls.
+/// A scripted RFB 3.8 server that supports Continuous Updates and pushes.
 ///
 /// The sequence, and every step of it is answered rather than timed:
 ///
@@ -224,8 +225,8 @@ enum ScrollRequest {
 /// 2. A non-incremental request paints the left half of the desktop.
 /// 3. `EnableContinuousUpdates` is answered with a fence asking to be echoed, so
 ///    the echo can be asserted rather than assumed.
-/// 4. A pointer event — which the test sends once it has seen the paint — pushes a
-///    CopyRect moving that half to the right, **unasked**. Nothing in RFB permits
+/// 4. A pointer event — which the test sends once it has seen the paint — pushes
+///    the right half, **unasked**. Nothing in RFB permits
 ///    that without the extension, so the record arriving at the browser is also the
 ///    proof that continuous updates are on.
 async fn spawn_scrolling_vnc() -> (u16, mpsc::UnboundedReceiver<ScrollRequest>) {
@@ -313,7 +314,7 @@ async fn serve_scrolling_vnc(
             4 => {
                 stream.read_exact(&mut [0u8; 7]).await?;
             }
-            // PointerEvent: the cue to scroll. The client asked for nothing here.
+            // PointerEvent: the cue to push. The client asked for nothing here.
             5 => {
                 stream.read_exact(&mut [0u8; 5]).await?;
                 let mut update = vec![0u8, 0];
@@ -321,9 +322,14 @@ async fn serve_scrolling_vnc(
                 for value in [SCROLL_W, 0, SCROLL_W, FAKE_DESKTOP] {
                     update.extend_from_slice(&value.to_be_bytes());
                 }
-                update.extend_from_slice(&1i32.to_be_bytes()); // CopyRect
-                update.extend_from_slice(&0u16.to_be_bytes()); // source x
-                update.extend_from_slice(&0u16.to_be_bytes()); // source y
+                update.extend_from_slice(&0i32.to_be_bytes()); // raw
+                update.extend(
+                    std::iter::repeat_n(
+                        [0x10u8, 0x40, 0x90, 0],
+                        usize::from(SCROLL_W) * usize::from(FAKE_DESKTOP),
+                    )
+                    .flatten(),
+                );
                 stream.write_all(&update).await?;
             }
             // ClientCutText
@@ -372,11 +378,13 @@ async fn serve_scrolling_vnc(
 // banner, its DH authentication, the `0x81` ClientInit, the cleartext prelude,
 // the rekey that switches on the record layer, and then a display layout — the
 // virtual display once one is configured, the physical screen otherwise — and a
-// framebuffer update *inside* that record layer. The fake accepts the media
-// stream the gateway offers and names no ports for it, which keeps the picture on
-// RFB pixels for the gateway's first-picture allowance: the stream's own packets are
-// UDP, and `src/vnc_apple_media.rs` tests them. Or it refuses the offer, which
-// ends the session.
+// framebuffer update *inside* that record layer. The fake names its media
+// stream's ports for the encodings that list the stream and after each display
+// change, as the Mac does, and accepts the offer the gateway makes on them while
+// sending nothing to them, which keeps the picture on RFB pixels for the gateway's
+// first-picture allowance: the stream's own packets are UDP, and
+// `src/vnc_apple_media.rs` tests them. Or it refuses the offer, which ends the
+// session.
 //
 // This is the only automated test that can reach any of it. There is no
 // containerisable Apple server — `tests/vnc-dummy` is Xtigervnc and speaks none of
@@ -429,6 +437,9 @@ enum MacRequest {
     Display(u32),
     AutoPasteboard(bool),
     AutoFramebuffer((u16, u16)),
+    /// A media-stream offer, and whether the encodings last listed had the media
+    /// stream first, which is what stops a Mac's pixels.
+    Offer { media_first: bool },
     IncrementalFramebuffer,
     /// An incremental request for the single pixel at the origin: polling held
     /// while a display change is out.
@@ -438,8 +449,6 @@ enum MacRequest {
     ClipboardSend { session_id: u32, text: String },
     /// A PointerEvent's button mask, and where it points.
     Pointer(u8, (u16, u16)),
-    /// A media-stream offer, reported only by a fake set to [`MacStream::Hold`].
-    Offer,
     /// The address the gateway connected from, reported first, and only by a fake
     /// set to [`MacStream::Hold`].
     From(std::net::IpAddr),
@@ -469,7 +478,7 @@ async fn spawn_fake_mac() -> (
 /// How the fake Mac answers a media-stream offer.
 #[derive(Clone, Copy, Debug)]
 enum MacStream {
-    /// With AVConference's answer and no ports, so no packet is ever owed.
+    /// With AVConference's answer, and nothing ever sent to the ports.
     Accept,
     /// With error message 3 of type 2, what a Mac sends for an offer it cannot
     /// build a configuration from.
@@ -477,6 +486,15 @@ enum MacStream {
     /// With nothing: the offer stays out, which a session ends on once its answer
     /// is overdue. Each offer is reported as [`MacRequest::Offer`].
     Hold,
+}
+
+/// What a fake Mac is scripted with: its answer to a media-stream offer, and
+/// whether its physical screens are the two of [`fake_mac_two_screens`] rather
+/// than the one of [`fake_mac_layout`].
+#[derive(Clone, Copy, Debug)]
+struct MacScript {
+    answer: MacStream,
+    two_screens: bool,
 }
 
 /// [`spawn_fake_mac`], with the command bitmap its ServerInit sends and its answer
@@ -490,16 +508,29 @@ async fn spawn_fake_mac_with(
     mpsc::UnboundedSender<MacAction>,
     tokio::task::JoinHandle<std::io::Result<Vec<((u16, u16), u16)>>>,
 ) {
+    spawn_fake_mac_scripted(commands, MacScript { answer, two_screens: false }).await
+}
+
+/// [`spawn_fake_mac_with`], given the whole script.
+async fn spawn_fake_mac_scripted(
+    commands: [u8; 16],
+    script: MacScript,
+) -> (
+    u16,
+    mpsc::UnboundedReceiver<MacRequest>,
+    mpsc::UnboundedSender<MacAction>,
+    tokio::task::JoinHandle<std::io::Result<Vec<((u16, u16), u16)>>>,
+) {
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let (tx, rx) = mpsc::unbounded_channel();
     let (action_tx, action_rx) = mpsc::unbounded_channel();
     let task = tokio::spawn(async move {
         let (stream, from) = listener.accept().await?;
-        if matches!(answer, MacStream::Hold) {
+        if matches!(script.answer, MacStream::Hold) {
             let _ = tx.send(MacRequest::From(from.ip()));
         }
-        serve_fake_mac(stream, commands, answer, tx, action_rx).await
+        serve_fake_mac(stream, commands, script, tx, action_rx).await
     });
     (port, rx, action_tx, task)
 }
@@ -596,6 +627,64 @@ fn fake_mac_layout(id: u32, (w, h): (u16, u16), density: u16) -> Vec<u8> {
     record[0x22..0x24].copy_from_slice(&bw.to_be_bytes());
     record[0x24..0x28].copy_from_slice(&1u32.to_be_bytes()); // main
     p.extend_from_slice(&record);
+    p
+}
+
+/// The id of the main screen of [`fake_mac_two_screens`].
+const MAC_MAIN_DISPLAY: u32 = 3;
+/// The side, in pixels, of that main screen, which is 2x: twice
+/// [`MAC_SIDE_SCREEN`]'s points.
+const MAC_MAIN_SCREEN: u16 = 32;
+/// The side of the 1x screen to the main one's left, in points and in pixels.
+const MAC_SIDE_SCREEN: u16 = 16;
+
+/// The `AppleDisplayLayout` of a Mac sharing two physical screens in its combined
+/// view, as a MacBook Pro with its lid open beside an external display sent it
+/// (macOS 27), in miniature: a 1x screen to the left of the main one, which is 2x
+/// and sits at the origin of the Mac's arrangement, so the left screen's edges are
+/// negative. The framebuffer holds both side by side.
+///
+/// Built from the wire format, as [`fake_mac_layout`] is.
+fn fake_mac_two_screens() -> Vec<u8> {
+    const RECORD: usize = 0x38;
+    const HEAD: usize = 0x14;
+    let (side, main) = (MAC_SIDE_SCREEN, MAC_MAIN_SCREEN);
+    let main_points = main / 2;
+
+    let mut p = vec![0u8; 2 + HEAD];
+    p[..2].copy_from_slice(&((HEAD + 2 * RECORD) as u16).to_be_bytes());
+    p[2..4].copy_from_slice(&5u16.to_be_bytes()); // version
+    p[4..6].copy_from_slice(&(side + main_points).to_be_bytes()); // points spanned
+    p[6..8].copy_from_slice(&main_points.to_be_bytes());
+    p[8..10].copy_from_slice(&(side + main).to_be_bytes()); // the framebuffer
+    p[10..12].copy_from_slice(&main.to_be_bytes());
+    p[12..16].copy_from_slice(&u32::MAX.to_be_bytes()); // the combined view
+    p[16..20].copy_from_slice(&4u32.to_be_bytes()); // on console
+    p[20..22].copy_from_slice(&2u16.to_be_bytes()); // two displays
+
+    // (top, left, bottom, right), in points and then in pixels.
+    let record = |id: u32, density: f64, logical: [i16; 4], backing: [i16; 4], flags: u32| {
+        let mut record = vec![0u8; RECORD];
+        record[0x00..0x08].copy_from_slice(&density.to_be_bytes());
+        record[0x08..0x10].copy_from_slice(&1.0f64.to_be_bytes());
+        record[0x10..0x14].copy_from_slice(&id.to_be_bytes());
+        for (at, edges) in [(0x14, logical), (0x1c, backing)] {
+            for (i, edge) in edges.iter().enumerate() {
+                record[at + 2 * i..at + 2 * i + 2].copy_from_slice(&edge.to_be_bytes());
+            }
+        }
+        record[0x24..0x28].copy_from_slice(&flags.to_be_bytes());
+        record
+    };
+    let (side, main, main_points) = (side.cast_signed(), main.cast_signed(), main_points.cast_signed());
+    p.extend_from_slice(&record(MAC_PHYSICAL_DISPLAY, 1.0, [0, -side, side, 0], [0, -side, side, 0], 0));
+    p.extend_from_slice(&record(
+        MAC_MAIN_DISPLAY,
+        2.0,
+        [0, 0, main_points, main_points],
+        [0, 0, main, main],
+        1, // main
+    ));
     p
 }
 
@@ -718,14 +807,10 @@ fn fake_mac_read_clipboard(header: &[u8; 15], compressed: &[u8]) -> (u32, String
 /// never mistaken for one repeat. Capped to a corner of the desktop: a dirty rect
 /// need not cover it, and the raw pixels of the 3840×2160 opening display a
 /// resizable session now asks for would not fit one record.
-///
-/// With `answer`, a second rect answers the media-stream offer the gateway made
-/// ([`fake_mac_answer`]). It rides an update the fake sends anyway, so the answer
-/// adds no update, and no poll, to the order the tests assert.
-fn fake_mac_update(shade: u8, (w, h): (u16, u16), answer: Option<MacStream>) -> Vec<u8> {
+fn fake_mac_update(shade: u8, (w, h): (u16, u16)) -> Vec<u8> {
     let (w, h) = (w.min(MAC_DESKTOP), h.min(MAC_DESKTOP));
     let mut update = vec![0u8, 0];
-    update.extend_from_slice(&(1 + u16::from(answer.is_some())).to_be_bytes());
+    update.extend_from_slice(&1u16.to_be_bytes());
     update.extend_from_slice(&0u16.to_be_bytes()); // x
     update.extend_from_slice(&0u16.to_be_bytes()); // y
     update.extend_from_slice(&w.to_be_bytes());
@@ -735,10 +820,27 @@ fn fake_mac_update(shade: u8, (w, h): (u16, u16), answer: Option<MacStream>) -> 
         shade;
         usize::from(w) * usize::from(h) * 4
     ]);
-    if let Some(answer) = answer {
-        update.extend_from_slice(&fake_mac_answer(answer));
-    }
     update
+}
+
+/// The rect that names the media stream's ports, in encoding 1010: message 1, with
+/// the audio and the first video leg enabled. Two ports free on this host, which
+/// nothing is sent to.
+fn fake_mac_ports() -> Vec<u8> {
+    let free = || std::net::UdpSocket::bind("127.0.0.1:0").unwrap().local_addr().unwrap().port();
+    let mut rect = vec![0u8; 8]; // x, y, w, h
+    rect.extend_from_slice(&1010i32.to_be_bytes());
+    rect.extend_from_slice(&36u16.to_be_bytes());
+    rect.extend_from_slice(&1u16.to_be_bytes()); // the ports
+    rect.extend_from_slice(&1u16.to_be_bytes()); // version
+    rect.extend_from_slice(&0u32.to_be_bytes()); // flags
+    for port in [free(), free()] {
+        rect.extend_from_slice(&port.to_be_bytes());
+        rect.extend_from_slice(&1u32.to_be_bytes()); // enabled
+    }
+    rect.extend_from_slice(&[0u8; 6]); // video 2, off
+    rect.extend_from_slice(&[0u8; 10]);
+    rect
 }
 
 /// The rect that answers a media-stream offer, in encoding 1010: [`MacStream`]'s
@@ -771,11 +873,11 @@ fn fake_mac_answer(answer: MacStream) -> Vec<u8> {
 async fn serve_fake_mac(
     mut stream: TcpStream,
     commands: [u8; 16],
-    answer: MacStream,
+    script: MacScript,
     requests: mpsc::UnboundedSender<MacRequest>,
     mut actions: mpsc::UnboundedReceiver<MacAction>,
 ) -> std::io::Result<Vec<((u16, u16), u16)>> {
-    use remotex::vnc_record::{Keys, RecordReader, RecordWriter};
+    use alumia::vnc_record::{Keys, RecordReader, RecordWriter};
     use tokio::io::AsyncReadExt as _;
 
     stream.write_all(b"RFB 003.889\n").await?;
@@ -897,7 +999,7 @@ async fn serve_fake_mac(
         records,
         write_half,
         writer,
-        answer,
+        script,
         requests,
         &mut actions,
         &mut configurations,
@@ -919,21 +1021,25 @@ async fn serve_fake_mac(
 
 /// The record-layer half of [`serve_fake_mac`]: everything after the rekey.
 async fn serve_fake_mac_records(
-    mut records: remotex::vnc_record::RecordReader<tokio::net::tcp::OwnedReadHalf>,
+    mut records: alumia::vnc_record::RecordReader<tokio::net::tcp::OwnedReadHalf>,
     mut write_half: tokio::net::tcp::OwnedWriteHalf,
-    mut writer: remotex::vnc_record::RecordWriter,
-    answer: MacStream,
+    mut writer: alumia::vnc_record::RecordWriter,
+    script: MacScript,
     requests: mpsc::UnboundedSender<MacRequest>,
     actions: &mut mpsc::UnboundedReceiver<MacAction>,
     configurations: &mut Vec<((u16, u16), u16)>,
 ) -> std::io::Result<()> {
     use tokio::io::AsyncReadExt as _;
 
+    let answer = script.answer;
     let mut shade = 0x40u8;
     let mut sent_layout = false;
     let mut sent_clipboard_status = false;
     let mut clipboard_fetch_pending = false;
-    let mut offer_pending = false;
+    // Whether the encodings listed the media stream, after which every display
+    // change names its ports again.
+    let mut media_listed = false;
+    let mut media_first = false;
 
     loop {
         let mut kind = [0u8; 1];
@@ -947,7 +1053,7 @@ async fn serve_fake_mac_records(
                 );
                 let message =
                     fake_mac_clipboard_message(MAC_CLIPBOARD_SESSION, MAC_REMOTE_CLIPBOARD);
-                write_half.write_all(writer.frame(&message).unwrap()).await?;
+                write_half.write_all(writer.frame(&message)).await?;
                 clipboard_fetch_pending = false;
                 continue;
             }
@@ -964,22 +1070,33 @@ async fn serve_fake_mac_records(
             0 => {
                 records.read_exact(&mut [0u8; 19]).await?;
             }
-            // SetEncodings
+            // SetEncodings. The list naming the media stream is answered with its
+            // ports, in an update of their own.
             2 => {
                 let mut head = [0u8; 3];
                 records.read_exact(&mut head).await?;
                 let count = u16::from_be_bytes([head[1], head[2]]);
-                records.read_exact(&mut vec![0u8; usize::from(count) * 4]).await?;
+                let mut encodings = vec![0u8; usize::from(count) * 4];
+                records.read_exact(&mut encodings).await?;
+                let lists_media = encodings.as_chunks::<4>().0.iter().any(|&e| i32::from_be_bytes(e) == 1010);
+                media_first = encodings.as_chunks::<4>().0.first().is_some_and(|&e| i32::from_be_bytes(e) == 1010);
+                if lists_media && !std::mem::replace(&mut media_listed, true) {
+                    let mut update = vec![0u8, 0];
+                    update.extend_from_slice(&1u16.to_be_bytes());
+                    update.extend_from_slice(&fake_mac_ports());
+                    write_half.write_all(writer.frame(&update)).await?;
+                }
             }
-            // FramebufferUpdateRequest. A non-incremental one is answered; the
-            // first is answered with the display layout first, which is the
-            // metadata burst a real Mac opens with.
+            // FramebufferUpdateRequest. A non-incremental one is answered, with
+            // no more than the region it asks for; the first is answered with
+            // the display layout first, which is the metadata burst a real Mac
+            // opens with.
             3 => {
                 let mut req = [0u8; 9];
                 records.read_exact(&mut req).await?;
+                let rect = [&req[1..3], &req[3..5], &req[5..7], &req[7..9]]
+                    .map(|field| u16::from_be_bytes([field[0], field[1]]));
                 if req[0] != 0 {
-                    let rect = [&req[1..3], &req[3..5], &req[5..7], &req[7..9]]
-                        .map(|field| u16::from_be_bytes([field[0], field[1]]));
                     let _ = requests.send(if rect == [0, 0, 1, 1] {
                         MacRequest::HeldFramebuffer
                     } else {
@@ -999,14 +1116,19 @@ async fn serve_fake_mac_records(
                     rect.extend_from_slice(&1u16.to_be_bytes());
                     rect.extend_from_slice(&[0u8; 8]);
                     rect.extend_from_slice(&0x451i32.to_be_bytes());
-                    rect.extend_from_slice(&fake_mac_layout(display, points, density));
-                    write_half.write_all(writer.frame(&rect).unwrap()).await?;
+                    // The two physical screens, on a fake scripted with them and
+                    // asked for no virtual display.
+                    rect.extend_from_slice(&if script.two_screens && configurations.is_empty() {
+                        fake_mac_two_screens()
+                    } else {
+                        fake_mac_layout(display, points, density)
+                    });
+                    write_half.write_all(writer.frame(&rect)).await?;
                 }
                 shade = shade.wrapping_add(0x10);
-                let pixels = (points.0 * density, points.1 * density);
-                let answered = std::mem::take(&mut offer_pending).then_some(answer);
+                let pixels = ((points.0 * density).min(rect[2]), (points.1 * density).min(rect[3]));
                 write_half
-                    .write_all(writer.frame(&fake_mac_update(shade, pixels, answered)).unwrap())
+                    .write_all(writer.frame(&fake_mac_update(shade, pixels)))
                     .await?;
             }
             // KeyEvent
@@ -1061,13 +1183,13 @@ async fn serve_fake_mac_records(
                 assert!(!clipboard_fetch_pending, "overlapping clipboard fetches");
                 clipboard_fetch_pending = true;
                 write_half
-                    .write_all(writer.frame(&[0, 0, 0, 0]).unwrap())
+                    .write_all(writer.frame(&[0, 0, 0, 0]))
                     .await?;
                 let mut fence = vec![MSG_FENCE, 0, 0, 0];
                 fence.extend_from_slice(&(1u32 << 31).to_be_bytes());
                 fence.push(4);
                 fence.extend_from_slice(b"clip");
-                write_half.write_all(writer.frame(&fence).unwrap()).await?;
+                write_half.write_all(writer.frame(&fence)).await?;
             }
             // SetDisplayMessage, reported so a later request can order assertions
             // without relying on a timeout.
@@ -1087,7 +1209,7 @@ async fn serve_fake_mac_records(
                 // frame. A real Mac may send this status at any time after setup.
                 if !std::mem::replace(&mut sent_clipboard_status, true) {
                     let status = [0x14, 0, 0, 4, 0, 1, 0, 2];
-                    write_half.write_all(writer.frame(&status).unwrap()).await?;
+                    write_half.write_all(writer.frame(&status)).await?;
                 }
             }
             // SetDisplayConfiguration: the High Performance subtype's one virtual
@@ -1103,19 +1225,22 @@ async fn serve_fake_mac_records(
                 configurations.push((points, density));
                 // Setup is answered by the first non-incremental request below.
                 // A steady-state dynamic configuration is answered immediately by
-                // a fresh authoritative layout, as the real Mac does.
+                // a fresh authoritative layout, as the real Mac does, and once the
+                // media stream is listed, by its ports named again.
                 if sent_layout {
                     let mut rect = vec![0u8, 0];
-                    rect.extend_from_slice(&1u16.to_be_bytes());
+                    rect.extend_from_slice(&(1 + u16::from(media_listed)).to_be_bytes());
                     rect.extend_from_slice(&[0u8; 8]);
                     rect.extend_from_slice(&0x451i32.to_be_bytes());
                     rect.extend_from_slice(&fake_mac_layout(MAC_VIRTUAL_DISPLAY, points, density));
-                    write_half.write_all(writer.frame(&rect).unwrap()).await?;
+                    if media_listed {
+                        rect.extend_from_slice(&fake_mac_ports());
+                    }
+                    write_half.write_all(writer.frame(&rect)).await?;
                 }
             }
-            // RFBMediaStreamServerConfiguration: the media-stream offer, accepted in
-            // the next update, or refused at once in an update of its own. One offer
-            // at a time, as the Mac requires.
+            // RFBMediaStreamServerConfiguration: the media-stream offer, accepted or
+            // refused at once in an update of its own.
             0x1c => {
                 let mut head = [0u8; 3];
                 records.read_exact(&mut head).await?;
@@ -1123,18 +1248,13 @@ async fn serve_fake_mac_records(
                 let mut body = vec![0u8; size];
                 records.read_exact(&mut body).await?;
                 assert_eq!(&body[..2], &3u16.to_be_bytes(), "media-stream configuration version");
-                assert!(!offer_pending, "a second media-stream offer while one was out");
-                match answer {
-                    MacStream::Accept => offer_pending = true,
-                    MacStream::Hold => {
-                        let _ = requests.send(MacRequest::Offer);
-                    }
-                    MacStream::Refuse => {
-                        let mut update = vec![0u8, 0];
-                        update.extend_from_slice(&1u16.to_be_bytes());
-                        update.extend_from_slice(&fake_mac_answer(answer));
-                        write_half.write_all(writer.frame(&update).unwrap()).await?;
-                    }
+                let _ = requests.send(MacRequest::Offer { media_first });
+                // A fake set to hold its answer never sends one.
+                if !matches!(answer, MacStream::Hold) {
+                    let mut update = vec![0u8, 0];
+                    update.extend_from_slice(&1u16.to_be_bytes());
+                    update.extend_from_slice(&fake_mac_answer(answer));
+                    write_half.write_all(writer.frame(&update)).await?;
                 }
             }
             // ClipboardSend: independently inflate and parse what the browser put
@@ -1167,10 +1287,10 @@ async fn serve_fake_mac_records(
 /// the bound address.
 async fn spawn_app(target: TargetConfig) -> SocketAddr {
     let config = AppConfig {
-        listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
+        listen: alumia::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         targets: vec![target],
         auth: common::test_auth(),
-        branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
+        branding: alumia::config::Branding { text: "alumia".to_owned(), logo: None },
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
@@ -1206,6 +1326,7 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
         size: Some((1280, 800)),
         egfx: None,
         egfx_h264: false,
+        virtual_displays: 1,
         camera: false,
         microphone: false,
         video_quality: None,
@@ -1214,7 +1335,6 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
         virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,
-        audio_adaptive_min: None,
     }
 }
 
@@ -1222,7 +1342,7 @@ fn target(protocol: Protocol, port: u16) -> TargetConfig {
 /// fake Mac checks the credentials against.
 fn mac_target(port: u16) -> TargetConfig {
     TargetConfig {
-        subtype: Some(remotex::config::Subtype::ArdHighPerformance),
+        subtype: Some(alumia::config::Subtype::ArdHighPerformance),
         username: MAC_USER.to_owned(),
         password: MAC_PASSWORD.to_owned(),
         // No size: the virtual display opens at the screen the connect names.
@@ -1273,7 +1393,7 @@ async fn http_get(addr: SocketAddr, path: &str, cookie: Option<&str>) -> String 
 /// `error` message or a close.
 async fn expect_resize(ws: &mut Ws, w: u16, h: u16) {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = ws.display_socket().next().await {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
@@ -1299,7 +1419,7 @@ async fn expect_resize(ws: &mut Ws, w: u16, h: u16) {
 /// fails on an `error` message or a close.
 async fn expect_picker(ws: &mut Ws) {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = ws.session_socket().next().await {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
@@ -1320,7 +1440,7 @@ async fn expect_picker(ws: &mut Ws) {
 /// Read from the socket until a binary frame of the desktop's stream arrives.
 async fn expect_frame(ws: &mut Ws) -> Vec<common::BatchUnit> {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = ws.display_socket().next().await {
             match msg.expect("websocket receive") {
                 Message::Binary(frame) => {
                     // Parsed rather than sniffed: the envelope's own invariants
@@ -1350,7 +1470,10 @@ async fn next_scroll_request(rx: &mut mpsc::UnboundedReceiver<ScrollRequest>) ->
 }
 
 /// Read from the socket until it closes; returns the close code (if any).
-async fn expect_close(ws: &mut Ws) -> Option<u16> {
+async fn expect_close<S>(ws: &mut S) -> Option<u16>
+where
+    S: futures_util::Stream<Item = Result<Message, tokio_tungstenite::tungstenite::Error>> + Unpin,
+{
     tokio::time::timeout(Duration::from_secs(10), async {
         while let Some(msg) = ws.next().await {
             match msg {
@@ -1434,6 +1557,27 @@ async fn websocket_without_a_valid_token_is_closed_with_4000() {
     assert_eq!(expect_close(&mut ws).await, Some(4000));
 }
 
+/// A display socket carries no token and is let in by the login alone: the login
+/// the session was claimed under, which another login is not, and only for a
+/// display the session shows — the first always, the second only in a tab.
+#[tokio::test]
+async fn a_display_socket_is_the_claiming_logins_and_shows_only_a_listed_tab() {
+    let addr = spawn_app_dead_rdp().await;
+    let owner = common::login(addr).await;
+    let other = common::login(addr).await;
+    let _token = common::claim_session(addr, &owner).await;
+
+    let mut ws = common::connect_display_ws(addr, &other, 1).await;
+    assert_eq!(expect_close(&mut ws).await, Some(4000), "another login holds no session");
+    let mut ws = common::connect_display_ws(addr, &owner, 2).await;
+    assert_eq!(expect_close(&mut ws).await, Some(4002), "no display is shown in a tab");
+    let mut ws = common::connect_display_ws(addr, &owner, 1).await;
+    assert!(
+        tokio::time::timeout(Duration::from_millis(250), expect_close(&mut ws)).await.is_err(),
+        "the claiming login's first display stays open"
+    );
+}
+
 /// The audio endpoint answers a bad token the same way, and that sameness is the
 /// point: two sockets with one credential and one refusal, so a client has one thing
 /// to handle rather than two.
@@ -1461,15 +1605,15 @@ async fn an_audio_socket_without_a_valid_token_is_closed_with_4000() {
     );
 }
 
-/// The two halves of the RFB scroll path, end to end over the real socket: the
-/// server drives the update cycle, and a region it says has moved — read back out
-/// of the shadow — reaches the browser as a frame it never asked for.
+/// Continuous updates, end to end over the real socket: the server drives the
+/// update cycle, and a region it paints on its own reaches the browser as a frame
+/// this client never asked for.
 ///
 /// Both are asserted from the other side of a wire nothing in `src/vnc.rs` wrote:
 /// the scripted server reads the client's messages itself, and the records are
 /// parsed by `common::batch_units`.
 #[tokio::test]
-async fn continuous_updates_carry_an_unasked_copyrect_to_the_browser() {
+async fn continuous_updates_carry_an_unasked_update_to_the_browser() {
     let (vnc_port, mut seen) = spawn_scrolling_vnc().await;
     let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
     let cookie = common::login(addr).await;
@@ -1510,7 +1654,7 @@ async fn continuous_updates_carry_an_unasked_copyrect_to_the_browser() {
     expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
     expect_frame(&mut ws).await;
 
-    // The cue for the scroll, and an input event rather than a request: what comes
+    // The cue for the push, and an input event rather than a request: what comes
     // back is an update this client never asked for.
     ws.send(Message::text(r#"{"type":"mouseMove","x":1,"y":1}"#))
         .await
@@ -1518,7 +1662,7 @@ async fn continuous_updates_carry_an_unasked_copyrect_to_the_browser() {
 
     expect_frame(&mut ws).await;
 
-    // Nothing between the first request and the copy was an incremental poll: the
+    // Nothing between the first request and the push was an incremental poll: the
     // round trip per frame is the whole point of the extension.
     while let Ok(request) = seen.try_recv() {
         assert_ne!(
@@ -1599,7 +1743,7 @@ async fn an_oversize_vnc_desktop_holds_the_session_without_a_picture() {
     expect_no_picture(&mut ws).await;
 
     // A reattach is told the same, and still sent no picture.
-    ws.close(None).await.unwrap();
+    futures_util::SinkExt::close(&mut ws).await.unwrap();
     drop(ws);
     let (status, body) =
         common::post_session(addr, &cookie, &format!(r#"{{"sessionId":"{token}"}}"#)).await;
@@ -1618,7 +1762,7 @@ async fn an_oversize_vnc_desktop_holds_the_session_without_a_picture() {
 /// a close: long enough for the full update the fake server answers with at once.
 async fn expect_no_picture(ws: &mut Ws) {
     let quiet = tokio::time::timeout(Duration::from_millis(500), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = ws.display_socket().next().await {
             match msg.expect("websocket receive") {
                 Message::Binary(frame) => panic!("a held desktop sent a {}-byte frame", frame.len()),
                 Message::Text(text) => {
@@ -1643,7 +1787,7 @@ async fn an_oversize_vnc_desktop_under_resize_is_refused() {
     let (w, h) = (3842, 2);
     let vnc_port = spawn_fake_vnc_sized(w, h).await;
     let addr = spawn_app(TargetConfig {
-        subtype: Some(remotex::config::Subtype::Wlshare),
+        subtype: Some(alumia::config::Subtype::Wlshare),
         ..target(Protocol::Vnc, vnc_port)
     })
     .await;
@@ -1653,6 +1797,11 @@ async fn an_oversize_vnc_desktop_under_resize_is_refused() {
     common::connect_target_with(&mut ws, "test-target", RESIZE).await;
     let error = expect_error(&mut ws).await;
     assert!(error.contains("will not encode a 3842x2 picture"), "unexpected error: {error}");
+    // Beside the sentence, the cause the page says in the person's language.
+    assert!(
+        error.contains(r#""cause":{"code":"AL-7101","fill":{"height":"2","width":"3842"}}"#),
+        "unexpected cause: {error}"
+    );
 }
 
 /// Logging out ends the desktop, and the login after it starts from the picker.
@@ -1712,7 +1861,7 @@ async fn detach_keeps_the_engine_and_reattach_repaints() {
     expect_frame(&mut ws).await;
 
     // Detach: the browser goes away, the engine keeps running.
-    ws.close(None).await.unwrap();
+    futures_util::SinkExt::close(&mut ws).await.unwrap();
     drop(ws);
 
     // Reattach (same token, reclaim): the engine must re-announce the size
@@ -1790,7 +1939,7 @@ struct ClipboardMessage {
 /// arrives.
 async fn expect_clipboard(ws: &mut Ws) -> ClipboardMessage {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = ws.session_socket().next().await {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
                     assert!(!text.contains(r#""type":"error""#), "session failed: {text}");
@@ -1935,9 +2084,29 @@ async fn a_fetch_before_the_remote_has_copied_anything_is_still_answered() {
 /// `displays` message carries remote-supplied strings — screen labels and details —
 /// so a substring match is a match against content the *remote* chooses, and a
 /// screen named `"type":"resize"` would satisfy a search for a resize.
+/// The socket a control message of `kind` travels on: a display's size, pointer and
+/// stream on the display socket, everything else on the session socket. A helper
+/// reading for one kind reads that socket alone, so what it skips past is never
+/// a message of the other socket that a later helper is waiting for.
+fn socket_for<'a>(ws: &'a mut Ws, kind: &str) -> &'a mut common::Socket {
+    const DISPLAY: [&str; 10] = [
+        "resize",
+        "cursor",
+        "mosaic",
+        "oversize",
+        "resizing",
+        "screenUnavailable",
+        "remoteOs",
+        "touchReady",
+        "videoFormat",
+        "graphicsStart",
+    ];
+    if DISPLAY.contains(&kind) { ws.display_socket() } else { ws.session_socket() }
+}
+
 async fn expect_control(ws: &mut Ws, kind: &str) -> serde_json::Value {
     tokio::time::timeout(Duration::from_secs(10), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = socket_for(ws, kind).next().await {
             match msg.expect("websocket receive") {
                 Message::Text(text) => {
                     let parsed: serde_json::Value = serde_json::from_str(&text)
@@ -1984,6 +2153,7 @@ async fn high_performance_refuses_a_mac_without_a_virtual_display() {
 
     let error = expect_error(&mut ws).await;
     assert!(error.contains("does not offer High Performance"), "{error}");
+    assert!(error.contains(r#""cause":{"code":"AL-7016","fill":{}}"#), "{error}");
 
     // The prelude never went out: the fake read end-of-stream where it expected
     // ViewerInfo, and saw no request.
@@ -1996,10 +2166,12 @@ async fn high_performance_refuses_a_mac_without_a_virtual_display() {
 }
 
 /// A Mac that refuses the media stream ends the session, as it ends Apple's
-/// viewer's: High Performance does not go on over ZRLE alone.
+/// viewer's: High Performance does not go on over ZRLE alone. The offer it
+/// refuses went out behind encodings that list the media stream first, so the
+/// Mac's updates do not meet its answer.
 #[tokio::test]
 async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
-    let (mac_port, _requests, _actions, fake_mac) =
+    let (mac_port, mut requests, _actions, fake_mac) =
         spawn_fake_mac_with(MAC_COMMANDS, MacStream::Refuse).await;
     let addr = spawn_app(mac_target(mac_port)).await;
     let cookie = common::login(addr).await;
@@ -2016,6 +2188,13 @@ async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
         error.contains("the Mac refused the media stream (error type 2, sub-code 0)"),
         "{error}"
     );
+    assert!(error.contains(r#""cause":{"code":"AL-7709","fill":{}}"#), "{error}");
+    let media_first = loop {
+        if let MacRequest::Offer { media_first } = next_mac_request(&mut requests).await {
+            break media_first;
+        }
+    };
+    assert!(media_first, "the offer went out behind encodings listing the stream first");
     // The gateway hung up on the fake, which reads that as the end of its session.
     fake_mac
         .await
@@ -2024,8 +2203,7 @@ async fn high_performance_ends_when_the_mac_refuses_the_media_stream() {
 }
 
 /// An offer that brings no picture ends the session once the first one is overdue:
-/// the fake accepts offers only in an update it would send anyway, and on a still
-/// session nothing asks for one, so this offer goes unanswered.
+/// the fake accepts the offer and sends nothing to the ports it named.
 #[tokio::test]
 #[ignore = "slow: waits out the 10 s stream start"]
 async fn high_performance_ends_when_the_offer_brings_no_picture() {
@@ -2042,7 +2220,16 @@ async fn high_performance_ends_when_the_offer_brings_no_picture() {
 
     let started = std::time::Instant::now();
     let error = expect_error(&mut ws).await;
-    assert!(error.contains("did not answer the media-stream offer within 10s"), "{error}");
+    assert!(error.contains("no picture came over the Mac's media stream within 10s of its offer"), "{error}");
+    // The cause names the port the picture was waited for on, which is the
+    // gateway's own and drawn afresh for each session: any port, and the ten
+    // seconds the stream is given to start.
+    let (_, named) = error
+        .split_once(r#""cause":{"code":"AL-7703","fill":{"port":""#)
+        .unwrap_or_else(|| panic!("the cause is the picture's leg that brought nothing: {error}"));
+    let (port, rest) = named.split_once('"').expect("the port's value is closed");
+    assert!(port.parse::<u16>().is_ok_and(|port| port != 0), "{error}");
+    assert!(rest.starts_with(r#","seconds":"10"}}"#), "{error}");
     assert!(started.elapsed() >= Duration::from_secs(9), "ended early: {:?}", started.elapsed());
     fake_mac
         .await
@@ -2053,7 +2240,7 @@ async fn high_performance_ends_when_the_offer_brings_no_picture() {
 /// Read until an `error` control message arrives, and hand back its line.
 async fn expect_error(ws: &mut Ws) -> String {
     tokio::time::timeout(Duration::from_secs(20), async {
-        while let Some(msg) = ws.next().await {
+        while let Some(msg) = ws.session_socket().next().await {
             if let Ok(Message::Text(text)) = msg
                 && text.contains(r#""type":"error""#)
             {
@@ -2075,7 +2262,7 @@ async fn standard_on_a_virtual_display_resizes_it_and_offers_no_stream() {
     let (mac_port, mut requests, _actions, fake_mac) =
         spawn_fake_mac_with(MAC_COMMANDS, MacStream::Refuse).await;
     let addr = spawn_app(TargetConfig {
-        subtype: Some(remotex::config::Subtype::Ard),
+        subtype: Some(alumia::config::Subtype::Ard),
         virtual_display: true,
         ..mac_target(mac_port)
     })
@@ -2152,7 +2339,7 @@ async fn standard_refuses_a_virtual_display_the_mac_does_not_offer() {
     let (mac_port, mut requests, _actions, fake_mac) =
         spawn_fake_mac_with(commands, MacStream::Refuse).await;
     let addr = spawn_app(TargetConfig {
-        subtype: Some(remotex::config::Subtype::Ard),
+        subtype: Some(alumia::config::Subtype::Ard),
         virtual_display: true,
         ..mac_target(mac_port)
     })
@@ -2164,6 +2351,7 @@ async fn standard_refuses_a_virtual_display_the_mac_does_not_offer() {
 
     let error = expect_error(&mut ws).await;
     assert!(error.contains("without virtual_display"), "{error}");
+    assert!(error.contains(r#""cause":{"code":"AL-7016","fill":{}}"#), "{error}");
     let served = fake_mac.await.unwrap();
     assert_eq!(served.unwrap_err().kind(), std::io::ErrorKind::UnexpectedEof);
     assert!(requests.try_recv().is_err(), "the gateway sent a request");
@@ -2178,7 +2366,7 @@ async fn standard_refuses_a_virtual_display_the_mac_does_not_offer() {
 async fn standard_speaks_apples_revision_on_the_physical_screen() {
     let (mac_port, mut requests, _actions, fake_mac) = spawn_fake_mac().await;
     let addr = spawn_app(TargetConfig {
-        subtype: Some(remotex::config::Subtype::Ard),
+        subtype: Some(alumia::config::Subtype::Ard),
         ..mac_target(mac_port)
     })
     .await;
@@ -2241,7 +2429,7 @@ async fn mirror_opens_on_the_physical_displays_and_offers_the_stream() {
     let (mac_port, mut requests, _actions, fake_mac) =
         spawn_fake_mac_with(MAC_COMMANDS, MacStream::Refuse).await;
     let addr = spawn_app(TargetConfig {
-        subtype: Some(remotex::config::Subtype::ArdMirror),
+        subtype: Some(alumia::config::Subtype::ArdMirror),
         ..mac_target(mac_port)
     })
     .await;
@@ -2267,6 +2455,7 @@ async fn mirror_opens_on_the_physical_displays_and_offers_the_stream() {
         error.contains("the Mac refused the media stream (error type 2, sub-code 0)"),
         "{error}"
     );
+    assert!(error.contains(r#""cause":{"code":"AL-7709","fill":{}}"#), "{error}");
     let configurations = fake_mac
         .await
         .expect("the fake Mac task panicked")
@@ -2307,14 +2496,14 @@ async fn expect_resize_to(ws: &mut Ws, size: (u16, u16)) -> f64 {
 /// host without it cannot start this session, and the test has nothing to drive.
 #[tokio::test]
 async fn mirror_fits_the_screen_to_the_window_and_points_in_the_macs_pixels() {
-    if remotex::libav::api().is_err() {
+    if alumia::libav::api().is_err() {
         eprintln!("skipped: no FFmpeg on this host to decode a mirror session's picture");
         return;
     }
     let (mac_port, mut requests, _actions, fake_mac) =
         spawn_fake_mac_with(MAC_COMMANDS, MacStream::Hold).await;
     let addr = spawn_app(TargetConfig {
-        subtype: Some(remotex::config::Subtype::ArdMirror),
+        subtype: Some(alumia::config::Subtype::ArdMirror),
         ..mac_target(mac_port)
     })
     .await;
@@ -2349,7 +2538,7 @@ async fn mirror_fits_the_screen_to_the_window_and_points_in_the_macs_pixels() {
     // The offer is out from here to the end of the test.
     loop {
         match next_mac_request(&mut requests).await {
-            MacRequest::Offer => break,
+            MacRequest::Offer { .. } => break,
             MacRequest::IncrementalFramebuffer | MacRequest::HeldFramebuffer => {}
             other => panic!("expected the media-stream offer, got {other:?}"),
         }
@@ -2379,6 +2568,246 @@ async fn mirror_fits_the_screen_to_the_window_and_points_in_the_macs_pixels() {
         .unwrap();
     ws.send(Message::text(r#"{"type":"mouseMove","x":3,"y":5}"#)).await.unwrap();
     assert_eq!(next_mac_pointer(&mut requests).await, (3, 5));
+
+    ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
+    expect_picker(&mut ws).await;
+    let configurations = fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+    assert!(configurations.is_empty(), "a mirror session asked for a virtual display: {configurations:?}");
+}
+
+/// A mirror session opened by a client that fits the picture to its width and
+/// reports no window, which is a phone: the picture is reduced to the width it
+/// shows it at, in its own pixels. Before it says one, the short side of the
+/// connect's screen, the width it is held upright at; then each width it says
+/// (`shown`), which its zoom raises, and never wider than the Mac's screen. A
+/// pointer position still reaches the Mac in the Mac's pixels, and `sight` ends
+/// nothing: the session takes the pointer after it. A screen said again as a page
+/// with a pointer says it, without the fit, is the picture as it came, and the
+/// width said no longer binds. No `viewport` is sent anywhere in it. The fake
+/// holds the offer, as in the test above.
+#[tokio::test]
+async fn shown_and_sight_on_a_mirror_session_of_a_client_that_names_no_window() {
+    if alumia::libav::api().is_err() {
+        eprintln!("skipped: no FFmpeg on this host to decode a mirror session's picture");
+        return;
+    }
+    let (mac_port, mut requests, _actions, fake_mac) =
+        spawn_fake_mac_with(MAC_COMMANDS, MacStream::Hold).await;
+    let addr = spawn_app(TargetConfig {
+        subtype: Some(alumia::config::Subtype::ArdMirror),
+        ..mac_target(mac_port)
+    })
+    .await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    // A screen of 8 x 16 points at 1x, held upright: 8 pixels across.
+    let upright = MAC_DESKTOP / 4;
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{upright},"h":{},"scale":100,"fit":true}},"choices":{RESIZE}}}"#,
+        MAC_DESKTOP / 2
+    )))
+    .await
+    .unwrap();
+    while !matches!(next_mac_request(&mut requests).await, MacRequest::Offer { .. }) {}
+
+    // A quarter of the Mac's pixels across, labelled so the picture keeps the Mac's points.
+    assert_eq!(expect_resize_to(&mut ws, (upright, upright)).await, 0.25);
+
+    // Turned on its side, it shows the picture at 16: half the Mac's pixels.
+    let sideways = MAC_DESKTOP / 2;
+    ws.send(Message::text(format!(r#"{{"type":"shown","w":{sideways}}}"#))).await.unwrap();
+    assert_eq!(expect_resize_to(&mut ws, (sideways, sideways)).await, 0.5);
+    ws.send(Message::text(r#"{"type":"mouseMove","x":8,"y":4}"#)).await.unwrap();
+    assert_eq!(next_mac_pointer(&mut requests).await, (16, 8), "the Mac's pixels, not the picture's");
+
+    // Zoomed past the Mac's screen: the screen is as wide as the picture goes.
+    ws.send(Message::text(format!(r#"{{"type":"shown","w":{}}}"#, MAC_DESKTOP * 2))).await.unwrap();
+    assert_eq!(expect_resize_to(&mut ws, (MAC_DESKTOP, MAC_DESKTOP)).await, 1.0);
+
+    // Out of sight and back: nothing ends, and the pointer still reaches the Mac.
+    ws.send(Message::text(r#"{"type":"sight","visible":false}"#)).await.unwrap();
+    ws.send(Message::text(r#"{"type":"sight","visible":true}"#)).await.unwrap();
+    ws.send(Message::text(r#"{"type":"mouseMove","x":3,"y":5}"#)).await.unwrap();
+    assert_eq!(next_mac_pointer(&mut requests).await, (3, 5));
+
+    // Zoomed out to a quarter: the picture follows it down.
+    ws.send(Message::text(format!(r#"{{"type":"shown","w":{upright}}}"#))).await.unwrap();
+    assert_eq!(expect_resize_to(&mut ws, (upright, upright)).await, 0.25);
+
+    // Said as a page with a pointer says it, with no fit: no window reported, so the
+    // picture as it came, and the width said before binds no longer.
+    ws.send(Message::text(format!(
+        r#"{{"type":"hostDisplay","w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}}"#
+    )))
+    .await
+    .unwrap();
+    assert_eq!(expect_resize_to(&mut ws, (MAC_DESKTOP, MAC_DESKTOP)).await, 1.0);
+
+    ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
+    expect_picker(&mut ws).await;
+    let configurations = fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+    assert!(configurations.is_empty(), "a mirror session asked for a virtual display: {configurations:?}");
+}
+
+/// A client that fits the picture to its width is sent a Mac's virtual display
+/// reduced as it is sent the Mac's screens: the display opens at the screen the
+/// connect names, and the width the client then says it shows the picture at is
+/// what it is held to. A desk's virtual display is never reduced: it is the
+/// window's own size. The fake holds the offer, as the mirror tests do.
+#[tokio::test]
+async fn shown_and_sight_reduce_a_virtual_display_for_a_client_that_fits_it() {
+    if alumia::libav::api().is_err() {
+        eprintln!("skipped: no FFmpeg on this host to decode a High Performance session's picture");
+        return;
+    }
+    let (mac_port, mut requests, _actions, fake_mac) =
+        spawn_fake_mac_with(MAC_COMMANDS, MacStream::Hold).await;
+    let addr = spawn_app(mac_target(mac_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_mac_ws(addr, &token, &cookie).await;
+    // A screen of 8 x 16 points at 1x, held upright, with no passthrough: the
+    // Mac's stream is decoded here. A phone's screen is no desktop's shape, so
+    // the virtual display opens at the gateway's default, which the phone is
+    // then sent reduced to its width.
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":8,"h":16,"scale":100,"fit":true}},"choices":{RESIZE}}}"#
+    )))
+    .await
+    .unwrap();
+    while !matches!(next_mac_request(&mut requests).await, MacRequest::Offer { .. }) {}
+    // Eight pixels across, labelled so the picture keeps the display's points.
+    let (w, h) = alumia::config::DEFAULT_SIZE;
+    let across = |pixels: u16| (f64::from(pixels) * f64::from(h) / f64::from(w)) as u16;
+    assert_eq!(expect_resize_to(&mut ws, (8, across(8))).await as f32, 8.0 / f32::from(w));
+    // Shown at half: the picture follows the width said, as a screen's does.
+    ws.send(Message::text(r#"{"type":"shown","w":4}"#)).await.unwrap();
+    assert_eq!(expect_resize_to(&mut ws, (4, across(4))).await as f32, 4.0 / f32::from(w));
+    ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
+    expect_picker(&mut ws).await;
+    let configurations = fake_mac
+        .await
+        .expect("the fake Mac task panicked")
+        .expect("the fake Mac task failed");
+    assert_eq!(configurations, vec![((w, h), 1)], "the virtual display opened at the gateway's default");
+}
+
+/// A page out of sight is sent no picture, however it asks: a repaint asked for
+/// while hidden encodes nothing. Back in sight it is sent a keyframe, which is
+/// what the decoder it builds afresh starts from. The laboratory's lines go in the
+/// log and end nothing on the way.
+#[tokio::test]
+async fn shown_and_sight_hold_the_picture_of_a_hidden_page_and_bring_it_back_at_a_keyframe() {
+    let vnc_port = spawn_fake_vnc().await;
+    let addr = spawn_app(target(Protocol::Vnc, vnc_port)).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    common::connect_target(&mut ws, "test-target").await;
+    expect_resize(&mut ws, FAKE_DESKTOP, FAKE_DESKTOP).await;
+    expect_frame(&mut ws).await;
+
+    ws.send(Message::text(r#"{"type":"sight","visible":false}"#)).await.unwrap();
+    ws.send(Message::text(r#"{"type":"refresh"}"#)).await.unwrap();
+    expect_no_picture(&mut ws).await;
+    ws.send(Message::text(r#"{"type":"lab","lines":["decoder: closed in the background"]}"#)).await.unwrap();
+
+    ws.send(Message::text(r#"{"type":"sight","visible":true}"#)).await.unwrap();
+    let units = expect_frame(&mut ws).await;
+    assert!(units[0].keyframe, "a page back in sight was sent a delta first");
+    // Its tab is a plain VNC one: a `shown` reduces nothing there and ends nothing either.
+    ws.send(Message::text(r#"{"type":"shown","w":320}"#)).await.unwrap();
+    ws.send(Message::text(r#"{"type":"refresh"}"#)).await.unwrap();
+    expect_frame(&mut ws).await;
+}
+
+/// A mirror session on a Mac sharing two screens is its main screen's: the Mac's
+/// stream carries that screen alone, whatever screen is asked for (measured on
+/// macOS 27, 2026-10-08), so the browser is told the main screen fitted to its
+/// window and not the framebuffer of both, a pointer position reaches the Mac
+/// moved to where the main screen sits in that framebuffer, and both screens are
+/// listed with the mark on the main one, which the page shows as the ones a
+/// Mirrored session cannot switch to; a choice is never sent to the Mac, with the
+/// stream's offer answered. The fake names no ports, so the session is driven
+/// inside the ten seconds the first picture may take.
+#[tokio::test]
+async fn mirror_on_two_screens_lists_both_marks_the_main_one_and_takes_no_selection() {
+    if alumia::libav::api().is_err() {
+        eprintln!("skipped: no FFmpeg on this host to decode a mirror session's picture");
+        return;
+    }
+    let script = MacScript { answer: MacStream::Accept, two_screens: true };
+    let (mac_port, mut requests, _actions, fake_mac) = spawn_fake_mac_scripted(MAC_COMMANDS, script).await;
+    let addr = spawn_app(TargetConfig {
+        subtype: Some(alumia::config::Subtype::ArdMirror),
+        ..mac_target(mac_port)
+    })
+    .await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = connect_ws(addr, &token, &cookie).await;
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"test-target","display":{{"w":{MAC_SCREEN_WIDTH},"h":{MAC_SCREEN_HEIGHT},"scale":100}},"choices":{RESIZE}}}"#
+    )))
+    .await
+    .unwrap();
+
+    // Armed for the framebuffer of both screens, which is what the Mac's
+    // rectangles and its pushes are in.
+    assert_eq!(next_mac_request(&mut requests).await, MacRequest::AutoPasteboard(true));
+    assert_eq!(
+        next_mac_request(&mut requests).await,
+        MacRequest::AutoFramebuffer((MAC_SIDE_SCREEN + MAC_MAIN_SCREEN, MAC_MAIN_SCREEN))
+    );
+    // Both screens listed, as the Mac laid them out, with the mark on the main
+    // one, which is the screen the stream carries; no "Combined Display", which
+    // has no stream of its own.
+    let msg = expect_displays(&mut ws).await;
+    let displays = msg["displays"].as_array().expect("a display array");
+    assert_eq!(displays.len(), 2, "{msg}");
+    assert_eq!(displays[0]["id"], MAC_PHYSICAL_DISPLAY, "{msg}");
+    assert_eq!(displays[0]["main"], false, "{msg}");
+    assert_eq!(displays[1]["id"], MAC_MAIN_DISPLAY, "{msg}");
+    assert_eq!(displays[1]["main"], true, "{msg}");
+    assert_eq!(msg["active"], MAC_MAIN_DISPLAY, "{msg}");
+    // The stream is offered once the list is out, with the media stream ahead of
+    // the rectangles, and the region stays held from there: the picture is the
+    // stream's, and the polling never turns incremental. A second offer, or
+    // anything but a held poll, is met by `next_mac_pointer` below.
+    loop {
+        match next_mac_request(&mut requests).await {
+            MacRequest::Offer { media_first: true } => break,
+            MacRequest::HeldFramebuffer => {}
+            other => panic!("expected the media-stream offer, got {other:?}"),
+        }
+    }
+
+    // A window of a quarter of the main screen's pixels, on a 1x browser: the main
+    // screen fitted to it, where the framebuffer of both would be wider than tall.
+    let quarter = MAC_MAIN_SCREEN / 4;
+    ws.send(Message::text(format!(r#"{{"type":"viewport","w":{quarter},"h":{quarter}}}"#))).await.unwrap();
+    assert_eq!(expect_resize_to(&mut ws, (quarter, quarter)).await, 1.0);
+    ws.send(Message::text(r#"{"type":"mouseMove","x":4,"y":2}"#)).await.unwrap();
+    assert_eq!(
+        next_mac_pointer(&mut requests).await,
+        (MAC_SIDE_SCREEN + 16, 8),
+        "the Mac's pixels, past the screen to the main one's left"
+    );
+
+    // A selection never reaches the Mac, with no offer out either: the next thing
+    // it is sent is the pointer event behind it.
+    ws.send(Message::text(format!(r#"{{"type":"selectDisplay","id":{MAC_PHYSICAL_DISPLAY}}}"#)))
+        .await
+        .unwrap();
+    ws.send(Message::text(r#"{"type":"mouseMove","x":0,"y":7}"#)).await.unwrap();
+    assert_eq!(next_mac_pointer(&mut requests).await, (MAC_SIDE_SCREEN, 28));
 
     ws.send(Message::text(r#"{"type":"disconnect"}"#)).await.unwrap();
     expect_picker(&mut ws).await;
@@ -2436,7 +2865,8 @@ async fn high_performance_configures_a_virtual_display_and_round_trips_clipboard
     assert_eq!(displays[0]["virtual"], true, "{msg}");
     assert_eq!(msg["active"], MAC_VIRTUAL_DISPLAY, "{msg}");
     // No picture: the Mac's ZRLE is stepped over, and the picture is the media
-    // stream alone, which this fake Mac never delivers.
+    // stream alone, which this fake Mac never delivers, so the browser has been
+    // told its screen is not available.
     assert_eq!(
         next_mac_request(&mut requests).await,
         MacRequest::AutoPasteboard(true),

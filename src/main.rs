@@ -1,11 +1,11 @@
 use anyhow::Context;
-use clap::Parser;
 use log::info;
 #[cfg(unix)]
 use log::warn;
-use remotex::cli::{Cli, Commands};
-use remotex::config::{AppConfig, ListenAddr};
-use remotex::server;
+use alumia::cause::{Cause, Caused as _};
+use alumia::cli::{Cli, Commands};
+use alumia::config::{AppConfig, ListenAddr};
+use alumia::server;
 
 // jemalloc rather than glibc's malloc. Every session runs its engine on a thread of
 // its own and encodes on tokio's blocking pool, and glibc gives each allocating
@@ -16,43 +16,96 @@ use remotex::server;
 #[global_allocator]
 static ALLOCATOR: tikv_jemallocator::Jemalloc = tikv_jemallocator::Jemalloc;
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
-    env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info")).init();
+fn main() -> std::process::ExitCode {
+    // Read before anything is logged: it says where the log goes, and logs
+    // nothing itself.
+    let cli = alumia::cli::parse();
+    // Changed only where there is a hosted gateway to log elsewhere.
+    #[cfg_attr(not(all(target_os = "macos", feature = "embedded-gateway")), allow(unused_mut))]
+    let mut logger = env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"));
+    // The gateway a Mac app hosts is a service, whose standard error leads
+    // nowhere a person can read: it logs to its own folder, once that folder is
+    // its own (see `alumia::app::Log`).
+    #[cfg(all(target_os = "macos", feature = "embedded-gateway"))]
+    let log = alumia::app::Log::default();
+    #[cfg(all(target_os = "macos", feature = "embedded-gateway"))]
+    if matches!(cli.command, Commands::Serve { app: true, .. }) {
+        logger.target(env_logger::Target::Pipe(Box::new(log.clone())));
+    }
+    logger.init();
 
-    let cli = Cli::parse();
+    #[cfg(feature = "embedded-gateway")]
+    let worker = matches!(cli.command, Commands::ServeEmbedded { .. });
+    #[cfg(not(feature = "embedded-gateway"))]
+    let worker = false;
+    // The runtime is made here, where `#[tokio::main]` would make it, because the
+    // gateway a Mac app hosts makes its own: one for the process, and one for each
+    // run of the server (see `hosted`).
+    #[cfg(all(target_os = "macos", feature = "embedded-gateway"))]
+    let result = if matches!(cli.command, Commands::Serve { app: true, .. }) {
+        hosted::serve(&log)
+    } else {
+        runtime().block_on(run(cli))
+    };
+    #[cfg(not(all(target_os = "macos", feature = "embedded-gateway")))]
+    let result = runtime().block_on(run(cli));
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        // Whoever ran the command is told why in their own language, with the
+        // error's own sentence under it (see alumia::words). A worker's words are
+        // read by the panel that started it, which shows them to its own reader.
+        Err(e) if worker => {
+            eprintln!("{}", alumia::words::tell(&e, "AL-9800"));
+            std::process::ExitCode::FAILURE
+        }
+        Err(e) => {
+            eprintln!("{}", alumia::words::tell(&e, "AL-9400"));
+            std::process::ExitCode::FAILURE
+        }
+    }
+}
 
+/// The runtime a command runs on, as `#[tokio::main]` builds it.
+fn runtime() -> tokio::runtime::Runtime {
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()
+        .expect("failed to build the runtime")
+}
+
+async fn run(cli: Cli) -> anyhow::Result<()> {
     match cli.command {
-        Commands::Serve { config, listen } => {
+        Commands::Serve { config, listen, .. } => {
             // The listen address is the one thing a deployment says outside the
-            // file — `--listen`, or `REMOTEX_LISTEN` for a container that has an
+            // file — `--listen`, or `ALUMIA_LISTEN` for a container that has an
             // environment but no argv to edit. Everything else comes from the
             // TOML file, credentials included (see src/config.rs for why). Every
             // target is served; the browser picks one after login.
-            info!("remotex {}, features: {}", env!("CARGO_PKG_VERSION"), remotex::cli::features_line());
-            let (file, path) = remotex::config::load(config.as_deref())?;
+            info!("alumia {}, features: {}", env!("CARGO_PKG_VERSION"), alumia::cli::features_line());
+            let (file, path) = alumia::config::load(config.as_deref())?;
             info!("config: {}", path.display());
+            let state_dir = alumia::config::state_dir(&path);
             let config = file.resolve_with(
                 listen.as_deref(),
-                &remotex::config::state_dir(&path),
-                &remotex::config::data_dir(path.parent().unwrap_or(std::path::Path::new(""))),
+                &state_dir,
+                &alumia::config::data_dir(path.parent().unwrap_or(std::path::Path::new(""))),
             )?;
-            serve(config).await?;
+            serve(config, &state_dir).await?;
         }
         #[cfg(feature = "embedded-gateway")]
         Commands::Tui { port, instances_dir } => {
-            anyhow::ensure!(port != 0, "--port must be between 1 and 65535");
-            remotex::embedded::run_tui(remotex::embedded::TuiOptions {
+            alumia::ensure_known!("AL-9401"; port != 0, "--port must be between 1 and 65535");
+            alumia::embedded::run_tui(alumia::embedded::TuiOptions {
                 port,
                 instances_dir: instances_dir
                     .map(Ok)
-                    .unwrap_or_else(remotex::embedded::default_instances_dir)?,
+                    .unwrap_or_else(alumia::embedded::default_instances_dir)?,
             })
             .await?;
         }
         #[cfg(feature = "embedded-gateway")]
         Commands::ServeEmbedded { instance_dir } => {
-            serve_embedded(&remotex::embedded::Instance::new(instance_dir)).await?;
+            serve_embedded(&alumia::embedded::Instance::new(instance_dir)).await?;
         }
         Commands::CheckConfig {
             config,
@@ -61,23 +114,32 @@ async fn main() -> anyhow::Result<()> {
         } => {
             // The message is the product here: an instance manager can run this for
             // its configuration editor and show stderr to somebody about to fix the
-            // file. `{:#}` keeps the whole `anyhow` chain, which
-            // is what names the target the complaint is about.
-            let text = remotex::config::read_candidate(config.as_deref())?;
+            // file. It is told as every error is (alumia::words), and the sentence
+            // under the catalogue's keeps the whole `anyhow` chain, which is what
+            // names the target the complaint is about.
+            let text = alumia::config::read_candidate(config.as_deref())?;
             #[cfg(feature = "embedded-gateway")]
             let result = if embedded {
-                remotex::embedded::check(&text)
+                alumia::embedded::check(&text)
             } else {
-                remotex::config::check(&text)
+                alumia::config::check(&text)
             };
             #[cfg(not(feature = "embedded-gateway"))]
-            let result = remotex::config::check(&text);
+            let result = alumia::config::check(&text);
             if let Err(e) = result {
-                eprintln!("{e:#}");
+                eprintln!("{}", alumia::words::tell(&e, "AL-9500"));
                 std::process::exit(1);
             }
         }
         Commands::GenPasswd { username } => gen_passwd(&username)?,
+        #[cfg(all(target_os = "macos", feature = "embedded-gateway"))]
+        Commands::App { language, asked } => {
+            // What it printed is its answer, a refusal included: the app reads
+            // that line, and the status says only whether it was one.
+            if !alumia::app::command(asked, language.as_deref()).await {
+                std::process::exit(1);
+            }
+        }
     }
 
     Ok(())
@@ -90,16 +152,16 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
     use std::io::IsTerminal as _;
 
     let password = if std::io::stdin().is_terminal() {
-        let password = rpassword::prompt_password("Password: ")?;
-        let confirm = rpassword::prompt_password("Confirm password: ")?;
-        anyhow::ensure!(password == confirm, "passwords do not match");
+        let password = rpassword::prompt_password(alumia::words::say("prompt.password", &[]))?;
+        let confirm = rpassword::prompt_password(alumia::words::say("prompt.confirm", &[]))?;
+        alumia::ensure_known!("AL-9402"; password == confirm, "passwords do not match");
         password
     } else {
         let mut line = String::new();
         std::io::stdin().read_line(&mut line)?;
         line.trim_end_matches(['\r', '\n']).to_owned()
     };
-    let encoded = remotex::auth::generate(username, &password, remotex::auth::DEFAULT_COST)?;
+    let encoded = alumia::auth::generate(username, &password, alumia::auth::DEFAULT_COST)?;
     println!("{encoded}");
     Ok(())
 }
@@ -108,13 +170,13 @@ fn gen_passwd(username: &str) -> anyhow::Result<()> {
 ///
 /// Three ways out, and the first is the one the guarantee rests on: the parent's
 /// end of our stdin closing, which happens however the parent ended — see
-/// [`remotex::embedded::parent_closed`]. The signal handler is for a run started by
+/// [`alumia::embedded::parent_closed`]. The signal handler is for a run started by
 /// hand, and the server arm only completes by failing.
 #[cfg(feature = "embedded-gateway")]
-async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Result<()> {
+async fn serve_embedded(instance: &alumia::embedded::Instance) -> anyhow::Result<()> {
     // As in `serve`.
     #[cfg(target_os = "macos")]
-    let _displays = remotex::mac_displays::ReleaseOnExit;
+    let _displays = alumia::mac_displays::ReleaseOnExit;
     // Ahead of the race below, because asking for the claim can wait, and waiting
     // is what `serve` must not do before it has refused.
     let claim = instance.claim().await?;
@@ -127,8 +189,8 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
         // that wins decides whether a refused config is reported at all: `[server]`
         // in the file, and one run in five exits 0 with nothing on stderr.
         biased;
-        result = remotex::embedded::serve(instance, claim) => result?,
-        _ = remotex::embedded::parent_closed() => {
+        result = alumia::embedded::serve(instance, claim) => result?,
+        _ = alumia::embedded::parent_closed() => {
             info!("stdin closed: whatever started this gateway is gone; stopping");
         }
         _ = shutdown_signal() => info!("shutdown signal received; stopping"),
@@ -136,44 +198,99 @@ async fn serve_embedded(instance: &remotex::embedded::Instance) -> anyhow::Resul
     Ok(())
 }
 
-/// EXPERIMENTAL: read the software HEVC decoder the config resolved to, before the
+/// BETA: read the software HEVC decoder the config resolved to, before the
 /// gateway listens, so an archive it cannot serve is a refused start.
-fn load_hevc_decoder(config: &AppConfig) -> anyhow::Result<Option<remotex::hevc_wasm::HevcDecoder>> {
+fn load_hevc_decoder(config: &AppConfig) -> anyhow::Result<Option<alumia::hevc_wasm::HevcDecoder>> {
     let Some(archive) = &config.hevc_wasm else {
         return Ok(None);
     };
-    let decoder = remotex::hevc_wasm::HevcDecoder::load(archive)?;
+    let decoder = alumia::hevc_wasm::HevcDecoder::load(archive)?;
     info!(
         "serving the software HEVC decoder hevc-wasm v{} from {}",
-        remotex::hevc_wasm::VERSION,
+        alumia::hevc_wasm::VERSION,
         archive.display()
     );
     Ok(Some(decoder))
 }
 
-async fn serve(config: AppConfig) -> anyhow::Result<()> {
+/// Serve `config`. `state_dir` is where the gateway keeps what outlives it: the
+/// `[meter]` database the config already resolved there, and the kept logins.
+async fn serve(config: AppConfig, state_dir: &std::path::Path) -> anyhow::Result<()> {
     // Gives back a built-in display the gateway turned off, however it stops.
     #[cfg(target_os = "macos")]
-    let _displays = remotex::mac_displays::ReleaseOnExit;
+    let _displays = alumia::mac_displays::ReleaseOnExit;
+    let (mut opened, ()) = open(&config, state_dir, |config, logins, throughput, hevc_decoder| {
+        (server::router_with_logins(config, logins, throughput, hevc_decoder), ())
+    })
+    .await?;
+
+    // Race the servers against an explicit shutdown signal. Relying on the OS
+    // default SIGINT disposition to terminate proved flaky on macOS — Ctrl+C
+    // was intermittently ignored while a detached engine thread was still
+    // running, forcing a SIGKILL. An installed handler makes it deterministic.
+    tokio::select! {
+        // The first server to *finish* has failed — `axum::serve` only returns on
+        // error — so it is reported rather than waited on for the others.
+        Some(result) = opened.servers.join_next() => finished(result)?,
+        _ = shutdown_signal() => info!("shutdown signal received; stopping"),
+    }
+    Ok(())
+}
+
+/// Why a server that finished did.
+fn finished(result: Result<std::io::Result<()>, tokio::task::JoinError>) -> anyhow::Result<()> {
+    result.context("the server task panicked")?.context("server error")
+}
+
+/// The servers of one gateway, listening: one for each socket, over one router.
+struct Opened {
+    servers: tokio::task::JoinSet<std::io::Result<()>>,
+    /// Takes the socket file away when the gateway stops, by any way out. `None`
+    /// for TCP, which leaves nothing behind to clean up.
+    #[cfg(unix)]
+    _socket_file: Option<SocketFile>,
+}
+
+/// Open everything `config` serves, and listen. `router` builds the router over
+/// what was opened for it, and may hand back something of its own beside it: the
+/// gateway a Mac app hosts keeps the session slot ([`server::router_for_host`]).
+async fn open<Kept>(
+    config: &AppConfig,
+    state_dir: &std::path::Path,
+    router: impl FnOnce(
+        AppConfig,
+        alumia::auth::AuthSessions,
+        alumia::throughput::Throughput,
+        Option<alumia::hevc_wasm::HevcDecoder>,
+    ) -> (axum::Router, Kept),
+) -> anyhow::Result<(Opened, Kept)> {
     if let Some(recording) = &config.meter {
         info!("recording websocket throughput to {}", recording.database.display());
     }
-    let throughput = remotex::throughput::start(
+    let throughput = alumia::throughput::start(
         config.meter.as_ref(),
         config.targets.iter().map(|target| target.name.clone()).collect(),
     )
-        .context("cannot record websocket throughput ([meter].database)")?;
-    let hevc_decoder = load_hevc_decoder(&config)?;
+        .context("cannot record websocket throughput ([meter].database)")
+        .cause(|| Cause::new("AL-9403"))?;
+    let hevc_decoder = load_hevc_decoder(config)?;
     config.hp_decoders.load()?;
-    let app = server::router(config.clone(), throughput, hevc_decoder);
+    let logins = match config.auth.login() {
+        Some(site_passwd) => {
+            let kept = state_dir.join(alumia::auth::LOGINS_FILE);
+            info!("kept logins: {}", kept.display());
+            alumia::auth::AuthSessions::open(&kept, site_passwd)
+        }
+        // A gateway with no login mints no session.
+        None => alumia::auth::AuthSessions::default(),
+    };
+    let (app, kept) = router(config.clone(), logins, throughput, hevc_decoder);
 
     // One server per listener over the same router — `Router` is `Clone`, and the
     // session slot behind it is a single `Arc`, so which socket a browser arrived on
     // is invisible from here. That matters: two listeners are two doors to one
     // gateway, not two gateways.
     let mut servers = tokio::task::JoinSet::new();
-    // Lives until this function returns, and taking the socket file away is what it
-    // is for. `None` for TCP, which leaves nothing behind to clean up.
     #[cfg(unix)]
     let mut socket_file = None;
 
@@ -197,7 +314,8 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
             //
             // A literal is unaffected: `127.0.0.1`, `::1` and `0.0.0.0` each resolve
             // to themselves and bind exactly one socket, as before.
-            let listeners = server::bind_all(&resolved_addrs(addr).await?, addr)?;
+            let listeners = server::bind_all(&resolved_addrs(addr).await?, addr)
+                .cause(|| Cause::new("AL-9411").with("address", addr))?;
             for listener in &listeners {
                 if let Ok(socket) = listener.local_addr() {
                     info!("listening on http://{socket}");
@@ -220,7 +338,7 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         #[cfg(unix)]
         ListenAddr::Unix(path) => {
             let listener = bind_unix(path)?;
-            // Armed the moment the socket exists, so every way out of this function
+            // Armed the moment the socket exists, so every way out from here on
             // takes it away with it.
             socket_file = Some(SocketFile(path.clone()));
             info!("listening on unix:{}", path.display());
@@ -236,13 +354,16 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         // `parse_listen` refuses `unix:` before anything is bound where there are no
         // Unix sockets; the arm is for the compiler, not for a reachable state.
         #[cfg(not(unix))]
-        ListenAddr::Unix(path) => anyhow::bail!(
+        ListenAddr::Unix(path) => alumia::bail_known!(
+            "AL-9550", path = path.display();
             "unix:{} — Unix sockets are not supported on Windows",
             path.display()
         ),
         // Only `resolve_embedded` names a pipe, and `serve-embedded` serves it.
         #[cfg(all(feature = "embedded-gateway", windows))]
-        ListenAddr::Pipe(name) => anyhow::bail!("{name} is an embedded worker's private pipe"),
+        ListenAddr::Pipe(name) => {
+            alumia::bail_known!("AL-9404", name = name; "{name} is an embedded worker's private pipe")
+        }
     }
 
     info!("{} target(s) available in the post-login picker:", config.targets.len());
@@ -256,21 +377,121 @@ async fn serve(config: AppConfig) -> anyhow::Result<()> {
         info!("web login: user {:?}", site_passwd.username());
     }
 
-    // Race the servers against an explicit shutdown signal. Relying on the OS
-    // default SIGINT disposition to terminate proved flaky on macOS — Ctrl+C
-    // was intermittently ignored while a detached engine thread was still
-    // running, forcing a SIGKILL. An installed handler makes it deterministic.
-    tokio::select! {
-        // The first server to *finish* has failed — `axum::serve` only returns on
-        // error — so it is reported rather than waited on for the others.
-        Some(result) = servers.join_next() => {
-            result.context("the server task panicked")?.context("server error")?;
-        }
-        _ = shutdown_signal() => info!("shutdown signal received; stopping"),
+    let opened = Opened {
+        servers,
+        #[cfg(unix)]
+        _socket_file: socket_file,
+    };
+    Ok((opened, kept))
+}
+
+/// The gateway a Mac app hosts, `serve --app`: see [`alumia::app`].
+#[cfg(all(target_os = "macos", feature = "embedded-gateway"))]
+mod hosted {
+    use std::path::Path;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use anyhow::Context as _;
+
+    use alumia::app::{self, Serving};
+    use alumia::server::{self, Neighbours};
+    use alumia::session::{HostEnd, SessionManager};
+
+    /// One run of the server with the settings as they were read, on a runtime of
+    /// its own: ending the runtime is ending everything the run started, its
+    /// tasks, its connections and its recorder, with nothing to track one by one.
+    struct Generation {
+        runtime: Mutex<Option<tokio::runtime::Runtime>>,
+        opened: tokio::sync::Mutex<Option<super::Opened>>,
+        sessions: Arc<SessionManager>,
+        /// The computers' names, in the settings' order: the session slot says
+        /// which is open by its place among them.
+        computers: Vec<String>,
+        listen: String,
     }
-    #[cfg(unix)]
-    drop(socket_file);
-    Ok(())
+
+    impl Generation {
+        /// Read the settings in `dir` and serve them.
+        fn start(dir: &Path, neighbours: Neighbours) -> anyhow::Result<Self> {
+            // Whoever asks for a run is a task of the process's runtime, and this
+            // blocks: on the files, and on the run's own runtime while it binds.
+            tokio::task::block_in_place(|| {
+                let path = app::settings_path(dir);
+                alumia::ensure_known!("AL-9901"; path.exists(), "no settings yet at {}", path.display());
+                let (file, _) = alumia::config::load(Some(&path))?;
+                let config = file.resolve_with(None, dir, &alumia::config::data_dir(dir))?;
+                let runtime =
+                    tokio::runtime::Runtime::new().context("cannot start a runtime for the server")?;
+                let (opened, sessions) =
+                    runtime.block_on(super::open(&config, dir, |config, logins, throughput, hevc_decoder| {
+                        server::router_for_host(config, logins, throughput, hevc_decoder, neighbours)
+                    }))?;
+                Ok(Self {
+                    runtime: Mutex::new(Some(runtime)),
+                    opened: tokio::sync::Mutex::new(Some(opened)),
+                    sessions,
+                    computers: config.targets.iter().map(|target| target.name.clone()).collect(),
+                    listen: config.listen.to_string(),
+                })
+            })
+        }
+    }
+
+    impl Serving for Generation {
+        fn listen(&self) -> String {
+            self.listen.clone()
+        }
+
+        fn session(&self) -> Option<String> {
+            self.sessions.selected_target().and_then(|at| self.computers.get(at).cloned())
+        }
+
+        async fn end_session(&self, why: HostEnd) -> bool {
+            self.sessions.end_from_host(why).await
+        }
+
+        async fn failed(&self) -> anyhow::Error {
+            let mut opened = self.opened.lock().await;
+            let Some(opened) = opened.as_mut() else {
+                return std::future::pending().await;
+            };
+            while let Some(result) = opened.servers.join_next().await {
+                if let Err(error) = super::finished(result) {
+                    return error;
+                }
+            }
+            std::future::pending().await
+        }
+
+        async fn end(&self, grace: Duration) {
+            // The listening sockets first, and waited for: the next run binds the
+            // same ones.
+            if let Some(mut opened) = self.opened.lock().await.take() {
+                opened.servers.shutdown().await;
+            }
+            let runtime = self.runtime.lock().unwrap().take();
+            if let Some(runtime) = runtime {
+                tokio::task::block_in_place(|| runtime.shutdown_timeout(grace));
+            }
+        }
+    }
+
+    /// Host the gateway of the app's folder until the process is told to stop.
+    /// `log` is where this process logs, which the folder takes once it is this
+    /// gateway's ([`app::host`]).
+    pub fn serve(log: &app::Log) -> anyhow::Result<()> {
+        let dir = app::dir()?;
+        super::runtime().block_on(async {
+            let neighbours = app::neighbours(app::bundle(), app::DISCOVERY_LIMIT, app::DISCOVERY_KEPT);
+            let start = || Generation::start(&dir, Arc::clone(&neighbours));
+            // What the process holds whatever run is serving: a built-in display it
+            // turned off is given back when the process stops, and not when its
+            // settings change.
+            let held = alumia::mac_displays::ReleaseOnExit;
+            app::host(&dir, start, super::shutdown_signal(), held, log).await
+        })
+    }
 }
 
 /// The socket file, removed when the gateway stops.
@@ -317,14 +538,16 @@ fn bind_unix(path: &std::path::Path) -> anyhow::Result<std::os::unix::net::UnixL
     let listener = match UnixListener::bind(path) {
         Ok(listener) => listener,
         Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
-            anyhow::ensure!(
+            alumia::ensure_known!(
+                "AL-9405", path = path.display();
                 UnixStream::connect(path).is_err(),
                 "{} is already being served by another process",
                 path.display()
             );
             warn!("replacing the leftover socket {}", path.display());
             std::fs::remove_file(path)
-                .with_context(|| format!("cannot remove the leftover socket {}", path.display()))?;
+                .with_context(|| format!("cannot remove the leftover socket {}", path.display()))
+                .cause(|| Cause::new("AL-9406").with("path", path.display()))?;
             UnixListener::bind(path).map_err(|e| unix_bind_error(path, e))?
         }
         Err(e) => return Err(unix_bind_error(path, e)),
@@ -333,7 +556,8 @@ fn bind_unix(path: &std::path::Path) -> anyhow::Result<std::os::unix::net::UnixL
     // few microseconds between the two lines, and what is behind it is a gateway
     // that still asks for a login.
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o660))
-        .with_context(|| format!("cannot set the mode of {}", path.display()))?;
+        .with_context(|| format!("cannot set the mode of {}", path.display()))
+        .cause(|| Cause::new("AL-9407").with("path", path.display()))?;
     Ok(listener)
 }
 
@@ -350,13 +574,15 @@ fn unix_bind_error(path: &std::path::Path, e: std::io::Error) -> anyhow::Error {
     let hint = if e.kind() == std::io::ErrorKind::InvalidInput {
         format!(
             " (this path is {} bytes, and a socket address holds about 100 — \
-             put the socket somewhere shorter, such as /tmp/remotex.sock)",
+             put the socket somewhere shorter, such as /tmp/alumia.sock)",
             path.as_os_str().len()
         )
     } else {
         String::new()
     };
-    anyhow::Error::new(e).context(format!("cannot listen on unix:{}{hint}", path.display()))
+    Cause::new("AL-9408")
+        .with("path", path.display())
+        .of(anyhow::Error::new(e).context(format!("cannot listen on unix:{}{hint}", path.display())))
 }
 
 /// Every socket address `addr` names, in the resolver's order and without
@@ -369,13 +595,14 @@ async fn resolved_addrs(addr: &str) -> anyhow::Result<Vec<std::net::SocketAddr>>
     let mut seen = Vec::new();
     for socket in tokio::net::lookup_host(addr)
         .await
-        .with_context(|| format!("cannot resolve {addr}"))?
+        .with_context(|| format!("cannot resolve {addr}"))
+        .cause(|| Cause::new("AL-9409").with("address", addr))?
     {
         if !seen.contains(&socket) {
             seen.push(socket);
         }
     }
-    anyhow::ensure!(!seen.is_empty(), "{addr} resolves to no address at all");
+    alumia::ensure_known!("AL-9410", address = addr; !seen.is_empty(), "{addr} resolves to no address at all");
     Ok(seen)
 }
 

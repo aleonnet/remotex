@@ -15,18 +15,6 @@ clipboard, sound, and the browser's camera and microphone. Touch is not carried,
 and is [under consideration](#touch-on-an-rdp-target-ms-rdpei) rather than
 planned.
 
-The clipboard, sound, camera, and microphone are done. Their protocol and engine
-paths are recorded in [The RDP client](rdp-client.md) rather than here;
-MS-RDPECLIP, MS-RDPEA, MS-RDPECAM, and MS-RDPEAI live under
-`rdp_client/proto/`, with their gateway adapters beside `src/rdp.rs`.
-
-EGFX is in, as [The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx)
-describes; what is left of it
-beyond the decoders is under
-[H.264 in the RDP graphics pipeline](#h264-in-the-rdp-graphics-pipeline)
-rather than here, because that payoff is a picture's cost, not a control
-restored.
-
 #### Licensing on a Remote Desktop Session Host
 
 The licensing step accepts exactly one PDU: an `ERROR_ALERT` carrying
@@ -151,9 +139,9 @@ What is not done:
   decoded picture on the GPU, and reading it back only when a later command
   copies from it, is the step after that if a large one proves slow.
 
-### Two streams for Apple's All Displays
+### Two streams for Standard's Combined Display
 
-Standard's All Displays over two screens is one framebuffer of both, which is
+Standard's Combined Display over two screens is one framebuffer of both, which is
 often past the video ceiling at factor 1.0 (5376×2287 over a 2x screen beside a
 1x one), and then has no picture: the page offers one screen instead
 ([past the ceiling](architecture.md#past-the-ceiling)). The plan is to carry that
@@ -165,16 +153,47 @@ paint window order two chains, and how each stream starts over are the work.
 Two screens is the limit, as it is today: All Displays over three or more is held
 with the notice whatever its size.
 
+High Performance is not part of this. Its All Displays is not one framebuffer:
+each of its virtual displays is a stream of its own already, the second shown in
+a browser tab ([two virtual displays](#two-virtual-displays-past-alpha)).
+
+### Two virtual displays past alpha
+
+`virtual_displays = 2` on an `rdp` or `ard-high-performance` target is alpha
+([Two displays, each in a tab of its own](servers.md#two-displays-each-in-a-tab-of-its-own)).
+What it lacks:
+
+- **Telling the displays apart.** The session page's Info names both displays
+  and links to the second, but nothing on the remote's screens says which
+  display is which.
+
+Fixing that does not take it out of alpha by itself. It also needs more testing
+than it has had, on both kinds of target, before it is offered as anything else.
+
+### A touchpad's scroll as a gesture on a Mac
+
+A Mac is sent a scroll as a distance on both axes, with no gesture around it
+([a Mac scrolls by a distance](apple-vnc-889.md#a-mac-scrolls-by-a-distance)).
+Horizontal scrolling from a touchpad feels less fluid that way than vertical. A
+two-finger swipe is rarely straight: on a Windows precision touchpad the browser
+reports both axes in most swipes, as finely on one as on the other, and a Mac
+holds a scroll to the axis it began on only within a gesture.
+
+The plan is to send the gesture. The scroll message has a field for the scroll
+phase and one for the momentum phase, which Apple's viewer fills from its own
+trackpad. A browser's wheel events carry neither, so the gateway would open a
+gesture at the first event of a glide, continue it while events keep coming and
+end it once they stop. What the Mac does with a gesture it is sent that way, and
+whether the phases alone make the horizontal axis feel right, are still to be
+tested, on a physical Mac.
+
 ## Under consideration
 
 ### Touch on an RDP target (MS-RDPEI)
 
-Taken up if the need for it shows. Touch was carried by the engine before this
-client, from FreeRDP's `rdpei` plugin, and is not carried *here*: `proto` is the
-gateway's own now, so it is a channel to write rather than a dependency to
-configure, and it is refused where it would otherwise build a control with
-nothing behind it, by having no key at all — whether touch exists is the host's
-answer, and this client never asks.
+Taken up if the need for it shows. The RDP client does not carry touch: it is a
+channel to write, and it has no config key, since whether touch exists is the
+host's answer and this client never asks.
 
 Everything on either side of the channel is already written and shipped: the
 browser's touch passthrough layer (`touchPassthrough.ts`), `ServerMsg::TouchReady`
@@ -194,6 +213,48 @@ can report one. Held contacts must be released when a client goes away, or the
 remote keeps fingers down that no longer exist. A Windows host opens MS-RDPEI and
 xrdp never does, which is the reason this stays an always-offered capability
 rather than a key.
+
+### Reaching the page from a device without Tailscale
+
+Taken up if the need for it shows. The page requires a secure context
+(`frontend/src/preflight.ts`) and the gateway has no TLS listener, so over plain
+`http://` a browser opens it on the machine itself and nowhere else. From another
+device the way in is Tailscale Serve, which gives the page a certificate and
+reaches the devices of one tailnet and no others: the device that opens the page
+has Tailscale too, signed in to the same tailnet. That holds on the local network
+and away from it alike.
+
+What it would take to open the page from a device with no Tailscale on it, none
+of it designed:
+
+- A certificate of the gateway's own, for the local network. Every device then
+  has to be told to trust it, one by one.
+- A certificate a browser already trusts, for a name that resolves to the local
+  address. That needs a domain and a service that issues the certificates: a
+  thing to run, not a thing to ship.
+- Tailscale Funnel, which opens the page to the whole internet, on ports 443,
+  8443 and 10000 only. A remote desktop's sign-in page would then be public.
+
+Until one of them is chosen, the app of Mac says the limit where the way in is
+chosen and offers nothing for it
+([the design system](design/2026-10-03-0003-design-system.md#o-app-de-mac)).
+
+### The Mac app in the Mac App Store
+
+Taken up after the app that is downloaded, which is the one there is
+([The Mac app](mac-app.md)). What the store's rules were read to mean for it is
+in the research, and
+none of it is designed:
+
+- **The MacBook's built-in display.** Holding it off with the lid closed uses a
+  function Apple does not publish (`src/mac_displays.rs`), and the store takes
+  "only public APIs" (guideline 2.5.1). A store build leaves the hold out, or
+  says the lid has to be opened and closed.
+- **What the app runs.** The app as built runs Tailscale's and Homebrew's
+  commands, and its gateway loads Homebrew's FFmpeg under an entitlement of its
+  own. What the sandbox a store app runs in allows of that was not looked into.
+- **What holds.** Keeping the gateway running as a service, listening on a port
+  and reaching this Mac's own Screen Sharing were read as allowed.
 
 ### Not forwarding silence in a passed sound stream
 
@@ -221,11 +282,12 @@ unit makes the saving worth that has not been measured.
 
 ## Not planned
 
-### Tight, JPEG and H.264 on a plain VNC target
+### Encodings other than ZRLE on a plain VNC target
 
-A plain `vnc` target advertises only the lossless standard encodings: Tight and
-TightPNG are vendor encodings, JPEG and H.264 are lossy, and advertising an
-encoding is a promise to decode it. Decoding the Tight family, or handing a
+A plain `vnc` target advertises ZRLE, and Raw beside it: CopyRect, zlib, Hextile
+and RRE are for servers without ZRLE, Tight and TightPNG are vendor encodings,
+JPEG and H.264 are lossy, and advertising an encoding is a promise to decode
+it. Decoding the Tight family, or handing a
 lossy payload to the browser untouched, would remove upstream bytes and a
 transcode at the cost of a decoder this repo would then own. That work is for a
 server outside the three the project prioritizes, which is reached through the
@@ -243,6 +305,23 @@ flag; the hosts that acted on it, choosing the classic RemoteFX codec over the
 progressive form, are not supported, so there is nothing for the flag to change.
 The decision is recorded in
 [The RDP client](rdp-client.md#the-graphics-pipeline-ms-rdpegfx).
+
+### More than two virtual displays on a target
+
+`virtual_displays` is held to two. A browser tab shows one display, and the
+gateway encodes only the displays shown: the one on the session's page, and on
+*All Displays* (alpha) the second in a tab of its own at `/display/2`. Each
+further display is a desktop the host renders for nobody but a further tab, and
+two is the most the picker, the input offset, the tab's feed and the span the host
+builds have been checked with. RDP would allow sixteen in a row (MS-RDPBCGR 2.2.1.3.6). A Mac's High
+Performance mode advertises how many virtual displays it will create, which is
+two, holds a configuration naming more to two, and has a video leg for a second
+display and no third, so two is the limit there whatever this gateway asked for.
+What holds the ceiling is that nothing shows more: a person at
+a browser looks at one screen, and a third display that is never on it is work
+the host does for a menu entry. Raising it means first wanting the view that
+would use it, such as the Mac's All Displays composed across virtual displays,
+which is not planned either.
 
 ### Multiple sessions
 

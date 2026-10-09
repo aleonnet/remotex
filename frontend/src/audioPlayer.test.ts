@@ -6,6 +6,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { type AudioFormat, createAudioPlayer } from "./audioPlayer.ts";
+import type { Fault } from "./fault.ts";
 import type { FlacFactory } from "./flacDecoder.ts";
 
 const FLAC: AudioFormat = {
@@ -21,7 +22,7 @@ const context = () =>
 
 /** A player on a load the test settles, and the errors it reported. */
 function playerOnPendingLoad() {
-  const errors: string[] = [];
+  const errors: Fault[] = [];
   let resolve: (make: FlacFactory) => void = () => {};
   let reject: (error: Error) => void = () => {};
   const promise = new Promise<FlacFactory>((yes, no) => {
@@ -45,7 +46,7 @@ test("a module that fails to load is reported", async () => {
   const { errors, load } = playerOnPendingLoad();
   load.reject(new Error("offline"));
   await settled();
-  assert.deepEqual(errors, ["This browser could not load the FLAC decoder."]);
+  assert.deepEqual(errors, [{ code: "AL-5101" }]);
 });
 
 test("a load that fails after the player closed reports nothing", async () => {
@@ -77,7 +78,7 @@ test("a stream the module refuses is reported", async () => {
     throw new Error("not a stream carried here");
   });
   await settled();
-  assert.deepEqual(errors, ["This browser could not load the FLAC decoder."]);
+  assert.deepEqual(errors, [{ code: "AL-5101" }]);
 });
 
 /** WebCodecs' decoder as far as the player drives it, and what it was asked. */
@@ -130,9 +131,9 @@ function withFakeWebCodecs(body: () => void): void {
 test("a gap starts the decoder again before the packets after it", () => {
   withFakeWebCodecs(() => {
     const player = createAudioPlayer(OPUS, context(), { onError: () => {} });
-    player.push([new Uint8Array([1])]);
+    player.push([new Uint8Array([1])], 0);
     player.gap();
-    player.push([new Uint8Array([2])]);
+    player.push([new Uint8Array([2])], 0.04);
     assert.deepEqual(FakeAudioDecoder.calls, [
       "configure",
       "decode 1",

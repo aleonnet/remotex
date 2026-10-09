@@ -1,0 +1,18 @@
+{
+  "computers": [
+    { "name": "Mac da Ana virtual" },
+    { "name": "Mac da Ana mirrored" },
+    {
+      "name": "pc-da-sala",
+      "fresh": true,
+      "protocol": "vnc",
+      "subtype": null,
+      "host": "192.0.2.10",
+      "port": 5900,
+      "username": null,
+      "virtual_displays": null
+    },
+    { "name": "linux-antigo" },
+    { "name": "estacao" }
+  ]
+}

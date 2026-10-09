@@ -1,13 +1,18 @@
-// What the "This session" card says about the sound and the video.
+// What the information sheet says about the sound and the picture.
 //
-// The cases that matter are the ones the Render row cannot answer: which of the
-// two audio paths a target chose, why there is no sound, and what a live video
-// decoder was actually configured with.
+// The cases that matter are the ones the Picture line cannot answer: why there is
+// no sound, whose the picture is, and what a live decoder was actually
+// configured with.
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { audioLabel, renderLabel, videoLabel } from "./mediaLabel.ts";
+import {
+  audioDetail,
+  pictureState,
+  soundState,
+  videoSaid,
+} from "./mediaLabel.ts";
 
 const OPUS = {
   codec: "opus",
@@ -18,100 +23,76 @@ const OPUS = {
 
 test("a session without sound says so rather than offering nothing", () => {
   assert.equal(
-    audioLabel({ available: false, enabled: false, error: null, stream: null }),
-    "None in this session",
+    soundState({ available: false, enabled: false, error: null, stream: null }),
+    "none",
   );
 });
 
 test("a muted session is distinguished from one whose sound failed", () => {
   assert.equal(
-    audioLabel({ available: true, enabled: false, error: null, stream: null }),
-    "Muted",
+    soundState({ available: true, enabled: false, error: null, stream: null }),
+    "muted",
   );
-  // The one state here that is wrong rather than off.
+  // The one state here that is wrong rather than off, and it comes first: the
+  // failure is also why the sound is no longer asked for.
   assert.equal(
-    audioLabel({
+    soundState({
       available: true,
       enabled: false,
-      error: "AudioDecoder refused opus",
-      stream: null,
+      error: { code: "AL-5102", fill: { codec: "opus" } },
+      stream: OPUS,
     }),
-    "Stopped — AudioDecoder refused opus",
+    "stopped",
   );
 });
 
-test("enabling is a click and the format is a round trip later", () => {
+test("turning the sound on is a press, and its format a round trip later", () => {
+  const row = { available: true, enabled: true, error: null };
+  assert.equal(soundState({ ...row, stream: null }), "waiting");
+  assert.equal(soundState({ ...row, stream: OPUS }), "playing");
+});
+
+test("a stream names its codec, its rate and its channels, as data", () => {
+  assert.equal(audioDetail(OPUS), "opus · 48 kHz · 2");
+  // An RDP host's PCM, coded as FLAC at the host's own rate.
   assert.equal(
-    audioLabel({ available: true, enabled: true, error: null, stream: null }),
-    "Waiting for the audio format",
+    audioDetail({ ...OPUS, codec: "flac", sampleRate: 44_100 }),
+    "flac · 44.1 kHz · 2",
+  );
+  assert.equal(audioDetail({ ...OPUS, channels: 1 }), "opus · 48 kHz · 1");
+});
+
+test("the picture is the remote's own, the gateway's, or composed here", () => {
+  assert.equal(pictureState(null), "waiting");
+  assert.equal(
+    pictureState({ decode: "hev1.4.10.L150.BE.8", passthrough: true }),
+    "passed",
+  );
+  assert.equal(
+    pictureState({ decode: "vp09.00.40.08", passthrough: false }),
+    "encoded",
+  );
+  assert.equal(
+    pictureState({ decode: "", passthrough: true, composed: true }),
+    "composed",
   );
 });
 
-test("an encoded stream names its codec, its shape and whose it is", () => {
-  assert.equal(
-    audioLabel({ available: true, enabled: true, error: null, stream: OPUS }),
-    "opus · 48 kHz stereo · encoded by the gateway",
+test("the video decoder's line waits for the format, then names it", () => {
+  assert.deepEqual(videoSaid(null, null), { code: "AL-5800" });
+  assert.deepEqual(
+    videoSaid({ decode: "vp09.00.40.08", passthrough: false }, null),
+    { decode: "vp09.00.40.08" },
   );
 });
 
-test("a lossless stream says whether it is the remote's own or coded here", () => {
-  const row = (stream: typeof OPUS) =>
-    audioLabel({ available: true, enabled: true, error: null, stream });
-  // wlshare's frames, passed as they came.
-  assert.equal(
-    row({ ...OPUS, codec: "flac", passthrough: true }),
-    "flac · 48 kHz stereo · passthrough from the remote",
+test("a picture that is not a video stream says why no video is in use", () => {
+  const stream = { decode: "vp09.00.40.08", passthrough: true };
+  // Held, whatever decoder was built before.
+  assert.deepEqual(videoSaid(stream, "size"), { code: "AL-5801" });
+  assert.deepEqual(videoSaid(stream, "screens"), { code: "AL-5802" });
+  assert.deepEqual(
+    videoSaid({ decode: "", passthrough: true, composed: true }, null),
+    { code: "AL-5803" },
   );
-  // An RDP host's PCM, coded as FLAC by the gateway at the host's own rate.
-  assert.equal(
-    row({ ...OPUS, codec: "flac", sampleRate: 44_100 }),
-    "flac · 44.1 kHz stereo · encoded by the gateway",
-  );
-});
-
-test("a channel count that is neither mono nor stereo still names itself", () => {
-  assert.equal(
-    audioLabel({
-      available: true,
-      enabled: true,
-      error: null,
-      stream: { ...OPUS, channels: 1 },
-    }),
-    "opus · 48 kHz mono · encoded by the gateway",
-  );
-  assert.equal(
-    audioLabel({
-      available: true,
-      enabled: true,
-      error: null,
-      stream: { ...OPUS, channels: 6 },
-    }),
-    "opus · 48 kHz 6 channels · encoded by the gateway",
-  );
-});
-
-test("the video row waits for the format, then names it and whose stream it is", () => {
-  assert.equal(videoLabel(null, null), "Waiting for the video format");
-  assert.equal(
-    videoLabel({ decode: "vp09.00.40.08", passthrough: false }, null),
-    "vp09.00.40.08 · encoded by the gateway",
-  );
-  assert.equal(
-    videoLabel({ decode: "hev1.4.10.L150.BE.8", passthrough: true }, null),
-    "hev1.4.10.L150.BE.8 · passthrough from the remote",
-  );
-  assert.equal(
-    videoLabel({ decode: "vp09.00.40.08", passthrough: true }, "size"),
-    "Not in use: the desktop is past what video carries",
-  );
-  assert.equal(
-    videoLabel({ decode: "vp09.00.40.08", passthrough: true }, "screens"),
-    "Not in use: All Displays spans more than two screens",
-  );
-});
-
-test("the Render row waits for the target, then names its dial", () => {
-  const plan = "video q90 4:4:4 · adaptive";
-  assert.equal(renderLabel(""), "Waiting for the target");
-  assert.equal(renderLabel(plan), plan);
 });

@@ -6,19 +6,20 @@
 // never transcodes: what `VideoEncoder` emits here is what the remote decodes,
 // which is why the encoder is configured for Annex B H.264 (the bitstream
 // MS-RDPECAM carries) and why a browser that cannot encode it gets a named
-// error instead of a fallback. The remote drives the traffic: frames are
+// fault (fault.ts) instead of a fallback. The remote drives the traffic: frames are
 // encoded and sent only between its `cameraStart` and `cameraStop`, and a
 // `cameraKeyframe` makes the next frame an IDR so a stream the gateway had to
 // drop can resume.
 
+import { type Fault, FaultError } from "./fault.ts";
 import { type ClientMsg, encodeCameraFrame } from "./protocol";
 
 export interface CameraSenderCallbacks {
   // The socket closed or the sender failed, and the sender has already stopped:
-  // the capture is released and the camera light is off. `reason` is non-null
-  // for a failure worth showing (no camera permission, no H.264 encoder, the
-  // target refusing the socket) and null for an ordinary close.
-  onStopped: (reason: string | null) => void;
+  // the capture is released and the camera light is off. `fault` is non-null
+  // for a failure worth showing (no H.264 encoder, the target refusing the
+  // socket) and null for an ordinary close.
+  onStopped: (fault: Fault | null) => void;
   // The remote started or stopped consuming — an application over there opened
   // or closed the camera. UI feedback only; the sender already obeys.
   onStreaming: (streaming: boolean) => void;
@@ -161,15 +162,13 @@ export async function startCameraSender(
   // cannot run without; the encoder and the track processor are checked here,
   // where a browser without them costs one feature instead of the page.
   if (typeof VideoEncoder === "undefined") {
-    throw new Error("this browser has no VideoEncoder");
+    throw new FaultError({ code: "AL-5301" });
   }
   if (typeof MediaStreamTrackProcessor === "undefined") {
-    throw new Error(
-      "this browser cannot read camera frames (no MediaStreamTrackProcessor)",
-    );
+    throw new FaultError({ code: "AL-5302" });
   }
   if (!navigator.mediaDevices?.getUserMedia) {
-    throw new Error("this browser offers no camera capture");
+    throw new FaultError({ code: "AL-5303" });
   }
 
   // A facing preference, not a bare `video: true`: bare leaves the browser its
@@ -203,7 +202,7 @@ export async function startCameraSender(
   try {
     const track = stream.getVideoTracks()[0];
     if (!track) {
-      throw new Error("the camera produced no video track");
+      throw new FaultError({ code: "AL-5304" });
     }
     return await senderForTrack(url, callbacks, track, undo);
   } catch (e) {
@@ -247,9 +246,7 @@ async function senderForTrack(
   };
   const support = await VideoEncoder.isConfigSupported(config);
   if (!support.supported) {
-    throw new Error(
-      `this browser cannot encode ${codec} at ${width}x${height}`,
-    );
+    throw new FaultError({ code: "AL-5305", fill: { codec, width, height } });
   }
 
   let stopped = false;
@@ -291,7 +288,12 @@ async function senderForTrack(
         socket.send(frame);
       }
     },
-    error: (e) => stop(e.message || "the H.264 encoder failed"),
+    error: (e) =>
+      stop(
+        e.message
+          ? { code: "AL-5306", detail: e.message }
+          : { code: "AL-5306" },
+      ),
   });
   undo.push(() => {
     if (encoder.state !== "closed") {
@@ -305,7 +307,7 @@ async function senderForTrack(
 
   // One stop for every path out, idempotent: the socket's close handler and an
   // explicit `stop` can both fire, and the second must find nothing to do.
-  const stop = (reason: string | null = null) => {
+  const stop = (fault: Fault | null = null) => {
     if (stopped) {
       return;
     }
@@ -321,7 +323,7 @@ async function senderForTrack(
     ) {
       socket.close();
     }
-    callbacks.onStopped(reason);
+    callbacks.onStopped(fault);
   };
 
   socket.onopen = () => {
@@ -366,7 +368,7 @@ async function senderForTrack(
   socket.onclose = (ev) => {
     // 4002 is the gateway saying the target carries no camera (or the engine
     // is gone); everything else is an ordinary end of the enable.
-    stop(ev.code === 4002 ? "this target carries no camera" : null);
+    stop(ev.code === 4002 ? { code: "AL-5307" } : null);
   };
 
   // One frame's fate: skipped while the remote is not consuming or the encoder

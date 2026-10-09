@@ -8,7 +8,7 @@ engine that consumes those events — damage into the video stream, `ClientMsg` 
 — is `src/rdp.rs`, and the boundary between the two is the point of this document:
 everything below it is protocol, everything above it is this gateway's.
 
-What a host draws with is a crate of its own, `crates/remotex-rdp-graphics`: the
+What a host draws with is a crate of its own, `crates/alumia-rdp-graphics`: the
 graphics pipeline's PDUs and bulk compression, the codecs, the compositor and the
 framebuffer. It is this client's all the same — `rdp_client` names the framebuffer
 and that part of the wire as its own — and is apart because the page runs it too,
@@ -46,7 +46,8 @@ read, in [andrewtheguy/ms-rdp-specs](https://github.com/andrewtheguy/ms-rdp-spec
 ## What it carries
 
 The desktop, the pointer, keyboard, mouse, resize, the clipboard, sound, and the
-browser's camera and microphone going the other way. No touch: it is announced
+browser's camera and microphone going the other way, over one monitor or a row
+of two ([Virtual displays](#virtual-displays-alpha)). No touch: it is announced
 only by a host that opens MS-RDPEI, which this client never asks for. What it
 would take is in [`roadmap.md`](roadmap.md).
 
@@ -203,9 +204,7 @@ and commands it carried when it ends, at `info`.
 
 ### The pipeline, passed on
 
-**Experimental**, for the reason
-[RDP's graphics pipeline, passed through](architecture.md#rdps-graphics-pipeline-passed-through)
-gives. `Connect::pass_graphics` — a session started with the passthrough — has the session hand the
+`Connect::pass_graphics` — a session started with the passthrough — has the session hand the
 pipeline's commands to its caller instead of composing them. The channel is
 still this client's: the capability exchange and the bulk compression are as
 above, since the history is the connection's, and so is writing each frame's
@@ -354,6 +353,66 @@ capabilities PDU and honoured 6.7 s into the same session. The ladder lives in t
 engine (`LAYOUT_RETRY_DELAYS`), because a retry needs a clock and a policy and the
 client owns neither.
 
+## Virtual displays (alpha)
+
+`Connect::monitors`, from the target's `virtual_displays`, asks the host for that
+many monitors of the session's size, the first the primary and the second against
+the edge of it that `Connect::placement` names, the session's choice at the
+picker: to its right or left, top-aligned, or above or below it, left-aligned.
+Positions are relative to the primary's corner, which is always (0, 0)
+([MS-RDPBCGR] 2.2.1.3.6.1, [MS-RDPEDISP] 2.2.2.2.1), so a monitor to its left or
+above it has negative ones. It goes out twice. At connect, as
+a `CS_MONITOR` block in the GCC conference ([MS-RDPBCGR] 2.2.1.3.6, `TS_UD_CS_MONITOR`)
+beside the three blocks every connection sends, with the core data's desktop set
+to the monitors' union; it is an extended block, so it is sent only to a server whose
+X.224 Connection Confirm carried `EXTENDED_CLIENT_DATA_SUPPORTED`, and a server
+without the flag is asked for one monitor and the one desktop it always gave. And
+in every monitor layout a resizing session sends ([MS-RDPEDISP] 2.2.2.2), one
+`DISPLAYCONTROL_MONITOR_LAYOUT` per monitor, the first flagged primary, all at one
+scale factor and each at the size `Input::resize` names for it: the same for every
+monitor unless a display shown in a tab of its own follows that tab's window, the
+second placed against the first's edge as at connect. The server's `MaxNumMonitors` and area ceiling arrive in
+its capabilities as before, and every layout is held to both: no more monitors
+than the server lays out, and no more than fit its area together, since a layout
+past either is one a conforming server ignores in silence, so monitors are dropped
+from the right until the rest fit. A first monitor that does not fit alone is not
+sent. `Event::ResizeReady` carries the area over every
+monitor together.
+
+The host answers with one desktop spanning the monitors: a Demand Active naming
+the union at connect, and a `ResetGraphics` naming it, with its monitor
+definitions, after each layout. The framebuffer is that span, and the host maps
+one surface onto the output per monitor. The definitions say where each monitor
+is (`arrangement` in the graphics crate's `proto/gfx.rs`): their edges are
+relative to the primary's corner, and the output starts at the leftmost and
+topmost of them, so `Event::Resize` carries each monitor's place in the output
+and its size, the primary first, wherever the host put them — beside one
+another or stacked, in whatever order it lists them. It carries the output as
+one monitor when the definitions do not make it up: none or one, an empty one,
+two that overlap, or a union that is not the output's size. At connect, where
+there are no definitions, the caller reads the equal monitors and the placement
+it asked for off the union's size. The client composes and reports the span as
+it does any desktop. Which part of it a browser sees, and the pointer offset
+into it, is the engine's (`View` in `src/rdp.rs`), and so is *All Displays*, which two
+monitors start on and which shows the second column on a socket of its own (`Tab`): nothing of it reaches
+the RDP client, which composes the one span either way. In a session that passes
+the pipeline the span is composed in the browser instead, which is told the
+column to show (`ServerMsg::GraphicsView`) and paints the second column's tab
+from the same picture
+([Two displays, one picture](architecture.md#rdps-graphics-pipeline-passed-through)).
+
+Measured 2026-10-03 against a Windows 11 host, through `tests/ws_probe.py`: a
+kept-size session asked for two 1440×900 monitors opened a 2880×900 desktop,
+`CreateSurface 2, MapSurfaceToOutput 2`; a resizing session opened at two
+1280×800 and a 1366×768 layout came back as one `ResetGraphics` of 2732×768 over
+two monitors; and asked for 1280×800 beside 1024×700, it answered a 2304×800
+`ResetGraphics` defining those two monitors, top-aligned. On 2026-10-03 the
+second monitor placed left of, above and below the first came back the same way,
+at connect and after a layout, and a position sent in the span's coordinates
+landed on the monitor it was made on. Alpha: one host, and
+nothing of the second display has been held
+against Microsoft's own client.
+
 ## The clipboard (MS-RDPECLIP)
 
 Three pieces, and the seam between them is a format id and a `Vec<u8>`:
@@ -437,7 +496,7 @@ Session Host role never creates it, and Microsoft's own client gets no camera
 against such a host either. On it the client asks for version 2, the host answers
 with the highest it speaks that is not higher, and nothing more is said until the
 browser enables its camera. That plug is what sends the Device Added Notification —
-a display name, `Remotex Camera`, and the name of a device channel — and the host
+a display name, `Alumia Camera`, and the name of a device channel — and the host
 then opens that channel by name. A version the client does not speak ends the
 protocol on that channel, as MS-RDPECAM 3.2.5.2 requires.
 
@@ -501,8 +560,8 @@ sink becomes `CameraBridge` signals, and the bridge's control becomes the sessio
 feed.
 
 `tests/rdp_client_probe.rs` plugs a camera into a real host and, under
-`REMOTEX_UAT_CAMERA=1`, asserts that the host agreed version 2 and opened the
-announced device's channel; `RUST_LOG=remotex=debug` shows the host's device queries
+`ALUMIA_UAT_CAMERA=1`, asserts that the host agreed version 2 and opened the
+announced device's channel; `RUST_LOG=alumia=debug` shows the host's device queries
 and this end's answers.
 
 ## Microphone (MS-RDPEAI)
@@ -535,7 +594,7 @@ audio, so a later Open begins with a fresh stream. The protocol state machine is
 `rdp_client/proto/rdpeai.rs`; `src/rdp_mic.rs` is its bridge adapter.
 
 `tests/rdp_client_probe.rs` drives a real host's Recording panel in
-`a_real_host_records_the_microphone`. With `REMOTEX_UAT_MICROPHONE=1` it asserts
+`a_real_host_records_the_microphone`. With `ALUMIA_UAT_MICROPHONE=1` it asserts
 version negotiation, then feeds a tone for the host's level meter while the
 device is open. Like the camera probe it is ignored by default and does not
 automatically inspect what the remote application heard.
@@ -573,7 +632,7 @@ The measured part: a Windows host negotiates nothing until something plays. A
 session opened onto a quiet desktop shows the dynamic channel opened and not a byte
 on it, for as long as the desktop stays quiet, and a probe that asserts on the
 format list fails there through no fault in the client. `tests/rdp_client_probe.rs`
-asserts the negotiation only under `REMOTEX_UAT_AUDIO=1`, which is the run's word
+asserts the negotiation only under `ALUMIA_UAT_AUDIO=1`, which is the run's word
 that a sound is playing on the remote; without it the counts are printed.
 
 ## What a host will not tell you

@@ -31,6 +31,7 @@ function harness() {
   const drawn: ArrayBuffer[] = [];
   let releaseDraw = () => {};
   let stallDraws = false;
+  let refuseBlank = false;
   let clock = 0;
   let painterOptions: Parameters<typeof createFramePainter>[0] | null = null;
 
@@ -51,10 +52,22 @@ function harness() {
     setVideoFormat(format) {
       calls.push(`format:${format.decode}`);
     },
+    restartVideo() {
+      calls.push("restart");
+    },
     startGraphics() {
       calls.push("graphics");
     },
+    setGraphicsView(part) {
+      calls.push(`view:${part.x},${part.y} ${part.w}x${part.h}`);
+    },
+    mirrorGraphics(display, part) {
+      calls.push(`mirror:${display} ${part.x},${part.y} ${part.w}x${part.h}`);
+    },
     blank(w, h) {
+      if (refuseBlank) {
+        throw new Error("the picture could not be blanked");
+      }
       calls.push(`blank:${w}x${h}`);
     },
   };
@@ -110,6 +123,10 @@ function harness() {
     advance: (milliseconds: number) => {
       clock += milliseconds;
     },
+    // What is laid over the desktop's canvas refuses to be blanked from now on.
+    refuseBlank: () => {
+      refuseBlank = true;
+    },
     painterOptions: () => {
       assert.ok(painterOptions);
       return painterOptions;
@@ -138,6 +155,33 @@ test("a batch frame reaches the painter; anything else is dropped", async () => 
       queuedMs: 0,
       drawMs: 0,
     },
+  ]);
+});
+
+test("a mark is echoed only once the draw ahead of it has finished", async () => {
+  const h = harness();
+  h.stall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(4),
+    sequence: 4,
+    generation: 2,
+  });
+  h.host.handle({ type: "mark", seq: 3 });
+  await settled();
+  // The picture is still being drawn: a notice over it stays up.
+  assert.deepEqual(h.events, []);
+  h.release();
+  await settled();
+  assert.deepEqual(h.events, [
+    {
+      type: "painted",
+      sequence: 4,
+      generation: 2,
+      queuedMs: 0,
+      drawMs: 0,
+    },
+    { type: "reached", seq: 3 },
   ]);
 });
 
@@ -186,6 +230,49 @@ test("resize and videoFormat hold their place behind a stalled draw", async () =
   ]);
 });
 
+test("a restart of the video holds its place behind a stalled draw, and reaches the painter", async () => {
+  const h = harness();
+  h.stall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(1),
+    sequence: 1,
+    generation: 1,
+  });
+  h.host.handle({ type: "restartVideo" });
+  await settled();
+  assert.deepEqual(h.calls, ["draw"], "the batch before it is painted first");
+  h.release();
+  await settled();
+  assert.deepEqual(h.calls, ["draw", "restart"]);
+});
+
+test("a size that could not be applied is still echoed, said in the console, and holds nothing up behind it", async () => {
+  // The echo is what takes the page's "Connecting…" down: withheld, the page
+  // waits for ever on a size nothing will ever answer for, with no word of why.
+  const h = harness();
+  const warned: unknown[][] = [];
+  const warn = console.warn;
+  console.warn = (...said: unknown[]) => {
+    warned.push(said);
+  };
+  try {
+    h.refuseBlank();
+    h.host.handle({ type: "resize", w: 640, h: 480, seq: 7, view: null });
+    h.host.handle({ type: "mark", seq: 8 });
+    await settled();
+  } finally {
+    console.warn = warn;
+  }
+  assert.deepEqual(h.events, [
+    { type: "resized", seq: 7 },
+    { type: "reached", seq: 8 },
+  ]);
+  assert.equal(warned.length, 1, "what went wrong was said once");
+  assert.match(String(warned[0]?.[0]), /resize/);
+  assert.match(String(warned[0]?.[1]), /the picture could not be blanked/);
+});
+
 test("a graphics pipeline starts in its place, behind the frames before it", async () => {
   // The run after the start must find a compositor with nothing in it, and the
   // frames before it must not: both are what the order is for.
@@ -211,6 +298,38 @@ test("a graphics pipeline starts in its place, behind the frames before it", asy
   h.release();
   await settled();
   assert.deepEqual(h.calls, ["draw", "graphics", "draw"]);
+});
+
+test("the part a display shows, and a tab's mirror, hold their place behind a stalled draw", async () => {
+  // Both come with a resize, behind the frames before it, and must apply to the
+  // picture the frames before them left: the view to the pipeline's, the mirror
+  // to the tab's.
+  const h = harness();
+  h.stall();
+  h.host.handle({
+    type: "frame",
+    data: batchFrame(1),
+    sequence: 1,
+    generation: 1,
+  });
+  h.host.handle({
+    type: "graphicsView",
+    part: { x: 1440, y: 0, w: 1440, h: 900 },
+  });
+  h.host.handle({
+    type: "graphicsMirror",
+    display: 2,
+    part: { x: 1440, y: 0, w: 1440, h: 900 },
+  });
+  await settled();
+  assert.deepEqual(h.calls, ["draw"]);
+  h.release();
+  await settled();
+  assert.deepEqual(h.calls, [
+    "draw",
+    "view:1440,0 1440x900",
+    "mirror:2 1440,0 1440x900",
+  ]);
 });
 
 test("a later batch reports the time it waited behind earlier paint", async () => {
@@ -335,13 +454,22 @@ test("a frame queued before the clear never reaches the next attachment", async 
 test("the painter's callbacks travel back as events", () => {
   const h = harness();
   const options = h.painterOptions();
-  options.onVideoError("no decoder");
+  options.onVideoError({ code: "AL-4604" });
   options.onVideoError(null);
   options.onVideoNeedsKeyframe("went quiet");
+  options.onVideoSettled?.();
+  // What is asked for and what settles it are an attachment's, and say whose:
+  // the count of clears the worker had taken.
+  h.host.handle({ type: "clear" });
+  options.onVideoNeedsKeyframe("went quiet again");
+  options.onVideoSettled?.();
   assert.deepEqual(h.events, [
-    { type: "videoError", reason: "no decoder" },
-    { type: "videoError", reason: null },
-    { type: "videoNeedsKeyframe", reason: "went quiet" },
+    { type: "videoError", fault: { code: "AL-4604" } },
+    { type: "videoError", fault: null },
+    { type: "videoNeedsKeyframe", reason: "went quiet", epoch: 0 },
+    { type: "videoSettled", epoch: 0 },
+    { type: "videoNeedsKeyframe", reason: "went quiet again", epoch: 1 },
+    { type: "videoSettled", epoch: 1 },
   ]);
 });
 

@@ -113,7 +113,7 @@ test("leaving full screen releases the lock", () => {
 
 test("the API's presence is reported, because the page promises keys on it", () => {
   // Not whether a lock took — that stays unreported by design — but whether this
-  // browser has one to take, which is what the menu and the Help card word
+  // browser has one to take, which is what the bar and the information sheet word
   // themselves from.
   assert.equal(keyboardLockSupported(), true);
   const navigator = fakeNavigator as { keyboard?: unknown };

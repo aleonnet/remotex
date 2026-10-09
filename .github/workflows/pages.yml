@@ -1,0 +1,73 @@
+name: Pages
+
+# The public page, site/, built into the repository by tools/site/build.sh from the product
+# itself and published as it is: nothing is built here. It runs in the public repository,
+# aleonnet/alumia, which GitHub Pages serves at https://aleonnet.github.io/alumia/, on every
+# push to main that touches site/, and by hand.
+#
+# It asks first whether GitHub Pages is turned on in the repository it runs in. The first
+# push a public repository ever gets carries the page, before anybody could turn Pages on
+# (docs/release.md, Once): asked, GitHub answers 404, the run says so and ends well with
+# nothing published. Turned on, GitHub answers 200 and the page goes out. Any other answer
+# fails the run. In aleonnet/alumia-app, where the work is, a push runs nothing, and a run by
+# hand is that first case rehearsed: GitHub Pages serves a public repository only on the plan
+# this account is on ("GitHub's plans", docs.github.com, read on 2026-10-09).
+on:
+  push:
+    branches: [main]
+    paths:
+      - site/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  ask:
+    if: github.repository == 'aleonnet/alumia' || github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      enabled: ${{ steps.pages.outputs.enabled }}
+    steps:
+      - name: Whether GitHub Pages is turned on here
+        id: pages
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          status=$(curl -sS -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $GH_TOKEN" -H "Accept: application/vnd.github+json" "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pages")
+          case "$status" in
+            200) echo "enabled=true" >> "$GITHUB_OUTPUT" ;;
+            404)
+              echo "enabled=false" >> "$GITHUB_OUTPUT"
+              echo "::notice::GitHub Pages is not turned on in this repository yet: nothing is published (docs/release.md, Once)."
+              ;;
+            *)
+              echo "::error::GitHub answered $status when asked whether Pages is turned on."
+              exit 1
+              ;;
+          esac
+
+  publish:
+    needs: ask
+    if: needs.ask.outputs.enabled == 'true'
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/configure-pages@v5
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+
+      - id: deploy
+        uses: actions/deploy-pages@v4

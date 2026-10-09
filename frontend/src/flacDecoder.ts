@@ -7,7 +7,7 @@
 // in a WebAssembly module of its own (frontend/wasm/flac): small, with no threads
 // and so no need of a shared memory, and fetched only by a session that plays
 // such a stream.
-import init, { Flac, type InitInput } from "../wasm/flac/pkg/remotex_flac.js";
+import init, { Flac, type InitInput } from "../wasm/flac/pkg/alumia_flac.js";
 
 /** What `audioFormat` said of a FLAC stream: the shape of every frame. */
 export interface FlacStream {

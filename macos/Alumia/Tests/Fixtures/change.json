@@ -1,0 +1,35 @@
+{
+  "listen": "127.0.0.1:52399",
+  "login": { "username": "ana", "password": "a-senha-nova-da-pagina" },
+  "computers": [
+    {
+      "name": "Mac da Ana virtual",
+      "protocol": "vnc",
+      "subtype": "ard-high-performance",
+      "host": "127.0.0.1",
+      "port": 5900,
+      "username": "ana",
+      "virtual_displays": 2
+    },
+    {
+      "name": "Mac da Ana mirrored",
+      "protocol": "vnc",
+      "subtype": "ard-mirror",
+      "host": "127.0.0.1",
+      "port": 5900,
+      "username": "ana",
+      "virtual_displays": null
+    },
+    {
+      "name": "escritorio",
+      "was": "pc-da-sala",
+      "protocol": "rdp",
+      "subtype": null,
+      "host": "192.0.2.20",
+      "port": 3389,
+      "username": "ana",
+      "virtual_displays": null
+    },
+    { "name": "estacao" }
+  ]
+}

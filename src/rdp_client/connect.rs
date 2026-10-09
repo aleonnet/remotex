@@ -10,7 +10,8 @@
 //! reader wants — what is sent, and what has to come back — would be the one thing not
 //! written down anywhere.
 
-use anyhow::{Context as _, Result, bail};
+use crate::cause::Caused as _;
+use anyhow::{Context as _, Result, anyhow};
 use log::{debug, info};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _, ReadHalf, WriteHalf};
 use tokio::net::TcpStream;
@@ -22,9 +23,10 @@ use super::proto::frame::Frames;
 use super::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
 use super::proto::info::ClientInfo;
 use super::proto::share::{self, Pdu};
-use super::proto::x224::{ConnectionConfirm, ConnectionRequest, Security, TPKT_HEADER};
-use super::proto::{fastpath, license, mcs, tls, x224};
+use super::proto::x224::{ConfirmFlags, ConnectionConfirm, ConnectionRequest, Security, TPKT_HEADER};
+use super::proto::{desktop, display, fastpath, license, mcs, tls, x224};
 use super::session::Connect;
+use crate::cause::Cause;
 use crate::engine;
 
 /// The keyboard layout the session is opened with: US English, which every Windows
@@ -105,7 +107,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     let dest = engine::host_port(&config.host, config.port);
     let mut tcp = engine::tcp_connect(&dest).await?;
     // This end of the socket, which the Client Info PDU tells the server about.
-    let client_address = tcp.local_addr().context("reading the local address")?.ip();
+    let client_address = tcp.local_addr().context("reading the local address").cause(|| crate::cause::Cause::new("AL-7210"))?.ip();
     // The name TLS and CredSSP are checked against. A bracketed IPv6 literal is how
     // `host_port` writes one, not a name either check understands.
     let server_name = config.host.trim_start_matches('[').trim_end_matches(']').to_owned();
@@ -116,19 +118,26 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
         cookie: Some(config.username.clone()),
         protocols: Security::HYBRID,
     };
-    tcp.write_all(&request.encode()).await.context("sending the X.224 Connection Request")?;
-    let frame = read_frame(&mut tcp).await.context("reading the X.224 Connection Confirm")?;
-    let protocol = match ConnectionConfirm::decode(&frame)? {
-        ConnectionConfirm::Negotiated { protocol, .. } if protocol == Security::HYBRID => protocol,
+    tcp.write_all(&request.encode()).await.context("sending the X.224 Connection Request").cause(|| crate::cause::Cause::new("AL-7210"))?;
+    let frame = read_frame(&mut tcp).await.context("reading the X.224 Connection Confirm").cause(|| crate::cause::Cause::new("AL-7210"))?;
+    let (protocol, confirmed) = match ConnectionConfirm::decode(&frame)? {
+        ConnectionConfirm::Negotiated { protocol, flags } if protocol == Security::HYBRID => {
+            (protocol, flags)
+        }
+        // Three ways of the same thing for whoever reads the page: the host wants a
+        // protection this client does not offer.
         ConnectionConfirm::Negotiated { protocol, .. } => {
-            bail!("{dest} chose {protocol:?}, and this client speaks only NLA")
+            return Err(unprotected().of(anyhow!("{dest} chose {protocol:?}, and this client speaks only NLA")));
         }
         // A server that answers without negotiation data wants the legacy RDP
         // security this client does not implement, which is the same refusal.
         ConnectionConfirm::Unnegotiated => {
-            bail!("{dest} offered no security negotiation, and this client speaks only NLA")
+            return Err(unprotected()
+                .of(anyhow!("{dest} offered no security negotiation, and this client speaks only NLA")));
         }
-        ConnectionConfirm::Refused(why) => bail!("{dest} refused the connection: {why:?}"),
+        ConnectionConfirm::Refused(why) => {
+            return Err(unprotected().of(anyhow!("{dest} refused the connection: {why:?}")));
+        }
     };
 
     // 2. The TLS session everything after this lives inside, and 3. the credentials,
@@ -150,11 +159,24 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     // 4. MCS Connect-Initial, carrying the GCC conference. The answer numbers every
     //    channel the session will use.
     let wanted = wanted_channels(config);
+    // More than one monitor rides an extended block, which [MS-RDPBCGR] 2.2.1.3.6
+    // forbids sending to a server that did not say it reads them. Such a server is
+    // given the one desktop it would have been given anyway, and the session has
+    // one display to show.
+    let extended = confirmed.contains(ConfirmFlags::EXTENDED_CLIENT_DATA);
+    let monitors = if config.monitors > 1 && !extended {
+        info!("rdp: {dest} does not take extended client data, so one monitor is asked for");
+        1
+    } else {
+        config.monitors.clamp(1, display::MAX_MONITORS)
+    };
     let conference = ConferenceCreateRequest {
         width: narrow(config.width),
         height: narrow(config.height),
+        placement: config.placement,
+        monitors: narrow(monitors),
         scale_percent: config.scale_percent,
-        client_name: "remotex",
+        client_name: "alumia",
         keyboard_layout: KEYBOARD_LAYOUT,
         selected_protocol: protocol.bits(),
         channels: &wanted,
@@ -164,7 +186,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     writer
         .write_all(&mcs::connect_initial(&conference)?)
         .await
-        .context("sending the MCS Connect-Initial")?;
+        .context("sending the MCS Connect-Initial").cause(|| crate::cause::Cause::new("AL-7210"))?;
     frames.next(&mut frame).await?;
     let answer = mcs::connect_response(&frame)?;
     let answer = ConferenceCreateResponse::decode(answer)?;
@@ -173,7 +195,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     // that rewrote the clear-text negotiation cannot reach it. [MS-RDPBCGR] 3.2.5.3.4
     // says to drop a connection whose record disagrees.
     if requested_protocols != request.protocols.bits() {
-        bail!(
+        crate::bail_known!("AL-7211"; 
             "{dest} says the negotiation offered protocols {requested_protocols:#x}, and this \
              client offered {:?}",
             request.protocols
@@ -181,7 +203,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     }
     if channels.len() != wanted.len() {
         let asked = wanted.len();
-        bail!("the host numbered {} channels, and {asked} were asked for", channels.len());
+        crate::bail_known!("AL-7211"; "the host numbered {} channels, and {asked} were asked for", channels.len());
     }
     // Paired with the names in the order both sides listed them, which is the only
     // thing that says which number is which channel.
@@ -192,8 +214,8 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     }
 
     // 5. Erect the domain — which is not answered — and attach a user to it.
-    writer.write_all(&mcs::erect_domain_request()).await.context("sending the MCS Erect Domain")?;
-    writer.write_all(&mcs::attach_user_request()).await.context("sending the MCS Attach User")?;
+    writer.write_all(&mcs::erect_domain_request()).await.context("sending the MCS Erect Domain").cause(|| crate::cause::Cause::new("AL-7210"))?;
+    writer.write_all(&mcs::attach_user_request()).await.context("sending the MCS Attach User").cause(|| crate::cause::Cause::new("AL-7210"))?;
     frames.next(&mut frame).await?;
     let user = mcs::attach_user_confirm(&frame)?;
 
@@ -202,11 +224,11 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
         writer
             .write_all(&mcs::channel_join_request(user, channel))
             .await
-            .context("sending an MCS Channel Join Request")?;
+            .context("sending an MCS Channel Join Request").cause(|| crate::cause::Cause::new("AL-7210"))?;
         frames.next(&mut frame).await?;
         let joined = mcs::channel_join_confirm(&frame)?;
         if joined != channel {
-            bail!("the host joined channel {joined} where {channel} was asked for");
+            crate::bail_known!("AL-7211"; "the host joined channel {joined} where {channel} was asked for");
         }
     }
 
@@ -222,7 +244,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
         keyboard_layout: KEYBOARD_LAYOUT,
     }
     .encode()?;
-    send(&mut writer, user, io_channel, &logon).await.context("sending the Client Info PDU")?;
+    send(&mut writer, user, io_channel, &logon).await.context("sending the Client Info PDU").cause(|| crate::cause::Cause::new("AL-7210"))?;
 
     // 8. Licensing, which on a host like this one is one PDU saying there is none.
     let payload = receive(&mut frames, &mut frame, io_channel).await?;
@@ -231,7 +253,7 @@ pub(super) async fn connect(config: &Connect) -> Result<Connected> {
     // 9. The capability exchange, and 10. the four PDUs that make the share live.
     let payload = receive(&mut frames, &mut frame, io_channel).await?;
     let Pdu::DemandActive { source, body } = share::decode(payload)? else {
-        bail!("the host did not demand a share once licensing was done");
+        crate::bail_known!("AL-7211"; "the host did not demand a share once licensing was done");
     };
     let demand = DemandActive::decode(source, body)?;
     info!(
@@ -273,13 +295,13 @@ pub(super) async fn activate(
     }
     .encode();
     let confirm = share::confirm_active(user, &confirm);
-    send(writer, user, io_channel, &confirm).await.context("sending the Confirm Active PDU")?;
+    send(writer, user, io_channel, &confirm).await.context("sending the Confirm Active PDU").cause(|| crate::cause::Cause::new("AL-7210"))?;
 
     // All four go out without waiting; the server's four come back in its own time,
     // with session PDUs among them.
     for request in finalization::requests(user, demand.server_channel, demand.share_id) {
         let framed = mcs::send_data_request(user, io_channel, &request)?;
-        writer.write_all(&framed).await.context("sending a finalization PDU")?;
+        writer.write_all(&framed).await.context("sending a finalization PDU").cause(|| crate::cause::Cause::new("AL-7210"))?;
     }
     let mut deferred = Vec::new();
     loop {
@@ -294,13 +316,20 @@ pub(super) async fn activate(
                 continue;
             }
             mcs::Indication::Disconnect(reason) => {
-                bail!("the host ended the connection before the desktop was ready: {reason}")
+                return Err(ended_early()
+                    .of(anyhow!("the host ended the connection before the desktop was ready: {reason}")));
             }
         };
         let Pdu::Data(data) = share::decode(payload)? else {
-            bail!("the host deactivated the share during connection finalization");
+            crate::bail_known!("AL-7211"; "the host deactivated the share during connection finalization");
         };
-        if finalization::response(&data)? == Response::FontMap {
+        // A host that refuses the logon says so here, with the PDU it would end a
+        // live session with: its reason keeps the cause the page says it by.
+        let response = finalization::response(&data).map_err(|refused| match data.kind {
+            share::SET_ERROR_INFO => desktop::caused(data.body, refused),
+            _ => refused.into(),
+        })?;
+        if response == Response::FontMap {
             return Ok(deferred);
         }
     }
@@ -328,12 +357,21 @@ async fn receive<'a>(
     match mcs::send_data_indication(frame)? {
         mcs::Indication::Data(data) if data.channel == channel => Ok(data.payload),
         mcs::Indication::Data(data) => {
-            bail!("the host sent a PDU on channel {}, where {channel} was expected", data.channel)
+            crate::bail_known!("AL-7211"; "the host sent a PDU on channel {}, where {channel} was expected", data.channel)
         }
-        mcs::Indication::Disconnect(reason) => {
-            bail!("the host ended the connection before the desktop was ready: {reason}")
-        }
+        mcs::Indication::Disconnect(reason) => Err(ended_early()
+            .of(anyhow!("the host ended the connection before the desktop was ready: {reason}"))),
     }
+}
+
+/// The host wants a protection this client does not offer: it speaks only NLA.
+fn unprotected() -> Cause {
+    Cause::new("AL-7206")
+}
+
+/// The host ended the connection before there was a desktop.
+fn ended_early() -> Cause {
+    Cause::new("AL-7209")
 }
 
 /// One whole TPKT frame off the socket, for the two exchanges that happen before

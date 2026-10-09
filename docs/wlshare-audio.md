@@ -37,17 +37,18 @@ username = "me"
 password = "…"
 ```
 
-`audio_bitrate`, `audio_adaptive` and `audio_adaptive_min` mean on this target
-what they mean on an `rdp` one, with wlshare's encoder in place of the
-gateway's: Opus at `audio_bitrate`, walked down toward the floor while the
+`audio_bitrate` and `audio_adaptive` mean on this target what they mean on an
+`rdp` one, with wlshare's encoder in place of the gateway's: Opus at
+`audio_bitrate`, walked down toward the floor sound-opus fixes while the
 browser's link is behind. They tune a session started with its sound as Opus;
-one started with it lossless (EXPERIMENTAL) is sent FLAC, which has no rate. The
-format is chosen at the picker and is the gateway's to ask for on the wire;
-wlshare has no key for it, and neither has the target.
+one started with it lossless is sent FLAC, which has no rate. The
+format is asked for by the page's address (`?sound=lossless`) and is the
+gateway's to ask for on the wire; wlshare has no key for it, and neither has the
+target.
 
-`subtype = "wlshare"` says the server is wlshare, and Sound, chosen under the
-target at the picker before Start as Opus or lossless, is what makes the gateway
-list the extension to it. A session started with it off lists none, and the desktop keeps playing on
+`subtype = "wlshare"` says the server is wlshare, and the sound, brought by the
+sound's key on the computer's line at the picker before Open, is what makes the
+gateway list the extension to it. A session started with it off lists none, and the desktop keeps playing on
 the host. The choice is offered on a `wlshare` target and on no other `vnc`
 target: a plain one is read through the
 RFB baseline, which carries no sound, `ard` carries none either, and
@@ -94,7 +95,7 @@ sound: both are [sound-opus](https://github.com/andrewtheguy/sound-opus), a
 repository of its own that the gateway and wlshare each pin by release tag.
 
 Opus is the one lossy step on the way to the browser, made once, by wlshare, and
-a session started with lossless sound (EXPERIMENTAL) has none
+a session started with lossless sound has none
 ([Lossless sound](architecture.md#lossless-sound)). As FLAC, music and speech
 cost about two-thirds of their 1.5 Mbit/s PCM rate or less on the RFB
 connection and on the browser's, and a desktop playing nothing, whose capture
@@ -125,7 +126,8 @@ announces late is still taken.
   end is dropped with a warning.
 - The Opus bitrate is the target's: `audio_bitrate` is named to wlshare with the
   enable, and where `audio_adaptive` is on, the walk that would move an encoder
-  here moves wlshare's instead. The pump that feeds `/ws/audio` measures how
+  here — sound-opus's, the crate wlshare codes with too — moves wlshare's
+  instead. The pump that feeds `/ws/audio` measures how
   long its sends block, as for any target, and each rate the walk arrives at
   goes through the bridge to the VNC engine, which sends it as a set-bitrate
   ([Audio frames](architecture.md#audio-frames)). A new listener's walk starts
@@ -180,7 +182,7 @@ without the extension is silence measured in packets, not in the announcement.
 Exercise the current path:
 
 ```sh
-REMOTEX_PROBE_PASSWORD=… uv run tests/ws_probe.py \
+ALUMIA_PROBE_PASSWORD=… uv run tests/ws_probe.py \
   --port <gateway port> --target <name> --user <user> --seconds 8 --audio
 # meanwhile, on the host
 pw-play <some>.wav

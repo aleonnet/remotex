@@ -204,7 +204,7 @@ impl WireKey {
             BoxedUint::from_be_slice_vartime(self.modulus()),
             BoxedUint::from_be_slice_vartime(self.exponent()),
         )
-        .map_err(|e| anyhow::anyhow!("the server's RSA key is invalid: {e}"))
+        .map_err(|e| crate::cause::Cause::new("AL-7022").of(anyhow::anyhow!("the server's RSA key is invalid: {e}")))
     }
 }
 
@@ -251,16 +251,16 @@ pub async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 
     let client_key = client_key
         .await
-        .map_err(|e| anyhow::anyhow!("RSA key generation task failed: {e}"))?
-        .map_err(|e| anyhow::anyhow!("RSA key generation failed: {e}"))?;
+        .map_err(|e| crate::cause::Cause::new("AL-7022").of(anyhow::anyhow!("RSA key generation task failed: {e}")))?
+        .map_err(|e| crate::cause::Cause::new("AL-7022").of(anyhow::anyhow!("RSA key generation failed: {e}")))?;
     let client_wire = WireKey::of_public(client_key.as_public_key());
 
     let mut client_random = vec![0u8; strength.random_len()];
     rand::rng().fill_bytes(&mut client_random);
     let sealed_random = server_key
         .encrypt(&mut rand::rng(), Pkcs1v15Encrypt, &client_random)
-        .map_err(|e| anyhow::anyhow!("encrypting the client random failed: {e}"))?;
-    anyhow::ensure!(
+        .map_err(|e| crate::cause::Cause::new("AL-7022").of(anyhow::anyhow!("encrypting the client random failed: {e}")))?;
+    crate::ensure_known!("AL-7022"; 
         sealed_random.len() == server_wire.size(),
         "the client random encrypted to {} bytes under a {}-byte server key",
         sealed_random.len(),
@@ -284,7 +284,7 @@ pub async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 
     let mut server_hash = vec![0u8; client_hash.len()];
     frames.read_exact(&mut server_hash).await?;
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7024"; 
         server_hash == strength.hash(&[&server_wire.0, &client_wire.0]),
         "the server's RSA-AES key hash does not match the keys exchanged — \
          the connection was tampered with"
@@ -293,7 +293,7 @@ pub async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
     let subtype = frames.read_u8().await?;
     let credentials = match subtype {
         SUBTYPE_USER_PASS => {
-            anyhow::ensure!(
+            crate::ensure_known!("AL-7023"; 
                 !username.is_empty(),
                 "the VNC server asks RSA-AES for a username and a password, and the target \
                  has no username"
@@ -306,7 +306,7 @@ pub async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
             }
             credentials("", password)?
         }
-        other => anyhow::bail!("unknown RSA-AES credential subtype {other}"),
+        other => crate::bail_known!("AL-7022"; "unknown RSA-AES credential subtype {other}"),
     };
     writer.write_all(&sealer.frame(&credentials)).await?;
 
@@ -316,7 +316,7 @@ pub async fn authenticate<R: AsyncRead + Unpin, W: AsyncWrite + Unpin>(
 
 async fn read_server_key<R: AsyncRead + Unpin>(reader: &mut R) -> anyhow::Result<WireKey> {
     let bits = reader.read_u32().await?;
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7022"; 
         (MIN_SERVER_KEY_BITS..=MAX_SERVER_KEY_BITS).contains(&bits),
         "the server's RSA key is {bits} bits; this client accepts \
          {MIN_SERVER_KEY_BITS} to {MAX_SERVER_KEY_BITS}"
@@ -335,7 +335,7 @@ async fn read_server_random<R: AsyncRead + Unpin>(
     strength: Strength,
 ) -> anyhow::Result<Vec<u8>> {
     let len = usize::from(reader.read_u16().await?);
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7022"; 
         len == client_key_size,
         "the server random is {len} bytes, not the {client_key_size} of the client key"
     );
@@ -343,8 +343,8 @@ async fn read_server_random<R: AsyncRead + Unpin>(
     reader.read_exact(&mut sealed).await?;
     let random = client_key
         .decrypt(Pkcs1v15Encrypt, &sealed)
-        .map_err(|e| anyhow::anyhow!("decrypting the server random failed: {e}"))?;
-    anyhow::ensure!(
+        .map_err(|e| crate::cause::Cause::new("AL-7022").of(anyhow::anyhow!("decrypting the server random failed: {e}")))?;
+    crate::ensure_known!("AL-7022"; 
         random.len() == strength.random_len(),
         "the server random is {} bytes, not {}",
         random.len(),
@@ -358,7 +358,7 @@ fn credentials(username: &str, password: &str) -> anyhow::Result<Vec<u8>> {
     let mut out = Vec::with_capacity(2 + username.len() + password.len());
     for (what, field) in [("username", username), ("password", password)] {
         let len = u8::try_from(field.len())
-            .map_err(|_| anyhow::anyhow!("the target's {what} is over 255 bytes"))?;
+            .map_err(|_| crate::cause::Cause::new("AL-7021").of(anyhow::anyhow!("the target's {what} is over 255 bytes")))?;
         out.push(len);
         out.extend_from_slice(field.as_bytes());
     }

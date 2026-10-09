@@ -1,13 +1,13 @@
 //! A managed local gateway: one browser instance, one private socket, one token.
 //!
-//! `remotex serve-embedded --instance-dir <dir>` is not a deployment. It is
+//! `alumia serve-embedded --instance-dir <dir>` is not a deployment. It is
 //! started by an instance manager, serves that browser instance alone, and dies
 //! with its parent. Everything that makes a `serve` gateway configurable is
 //! therefore decided here instead: it listens on its private transport —
 //! `<instance-dir>/gateway.sock`, or a named pipe on Windows, see [`transport`] —
 //! and there is no login to offer — see [`crate::config::Audience::Embedded`].
 //!
-//! The SPA it serves is the same browser client as `remotex serve`. The token below
+//! The SPA it serves is the same browser client as `alumia serve`. The token below
 //! stands in for the login: the master listener seeds it with an `HttpOnly` response
 //! cookie before proxying the browser to the child, so the page authenticates itself
 //! the way any logged-in browser does and the manager needs no session protocol of
@@ -39,6 +39,7 @@ use log::info;
 use serde::{Deserialize, Serialize};
 
 use crate::auth::EmbeddedToken;
+use crate::cause::{Cause, Caused as _};
 use crate::config::{Audience, ConfigFile};
 
 #[doc(hidden)]
@@ -61,7 +62,7 @@ pub struct Handshake {
     /// The private endpoint the control plane proxies to: the Unix socket's path,
     /// or the named pipe's name on Windows.
     pub endpoint: String,
-    /// The token the master listener seeds in the browser's `remotex_session`
+    /// The token the master listener seeds in the browser's `alumia_session`
     /// cookie, which then carries it to every request and `/ws` upgrade.
     pub token: String,
 }
@@ -110,9 +111,9 @@ impl Instance {
         Self { dir: dir.into() }
     }
 
-    /// `<dir>/remotex.toml` — the one file a user edits.
+    /// `<dir>/alumia.toml` — the one file a user edits.
     pub fn config_path(&self) -> PathBuf {
-        self.dir.join("remotex.toml")
+        self.dir.join("alumia.toml")
     }
 
     /// Read and check this instance's config.
@@ -122,9 +123,11 @@ impl Instance {
     pub fn load(&self) -> anyhow::Result<ConfigFile> {
         let path = self.config_path();
         let text = std::fs::read_to_string(&path)
-            .with_context(|| format!("failed to read config file {}", path.display()))?;
+            .with_context(|| format!("failed to read config file {}", path.display()))
+            .cause(|| Cause::new("AL-9559").with("path", path.display()))?;
         ConfigFile::parse_with(&text, Audience::Embedded)
             .with_context(|| format!("in config file {}", path.display()))
+            .cause(|| Cause::new("AL-9560").with("path", path.display()))
     }
 
     /// Claim this instance for one gateway: an exclusive lock on
@@ -146,7 +149,8 @@ impl Instance {
             .write(true)
             .truncate(false)
             .open(&path)
-            .with_context(|| format!("cannot open {}", path.display()))?;
+            .with_context(|| format!("cannot open {}", path.display()))
+            .cause(|| Cause::new("AL-9801").with("path", path.display()))?;
         let deadline = tokio::time::Instant::now() + CLAIM_PATIENCE;
         loop {
             match file.try_lock() {
@@ -155,10 +159,16 @@ impl Instance {
                     tokio::time::sleep(std::time::Duration::from_millis(50)).await;
                 }
                 Err(std::fs::TryLockError::WouldBlock) => {
-                    anyhow::bail!("{} is already served by another gateway", self.dir.display())
+                    crate::bail_known!(
+                        "AL-9802", path = self.dir.display();
+                        "{} is already served by another gateway",
+                        self.dir.display()
+                    )
                 }
                 Err(std::fs::TryLockError::Error(error)) => {
-                    return Err(error).with_context(|| format!("cannot lock {}", path.display()));
+                    return Err(error)
+                        .with_context(|| format!("cannot lock {}", path.display()))
+                        .cause(|| Cause::new("AL-9801").with("path", path.display()));
                 }
             }
         }
@@ -196,7 +206,8 @@ pub async fn serve(instance: &Instance, claim: Claim) -> anyhow::Result<()> {
         config.meter.as_ref(),
         config.targets.iter().map(|target| target.name.clone()).collect(),
     )
-        .context("cannot record websocket throughput ([meter].database)")?;
+        .context("cannot record websocket throughput ([meter].database)")
+        .cause(|| Cause::new("AL-9403"))?;
     // Before the handshake for the same reason: an archive it cannot serve is a
     // refused start.
     let hevc_decoder = config
@@ -317,7 +328,7 @@ mod tests {
     #[test]
     fn a_handshake_is_one_parseable_line() {
         let handshake = Handshake {
-            endpoint: "/tmp/remotex/gateway.sock".to_owned(),
+            endpoint: "/tmp/alumia/gateway.sock".to_owned(),
             token: "abc-123".to_owned(),
         };
         let line = handshake.line().unwrap();
@@ -329,14 +340,14 @@ mod tests {
         );
         // The field names the parent reads, spelled out so renaming one here fails
         // here rather than at launch.
-        assert!(line.contains("\"endpoint\":\"/tmp/remotex/gateway.sock\""), "{line}");
+        assert!(line.contains("\"endpoint\":\"/tmp/alumia/gateway.sock\""), "{line}");
         assert!(line.contains("\"token\":\"abc-123\""), "{line}");
     }
 
     #[test]
     fn an_instance_names_its_config_beside_itself() {
         let instance = Instance::new("/tmp/inst");
-        assert_eq!(instance.config_path(), Path::new("/tmp/inst").join("remotex.toml"));
+        assert_eq!(instance.config_path(), Path::new("/tmp/inst").join("alumia.toml"));
     }
 
     /// An embedded config is `[branding]` and `[[targets]]`, and an empty one is a

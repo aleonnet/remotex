@@ -41,7 +41,7 @@ use super::wire::{Malformed, Reader, Writer};
 const SERVER_CHANNEL: u16 = 0x03EA;
 
 /// `sourceDescriptor`. Ignored by every server, logged by some.
-const SOURCE: &[u8] = b"remotex\0";
+const SOURCE: &[u8] = b"alumia\0";
 
 /// Capability set types.
 const GENERAL: u16 = 0x01;
@@ -288,7 +288,7 @@ impl ConfirmActive {
         let mut w = Writer::with_capacity(12 + SOURCE.len() + sets.len());
         w.u32_le(self.share_id);
         w.u16_le(SERVER_CHANNEL);
-        w.u16_le(u16::try_from(SOURCE.len()).expect("a source descriptor of eight bytes"));
+        w.u16_le(u16::try_from(SOURCE.len()).expect("a source descriptor of seven bytes"));
         w.u16_le(
             u16::try_from(sets.len() + 4).expect("this client's capability list is under a kilobyte"),
         );

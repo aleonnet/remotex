@@ -81,13 +81,13 @@ pub fn body_len(header: [u8; SERVER_HEADER_LEN]) -> anyhow::Result<usize> {
     match header[0] {
         SERVER_START => Ok(START_FORMAT_LEN),
         SERVER_AVAILABLE | SERVER_STOP => Ok(0),
-        other => anyhow::bail!("wlshare microphone operation {other} is not one this client knows"),
+        other => crate::bail_known!("AL-7719"; "wlshare microphone operation {other} is not one this client knows"),
     }
 }
 
 /// Parse a server message from its header and the [`body_len`] bytes after it.
 pub fn parse_server(header: [u8; SERVER_HEADER_LEN], body: &[u8]) -> anyhow::Result<ServerMicrophone> {
-    anyhow::ensure!(body.len() == body_len(header)?, "a wlshare microphone message of the wrong length");
+    crate::ensure_known!("AL-7719"; body.len() == body_len(header)?, "a wlshare microphone message of the wrong length");
     Ok(match header[0] {
         SERVER_AVAILABLE => ServerMicrophone::Available,
         SERVER_START => ServerMicrophone::Start(MicFormat {

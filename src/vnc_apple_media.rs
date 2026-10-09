@@ -24,15 +24,19 @@
 //! ones Apple's client produced ([`audio_offer_blob`], [`video_offer_blob`]). The
 //! Mac refuses a configuration without either, so the two legs go together: the
 //! picture comes from one and the sound from the other, and while the sound leg
-//! runs the Mac mutes its own output, as it does for Apple's viewer.
+//! runs the Mac mutes its own output, as it does for Apple's viewer. A session
+//! with two virtual displays offers a video blob for each, and the Mac sends
+//! each display's picture on a leg of its own ([`MediaStream`]).
 //!
 //! A stream that fails ends the session, as it ends Apple's viewer's, which has no
 //! way back to RFB pixels: one the Mac refuses, one that brings no picture or no
 //! sound within [`STREAM_START`] of its offer, one that sends neither for
 //! [`STREAM_SILENCE`], and one whose receiver fails ([`MediaStream::overdue`],
 //! [`MediaStream::failure`]).
-//! ZRLE rectangles are stepped over by their length, never inflated or shown. Until the first media picture, and across display changes which stop the
-//! stream until the next offer, the browser stays behind its resize notice.
+//! ZRLE rectangles are stepped over by their length, never inflated or shown.
+//! Until the first media picture, and across display changes which stop the
+//! stream until the next offer, the browser says the screen is not available
+//! ([`crate::protocol::ServerMsg::ScreenUnavailable`]).
 //!
 //! Every packet in is authenticated before it is decrypted — AES-256 counter mode
 //! with an HMAC-SHA1-80 tag, RFC 3711 keys from the masters this side put in the
@@ -55,9 +59,13 @@
 //! The stream itself is HEVC Range Extensions, 4:4:4, full-range BT.709, RTP payload
 //! type 100 packed as RFC 7798 without DONL: single NAL units, aggregation packets
 //! and fragmentation units. [`Depacketizer`] reassembles access units from it, and a
-//! lost packet costs a PLI ([`rtcp_pli`]), which the Mac answers with an IDR within
-//! tens of milliseconds.
+//! lost packet costs a refresh ([`rtcp_refresh`]): a picture the Mac predicts from
+//! one this side acknowledged ([`rtcp_reference_ack`]), in place of an IDR. Where
+//! nothing is left to predict from, a PLI ([`rtcp_pli`]) brings an IDR within tens
+//! of milliseconds. The Mac drops either request when its last keyframe is under a
+//! second old, so one stays owed until a picture comes of it.
 
+use crate::cause::Caused as _;
 use std::io::Write as _;
 
 use anyhow::Context as _;
@@ -67,6 +75,7 @@ use aes::cipher::{BlockCipherEncrypt as _, KeyInit as _};
 use hmac::{Hmac, Mac as _};
 use sha1::Sha1;
 
+use crate::cause::Cause;
 use crate::vnc_apple;
 
 /// Encoding 1010 (`0x3f2`), `kSSVideoEncoding_AVCMediaStream`: the viewer takes its
@@ -87,11 +96,23 @@ pub const PASSED_SOUND: crate::audio::PassedFormat = crate::audio::PassedFormat 
     head: &crate::aac_eld::AUDIO_SPECIFIC_CONFIG,
 };
 
-/// The second `SetEncodings`, sent once the first layout has arrived: the opening
-/// list with the media stream appended.
-pub fn encodings_with_media_stream() -> Vec<i32> {
-    let mut encodings = vnc_apple::ENCODINGS.to_vec();
-    encodings.push(ENCODING_MEDIA_STREAM);
+/// The second `SetEncodings`, sent once the first layout has arrived and held
+/// for the rest of the session: the media stream first, as Apple's viewer
+/// lists it in High Performance mode. Naming the stream makes the Mac name its
+/// ports. The Mac's preferred codec is the first it
+/// knows in the list, and to a viewer whose preferred codec is the media stream
+/// its framebuffer sender sends no pixels: cursor shapes, layouts and the stream's
+/// ports still come.
+///
+/// That is what keeps the Mac's two framing threads apart. The sender frames its
+/// updates under a lock, and the thread that reads this side's messages frames
+/// the answer to an offer without it; a record from each at once fails its
+/// integrity check here and ends the session. `SetEncodings` is acted on under
+/// that lock, so an update being written is out before the first offer is
+/// read, and none follows it or any later offer.
+pub fn encodings_preferring_media_stream() -> Vec<i32> {
+    let mut encodings = vec![ENCODING_MEDIA_STREAM];
+    encodings.extend_from_slice(vnc_apple::ENCODINGS);
     encodings
 }
 
@@ -102,8 +123,15 @@ pub const FLAG_60FPS: u32 = 0x1;
 /// `0x1c` flag bit 2: capture without the pointer. The agent logs `send cursor with
 /// video 0` for it; without it the pointer is drawn into every picture.
 pub const FLAG_NO_CURSOR: u32 = 0x4;
-/// The flags this viewer sends.
+/// `0x1c` flag bit 1: [`FLAG_60FPS`] for the second video stream, which a
+/// two-display offer sets beside it.
+pub const FLAG_60FPS_SECOND: u32 = 0x2;
+/// The flags this viewer sends for one display.
 pub const FLAGS: u32 = FLAG_60FPS | FLAG_NO_CURSOR;
+
+/// The most displays a session's stream carries, one video leg each: the Mac
+/// creates one virtual display or two.
+pub const MAX_DISPLAYS: usize = 2;
 
 /// An SRTP master key as the `0x1c` message carries it: 32 bytes of AES-256 key and
 /// 14 bytes of salt.
@@ -251,7 +279,7 @@ fn video_codec(id: u64, levels: &[u64], features: &str, f4: u64) -> Proto {
 }
 
 /// The screen-video offer's blob: one stream at `size` backing pixels offering
-/// HEVC (`123`) and H.264 (`100`), `tiles` pictures to a frame. The stream's fields
+/// H.264 (RTP payload `123`) and HEVC (`100`), `tiles` pictures to a frame. The stream's fields
 /// follow `initWithScreenSSRC:…:customVideoWidth:customVideoHeight:tilesPerFrame:
 /// ltrpEnabled:pixelFormats:…`; the Mac answers with HEVC.
 fn video_offer_blob(ssrc: u32, (width, height): (u16, u16), tiles: u64) -> Vec<u8> {
@@ -396,33 +424,40 @@ pub type KeyPair = (MasterKey, MasterKey);
 /// +0x06 u32  flags
 /// +0x0a u16  audio offer length
 /// +0x0c u16  video1 offer length
-/// +0x0e u16  video2 offer length = 0
+/// +0x0e u16  video2 offer length, 0 for one display
 /// +0x14 16B  session UUID
 /// +0x24 46B  audio SRTP master key, viewer -> server
 /// +0x52 46B  audio SRTP master key, server -> viewer
-/// +0x80      audio offer, then 46B video1 key v->s, 46B video1 key s->v, video1 offer
+/// +0x80      audio offer, then 46B video1 key v->s, 46B video1 key s->v, video1 offer,
+///            and for a second display 46B video2 key v->s, 46B s->v, video2 offer
 /// ```
+///
+/// `videos` is each display's offer and keys, one or two.
 fn configuration_message(
     flags: u32,
     session_uuid: &[u8; 16],
     audio_offer: &[u8],
     audio_keys: &KeyPair,
-    video_offer: &[u8],
-    video_keys: &KeyPair,
+    videos: &[(&[u8], &KeyPair)],
 ) -> Vec<u8> {
     let mut msg = vec![0u8; 0x80];
     msg[0] = 0x1c;
     msg[4..6].copy_from_slice(&3u16.to_be_bytes());
     msg[6..10].copy_from_slice(&flags.to_be_bytes());
     msg[0x0a..0x0c].copy_from_slice(&(audio_offer.len() as u16).to_be_bytes());
-    msg[0x0c..0x0e].copy_from_slice(&(video_offer.len() as u16).to_be_bytes());
+    for (index, (offer, _)) in videos.iter().enumerate().take(MAX_DISPLAYS) {
+        let at = 0x0c + 2 * index;
+        msg[at..at + 2].copy_from_slice(&(offer.len() as u16).to_be_bytes());
+    }
     msg[0x14..0x24].copy_from_slice(session_uuid);
     msg[0x24..0x52].copy_from_slice(&audio_keys.0);
     msg[0x52..0x80].copy_from_slice(&audio_keys.1);
     msg.extend_from_slice(audio_offer);
-    msg.extend_from_slice(&video_keys.0);
-    msg.extend_from_slice(&video_keys.1);
-    msg.extend_from_slice(video_offer);
+    for (offer, keys) in videos.iter().take(MAX_DISPLAYS) {
+        msg.extend_from_slice(&keys.0);
+        msg.extend_from_slice(&keys.1);
+        msg.extend_from_slice(offer);
+    }
     let body_len = (msg.len() - 4) as u16;
     msg[2..4].copy_from_slice(&body_len.to_be_bytes());
     msg
@@ -435,48 +470,57 @@ struct Offers {
     session_uuid: [u8; 16],
     call_id: String,
     audio_keys: KeyPair,
-    video_keys: KeyPair,
     /// This side's SSRCs, which its RTCP reports carry.
     audio_ssrc: u32,
-    video_ssrc: u32,
+    /// Each display's video leg, in the Mac's order: its first virtual display,
+    /// then its second.
+    videos: Vec<VideoOffer>,
+}
+
+/// One video leg's keys, and this side's SSRC on it.
+struct VideoOffer {
+    keys: KeyPair,
+    ssrc: u32,
 }
 
 impl Offers {
-    fn new() -> Self {
+    /// For `displays` virtual displays, a video leg each.
+    fn new(displays: usize) -> Self {
         let key = || {
             let mut k = [0u8; 46];
             rand::fill(&mut k[..]);
             k
         };
         let audio_keys = (key(), key());
-        let video_keys = (key(), key());
+        let videos = (0..displays.clamp(1, MAX_DISPLAYS))
+            .map(|_| VideoOffer { keys: (key(), key()), ssrc: rand::random() })
+            .collect();
         let uuid = uuid::Uuid::new_v4();
         Self {
             session_uuid: *uuid.as_bytes(),
             call_id: uuid.hyphenated().to_string().to_ascii_uppercase(),
             audio_keys,
-            video_keys,
             audio_ssrc: rand::random(),
-            video_ssrc: rand::random(),
+            videos,
         }
     }
 
-    /// The `0x1c` message for a display of `size` backing pixels.
-    fn configuration(&self, size: (u16, u16)) -> Vec<u8> {
+    /// The `0x1c` message for displays of `sizes` backing pixels, one per video
+    /// leg. Every stream carries the session's one call id, as Apple's viewer's do.
+    fn configuration(&self, sizes: &[(u16, u16)]) -> Vec<u8> {
         let audio = offer(MODE_AUDIO, &audio_offer_blob(self.audio_ssrc), &self.call_id);
-        let video = offer(
-            MODE_VIDEO,
-            &video_offer_blob(self.video_ssrc, size, TILES_PER_FRAME),
-            &self.call_id,
-        );
-        configuration_message(
-            FLAGS,
-            &self.session_uuid,
-            &audio,
-            &self.audio_keys,
-            &video,
-            &self.video_keys,
-        )
+        let offers: Vec<Vec<u8>> = self
+            .videos
+            .iter()
+            .zip(sizes)
+            .map(|(video, size)| {
+                offer(MODE_VIDEO, &video_offer_blob(video.ssrc, *size, TILES_PER_FRAME), &self.call_id)
+            })
+            .collect();
+        let videos: Vec<(&[u8], &KeyPair)> =
+            offers.iter().zip(&self.videos).map(|(offer, video)| (offer.as_slice(), &video.keys)).collect();
+        let flags = if videos.len() > 1 { FLAGS | FLAG_60FPS_SECOND } else { FLAGS };
+        configuration_message(flags, &self.session_uuid, &audio, &self.audio_keys, &videos)
     }
 }
 
@@ -486,10 +530,12 @@ pub enum MediaReply {
     /// Message 1: the streams are being set up; audio comes from and RTCP goes to
     /// `audio_port`, the picture from `video_port`, on the Mac's address, and this
     /// side receives on the same port numbers. A display change re-sends it on its
-    /// own, with no stream behind it until the next offer.
-    Ports { audio_port: u16, video_port: u16 },
-    /// Message 2: AVConference accepted the offer.
-    Answer,
+    /// own, with no stream behind it until the next offer. `video2_port` is the
+    /// second display's leg, when the Mac has two virtual displays to send.
+    Ports { audio_port: u16, video_port: u16, video2_port: Option<u16> },
+    /// Message 2: AVConference accepted the offer, with an answer for this many
+    /// video legs.
+    Answer { videos: usize },
     /// Message 3: the Mac could not start the streams.
     Error { kind: u32, sub_code: u32 },
     /// A message type this client does not know.
@@ -498,11 +544,11 @@ pub enum MediaReply {
 
 /// Parse the body of an encoding-1010 rectangle (after its `u16` size).
 pub fn parse_media_reply(body: &[u8]) -> anyhow::Result<MediaReply> {
-    anyhow::ensure!(body.len() >= 8, "a media-stream reply of {} bytes has no header", body.len());
+    crate::ensure_known!("AL-7715"; body.len() >= 8, "a media-stream reply of {} bytes has no header", body.len());
     let kind = u16::from_be_bytes([body[0], body[1]]);
     match kind {
         1 => {
-            anyhow::ensure!(
+            crate::ensure_known!("AL-7715"; 
                 body.len() >= 36,
                 "media-stream message 1 is {} bytes, shorter than its three port records",
                 body.len()
@@ -513,21 +559,18 @@ pub fn parse_media_reply(body: &[u8]) -> anyhow::Result<MediaReply> {
                 u32::from_be_bytes(body[16..20].try_into().expect("four bytes checked"));
             let video2_flags =
                 u32::from_be_bytes(body[22..26].try_into().expect("four bytes checked"));
-            anyhow::ensure!(
+            crate::ensure_known!("AL-7715"; 
                 audio_flags & video_flags & 1 != 0,
                 "media-stream message 1 did not enable both its audio and video legs"
-            );
-            anyhow::ensure!(
-                video2_flags & 1 == 0,
-                "media-stream message 1 enabled a second video leg this one-display client did not offer"
             );
             Ok(MediaReply::Ports {
                 audio_port: u16::from_be_bytes([body[8], body[9]]),
                 video_port: u16::from_be_bytes([body[14], body[15]]),
+                video2_port: (video2_flags & 1 != 0).then(|| u16::from_be_bytes([body[20], body[21]])),
             })
         }
         2 => {
-            anyhow::ensure!(
+            crate::ensure_known!("AL-7715"; 
                 body.len() >= 18,
                 "media-stream answer is {} bytes, too short for its offer lengths",
                 body.len()
@@ -535,20 +578,16 @@ pub fn parse_media_reply(body: &[u8]) -> anyhow::Result<MediaReply> {
             let audio = usize::from(u16::from_be_bytes([body[8], body[9]]));
             let video = usize::from(u16::from_be_bytes([body[10], body[11]]));
             let video2 = usize::from(u16::from_be_bytes([body[12], body[13]]));
-            anyhow::ensure!(
-                video2 == 0,
-                "the Mac answered with a second video leg this one-display client did not offer"
-            );
-            anyhow::ensure!(
-                body.len() == 18 + audio + video,
+            crate::ensure_known!("AL-7715"; 
+                body.len() == 18 + audio + video + video2,
                 "media-stream answer is {} bytes, not the {} its offer lengths describe",
                 body.len(),
-                18 + audio + video
+                18 + audio + video + video2
             );
-            Ok(MediaReply::Answer)
+            Ok(MediaReply::Answer { videos: if video2 == 0 { 1 } else { 2 } })
         }
         3 => {
-            anyhow::ensure!(
+            crate::ensure_known!("AL-7715"; 
                 body.len() >= 16,
                 "media-stream error message is {} bytes, too short for its codes",
                 body.len()
@@ -647,9 +686,18 @@ pub struct RtpHeader {
     pub sequence: u16,
     pub timestamp: u32,
     pub ssrc: u32,
+    /// The Mac's mark on a picture that predicts only from one this side
+    /// acknowledged ([`rtcp_reference_ack`]): its answer to [`rtcp_refresh`].
+    pub refresh: bool,
     /// The payload, as a range of the datagram, without the authentication tag.
     pub payload: (usize, usize),
 }
+
+/// The profile of the header extension the Mac's video packets carry, less the
+/// bits that vary, and the bit of it that marks a refresh picture.
+const EXTENSION_PROFILE: u16 = 0x9301;
+const EXTENSION_VARIES: u16 = 0x0030;
+const EXTENSION_REFRESH: u16 = 0x0020;
 
 /// Read an RTP header. RTCP (packet types 200–207 in the whole second byte, which
 /// RTP would read as payload types 72–79) is told apart first.
@@ -662,10 +710,13 @@ fn rtp_header(data: &[u8]) -> Result<RtpHeader, SrtpError> {
     }
     let cc = usize::from(data[0] & 0x0f);
     let mut at = 12 + 4 * cc;
+    let mut refresh = false;
     if data[0] & 0x10 != 0 {
         if data.len() < at + 4 {
             return Err(SrtpError::NotRtp);
         }
+        let profile = u16::from_be_bytes([data[at], data[at + 1]]);
+        refresh = profile & !EXTENSION_VARIES == EXTENSION_PROFILE && profile & EXTENSION_REFRESH != 0;
         let words = usize::from(u16::from_be_bytes([data[at + 2], data[at + 3]]));
         at += 4 + 4 * words;
     }
@@ -678,6 +729,7 @@ fn rtp_header(data: &[u8]) -> Result<RtpHeader, SrtpError> {
         sequence: u16::from_be_bytes([data[2], data[3]]),
         timestamp: u32::from_be_bytes([data[4], data[5], data[6], data[7]]),
         ssrc: u32::from_be_bytes([data[8], data[9], data[10], data[11]]),
+        refresh,
         payload: (at, data.len() - AUTH_TAG_LEN),
     })
 }
@@ -813,6 +865,33 @@ pub fn rtcp_receiver_report(ssrc: u32) -> [u8; 8] {
     let mut report = [0x80, 201, 0, 1, 0, 0, 0, 0];
     report[4..].copy_from_slice(&ssrc.to_be_bytes());
     report
+}
+
+/// AVConference's acknowledgement of a picture this side has whole, by its RTP
+/// `timestamp`: an APP packet whose name is the number 5. The Mac's encoder keeps
+/// the newest acknowledged picture as a long-term reference, which is what lets it
+/// answer [`rtcp_refresh`] without an IDR. Alone in its datagram, as the rate
+/// report is.
+pub fn rtcp_reference_ack(ssrc: u32, timestamp: u32) -> [u8; 16] {
+    let mut ack = [0x80, 204, 0, 3, 0, 0, 0, 0, 0, 0, 0, 5, 0, 0, 0, 0];
+    ack[4..8].copy_from_slice(&ssrc.to_be_bytes());
+    ack[12..].copy_from_slice(&timestamp.to_be_bytes());
+    ack
+}
+
+/// AVConference's request for a picture to go on from after a loss, from `ssrc`
+/// about `media_ssrc`: payload-specific feedback of format 2 carrying the
+/// stream's `size`, which the Mac checks against its encoder's. It answers with a
+/// picture predicted from the last one acknowledged, marked
+/// [`RtpHeader::refresh`], or with an IDR when it holds none; the IDR is a
+/// fraction of the size of the one a PLI brings.
+pub fn rtcp_refresh(ssrc: u32, media_ssrc: u32, size: (u16, u16)) -> [u8; 16] {
+    let mut refresh = [0x82, 206, 0, 3, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+    refresh[4..8].copy_from_slice(&ssrc.to_be_bytes());
+    refresh[8..12].copy_from_slice(&media_ssrc.to_be_bytes());
+    refresh[12..14].copy_from_slice(&size.0.to_be_bytes());
+    refresh[14..].copy_from_slice(&size.1.to_be_bytes());
+    refresh
 }
 
 /// A Picture Loss Indication (RFC 4585 §6.3.1) from `ssrc` about `media_ssrc`: the
@@ -972,8 +1051,9 @@ pub enum Depacketized {
     Pending,
     /// A whole access unit, decodable from what came before it.
     Unit(AccessUnit),
-    /// Packets were lost: everything up to the next random-access picture is
-    /// dropped, and the sender should be asked for one.
+    /// Packets were lost: everything up to the next picture the stream can go on
+    /// from is dropped, and the sender should be asked for one —
+    /// [`Depacketizer::resumes_at_refresh`] says which kind.
     Lost,
 }
 
@@ -981,8 +1061,8 @@ pub enum Depacketized {
 ///
 /// A picture ends at the packet with the marker bit, or where the timestamp moves
 /// on. A gap in the sequence numbers drops the picture it fell in and everything
-/// after it until an IRAP picture arrives, because every other picture predicts
-/// from one that was lost.
+/// after it until an IRAP picture or one the Mac marks as a refresh arrives,
+/// because every other picture predicts from one that was lost.
 #[derive(Default)]
 pub struct Depacketizer {
     ssrc: Option<u32>,
@@ -995,6 +1075,12 @@ pub struct Depacketizer {
     /// Whether the stream is decodable from here: a random-access picture has
     /// arrived since the last loss.
     synced: bool,
+    /// The current picture carries the Mac's refresh mark.
+    refresh: bool,
+    /// Out of step by lost packets alone, with every picture before them handed
+    /// on: a refresh picture predicts from one of those, so the stream goes on
+    /// from it. Not after [`Self::resync`], which gave pictures up.
+    resumable: bool,
 }
 
 impl Depacketizer {
@@ -1016,17 +1102,19 @@ impl Depacketizer {
         }
         self.next_sequence = Some(header.sequence.wrapping_add(1));
         let mut out = Depacketized::Pending;
-        if self.timestamp.is_some_and(|ts| ts != header.timestamp) && !self.unit.is_empty() {
+        if self.timestamp.is_some_and(|ts| ts != header.timestamp) && (self.damaged || !self.unit.is_empty()) {
             // The previous picture's last packet (the marked one) never came.
             self.damaged = true;
             self.finish();
         }
         if lost {
             self.damaged = true;
+            self.resumable |= self.synced;
             self.synced = false;
             out = Depacketized::Lost;
         }
         self.timestamp = Some(header.timestamp);
+        self.refresh |= header.refresh;
         self.parse(payload);
         if header.marker {
             if let Some(unit) = self.finish() {
@@ -1086,17 +1174,49 @@ impl Depacketizer {
     /// could not keep was lost to every picture that predicts from it.
     pub fn resync(&mut self) {
         self.synced = false;
+        self.resumable = false;
+    }
+
+    /// Whether a refresh picture is enough to go on from, where the stream is
+    /// out of step: the pictures handed on are all still there to predict from.
+    pub fn resumes_at_refresh(&self) -> bool {
+        !self.synced && self.resumable
+    }
+
+    /// Pass over a packet nobody is shown, keeping in step with the stream: the
+    /// sequence number and the picture in flight are known when its packets are
+    /// wanted again, so the first one pushed is neither read as a duplicate nor
+    /// taken for the start of a picture it is the middle of. Its pictures are
+    /// given up, as by [`Self::resync`].
+    pub fn skip(&mut self, header: &RtpHeader) {
+        if self.ssrc != Some(header.ssrc) {
+            *self = Self { ssrc: Some(header.ssrc), ..Self::default() };
+        }
+        if self.next_sequence.is_some_and(|expected| header.sequence.wrapping_sub(expected) >= 0x8000) {
+            return;
+        }
+        *self = Self {
+            ssrc: self.ssrc,
+            next_sequence: Some(header.sequence.wrapping_add(1)),
+            timestamp: Some(header.timestamp),
+            damaged: !header.marker,
+            ..Self::default()
+        };
     }
 
     /// Close the current picture: it, if it is whole and decodable.
     fn finish(&mut self) -> Option<AccessUnit> {
         let unit = std::mem::take(&mut self.unit);
         let damaged = std::mem::take(&mut self.damaged) || self.fragment.take().is_some();
+        let refresh = std::mem::take(&mut self.refresh);
         if damaged || unit.is_empty() {
             return None;
         }
-        if !self.synced && unit.iter().any(|nal| is_random_access(nal_type(nal[0]))) {
+        if !self.synced
+            && (refresh && self.resumable || unit.iter().any(|nal| is_random_access(nal_type(nal[0]))))
+        {
             self.synced = true;
+            self.resumable = false;
         }
         self.synced.then_some(unit)
     }
@@ -1345,7 +1465,7 @@ impl Hevc {
             // outside the gateway's log. The failed call is reported instead.
             (api.av_log_set_level)(crate::libav::LOG_QUIET);
             let codec = (api.avcodec_find_decoder_by_name)(c"hevc".as_ptr());
-            anyhow::ensure!(!codec.is_null(), "libavcodec has no HEVC decoder");
+            crate::ensure_known!("AL-7710"; !codec.is_null(), "libavcodec has no HEVC decoder");
             let format = |name: &std::ffi::CStr| (api.av_get_pix_fmt)(name.as_ptr());
             let decoder = Self {
                 api,
@@ -1363,7 +1483,7 @@ impl Hevc {
                 stream: Vec::new(),
                 decoded_by: None,
             };
-            anyhow::ensure!(
+            crate::ensure_known!("AL-7710"; 
                 !decoder.ctx.is_null()
                     && !decoder.packet.is_null()
                     && !decoder.frame.is_null()
@@ -1379,7 +1499,7 @@ impl Hevc {
             // task asks for a keyframe.
             for (name, value) in [(c"threads", DECODE_THREADS), (c"thread_type", c"slice"), (c"err_detect", c"+explode")] {
                 let err = (api.av_opt_set)(decoder.ctx, name.as_ptr(), value.as_ptr(), 0);
-                anyhow::ensure!(
+                crate::ensure_known!("AL-7710"; 
                     err >= 0,
                     "libavcodec refused {}={}: {}",
                     name.to_string_lossy(),
@@ -1388,7 +1508,7 @@ impl Hevc {
                 );
             }
             let err = (api.avcodec_open2)(decoder.ctx, codec, std::ptr::null_mut());
-            anyhow::ensure!(err >= 0, "libavcodec could not open the HEVC decoder: {}", text(api, err));
+            crate::ensure_known!("AL-7710"; err >= 0, "libavcodec could not open the HEVC decoder: {}", text(api, err));
             Ok(decoder)
         }
     }
@@ -1631,12 +1751,31 @@ enum Outlet {
 /// display's 30 Hz ([`vnc_apple::DISPLAY_HZ`]).
 const PASS_QUEUE: usize = 15;
 
+/// What [`MediaStream::offer`] has the session send.
+#[derive(Debug, PartialEq, Eq)]
+pub enum Offer {
+    /// The `SetEncodings` naming [`ENCODING_MEDIA_STREAM`], which the Mac names its
+    /// ports for.
+    Encodings,
+    /// The `0x1c` offer for the display.
+    Configuration(Vec<u8>),
+}
+
 /// One session's media stream: its offers, and once the Mac names its ports, the
 /// receiver. Shared between the engine's two loops, which each decide on offers.
+///
+/// An offer goes out only once the Mac has named its ports, as Apple's viewer
+/// makes it: the Mac names them for the encodings naming the stream and after each
+/// display change, never in reply to an offer, and each naming is good for one
+/// offer.
 ///
 /// Only one offer is ever out: a second one, sent while the first's capture was
 /// starting, failed to start (`error 32000`) and left a display stream behind that
 /// crashed WindowServer when the virtual display went away.
+///
+/// A session with two virtual displays has a video leg for each, offered, answered
+/// and taken down together: one offer names both, and the Mac sends the second
+/// display's picture from the port after the first's.
 pub struct MediaStream {
     offers: Offers,
     /// The Mac, as the TCP session reached it: where the streams come from and RTCP
@@ -1648,27 +1787,31 @@ pub struct MediaStream {
     asked: bool,
     /// An offer is out that the Mac has not answered.
     pending: bool,
-    /// The Mac has named the ports of the offer last made. It names them ahead of
-    /// its answer or behind it, so an answered offer may still be owed them.
-    named: bool,
-    /// The size the live (or starting) stream was offered for; `None` while there
-    /// is none, as after a display change.
-    offered: Option<(u16, u16)>,
+    /// The Mac has named its ports, and no offer has gone out on that naming yet.
+    invited: bool,
+    /// The sizes the live (or starting) stream was offered for, one per display;
+    /// `None` while there is none, as after a display change.
+    offered: Option<Vec<(u16, u16)>>,
+    /// The size of a picture the offered stream brought that is not the offered
+    /// display's: what [`MediaStream::overdue`] names where no picture of that
+    /// display ever came. `None` from each offer until one comes.
+    strange: Option<(u16, u16)>,
     /// What the stream owes the session next — see [`MediaStream::overdue`].
     owed: Owed,
-    /// Signalled at every offer — see [`MediaStream::offered`].
+    /// Signalled at every new deadline — see [`MediaStream::offered`].
     offer_made: std::sync::Arc<tokio::sync::Notify>,
     /// The ports the receiver is bound to, and the receiver.
-    receiver: Option<((u16, u16), tokio::task::JoinHandle<()>)>,
-    pictures: Outlet,
-    /// Signalled by [`MediaStream::want_keyframe`], for the receiver to ask the Mac.
-    keyframe_wanted: std::sync::Arc<tokio::sync::Notify>,
+    receiver: Option<(Ports, tokio::task::JoinHandle<()>)>,
+    /// Each video leg, as the receiver shares it, in the Mac's order.
+    legs: Vec<Leg>,
+    /// Whether the Mac's legs carry the session's two displays the other way
+    /// round — see [`MediaStream::arrange`].
+    swapped: bool,
     /// Why the receiver stopped, which it leaves here before the `None` that says
     /// so — see [`MediaStream::failure`].
     failed: Failure,
-    /// When each leg last brought an authentic packet, which the receiver notes
-    /// — see [`MediaStream::overdue`].
-    picture_heard: Heard,
+    /// When the sound leg last brought an authentic packet, which the receiver
+    /// notes — see [`MediaStream::overdue`].
     sound_heard: Heard,
     /// When the sound leg last brought sound, an SRTP packet: what the offer's
     /// first sound is, which a report cannot stand in for.
@@ -1676,6 +1819,30 @@ pub struct MediaStream {
     /// Where the sound leg's decoded PCM goes: the session's audio bridge, when
     /// the browser can be sent sound. `None` drains the leg unread.
     sound: Option<std::sync::Arc<crate::audio::AudioBridge>>,
+}
+
+/// The ports the Mac named: the sound's, and each display's picture's.
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct Ports {
+    audio: u16,
+    videos: Vec<u16>,
+}
+
+/// One display's video leg, as the stream and its receiver share it.
+#[derive(Clone)]
+struct Leg {
+    pictures: Outlet,
+    /// Signalled by [`MediaStream::want_keyframe`] and [`MediaStream::show`], for
+    /// the receiver to ask the Mac.
+    keyframe_wanted: std::sync::Arc<tokio::sync::Notify>,
+    /// When the leg last brought an authentic packet, SRTP or SRTCP.
+    heard: Heard,
+    /// When the leg last brought a picture's packet, SRTP: what stands for the
+    /// first picture of a display nobody is shown ([`MediaStream::show`]).
+    pictured: Heard,
+    /// Whether anybody is shown this display. The pictures of one nobody is shown
+    /// are authenticated and dropped: neither decoded nor passed on.
+    shown: std::sync::Arc<std::sync::atomic::AtomicBool>,
 }
 
 /// Where the receiver and its decoder threads leave the first reason they stopped.
@@ -1693,14 +1860,17 @@ enum Owed {
     /// Nothing: no stream is offered, as before the first display and across a
     /// display change.
     Nothing,
+    /// The Mac's ports, without which no offer can go out, since this instant: the
+    /// encodings naming the stream went then, or the display settled without them.
+    Ports(std::time::Instant),
     /// An answer to the offer that went at this instant, for a display that has
     /// changed since. No other offer can go out until it comes.
     Answer(std::time::Instant),
-    /// Both legs, for the offer that went at `offered`: the first picture of its
+    /// Every leg, for the offer that went at `offered`: the first picture of each
     /// display and the first sound within [`STREAM_START`] of it, and after them
     /// a packet on each leg within [`STREAM_SILENCE`] of the last. `pictured` is
-    /// when the latest picture of that display came.
-    Stream { offered: std::time::Instant, pictured: Option<std::time::Instant> },
+    /// when the latest picture of each display came.
+    Stream { offered: std::time::Instant, pictured: [Option<std::time::Instant>; MAX_DISPLAYS] },
 }
 
 /// When `heard` last brought a packet, if it has since `since`.
@@ -1718,36 +1888,56 @@ fn leg_due(offered: std::time::Instant, last: Option<std::time::Instant>) -> std
 }
 
 impl MediaStream {
-    /// `pass` hands the read loop the Mac's access units rather than pictures
-    /// decoded from them — see [`Pictures`].
-    pub fn new(peer: std::net::SocketAddr, local: std::net::SocketAddr, pass: bool) -> (Self, Pictures) {
-        let (pictures, rx) = if pass {
-            let (tx, rx) = tokio::sync::mpsc::channel(PASS_QUEUE);
-            (Outlet::Passed(tx), Pictures::Passed(rx))
-        } else {
-            let (tx, rx) = tokio::sync::watch::channel(None);
-            (Outlet::Decoded(tx), Pictures::Decoded(rx))
-        };
+    /// A stream for `displays` virtual displays, with a [`Pictures`] for each in
+    /// the Mac's order. `pass` hands the read loop the Mac's access units rather
+    /// than pictures decoded from them — see [`Pictures`]. The first display is
+    /// shown from the start, and any other once [`Self::show`] says so.
+    pub fn new(
+        peer: std::net::SocketAddr,
+        local: std::net::SocketAddr,
+        pass: bool,
+        displays: usize,
+    ) -> (Self, Vec<Pictures>) {
+        let offers = Offers::new(displays);
+        let (legs, pictures) = (0..offers.videos.len())
+            .map(|index| {
+                let (pictures, rx) = if pass {
+                    let (tx, rx) = tokio::sync::mpsc::channel(PASS_QUEUE);
+                    (Outlet::Passed(tx), Pictures::Passed(rx))
+                } else {
+                    let (tx, rx) = tokio::sync::watch::channel(None);
+                    (Outlet::Decoded(tx), Pictures::Decoded(rx))
+                };
+                let leg = Leg {
+                    pictures,
+                    keyframe_wanted: std::sync::Arc::default(),
+                    heard: Heard::default(),
+                    pictured: Heard::default(),
+                    shown: std::sync::Arc::new(std::sync::atomic::AtomicBool::new(index == 0)),
+                };
+                (leg, rx)
+            })
+            .unzip();
         let media = Self {
-            offers: Offers::new(),
+            offers,
             peer: peer.ip(),
             local: local.ip(),
             asked: false,
             pending: false,
-            named: false,
+            invited: false,
             offered: None,
+            strange: None,
             owed: Owed::Nothing,
             offer_made: std::sync::Arc::default(),
             receiver: None,
-            pictures,
-            keyframe_wanted: std::sync::Arc::default(),
+            legs,
+            swapped: false,
             failed: Failure::default(),
-            picture_heard: Heard::default(),
             sound_heard: Heard::default(),
             sounded: Heard::default(),
             sound: None,
         };
-        (media, rx)
+        (media, pictures)
     }
 
     /// Carry the sound leg to `bridge`, the session's, for every stream from here.
@@ -1756,40 +1946,130 @@ impl MediaStream {
         self
     }
 
-    /// What to send to offer the stream for a display of `size` backing pixels,
-    /// unless an offer is already out or the stream already runs at that size: the
-    /// `0x1c` message, and ahead of the session's first one, whether the
-    /// `SetEncodings` naming [`ENCODING_MEDIA_STREAM`] has to precede it.
-    pub fn offer(&mut self, size: (u16, u16)) -> Option<(bool, Vec<u8>)> {
-        if self.pending || self.offered == Some(size) {
+    /// Note the Mac naming its ports, as [`Self::on_reply`] does, for a test of
+    /// another module: binding them takes an address of this host's, which a
+    /// test's is not.
+    #[cfg(test)]
+    pub(crate) fn name_ports(&mut self) {
+        self.asked = true;
+        self.invited = true;
+    }
+
+    /// How many displays the stream carries, a video leg each.
+    pub fn displays(&self) -> usize {
+        self.legs.len()
+    }
+
+    /// Say which display each leg carries. The Mac sends its displays in the
+    /// order they sit in the framebuffer it spans over them, not the order the
+    /// session asked for them in: with the second display arranged to the left
+    /// of the first or above it, on the Mac, the first leg carries the second.
+    /// `swapped` is whether that is so, as the layout places them. Every display
+    /// this stream is asked about or hands a picture of is the session's.
+    ///
+    /// Seen with the second display to the left, the right and above; one placed
+    /// diagonally has not been.
+    pub fn arrange(&mut self, swapped: bool) {
+        let swapped = swapped && self.legs.len() == 2;
+        if std::mem::replace(&mut self.swapped, swapped) != swapped {
+            // Who is shown a display goes with the display.
+            let relaxed = std::sync::atomic::Ordering::Relaxed;
+            let first = self.legs[0].shown.load(relaxed);
+            let second = self.legs[1].shown.swap(first, relaxed);
+            self.legs[0].shown.store(second, relaxed);
+        }
+    }
+
+    /// The leg that carries `display`, and the display leg `display` carries:
+    /// with two the one is the other's inverse.
+    pub fn leg_of(&self, display: usize) -> usize {
+        if self.swapped && display < 2 { 1 - display } else { display }
+    }
+
+    /// What to send toward a stream for displays of `sizes` backing pixels, which
+    /// the session's displays now are and nothing is about to change, unless an
+    /// offer is already out or the stream already runs at those sizes: first the
+    /// `SetEncodings` naming [`ENCODING_MEDIA_STREAM`], then, once the Mac has
+    /// named its ports for it, the `0x1c` offer. Until it has, the Mac owes them.
+    /// Nothing for sizes that are not one per leg: a layout still to catch up with
+    /// the displays asked for.
+    pub fn offer(&mut self, sizes: &[(u16, u16)]) -> Option<Offer> {
+        if self.pending || sizes.len() != self.legs.len() || self.offered.as_deref() == Some(sizes) {
+            return None;
+        }
+        let now = std::time::Instant::now();
+        if !std::mem::replace(&mut self.asked, true) {
+            self.owe(Owed::Ports(now));
+            return Some(Offer::Encodings);
+        }
+        if !std::mem::take(&mut self.invited) {
+            if self.owed == Owed::Nothing {
+                self.owe(Owed::Ports(now));
+            }
             return None;
         }
         self.pending = true;
-        self.named = false;
-        self.offered = Some(size);
-        self.owed = Owed::Stream { offered: std::time::Instant::now(), pictured: None };
-        self.offer_made.notify_one();
-        let first = !std::mem::replace(&mut self.asked, true);
-        Some((first, self.offers.configuration(size)))
+        self.offered = Some(sizes.to_vec());
+        self.strange = None;
+        self.owe(Owed::Stream { offered: now, pictured: [None; MAX_DISPLAYS] });
+        let by_leg: Vec<(u16, u16)> = (0..sizes.len()).map(|leg| sizes[self.leg_of(leg)]).collect();
+        Some(Offer::Configuration(self.offers.configuration(&by_leg)))
     }
 
-    /// The newest decoded picture, for a browser that needs the whole desktop again.
-    /// A passed stream has none: [`Self::want_keyframe`] is its repaint.
-    pub fn latest(&self) -> Option<std::sync::Arc<Picture>> {
-        match &self.pictures {
+    /// Owe `owed` from here, which sets a new deadline.
+    fn owe(&mut self, owed: Owed) {
+        self.owed = owed;
+        self.offer_made.notify_one();
+    }
+
+    /// The newest decoded picture of display `leg`, for a browser that needs the
+    /// whole desktop again. A passed stream has none: [`Self::want_keyframe`] is
+    /// its repaint.
+    pub fn latest(&self, leg: usize) -> Option<std::sync::Arc<Picture>> {
+        match &self.legs.get(self.leg_of(leg))?.pictures {
             Outlet::Decoded(pictures) => pictures.borrow().clone(),
             Outlet::Passed(_) => None,
         }
     }
 
-    /// Ask the Mac for an IDR, with a PLI on the picture's leg: a passed stream's
-    /// browser has to start over, after a reattach or its own decoder's
-    /// failure. The Mac answers within tens of milliseconds. A decoded stream asks
-    /// nothing: its repaint is [`Self::latest`].
-    pub fn want_keyframe(&self) {
-        if matches!(self.pictures, Outlet::Passed(_)) {
-            self.keyframe_wanted.notify_one();
+    /// Ask the Mac for an IDR of display `leg`, with a PLI on its picture's leg: a
+    /// passed stream's browser has to start over, after a reattach or its own
+    /// decoder's failure. The Mac answers within tens of milliseconds. A decoded
+    /// stream asks nothing: its repaint is [`Self::latest`].
+    pub fn want_keyframe(&self, leg: usize) {
+        if let Some(leg) = self.legs.get(self.leg_of(leg))
+            && matches!(leg.pictures, Outlet::Passed(_))
+        {
+            leg.keyframe_wanted.notify_one();
         }
+    }
+
+    /// Whether anybody is shown display `leg` from here. One coming into view
+    /// starts at an IDR the Mac is asked for, decoded or passed: the pictures since
+    /// it went out of view were dropped, and every one predicts from the last.
+    ///
+    /// A display's first picture is owed by its offer, and one coming into view
+    /// long after it has none on record: it counts as delivered here, and owes its
+    /// next packet like any running leg.
+    ///
+    /// `true` when the display came into view with this call, and so has no
+    /// picture to show until that IDR.
+    pub fn show(&mut self, leg: usize, shown: bool) -> bool {
+        let leg = self.leg_of(leg);
+        let Some(shared) = self.legs.get(leg) else {
+            return false;
+        };
+        let came = !shared.shown.swap(shown, std::sync::atomic::Ordering::Relaxed) && shown;
+        if came {
+            shared.keyframe_wanted.notify_one();
+            if let Owed::Stream { offered, pictured } = &mut self.owed
+                && pictured[leg].is_none()
+                && heard_since(&shared.pictured, *offered).is_some()
+            {
+                pictured[leg] = Some(std::time::Instant::now());
+            }
+        }
+        came
     }
 
     /// Whether an offer is out that the Mac has not answered: no display change may
@@ -1798,9 +2078,10 @@ impl MediaStream {
         self.pending
     }
 
-    /// The display changed. The Mac stops both streams for it and starts them
-    /// again only on an offer, which the settled layout gets; until then the stream
-    /// owes nothing but an answer to an offer still out, which holds back that one.
+    /// The display changed. The Mac stops every stream for it and starts them
+    /// again only on an offer, which the settled layout gets once the Mac has named
+    /// its ports for it; until then the stream owes nothing but an answer to an
+    /// offer still out, which holds back that one.
     pub fn stopped(&mut self) {
         self.offered = None;
         self.owed = match self.owed {
@@ -1809,23 +2090,47 @@ impl MediaStream {
         };
     }
 
-    /// A picture of `size` came from the receiver. Each one of the display the
-    /// stream was offered for puts the picture's deadline off; one of another
-    /// display, the old one's last, does not.
-    pub fn pictured(&mut self, size: (u16, u16)) {
-        if let Owed::Stream { pictured, .. } = &mut self.owed
-            && self.offered == Some(size)
+    /// A picture of `size` came from the receiver for display `leg`. Each one of
+    /// the display the stream was offered for puts the picture's deadline off; one
+    /// of another size, the old display's last or another screen's than the one
+    /// offered for, does not, and is remembered for [`Self::overdue`] to name.
+    pub fn pictured(&mut self, leg: usize, size: (u16, u16)) {
+        let carried = self.leg_of(leg);
+        let offered = self.offered.as_ref().and_then(|sizes| sizes.get(leg)).copied();
+        let Owed::Stream { pictured, .. } = &mut self.owed else {
+            return;
+        };
+        if offered == Some(size) {
+            if let Some(pictured) = pictured.get_mut(carried) {
+                *pictured = Some(std::time::Instant::now());
+            }
+            return;
+        }
+        if self.strange.replace(size) != Some(size)
+            && let Some(offered) = offered
         {
-            *pictured = Some(std::time::Instant::now());
+            log::debug!(
+                "vnc: the Mac's media stream brought a {}x{} picture, not one of the {}x{} display it was offered for",
+                size.0, size.1, offered.0, offered.1
+            );
         }
     }
 
-    /// When the picture's leg last delivered: its latest packet, once the offered
-    /// display's first picture has come, which a packet before it cannot stand in
-    /// for.
-    fn picture_last(&self, pictured: Option<std::time::Instant>) -> Option<std::time::Instant> {
-        let pictured = pictured?;
-        Some(heard_since(&self.picture_heard, pictured).unwrap_or(pictured))
+    /// When display `leg`'s picture last delivered: its latest packet, once the
+    /// offered display's first picture has come, which a packet before it cannot
+    /// stand in for. A display nobody is shown hands no picture on, and its first
+    /// is the first packet of one since the offer at `offered`.
+    fn picture_last(
+        &self,
+        leg: usize,
+        offered: std::time::Instant,
+        pictured: Option<std::time::Instant>,
+    ) -> Option<std::time::Instant> {
+        let shared = self.legs.get(leg)?;
+        let unshown = !shared.shown.load(std::sync::atomic::Ordering::Relaxed);
+        let pictured =
+            pictured.or_else(|| unshown.then(|| heard_since(&shared.pictured, offered)).flatten())?;
+        Some(heard_since(&shared.heard, pictured).unwrap_or(pictured))
     }
 
     /// When the sound leg last delivered: its latest packet, once sound has come
@@ -1835,7 +2140,7 @@ impl MediaStream {
         Some(heard_since(&self.sound_heard, sounded).unwrap_or(sounded))
     }
 
-    /// Signalled at every offer, which sets a new [`deadline`](Self::deadline): an
+    /// Signalled at every new [`deadline`](Self::deadline), which an offer sets: an
     /// offer can go out from either of the engine's loops, and the one that waits
     /// for the deadline may be idle behind a still screen when the other sends it.
     pub fn offered(&self) -> std::sync::Arc<tokio::sync::Notify> {
@@ -1846,47 +2151,101 @@ impl MediaStream {
     pub fn deadline(&self) -> Option<std::time::Instant> {
         match self.owed {
             Owed::Nothing => None,
-            Owed::Answer(offered) => Some(offered + STREAM_START),
-            Owed::Stream { offered, pictured } => {
-                let picture = leg_due(offered, self.picture_last(pictured));
-                Some(picture.min(leg_due(offered, self.sound_last(offered))))
-            }
+            Owed::Ports(since) | Owed::Answer(since) => Some(since + STREAM_START),
+            Owed::Stream { offered, pictured } => (0..self.legs.len())
+                .map(|leg| leg_due(offered, self.picture_last(leg, offered, pictured[leg])))
+                .chain([leg_due(offered, self.sound_last(offered))])
+                .min(),
         }
     }
 
     /// The error the session ends with when the stream is overdue at `now`: its
-    /// offer has gone unanswered, or brought no picture or no sound, in
-    /// [`STREAM_START`], or the running stream has sent nothing on a leg, neither
+    /// offer has gone unanswered, or brought no picture of a display or no sound,
+    /// in [`STREAM_START`], or the running stream has sent nothing on a leg, neither
     /// media nor a report, for [`STREAM_SILENCE`]. Apple's viewer ends its session on the same failures,
     /// counted in RTCP timeouts on each leg, and never falls back to RFB pixels.
     pub fn overdue(&self, now: std::time::Instant) -> Option<anyhow::Error> {
         let first = STREAM_START.as_secs();
         let silence = STREAM_SILENCE.as_secs();
-        let unanswered = || anyhow::anyhow!("the Mac did not answer the media-stream offer within {first}s");
-        let portless = || {
-            anyhow::anyhow!("the Mac accepted the media stream but named no ports for it within {first}s")
+        // Each with the cause the page says in the person's language: these are
+        // the ways a Mac's stream does not start, and what there is to do about one
+        // differs.
+        let unanswered = || {
+            Cause::new("AL-7705").with("seconds", first).of(anyhow::anyhow!(
+                "the Mac did not answer the media-stream offer within {first}s"
+            ))
         };
-        let firewalled = |what: &str, port: u16| {
-            anyhow::anyhow!(
+        let unnamed = || {
+            Cause::new("AL-7713").with("seconds", first).of(anyhow::anyhow!(
+                "the Mac named no ports for its media stream within {first}s"
+            ))
+        };
+        let portless = || {
+            Cause::new("AL-7706").with("seconds", first).of(anyhow::anyhow!(
+                "the Mac accepted the media stream but named no ports for it within {first}s"
+            ))
+        };
+        let firewalled = |code: &'static str, what: &str, port: u16| {
+            Cause::new(code).with("seconds", first).with("port", port).of(anyhow::anyhow!(
                 "no {what} came over the Mac's media stream within {first}s of its offer; if \
                  nothing reached UDP {port}, a firewall or NAT between the Mac and this gateway \
                  is what that looks like"
-            )
+            ))
         };
-        let ports = self.receiver.as_ref().map(|(ports, _)| *ports);
+        // What came on the picture's leg with no picture of the offered display
+        // among it: another screen's pictures, or packets that made none. Either is
+        // a stream that reached this gateway, which a firewall's is not.
+        let other_screen = |got: (u16, u16), wanted: (u16, u16)| {
+            Cause::new("AL-7701")
+                .with("got", format_args!("{} × {}", got.0, got.1))
+                .with("wanted", format_args!("{} × {}", wanted.0, wanted.1))
+                .of(anyhow::anyhow!(
+                    "the Mac's media stream brought pictures of {}x{}, not of the {}x{} display it \
+                     was offered for, within {first}s of its offer",
+                    got.0, got.1, wanted.0, wanted.1
+                ))
+        };
+        let pictureless = || {
+            Cause::new("AL-7702").with("seconds", first).of(anyhow::anyhow!(
+                "the Mac's media stream reached this gateway and brought no picture of its \
+                 display within {first}s of its offer"
+            ))
+        };
+        let silent = |code: &'static str, its_leg: &str| {
+            Cause::new(code).with("seconds", silence).of(anyhow::anyhow!(
+                "the Mac's media stream sent nothing on {its_leg} for {silence}s"
+            ))
+        };
+        let ports = self.receiver.as_ref().map(|(ports, _)| ports);
         let (offered, pictured) = match self.owed {
             Owed::Nothing => return None,
+            Owed::Ports(since) => return (now >= since + STREAM_START).then(unnamed),
             Owed::Answer(offered) => return (now >= offered + STREAM_START).then(unanswered),
             Owed::Stream { offered, pictured } => (offered, pictured),
         };
-        if now >= leg_due(offered, self.picture_last(pictured)) {
-            return Some(match (pictured, ports) {
+        for (leg, pictured) in pictured.into_iter().enumerate().take(self.legs.len()) {
+            let last = self.picture_last(leg, offered, pictured);
+            if now < leg_due(offered, last) {
+                continue;
+            }
+            // One display's picture is "the picture"; two are told apart.
+            let (what, its_leg) = if self.legs.len() == 1 {
+                ("picture".to_owned(), "the picture's leg".to_owned())
+            } else {
+                let display = leg + 1;
+                (format!("picture of display {display}"), format!("the leg of display {display}'s picture"))
+            };
+            return Some(match (last, ports.and_then(|ports| ports.videos.get(leg))) {
                 (None, _) if self.pending => unanswered(),
                 (None, None) => portless(),
-                (None, Some((_, video_port))) => firewalled("picture", video_port),
-                (Some(_), _) => {
-                    anyhow::anyhow!("the Mac's media stream sent nothing on the picture's leg for {silence}s")
-                }
+                (None, Some(port)) => match (self.strange, self.offered.as_ref().and_then(|sizes| sizes.get(leg))) {
+                    (Some(got), Some(wanted)) => other_screen(got, *wanted),
+                    _ if self.legs.get(leg).is_some_and(|leg| heard_since(&leg.heard, offered).is_some()) => {
+                        pictureless()
+                    }
+                    _ => firewalled("AL-7703", &what, *port),
+                },
+                (Some(_), _) => silent("AL-7707", &its_leg),
             });
         }
         let heard = self.sound_last(offered);
@@ -1894,10 +2253,8 @@ impl MediaStream {
             return Some(match (heard, ports) {
                 (None, _) if self.pending => unanswered(),
                 (None, None) => portless(),
-                (None, Some((audio_port, _))) => firewalled("sound", audio_port),
-                (Some(_), _) => {
-                    anyhow::anyhow!("the Mac's media stream sent nothing on the sound's leg for {silence}s")
-                }
+                (None, Some(ports)) => firewalled("AL-7704", "sound", ports.audio),
+                (Some(_), _) => silent("AL-7708", "the sound's leg"),
             });
         }
         None
@@ -1909,47 +2266,63 @@ impl MediaStream {
             .lock()
             .unwrap()
             .take()
-            .unwrap_or_else(|| anyhow::anyhow!("its receiver stopped"))
+            .unwrap_or_else(|| crate::cause::Cause::new("AL-7710").of(anyhow::anyhow!("its receiver stopped")))
     }
 
-    /// Act on an encoding-1010 rectangle. `true` when the stream is down until the
-    /// next offer: the Mac re-announced its ports with no offer of this side's out,
-    /// which is what it does after a display change of its own, with no stream
-    /// behind the announcement.
+    /// Act on an encoding-1010 rectangle. `true` when a stream offered for the
+    /// displays went down with it: the Mac named its ports again, which it does
+    /// after every display change, its own included, and the browser is told the
+    /// screen is not available until the offer that naming allows delivers.
     ///
-    /// An offer's ports and its answer come in either order. Ports behind the
-    /// answer are that offer's still: read as an unasked announcement they took
-    /// the stream down, and the offer made in its place was answered with no
-    /// ports at all, the Mac having named them once.
+    /// An offer goes out only once the Mac has named its ports
+    /// ([`offer`](Self::offer)), so ports named while a stream is offered are
+    /// never that offer's: they are the Mac saying its displays changed.
     ///
     /// An error ends the session: the Mac refused the stream, or described one this
     /// side cannot receive. Apple's viewer shows the refusal and closes.
     pub fn on_reply(&mut self, body: &[u8]) -> anyhow::Result<bool> {
         match parse_media_reply(body)? {
-            MediaReply::Ports { audio_port, video_port } => {
-                let owed = matches!(self.owed, Owed::Stream { .. }) && !self.named;
-                if !self.pending && !owed {
-                    log::debug!("vnc: the Mac re-announced its media streams unasked; they are down until offered");
-                    self.stopped();
-                    return Ok(true);
+            MediaReply::Ports { audio_port, video_port, video2_port } => {
+                let videos: Vec<u16> = [Some(video_port), video2_port].into_iter().flatten().collect();
+                crate::ensure_known!("AL-7715"; 
+                    videos.len() == self.legs.len(),
+                    "media-stream message 1 enabled {} video leg(s) for the {} virtual display(s) \
+                     this session asked for",
+                    videos.len(),
+                    self.legs.len()
+                );
+                self.invited = true;
+                if matches!(self.owed, Owed::Ports(_)) {
+                    self.owed = Owed::Nothing;
                 }
-                self.named = true;
-                let ports = (audio_port, video_port);
+                let down = self.offered.is_some();
+                if down {
+                    log::debug!("vnc: the Mac re-announced its media streams; they are down until offered");
+                    self.stopped();
+                }
+                let ports = Ports { audio: audio_port, videos };
                 // The Mac names the same ports every time, and the receiver carries
                 // on across display changes.
                 if self.receiver.as_ref().is_some_and(|(bound, _)| *bound == ports) {
-                    return Ok(false);
+                    return Ok(down);
                 }
                 if let Some((_, receiver)) = self.receiver.take() {
                     receiver.abort();
                 }
                 log::info!(
-                    "vnc: the Mac opened its media streams: screen video at UDP {video_port}, \
-                     sound at {audio_port}"
+                    "vnc: the Mac opened its media streams: screen video at UDP {}, sound at {audio_port}",
+                    ports.videos.iter().map(u16::to_string).collect::<Vec<_>>().join(" and ")
                 );
-                self.receiver = Some((ports, self.receive(ports)?));
+                let receiver = self.receive(&ports).cause(|| crate::cause::Cause::new("AL-7716"))?;
+                self.receiver = Some((ports, receiver));
+                return Ok(down);
             }
-            MediaReply::Answer => {
+            MediaReply::Answer { videos } => {
+                crate::ensure_known!("AL-7715"; 
+                    videos == self.legs.len(),
+                    "the Mac answered {videos} video leg(s) of the {} this session offered",
+                    self.legs.len()
+                );
                 log::debug!("vnc: the Mac accepted the media-stream offer");
                 self.pending = false;
                 // The display it was for has gone, and the new one's offer can
@@ -1958,16 +2331,26 @@ impl MediaStream {
                     self.owed = Owed::Nothing;
                 }
             }
-            MediaReply::Error { kind, sub_code } => anyhow::bail!(
-                "the Mac refused the media stream (error type {kind}, sub-code {sub_code})"
-            ),
+            // What the Mac answers a viewer that asks for the stream while
+            // another holds it.
+            MediaReply::Error { kind: 1, sub_code: 1 } => {
+                return Err(Cause::new("AL-7714").of(anyhow::anyhow!(
+                    "another viewer already has the Mac's High Performance stream, which it gives \
+                     to one at a time (error type 1, sub-code 1)"
+                )));
+            }
+            MediaReply::Error { kind, sub_code } => {
+                return Err(Cause::new("AL-7709").of(anyhow::anyhow!(
+                    "the Mac refused the media stream (error type {kind}, sub-code {sub_code})"
+                )));
+            }
             MediaReply::Other(kind) => log::debug!("vnc: ignoring media-stream message type {kind}"),
         }
         Ok(false)
     }
 
     /// Bind the ports the Mac named and start receiving on them.
-    fn receive(&self, ports: (u16, u16)) -> anyhow::Result<tokio::task::JoinHandle<()>> {
+    fn receive(&self, ports: &Ports) -> anyhow::Result<tokio::task::JoinHandle<()>> {
         Ok(tokio::spawn(Receiver::bind(self, ports)?.run()))
     }
 }
@@ -1998,7 +2381,9 @@ pub const STREAM_SILENCE: std::time::Duration = std::time::Duration::from_secs(4
 const DECODE_QUEUE: usize = 8;
 
 /// The least time between two keyframe requests. The Mac answers one in tens of
-/// milliseconds; this keeps a burst of losses from asking for one per packet.
+/// milliseconds; this keeps a burst of losses from asking for one per packet. It
+/// is also how often a request the Mac dropped is made again: with one picture
+/// to a frame the Mac drops any that comes within a second of its last keyframe.
 const PLI_INTERVAL: std::time::Duration = std::time::Duration::from_millis(500);
 
 /// How often the Mac's rate controller is sent a [`RateFeedback`] report: Apple's
@@ -2021,7 +2406,7 @@ const VIDEO_RECEIVE_BUFFER: usize = 4 << 20;
 /// ports is what that looks like, and the session ends at [`STREAM_START`].
 const SILENT_START: std::time::Duration = std::time::Duration::from_secs(5);
 
-/// `REMOTEX_HP_DUMP=<dir>`: the stream as it arrives, for replay outside the
+/// `ALUMIA_HP_DUMP=<dir>`: the stream as it arrives, for replay outside the
 /// gateway (`tests/hp_capture.sh`). `video.h265` is every access unit the
 /// depacketizer completes, as Annex B; `audio.eld` is every AAC-ELD unit, each
 /// behind its length as a big-endian u32. Both are written before any decoder
@@ -2046,7 +2431,7 @@ const DUMP_QUEUE: usize = 4096;
 
 impl MediaDump {
     fn from_env() -> Option<Self> {
-        let dir = std::path::PathBuf::from(std::env::var_os("REMOTEX_HP_DUMP")?);
+        let dir = std::path::PathBuf::from(std::env::var_os("ALUMIA_HP_DUMP")?);
         let open = |name: &str| {
             std::fs::File::create(dir.join(name))
                 .map(std::io::BufWriter::new)
@@ -2080,7 +2465,7 @@ impl MediaDump {
             log::warn!("vnc: not dumping the media stream: no writer thread: {e}");
             return None;
         }
-        log::info!("vnc: dumping the media stream to {} (REMOTEX_HP_DUMP)", dir.display());
+        log::info!("vnc: dumping the media stream to {} (ALUMIA_HP_DUMP)", dir.display());
         Some(Self { units })
     }
 
@@ -2114,38 +2499,275 @@ impl MediaDump {
     }
 }
 
-/// The UDP side: RTCP out on both legs once a second and rate reports on the
+/// The UDP side: RTCP out on every leg once a second and rate reports on each
 /// picture's every [`RATE_FEEDBACK`], video in and depacketized, sound in and
 /// decoded or passed. It runs until the session drops it, and stops early only
 /// on a failure, which it leaves in `failed` and which ends the session.
 struct Receiver {
     audio: tokio::net::UdpSocket,
-    video: tokio::net::UdpSocket,
-    video_port: u16,
-    video_srtp: SrtpReceiver,
     audio_srtp: SrtpReceiver,
     audio_rtcp: SrtcpSender,
-    video_rtcp: SrtcpSender,
-    video_reports: SrtcpReceiver,
     audio_reports: SrtcpReceiver,
     audio_ssrc: u32,
-    video_ssrc: u32,
-    pictures: Outlet,
-    keyframe_wanted: std::sync::Arc<tokio::sync::Notify>,
+    /// Each display's video leg, in the Mac's order.
+    videos: Vec<VideoLeg>,
     failed: Failure,
-    picture_heard: Heard,
     sound_heard: Heard,
     sounded: Heard,
     sound: Option<std::sync::Arc<crate::audio::AudioBridge>>,
 }
 
+/// One display's video leg in the receiver: its socket and keys, and where its
+/// pictures have got to.
+struct VideoLeg {
+    /// The display's number, from one, for the log.
+    display: usize,
+    socket: tokio::net::UdpSocket,
+    port: u16,
+    srtp: SrtpReceiver,
+    rtcp: SrtcpSender,
+    reports: SrtcpReceiver,
+    /// This side's SSRC on the leg, and the Mac's, once a packet has named it.
+    ssrc: u32,
+    media_ssrc: u32,
+    shared: Leg,
+    onward: Onward,
+    /// Set by the decoder thread for a unit that failed to decode.
+    keyframe: std::sync::Arc<std::sync::atomic::AtomicBool>,
+    depacketizer: Depacketizer,
+    feedback: RateFeedback,
+    keyframe_request: KeyframeRequest,
+    /// The stream's picture size, from its parameter sets: what a refresh
+    /// request names.
+    size: Option<(u16, u16)>,
+    /// The RTP timestamp of a picture handed on and not yet acknowledged.
+    unacknowledged: Option<u32>,
+    packets: u64,
+    forged: u64,
+    behind: u64,
+    pictures: u64,
+    /// Refreshes and keyframes asked of the Mac.
+    asks: u64,
+}
+
+/// The picture a leg's stream needs before it can go on.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum Ask {
+    /// One predicted from a picture already handed on, after lost packets
+    /// ([`rtcp_refresh`]).
+    Refresh,
+    /// An IDR ([`rtcp_pli`]): whoever is shown the stream has nothing to predict
+    /// from.
+    Keyframe,
+}
+
+/// A picture still to come on a leg: asked for as soon as the leg's stream has
+/// an SSRC to name, and again every [`PLI_INTERVAL`] until one arrives, since
+/// the Mac drops a request made too soon after its last keyframe and a still
+/// screen sends nothing more to show that it did.
+#[derive(Default)]
+struct KeyframeRequest {
+    owed: Option<Ask>,
+    asked: Option<tokio::time::Instant>,
+}
+
+impl KeyframeRequest {
+    /// An IDR wanted outlasts a refresh wanted, not the other way round.
+    fn want(&mut self, ask: Ask) {
+        self.owed = self.owed.max(Some(ask));
+    }
+
+    /// A picture the stream can go on from has arrived, or the stream it was
+    /// asked of is over.
+    fn settle(&mut self) {
+        self.owed = None;
+    }
+
+    /// What to ask for at `now`, which counts as asking.
+    fn due(&mut self, now: tokio::time::Instant) -> Option<Ask> {
+        if self.asked.is_some_and(|at| now.duration_since(at) < PLI_INTERVAL) {
+            return None;
+        }
+        let ask = self.owed?;
+        self.asked = Some(now);
+        Some(ask)
+    }
+}
+
+/// What one datagram on a video leg asks of the receiver.
+enum Took {
+    Nothing,
+    /// The stream cannot go on from here without this.
+    Wants(Ask),
+}
+
+impl VideoLeg {
+    /// Its sender, for the log: which display, where there is more than one.
+    fn name(&self, alone: bool) -> String {
+        if alone { "screen video".to_owned() } else { format!("screen video of display {}", self.display) }
+    }
+
+    /// One datagram off the leg's socket: authenticated, and its picture, once
+    /// whole, handed on to whoever is shown the display.
+    fn take(
+        &mut self,
+        data: &mut [u8],
+        arrived: std::time::Instant,
+        dump: &mut Option<MediaDump>,
+        alone: bool,
+    ) -> anyhow::Result<Took> {
+        let header = match self.srtp.unprotect(data) {
+            Ok(header) => header,
+            // The Mac's report, which keeps the leg alive while a still screen
+            // sends no picture.
+            Err(SrtpError::Rtcp) => {
+                if self.reports.authenticate(data).is_ok() {
+                    *self.shared.heard.lock().unwrap() = Some(std::time::Instant::now());
+                }
+                return Ok(Took::Nothing);
+            }
+            Err(SrtpError::Forged) => {
+                self.forged += 1;
+                if self.forged <= 3 {
+                    log::warn!(
+                        "vnc: dropped a {} packet whose SRTP tag did not match",
+                        self.name(alone)
+                    );
+                }
+                return Ok(Took::Nothing);
+            }
+            Err(_) => return Ok(Took::Nothing),
+        };
+        *self.shared.heard.lock().unwrap() = Some(arrived);
+        *self.shared.pictured.lock().unwrap() = Some(arrived);
+        self.feedback.received(header.ssrc, header.timestamp, arrived);
+        self.packets += 1;
+        if self.packets == 1 {
+            log::info!("vnc: the Mac's {} is flowing (SSRC {:#x})", self.name(alone), header.ssrc);
+        }
+        if self.media_ssrc != header.ssrc {
+            // A new stream, after an offer, starts with an IDR of its own.
+            self.keyframe_request.settle();
+            self.size = None;
+        }
+        self.media_ssrc = header.ssrc;
+        // A display nobody is shown costs its packets' authentication and nothing
+        // more. It starts over at the IDR [`MediaStream::show`] has asked for by
+        // the time it is back in view, whose first packet may be the next one.
+        if !self.shared.shown.load(std::sync::atomic::Ordering::Relaxed) {
+            self.depacketizer.skip(&header);
+            self.keyframe_request.settle();
+            return Ok(Took::Nothing);
+        }
+        let payload = &data[header.payload.0..header.payload.1];
+        match self.depacketizer.push(&header, payload) {
+            Depacketized::Pending => Ok(Took::Nothing),
+            Depacketized::Lost if self.depacketizer.resumes_at_refresh() => Ok(Took::Wants(Ask::Refresh)),
+            Depacketized::Lost => Ok(Took::Wants(Ask::Keyframe)),
+            Depacketized::Unit(unit) => {
+                // Only a stream that has had a picture it can go on from yields one.
+                self.keyframe_request.settle();
+                if let Some(params) =
+                    unit.iter().find(|nal| nal_type(nal[0]) == NAL_SPS).and_then(|sps| parse_sps(sps))
+                {
+                    self.size = Some(params.size);
+                }
+                // The dump is the first display's stream.
+                if self.display == 1
+                    && let Some(d) = dump.as_ref()
+                    && let Err(e) = d.video(&unit)
+                {
+                    log::warn!("vnc: stopped dumping the media stream: {e:#}");
+                    *dump = None;
+                }
+                match self.onward.send(unit) {
+                    Sent::Queued => {
+                        self.pictures += 1;
+                        self.unacknowledged = Some(header.timestamp);
+                        Ok(Took::Nothing)
+                    }
+                    Sent::Full(depth) => {
+                        self.behind += 1;
+                        if self.behind <= 3 {
+                            log::warn!(
+                                "vnc: {} fell {depth} pictures behind the Mac's {}; dropping to \
+                                 its next keyframe",
+                                self.onward.name(),
+                                self.name(alone)
+                            );
+                        }
+                        self.depacketizer.resync();
+                        Ok(Took::Wants(Ask::Keyframe))
+                    }
+                    Sent::Unready => Ok(Took::Wants(Ask::Keyframe)),
+                    Sent::Stopped => Err(crate::cause::Cause::new("AL-7710").of(anyhow::anyhow!("{} stopped", self.onward.name()))),
+                }
+            }
+        }
+    }
+
+    /// Ask the Mac for the picture `wanted` now or still owed, when the leg's
+    /// stream has named its SSRC and the last request is [`PLI_INTERVAL`] old. It
+    /// stays owed until [`Self::take`] has a picture.
+    async fn ask_keyframe(&mut self, wanted: Option<Ask>) {
+        if let Some(ask) = wanted {
+            self.keyframe_request.want(ask);
+        }
+        if self.media_ssrc == 0 {
+            return;
+        }
+        let Some(ask) = self.keyframe_request.due(tokio::time::Instant::now()) else {
+            return;
+        };
+        self.asks += 1;
+        let request = match (ask, self.size) {
+            (Ask::Refresh, Some(size)) => self.rtcp.protect(&rtcp_refresh(self.ssrc, self.media_ssrc, size)),
+            _ => self.rtcp.protect(&rtcp_pli(self.ssrc, self.media_ssrc)),
+        };
+        let _ = self.socket.send(&request).await;
+    }
+
+    /// Tell the Mac's encoder of the picture just handed on, which it may then
+    /// predict a refresh from.
+    async fn acknowledge(&mut self) {
+        if let Some(timestamp) = self.unacknowledged.take() {
+            let ack = self.rtcp.protect(&rtcp_reference_ack(self.ssrc, timestamp));
+            let _ = self.socket.send(&ack).await;
+        }
+    }
+}
+
+/// A datagram off the second display's socket, on a stream that has one.
+async fn second_received(videos: &[VideoLeg], datagram: &mut [u8]) -> std::io::Result<usize> {
+    match videos.get(1) {
+        Some(leg) => leg.socket.recv(datagram).await,
+        None => std::future::pending().await,
+    }
+}
+
+/// Which display the session asked a keyframe of.
+async fn keyframe_wanted(videos: &[VideoLeg]) -> usize {
+    match videos {
+        [] => std::future::pending().await,
+        [only] => {
+            only.shared.keyframe_wanted.notified().await;
+            0
+        }
+        [first, second, ..] => tokio::select! {
+            () = first.shared.keyframe_wanted.notified() => 0,
+            () = second.shared.keyframe_wanted.notified() => 1,
+        },
+    }
+}
+
 impl Receiver {
-    /// The two sockets, bound to the port numbers the Mac named and connected to
-    /// the Mac's. Every Mac names the same ones (its RFB port and the next), so a
+    /// The sockets, bound to the port numbers the Mac named and connected to
+    /// the Mac's. Every Mac names the same ones (its RFB port and the next, and the
+    /// one after for a second display), so a
     /// second gateway on this host with a High Performance session of its own
     /// binds them too: address and port reuse let both, and each socket being
     /// connected is what has the kernel hand each gateway its own Mac's packets.
-    fn bind(media: &MediaStream, (audio_port, video_port): (u16, u16)) -> anyhow::Result<Self> {
+    fn bind(media: &MediaStream, ports: &Ports) -> anyhow::Result<Self> {
         let bind = |port: u16, buffer: Option<usize>| -> anyhow::Result<tokio::net::UdpSocket> {
             let at = std::net::SocketAddr::new(media.local, port);
             let to = std::net::SocketAddr::new(media.peer, port);
@@ -2160,7 +2782,7 @@ impl Receiver {
             if let Some(buffer) = buffer {
                 socket
                     .set_recv_buffer_size(buffer)
-                    .with_context(|| format!("size UDP {at}'s receive buffer"))?;
+                    .with_context(|| format!("size UDP {at}'s receive buffer")).cause(|| crate::cause::Cause::new("AL-7716"))?;
                 let granted = socket.recv_buffer_size()?;
                 // Linux reads back twice what it grants, the half beside the
                 // payload being its own bookkeeping.
@@ -2176,27 +2798,64 @@ impl Receiver {
             }
             socket
                 .bind(&at.into())
-                .with_context(|| format!("bind UDP {at} for the Mac's media stream"))?;
-            socket.connect(&to.into()).with_context(|| format!("connect UDP {at} to {to}"))?;
+                .with_context(|| format!("bind UDP {at} for the Mac's media stream")).cause(|| crate::cause::Cause::new("AL-7716"))?;
+            socket.connect(&to.into()).with_context(|| format!("connect UDP {at} to {to}")).cause(|| crate::cause::Cause::new("AL-7716"))?;
             socket.set_nonblocking(true)?;
             Ok(tokio::net::UdpSocket::from_std(socket.into())?)
         };
+        let epoch = std::time::Instant::now();
+        let videos = media
+            .legs
+            .iter()
+            .zip(&media.offers.videos)
+            .zip(&ports.videos)
+            .enumerate()
+            .map(|(index, ((shared, offer), port))| {
+                let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                let onward = match &shared.pictures {
+                    Outlet::Decoded(pictures) => {
+                        let (units, decoder) = spawn_decoder(
+                            pictures.clone(),
+                            std::sync::Arc::clone(&keyframe),
+                            std::sync::Arc::clone(&media.failed),
+                        );
+                        Onward::Decoder(units, decoder)
+                    }
+                    Outlet::Passed(units) => Onward::Browser(Passer::default(), units.clone()),
+                };
+                Ok(VideoLeg {
+                    display: index + 1,
+                    socket: bind(*port, Some(VIDEO_RECEIVE_BUFFER))?,
+                    port: *port,
+                    srtp: SrtpReceiver::new(&offer.keys.1),
+                    rtcp: SrtcpSender::new(&offer.keys.0),
+                    reports: SrtcpReceiver::new(&offer.keys.1),
+                    ssrc: offer.ssrc,
+                    media_ssrc: 0,
+                    shared: shared.clone(),
+                    onward,
+                    keyframe,
+                    depacketizer: Depacketizer::default(),
+                    feedback: RateFeedback::new(epoch),
+                    keyframe_request: KeyframeRequest::default(),
+                    size: None,
+                    unacknowledged: None,
+                    packets: 0,
+                    forged: 0,
+                    behind: 0,
+                    pictures: 0,
+                    asks: 0,
+                })
+            })
+            .collect::<anyhow::Result<Vec<_>>>()?;
         Ok(Self {
-            audio: bind(audio_port, None)?,
-            video: bind(video_port, Some(VIDEO_RECEIVE_BUFFER))?,
-            video_port,
-            video_srtp: SrtpReceiver::new(&media.offers.video_keys.1),
+            audio: bind(ports.audio, None)?,
             audio_srtp: SrtpReceiver::new(&media.offers.audio_keys.1),
             audio_rtcp: SrtcpSender::new(&media.offers.audio_keys.0),
-            video_rtcp: SrtcpSender::new(&media.offers.video_keys.0),
-            video_reports: SrtcpReceiver::new(&media.offers.video_keys.1),
             audio_reports: SrtcpReceiver::new(&media.offers.audio_keys.1),
             audio_ssrc: media.offers.audio_ssrc,
-            video_ssrc: media.offers.video_ssrc,
-            pictures: media.pictures.clone(),
-            keyframe_wanted: std::sync::Arc::clone(&media.keyframe_wanted),
+            videos,
             failed: std::sync::Arc::clone(&media.failed),
-            picture_heard: std::sync::Arc::clone(&media.picture_heard),
             sound_heard: std::sync::Arc::clone(&media.sound_heard),
             sounded: std::sync::Arc::clone(&media.sounded),
             sound: media.sound.clone(),
@@ -2204,78 +2863,68 @@ impl Receiver {
     }
 
     async fn run(mut self) {
-        let keyframe = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-        let mut onward = match &self.pictures {
-            Outlet::Decoded(pictures) => {
-                let (units, decoder) = spawn_decoder(
-                    pictures.clone(),
-                    std::sync::Arc::clone(&keyframe),
-                    std::sync::Arc::clone(&self.failed),
-                );
-                Onward::Decoder(units, decoder)
-            }
-            Outlet::Passed(units) => Onward::Browser(Passer::default(), units.clone()),
-        };
-        let keyframe_wanted = std::sync::Arc::clone(&self.keyframe_wanted);
+        let alone = self.videos.len() == 1;
         let mut sound = self.sound.take().map(Sound::start);
-        let mut depacketizer = Depacketizer::default();
         let mut rtcp = tokio::time::interval(std::time::Duration::from_secs(1));
         let mut rate = tokio::time::interval(RATE_FEEDBACK);
         rate.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Delay);
-        let mut feedback = RateFeedback::new(std::time::Instant::now());
         let started = tokio::time::Instant::now();
-        let mut last_pli: Option<tokio::time::Instant> = None;
-        let mut media_ssrc = 0u32;
-        let mut packets: u64 = 0;
-        let mut forged: u64 = 0;
-        let mut behind: u64 = 0;
-        let (mut ticks, mut pictures, mut plis) = (0u32, 0u64, 0u64);
+        let mut ticks = 0u32;
         let mut warned_silent = false;
         let mut datagram = vec![0u8; 65_536];
+        let mut second_datagram = vec![0u8; if alone { 0 } else { 65_536 }];
         let mut sound_datagram = vec![0u8; 2048];
         let mut dump = MediaDump::from_env();
         let failure = loop {
-            let mut want_keyframe = false;
+            let mut want_keyframe = [None; MAX_DISPLAYS];
             tokio::select! {
                 _ = rtcp.tick() => {
                     let audio = self.audio_rtcp.protect(&rtcp_receiver_report(self.audio_ssrc));
-                    let video = self.video_rtcp.protect(&rtcp_receiver_report(self.video_ssrc));
                     let _ = self.audio.send(&audio).await;
-                    let _ = self.video.send(&video).await;
                     ticks += 1;
-                    if ticks % RATE_REPORT == 0 && pictures > 0 {
-                        log::debug!(
-                            "vnc: {:.1} pictures a second from the Mac over the last {RATE_REPORT}s, \
-                             {behind} dropped behind {} so far, {plis} keyframes asked for, \
-                             {:.1} ms of one-way delay reported",
-                            pictures as f64 / f64::from(RATE_REPORT),
-                            onward.name(),
-                            feedback.delay() * 1000.0
-                        );
-                        pictures = 0;
-                    }
-                    if packets == 0 && !warned_silent && started.elapsed() >= SILENT_START {
-                        warned_silent = true;
-                        log::warn!(
-                            "vnc: the Mac named UDP {} for its screen video but nothing has \
-                             arrived in {}s — it sends to this gateway's address on that port, \
-                             so a firewall or NAT between them is what this looks like",
-                            self.video_port,
-                            SILENT_START.as_secs()
-                        );
+                    for leg in &mut self.videos {
+                        let report = leg.rtcp.protect(&rtcp_receiver_report(leg.ssrc));
+                        let _ = leg.socket.send(&report).await;
+                        if ticks.is_multiple_of(RATE_REPORT) && leg.pictures > 0 {
+                            log::debug!(
+                                "vnc: {:.1} pictures a second of the Mac's {} over the last {RATE_REPORT}s, \
+                                 {} dropped behind {} so far, {} refreshes or keyframes asked for, \
+                                 {:.1} ms of one-way delay reported",
+                                leg.pictures as f64 / f64::from(RATE_REPORT),
+                                leg.name(alone),
+                                leg.behind,
+                                leg.onward.name(),
+                                leg.asks,
+                                leg.feedback.delay() * 1000.0
+                            );
+                            leg.pictures = 0;
+                        }
+                        if leg.packets == 0 && !warned_silent && started.elapsed() >= SILENT_START {
+                            warned_silent = true;
+                            log::warn!(
+                                "vnc: the Mac named UDP {} for its {} but nothing has \
+                                 arrived in {}s — it sends to this gateway's address on that port, \
+                                 so a firewall or NAT between them is what this looks like",
+                                leg.port,
+                                leg.name(alone),
+                                SILENT_START.as_secs()
+                            );
+                        }
                     }
                 }
                 _ = rate.tick() => {
-                    if let Some(report) = feedback.report(self.video_ssrc, std::time::Instant::now()) {
-                        let report = self.video_rtcp.protect(&report);
-                        let _ = self.video.send(&report).await;
+                    for leg in &mut self.videos {
+                        if let Some(report) = leg.feedback.report(leg.ssrc, std::time::Instant::now()) {
+                            let report = leg.rtcp.protect(&report);
+                            let _ = leg.socket.send(&report).await;
+                        }
                     }
                 }
                 received = self.audio.recv(&mut sound_datagram) => {
                     let len = match received {
                         Ok(len) => len,
                         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => continue,
-                        Err(e) => break anyhow::Error::new(e).context("the Mac's sound socket failed"),
+                        Err(e) => break crate::cause::Cause::new("AL-7710").of(anyhow::Error::new(e).context("the Mac's sound socket failed")),
                     };
                     let data = &mut sound_datagram[..len];
                     match (self.audio_srtp.unprotect(data), sound.as_mut()) {
@@ -2302,7 +2951,7 @@ impl Receiver {
                         (Err(_), _) => {}
                     }
                 }
-                received = self.video.recv(&mut datagram) => {
+                received = self.videos[0].socket.recv(&mut datagram) => {
                     let arrived = std::time::Instant::now();
                     let len = match received {
                         Ok(len) => len,
@@ -2310,84 +2959,43 @@ impl Receiver {
                         // report sent before the Mac's side was up.
                         Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => continue,
                         Err(e) => {
-                            break anyhow::Error::new(e).context("the Mac's screen video socket failed");
+                            break crate::cause::Cause::new("AL-7710").of(anyhow::Error::new(e).context("the Mac's screen video socket failed"));
                         }
                     };
-                    let data = &mut datagram[..len];
-                    let header = match self.video_srtp.unprotect(data) {
-                        Ok(header) => header,
-                        // The Mac's report, which keeps the leg alive while a still
-                        // screen sends no picture.
-                        Err(SrtpError::Rtcp) => {
-                            if self.video_reports.authenticate(data).is_ok() {
-                                *self.picture_heard.lock().unwrap() = Some(std::time::Instant::now());
-                            }
-                            continue;
+                    match self.videos[0].take(&mut datagram[..len], arrived, &mut dump, alone) {
+                        Ok(Took::Nothing) => {}
+                        Ok(Took::Wants(ask)) => want_keyframe[0] = Some(ask),
+                        Err(e) => break e,
+                    }
+                }
+                received = second_received(&self.videos, &mut second_datagram) => {
+                    let arrived = std::time::Instant::now();
+                    let len = match received {
+                        Ok(len) => len,
+                        Err(e) if e.kind() == std::io::ErrorKind::ConnectionRefused => continue,
+                        Err(e) => {
+                            break crate::cause::Cause::new("AL-7710")
+                                .of(anyhow::Error::new(e).context("the Mac's second screen video socket failed"));
                         }
-                        Err(SrtpError::Forged) => {
-                            forged += 1;
-                            if forged <= 3 {
-                                log::warn!("vnc: dropped a screen video packet whose SRTP tag did not match");
-                            }
-                            continue;
-                        }
-                        Err(_) => continue,
                     };
-                    *self.picture_heard.lock().unwrap() = Some(arrived);
-                    feedback.received(header.ssrc, header.timestamp, arrived);
-                    packets += 1;
-                    if packets == 1 {
-                        log::info!("vnc: the Mac's screen video is flowing (SSRC {:#x})", header.ssrc);
-                    }
-                    media_ssrc = header.ssrc;
-                    let payload = &data[header.payload.0..header.payload.1];
-                    match depacketizer.push(&header, payload) {
-                        Depacketized::Pending => {}
-                        Depacketized::Lost => want_keyframe = true,
-                        Depacketized::Unit(unit) => {
-                            if let Some(d) = dump.as_ref()
-                                && let Err(e) = d.video(&unit)
-                            {
-                                log::warn!("vnc: stopped dumping the media stream: {e:#}");
-                                dump = None;
-                            }
-                            match onward.send(unit) {
-                                Sent::Queued => pictures += 1,
-                                Sent::Full(depth) => {
-                                    behind += 1;
-                                    if behind <= 3 {
-                                        log::warn!(
-                                            "vnc: {} fell {depth} pictures behind the Mac; \
-                                             dropping to its next keyframe",
-                                            onward.name()
-                                        );
-                                    }
-                                    depacketizer.resync();
-                                    want_keyframe = true;
-                                }
-                                Sent::Unready => want_keyframe = true,
-                                Sent::Stopped => break anyhow::anyhow!("{} stopped", onward.name()),
-                            }
-                        }
+                    match self.videos[1].take(&mut second_datagram[..len], arrived, &mut dump, alone) {
+                        Ok(Took::Nothing) => {}
+                        Ok(Took::Wants(ask)) => want_keyframe[1] = Some(ask),
+                        Err(e) => break e,
                     }
                 }
-                () = keyframe_wanted.notified() => {
-                    depacketizer.resync();
-                    want_keyframe = true;
+                leg = keyframe_wanted(&self.videos) => {
+                    self.videos[leg].depacketizer.resync();
+                    self.videos[leg].keyframe_request.want(Ask::Keyframe);
                 }
             }
-            if keyframe.swap(false, std::sync::atomic::Ordering::Relaxed) {
-                depacketizer.resync();
-                want_keyframe = true;
-            }
-            if want_keyframe
-                && media_ssrc != 0
-                && last_pli.is_none_or(|at| at.elapsed() >= PLI_INTERVAL)
-            {
-                last_pli = Some(tokio::time::Instant::now());
-                plis += 1;
-                let pli = self.video_rtcp.protect(&rtcp_pli(self.video_ssrc, media_ssrc));
-                let _ = self.video.send(&pli).await;
+            for (leg, wanted) in self.videos.iter_mut().zip(want_keyframe) {
+                let failed = leg.keyframe.swap(false, std::sync::atomic::Ordering::Relaxed);
+                if failed {
+                    leg.depacketizer.resync();
+                }
+                leg.acknowledge().await;
+                leg.ask_keyframe(if failed { Some(Ask::Keyframe) } else { wanted }).await;
             }
         };
         // The stream has failed while the RFB session goes on. The reason, then
@@ -2395,16 +3003,18 @@ impl Receiver {
         // decoder's last picture, or that picture would be the last word.
         log::warn!("vnc: the Mac's media receiver stopped: {failure:#}");
         fail(&self.failed, failure);
-        match onward {
-            Onward::Decoder(units, decoder) => {
-                drop(units);
-                let _ = tokio::task::spawn_blocking(move || decoder.join()).await;
-                if let Outlet::Decoded(pictures) = &self.pictures {
-                    pictures.send_replace(None);
+        for leg in self.videos {
+            match leg.onward {
+                Onward::Decoder(units, decoder) => {
+                    drop(units);
+                    let _ = tokio::task::spawn_blocking(move || decoder.join()).await;
+                    if let Outlet::Decoded(pictures) = &leg.shared.pictures {
+                        pictures.send_replace(None);
+                    }
                 }
-            }
-            Onward::Browser(_, units) => {
-                let _ = units.send(None).await;
+                Onward::Browser(_, units) => {
+                    let _ = units.send(None).await;
+                }
             }
         }
     }
@@ -2545,7 +3155,7 @@ fn spawn_decoder(
     let thread = std::thread::spawn(move || {
         let mut decoder = match Hevc::new(true) {
             Ok(decoder) => decoder,
-            Err(e) => return fail(&failed, e.context("no HEVC decoder")),
+            Err(e) => return fail(&failed, crate::cause::Cause::new("AL-7710").of(e.context("no HEVC decoder"))),
         };
         let mut failures: u64 = 0;
         while let Ok(unit) = inbox.recv() {
@@ -2606,6 +3216,85 @@ impl Sound {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_keyframe_request_is_repeated_until_a_picture_settles_it() {
+        use super::Ask;
+        let start = tokio::time::Instant::now();
+        let mut request = super::KeyframeRequest::default();
+        assert_eq!(request.due(start), None, "nothing is owed");
+        request.want(Ask::Refresh);
+        assert_eq!(request.due(start), Some(Ask::Refresh));
+        assert_eq!(request.due(start + super::PLI_INTERVAL / 2), None, "too soon to ask again");
+        // The Mac may have dropped the first: it is still owed.
+        assert_eq!(request.due(start + super::PLI_INTERVAL), Some(Ask::Refresh));
+        // An IDR wanted meanwhile is what goes out, and a refresh does not undo it.
+        request.want(Ask::Keyframe);
+        request.want(Ask::Refresh);
+        assert_eq!(request.due(start + super::PLI_INTERVAL * 2), Some(Ask::Keyframe));
+        request.settle();
+        assert_eq!(request.due(start + super::PLI_INTERVAL * 4), None, "a picture came");
+    }
+
+    /// The packets a probe of macvm sent, which its encoder answered with a
+    /// refresh picture.
+    #[test]
+    fn the_refresh_request_and_the_acknowledgement_are_avconferences() {
+        assert_eq!(
+            super::rtcp_refresh(0xb54e_0c1c, 0x39b8_5839, (1600, 1000)),
+            [0x82, 0xce, 0, 3, 0xb5, 0x4e, 0x0c, 0x1c, 0x39, 0xb8, 0x58, 0x39, 0x06, 0x40, 0x03, 0xe8]
+        );
+        assert_eq!(
+            super::rtcp_reference_ack(0x1203_c98d, 200_800),
+            [0x80, 0xcc, 0, 3, 0x12, 0x03, 0xc9, 0x8d, 0, 0, 0, 5, 0x00, 0x03, 0x10, 0x60]
+        );
+    }
+
+    /// The Mac's extension word is `0x9301` or `0x9311`, and `0x9331` on a
+    /// refresh picture.
+    #[test]
+    fn a_refresh_picture_is_marked_in_the_header_extension() {
+        let packet = |profile: u16| {
+            let mut data = vec![0x90, 100, 0, 1, 0, 0, 0, 0, 0, 0, 0, 9];
+            data.extend_from_slice(&profile.to_be_bytes());
+            data.extend_from_slice(&[0, 1, 0, 1, 0xd5, 0x2f]);
+            data.extend_from_slice(&[0; 2 + super::AUTH_TAG_LEN]);
+            super::rtp_header(&data).map(|header| header.refresh)
+        };
+        assert_eq!(packet(0x9301), Ok(false));
+        assert_eq!(packet(0x9311), Ok(false));
+        assert_eq!(packet(0x9331), Ok(true));
+        assert_eq!(packet(0x1020), Ok(false), "another extension's bits mean nothing");
+    }
+
+    /// After lost packets the pictures handed on are still there to predict
+    /// from, so the stream goes on at the Mac's refresh picture; after a resync
+    /// they are not, and only a random-access picture will do.
+    #[test]
+    fn a_stream_goes_on_from_a_refresh_picture_after_a_loss_but_not_after_a_resync() {
+        let refresh = |sequence, timestamp| RtpHeader { refresh: true, ..header(sequence, timestamp, true) };
+        let mut d = Depacketizer::default();
+        assert_eq!(d.push(&header(10, 0, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
+        assert!(matches!(d.push(&header(11, 0, true), IDR), Depacketized::Unit(_)));
+        // 12 is lost: 13 predicts from it, and the refresh picture does not.
+        assert_eq!(d.push(&header(13, 800, true), TRAIL), Depacketized::Lost);
+        assert!(d.resumes_at_refresh());
+        assert_eq!(d.push(&header(14, 1200, true), TRAIL), Depacketized::Lost);
+        assert_eq!(d.push(&refresh(15, 1600), TRAIL), Depacketized::Unit(vec![TRAIL.to_vec()]));
+        assert!(!d.resumes_at_refresh());
+        assert_eq!(d.push(&header(16, 2000, true), TRAIL), Depacketized::Unit(vec![TRAIL.to_vec()]));
+        // A refresh picture that lost a packet of its own is no start.
+        assert_eq!(d.push(&RtpHeader { marker: false, ..refresh(18, 2400) }, TRAIL), Depacketized::Lost);
+        assert_eq!(d.push(&header(20, 2400, true), TRAIL), Depacketized::Lost);
+        assert!(d.resumes_at_refresh());
+        // Whoever was shown the stream gave pictures up: a refresh predicts from
+        // one of them.
+        d.resync();
+        assert!(!d.resumes_at_refresh());
+        assert_eq!(d.push(&refresh(21, 2800), TRAIL), Depacketized::Lost);
+        assert_eq!(d.push(&header(22, 3200, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
+        assert!(matches!(d.push(&header(23, 3200, true), IDR), Depacketized::Unit(_)));
+    }
+
     use super::*;
 
     fn unhex(hex: &str) -> Vec<u8> {
@@ -2722,7 +3411,7 @@ mod tests {
     fn the_configuration_message_lays_out_as_measured() {
         let a = ([0xa1; 46], [0xa2; 46]);
         let v = ([0xb1; 46], [0xb2; 46]);
-        let msg = configuration_message(FLAGS, &[0x11; 16], &[0xaa; 300], &a, &[0xbb; 400], &v);
+        let msg = configuration_message(FLAGS, &[0x11; 16], &[0xaa; 300], &a, &[(&[0xbb; 400], &v)]);
         assert_eq!(msg[0], 0x1c);
         assert_eq!(usize::from(u16::from_be_bytes([msg[2], msg[3]])), msg.len() - 4);
         assert_eq!(&msg[4..6], &[0, 3]);
@@ -2737,15 +3426,47 @@ mod tests {
         assert_eq!(&msg[video_keys..video_keys + 46], &v.0);
         assert_eq!(&msg[video_keys + 46..video_keys + 92], &v.1);
         assert_eq!(msg.len(), video_keys + 92 + 400);
+
+        // A second display's keys and offer follow the first's, its length beside
+        // the first's in the header.
+        let w = ([0xc1; 46], [0xc2; 46]);
+        let two = configuration_message(
+            FLAGS | FLAG_60FPS_SECOND,
+            &[0x11; 16],
+            &[0xaa; 300],
+            &a,
+            &[(&[0xbb; 400], &v), (&[0xcc; 500], &w)],
+        );
+        assert_eq!(usize::from(u16::from_be_bytes([two[2], two[3]])), two.len() - 4);
+        assert_eq!(&two[6..10], &[0, 0, 0, 7]);
+        assert_eq!(&two[0x0c..0x0e], &400u16.to_be_bytes());
+        assert_eq!(&two[0x0e..0x10], &500u16.to_be_bytes());
+        assert_eq!(two[..0x0e], {
+            let mut head = msg[..0x0e].to_vec();
+            head[2..4].copy_from_slice(&two[2..4]);
+            head[6..10].copy_from_slice(&two[6..10]);
+            head
+        });
+        let second_keys = msg.len();
+        assert_eq!(two[0x10..second_keys], msg[0x10..]);
+        assert_eq!(&two[second_keys..second_keys + 46], &w.0);
+        assert_eq!(&two[second_keys + 46..second_keys + 92], &w.1);
+        assert_eq!(two.len(), second_keys + 92 + 500);
+        // What the Mac checks the message against: 0xd8 with the first display's
+        // keys, the offers, and 0x5c of keys before a second display's offer.
+        assert_eq!(two.len() - 4, 0xd8 + 300 + 400 + 0x5c + 500);
     }
 
     #[test]
     fn the_replies_parse_as_measured() {
         // Message 1 as the Mac sent it: audio at 5900, video at 5901.
         let ports = unhex("0001000100000000170c00000001170d0000000100000000000000000000000000000000");
-        assert_eq!(parse_media_reply(&ports).unwrap(), MediaReply::Ports { audio_port: 5900, video_port: 5901 });
+        assert_eq!(
+            parse_media_reply(&ports).unwrap(),
+            MediaReply::Ports { audio_port: 5900, video_port: 5901, video2_port: None }
+        );
         let answer = unhex("000200020000000000020003000000000000aabbccddee");
-        assert_eq!(parse_media_reply(&answer).unwrap(), MediaReply::Answer);
+        assert_eq!(parse_media_reply(&answer).unwrap(), MediaReply::Answer { videos: 1 });
         let error = unhex("00030001000000000000000200000000");
         assert_eq!(parse_media_reply(&error).unwrap(), MediaReply::Error { kind: 2, sub_code: 0 });
         assert_eq!(parse_media_reply(&[0, 9, 0, 1, 0, 0, 0, 0]).unwrap(), MediaReply::Other(9));
@@ -2754,9 +3475,17 @@ mod tests {
         let mut disabled_audio = ports.clone();
         disabled_audio[13] = 0;
         assert!(parse_media_reply(&disabled_audio).is_err());
+        // Two virtual displays: the second's leg enabled, at the port after the
+        // first's, and an answer with a blob for it.
         let mut second_video = ports.clone();
+        second_video[20..22].copy_from_slice(&5902u16.to_be_bytes());
         second_video[25] = 1;
-        assert!(parse_media_reply(&second_video).is_err());
+        assert_eq!(
+            parse_media_reply(&second_video).unwrap(),
+            MediaReply::Ports { audio_port: 5900, video_port: 5901, video2_port: Some(5902) }
+        );
+        let two_answers = unhex("000200020000000000020003000100000000aabbccddeeff");
+        assert_eq!(parse_media_reply(&two_answers).unwrap(), MediaReply::Answer { videos: 2 });
         let mut wrong_answer_size = answer;
         wrong_answer_size.pop();
         assert!(parse_media_reply(&wrong_answer_size).is_err());
@@ -2918,7 +3647,7 @@ mod tests {
     }
 
     fn header(sequence: u16, timestamp: u32, marker: bool) -> RtpHeader {
-        RtpHeader { payload_type: 100, marker, sequence, timestamp, ssrc: 9, payload: (0, 0) }
+        RtpHeader { payload_type: 100, marker, sequence, timestamp, ssrc: 9, refresh: false, payload: (0, 0) }
     }
 
     const VPS: &[u8] = &[0x40, 0x01, 0xaa];
@@ -2950,6 +3679,43 @@ mod tests {
                 fu
             })
             .collect()
+    }
+
+    /// A display out of view has its packets passed over, for as long as it is,
+    /// and is asked for an IDR as it comes back: on a still screen the next
+    /// packet is that IDR's first, and the whole of it has to be taken.
+    #[test]
+    fn a_stream_passed_over_takes_the_idr_that_starts_at_the_next_packet() {
+        let mut d = Depacketizer::default();
+        assert_eq!(d.push(&header(10, 0, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
+        assert!(matches!(d.push(&header(11, 0, true), IDR), Depacketized::Unit(_)));
+        // 40,000 packets out of view, which a sequence number left where it was
+        // would read as behind.
+        let on = 11u16.wrapping_add(40_000);
+        for passed in 1..=40_000u16 {
+            d.skip(&header(11u16.wrapping_add(passed), 400, passed == 40_000));
+        }
+        assert_eq!(d.push(&header(on + 1, 800, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
+        assert_eq!(
+            d.push(&header(on + 2, 800, true), IDR),
+            Depacketized::Unit(vec![VPS.to_vec(), SPS.to_vec(), IDR.to_vec()])
+        );
+    }
+
+    /// Back in view in the middle of a picture: its tail is no start, though an
+    /// IDR's tail holds slices a decoder could be handed.
+    #[test]
+    fn a_stream_passed_over_mid_picture_starts_at_the_next_whole_one() {
+        let mut d = Depacketizer::default();
+        d.skip(&header(10, 0, false));
+        assert_eq!(d.push(&header(11, 0, true), IDR), Depacketized::Lost);
+        assert_eq!(d.push(&header(12, 400, true), TRAIL), Depacketized::Lost);
+        assert!(!d.resumes_at_refresh(), "its pictures were given up");
+        // The picture passed over never ended with a marked packet: the next
+        // timestamp is a new picture all the same.
+        d.skip(&header(13, 800, false));
+        assert_eq!(d.push(&header(14, 1200, false), &aggregation(&[VPS, SPS])), Depacketized::Pending);
+        assert!(matches!(d.push(&header(15, 1200, true), IDR), Depacketized::Unit(_)));
     }
 
     /// Apple's first picture: the parameter sets aggregated, the IDR fragmented;
@@ -3127,7 +3893,7 @@ mod tests {
     fn media() -> MediaStream {
         let peer = "[fd00::2]:5900".parse().unwrap();
         let local = "[fd00::1]:50000".parse().unwrap();
-        MediaStream::new(peer, local, false).0
+        MediaStream::new(peer, local, false, 1).0
     }
 
     /// The embedded picture the decoder is warmed on is one access unit of 4:4:4
@@ -3146,63 +3912,109 @@ mod tests {
         assert_eq!(warm_decoder().unwrap(), (256, 256));
     }
 
-    /// One offer out at a time, one per display, and the encodings ahead of the
-    /// first.
+    /// Offer the stream for `size` as the session does once the Mac has named its
+    /// ports. The naming is noted as [`MediaStream::on_reply`] notes it: binding
+    /// the ports takes an address of this host's, which the tests' is not.
+    fn offer_on_ports(m: &mut MediaStream, size: (u16, u16)) -> Vec<u8> {
+        m.asked = true;
+        m.invited = true;
+        match m.offer(&[size]) {
+            Some(Offer::Configuration(msg)) => msg,
+            other => panic!("no offer for {size:?}: {other:?}"),
+        }
+    }
+
+    const ANSWER: &str = "000200020000000000000000000000000000";
+    const PORTS: &str = "0001000100000000170c00000001170d0000000100000000000000000000000000000000";
+
+    /// The encodings first, then an offer only on the ports the Mac names for
+    /// them or for a display change, one per naming, one out at a time, one per
+    /// display.
     #[test]
-    fn an_offer_goes_out_once_per_display_and_one_at_a_time() {
+    fn an_offer_waits_for_the_ports_and_goes_out_once_per_display_and_one_at_a_time() {
         let mut m = media();
-        let (first, msg) = m.offer((1600, 1000)).expect("the first display gets an offer");
-        assert!(first);
+        assert_eq!(m.offer(&[(1600, 1000)]), Some(Offer::Encodings), "the encodings ask for the ports");
+        assert!(m.offer(&[(1600, 1000)]).is_none(), "no offer before the Mac names its ports");
+        m.invited = true;
+        let Some(Offer::Configuration(msg)) = m.offer(&[(1600, 1000)]) else {
+            panic!("the named ports allow an offer")
+        };
         assert_eq!(msg[0], 0x1c);
         assert!(m.pending());
-        assert!(m.offer((1280, 800)).is_none(), "not while one is out");
-        assert!(!m.on_reply(&unhex("000200020000000000000000000000000000")).unwrap());
+        assert!(m.offer(&[(1280, 800)]).is_none(), "not while one is out");
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
         assert!(!m.pending());
-        assert!(m.offer((1600, 1000)).is_none(), "the stream runs at this size");
+        assert!(m.offer(&[(1600, 1000)]).is_none(), "the stream runs at this size");
         m.stopped();
-        let (first, _) = m.offer((1600, 1000)).expect("a display change needs a new one");
-        assert!(!first, "the encodings went out with the first");
+        assert!(m.offer(&[(1600, 1000)]).is_none(), "a display change waits for the ports named after it");
+        m.invited = true;
+        assert!(matches!(m.offer(&[(1600, 1000)]), Some(Offer::Configuration(_))));
+    }
+
+    /// The ports are owed from the encodings that ask for them. Named, they allow
+    /// an offer; named again, which the Mac does after a display change of its
+    /// own, they take the stream offered for the old display down until the next.
+    #[test]
+    fn named_ports_allow_an_offer_and_named_again_take_the_stream_down() {
+        let mut m = media();
+        m.offer(&[(1600, 1000)]).unwrap();
+        let due = m.deadline().expect("the ports are owed once asked for");
+        let unnamed = m.overdue(due).expect("overdue at the deadline");
+        assert!(unnamed.to_string().contains("named no ports"), "{unnamed}");
+
+        // Binding them is what fails here, once the naming is noted.
+        let bound = m.on_reply(&unhex(PORTS)).unwrap_err();
+        assert!(format!("{bound:#}").contains("for the Mac's media stream"), "{bound:#}");
+        assert_eq!(crate::cause::find(&bound).map(|cause| cause.code), Some("AL-7716"), "the local ports'");
+        assert_eq!(m.deadline(), None, "named");
+        assert!(matches!(m.offer(&[(1600, 1000)]), Some(Offer::Configuration(_))));
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+
+        m.on_reply(&unhex(PORTS)).unwrap_err();
+        assert_eq!(m.offered, None, "the stream is down");
+        assert!(matches!(m.offer(&[(1600, 1000)]), Some(Offer::Configuration(_))), "and offered again");
+    }
+
+    /// A display change the Mac names no ports after does not leave the session
+    /// waiting for good: the offer the new display wants owes the ports from the
+    /// moment it is asked for, and past [`STREAM_START`] the session ends with that
+    /// cause. A mirror session depends on it. Whether a Mac names its ports again
+    /// when its own screens change has not been measured, and a session with no
+    /// stream and no deadline would show no picture and say nothing of it.
+    #[test]
+    fn a_display_change_the_mac_names_no_ports_after_ends_the_session_with_its_cause() {
+        let mut m = media();
+        offer_on_ports(&mut m, (1600, 1000));
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        m.stopped();
+        assert_eq!(m.deadline(), None, "nothing is owed until the new display is offered for");
+        assert!(m.offer(&[(2560, 1440)]).is_none(), "no offer before the ports are named again");
+        let due = m.deadline().expect("the ports are owed from the offer that waits for them");
+        assert!(m.overdue(due - std::time::Duration::from_millis(1)).is_none());
+        let unnamed = m.overdue(due).expect("overdue at the deadline");
+        assert_eq!(
+            crate::cause::find(&unnamed),
+            Some(&Cause::new("AL-7713").with("seconds", STREAM_START.as_secs()))
+        );
+        // Asked again meanwhile, the debt keeps the moment it began at.
+        assert!(m.offer(&[(2560, 1440)]).is_none());
+        assert_eq!(m.deadline(), Some(due));
+        // Named in time, they allow the offer, and what is owed is the stream.
+        m.invited = true;
+        assert!(matches!(m.offer(&[(2560, 1440)]), Some(Offer::Configuration(_))));
+        assert!(m.overdue(due).is_none_or(|late| crate::cause::find(&late) != Some(&Cause::new("AL-7713").with("seconds", STREAM_START.as_secs()))));
     }
 
     /// A refusal is an error, which ends the session as it ends Apple's viewer's.
-    /// Ports re-announced with no offer out — which is what a display change the
-    /// Mac made on its own sends — are a stream down until the next offer.
     #[test]
-    fn a_refusal_ends_the_session_and_an_unasked_announcement_downs_the_stream() {
+    fn a_refusal_ends_the_session() {
         let mut m = media();
-        m.offer((1600, 1000)).unwrap();
+        offer_on_ports(&mut m, (1600, 1000));
         let refused = m.on_reply(&unhex("00030001000000000000000200000000")).unwrap_err();
         assert!(
             format!("{refused:#}").contains("refused the media stream (error type 2, sub-code 0)"),
             "{refused:#}"
         );
-
-        let mut m = media();
-        let ports = unhex("0001000100000000170c00000001170d0000000100000000000000000000000000000000");
-        assert!(m.on_reply(&ports).unwrap());
-        assert!(m.offer((1600, 1000)).is_some());
-    }
-
-    /// The Mac names an offer's ports ahead of its answer or behind it, and either
-    /// way they are that offer's: named behind the answer they open the stream, and
-    /// do not read as the unasked announcement a display change of the Mac's own
-    /// sends, which is what the next one is.
-    #[test]
-    fn ports_named_after_the_answer_open_the_stream() {
-        let answer = unhex("000200020000000000000000000000000000");
-        let ports = unhex("0001000100000000170c00000001170d0000000100000000000000000000000000000000");
-        let mut m = media();
-        m.offer((1600, 1000)).unwrap();
-        assert!(!m.on_reply(&answer).unwrap());
-        // Taken as the offer's ports: binding them is what fails here, at an
-        // address that is not this host's.
-        let opened = m.on_reply(&ports).unwrap_err();
-        assert!(format!("{opened:#}").contains("for the Mac's media stream"), "{opened:#}");
-        assert!(m.offer((1600, 1000)).is_none(), "the stream is still offered for this display");
-
-        // Named again with no offer out, they are the Mac's own display change.
-        assert!(m.on_reply(&ports).unwrap());
-        assert!(m.offer((1600, 1000)).is_some());
     }
 
     /// An offer owes its display's first picture and the first sound within
@@ -3217,24 +4029,26 @@ mod tests {
         assert_eq!(m.deadline(), None, "nothing is owed before an offer");
         *m.sounded.lock().unwrap() = Some(std::time::Instant::now() - std::time::Duration::from_secs(1));
         let offered = std::time::Instant::now();
-        m.offer((1600, 1000)).unwrap();
+        offer_on_ports(&mut m, (1600, 1000));
         let first = m.deadline().expect("an offer owes a picture and sound");
         assert!(first >= offered + STREAM_START);
         assert!(m.overdue(first - std::time::Duration::from_millis(1)).is_none());
         let unanswered = m.overdue(first).expect("overdue at the deadline");
         assert!(unanswered.to_string().contains("did not answer"), "{unanswered}");
+        assert_eq!(crate::cause::find(&unanswered), Some(&Cause::new("AL-7705").with("seconds", 10)));
 
-        assert!(!m.on_reply(&unhex("000200020000000000000000000000000000")).unwrap());
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
         let portless = m.overdue(first).expect("still overdue once answered");
         assert!(portless.to_string().contains("named no ports"), "{portless}");
+        assert_eq!(crate::cause::find(&portless), Some(&Cause::new("AL-7706").with("seconds", 10)));
 
-        m.pictured((1280, 800));
+        m.pictured(0, (1280, 800));
         assert_eq!(m.deadline(), Some(first), "another display's picture settles nothing");
-        *m.picture_heard.lock().unwrap() = Some(std::time::Instant::now());
+        *m.legs[0].heard.lock().unwrap() = Some(std::time::Instant::now());
         assert_eq!(m.deadline(), Some(first), "nor does a report before the first picture");
 
-        m.pictured((1600, 1000));
-        let Owed::Stream { pictured: Some(pictured), .. } = m.owed else {
+        m.pictured(0, (1600, 1000));
+        let Owed::Stream { pictured: [Some(pictured), _], .. } = m.owed else {
             panic!("the picture was not noted: {:?}", m.owed)
         };
         assert_eq!(m.deadline(), Some(first), "the first sound is still owed, none since the offer");
@@ -3244,20 +4058,22 @@ mod tests {
         assert_eq!(m.deadline(), Some(first), "a report is not the first sound");
         assert!(m.overdue(first).is_some(), "and overdue without it");
         *m.sounded.lock().unwrap() = Some(pictured);
-        *m.picture_heard.lock().unwrap() = Some(pictured);
+        *m.legs[0].heard.lock().unwrap() = Some(pictured);
         let next = m.deadline().expect("a running stream owes a packet on each leg");
         assert_eq!(next, pictured + STREAM_SILENCE);
         assert!(m.overdue(first).is_none(), "the first picture and sound settled the offer");
         let silent = m.overdue(next).expect("overdue after the silence");
         assert!(silent.to_string().contains("sent nothing on the picture's leg for 48s"), "{silent}");
+        assert_eq!(crate::cause::find(&silent), Some(&Cause::new("AL-7707").with("seconds", 48)));
 
         // A still screen sends no picture, and the Mac's report on the picture's
         // leg is what keeps it alive.
         let reported = pictured + std::time::Duration::from_secs(1);
-        *m.picture_heard.lock().unwrap() = Some(reported);
+        *m.legs[0].heard.lock().unwrap() = Some(reported);
         assert_eq!(m.deadline(), Some(next), "the sound is due first now");
         let quiet = m.overdue(next).expect("a leg without sound is overdue too");
         assert!(quiet.to_string().contains("sent nothing on the sound's leg for 48s"), "{quiet}");
+        assert_eq!(crate::cause::find(&quiet), Some(&Cause::new("AL-7708").with("seconds", 48)));
         *m.sound_heard.lock().unwrap() = Some(reported);
         assert_eq!(m.deadline(), Some(reported + STREAM_SILENCE), "a report on each leg puts both off");
         assert!(m.overdue(next).is_none());
@@ -3265,8 +4081,131 @@ mod tests {
         m.stopped();
         assert_eq!(m.deadline(), None, "a display change owes nothing");
         assert!(m.overdue(next + STREAM_SILENCE).is_none());
-        m.offer((1280, 800)).unwrap();
+        offer_on_ports(&mut m, (1280, 800));
         assert!(m.deadline().is_some(), "until its own offer");
+    }
+
+    /// A session with two virtual displays offers a video leg for each in the one
+    /// message, and takes the Mac's ports and answer only when they name both: a
+    /// stream of fewer legs than displays, or more, is one this side cannot show.
+    #[test]
+    fn two_displays_are_offered_named_and_answered_together() {
+        let peer = "[fd00::2]:5900".parse().unwrap();
+        let local = "[fd00::1]:50000".parse().unwrap();
+        let (mut m, pictures) = MediaStream::new(peer, local, true, 2);
+        assert_eq!((m.displays(), pictures.len()), (2, 2));
+
+        let sizes = [(1600, 1000), (1280, 800)];
+        assert_eq!(m.offer(&sizes[..1]), None, "a layout of one display is not the two asked for");
+        assert_eq!(m.offer(&sizes), Some(Offer::Encodings));
+        m.invited = true;
+        let Some(Offer::Configuration(msg)) = m.offer(&sizes) else {
+            panic!("the named ports allow an offer")
+        };
+        let length = |at: usize| usize::from(u16::from_be_bytes([msg[at], msg[at + 1]]));
+        assert_eq!(&msg[6..10], &[0, 0, 0, 7], "60 fps on both streams, and the pointer left out");
+        assert!(length(0x0c) > 0 && length(0x0e) > 0, "an offer for each display");
+        assert_eq!(msg.len() - 4, 0xd8 + length(0x0a) + length(0x0c) + 0x5c + length(0x0e));
+        assert!(m.offer(&sizes).is_none(), "one offer at a time");
+
+        let one = m.on_reply(&unhex(ANSWER)).unwrap_err();
+        assert!(format!("{one:#}").contains("answered 1 video leg(s) of the 2"), "{one:#}");
+        assert!(!m.on_reply(&unhex("000200020000000000020003000100000000aabbccddeeff")).unwrap());
+        assert!(!m.pending());
+
+        // Message 1 without the second leg, to this session, and with it, to a
+        // session of one display.
+        let short = m.on_reply(&unhex(PORTS)).unwrap_err();
+        assert!(format!("{short:#}").contains("enabled 1 video leg(s) for the 2"), "{short:#}");
+        let mut both = unhex(PORTS);
+        both[20..22].copy_from_slice(&5902u16.to_be_bytes());
+        both[25] = 1;
+        let extra = media().on_reply(&both).unwrap_err();
+        assert!(format!("{extra:#}").contains("enabled 2 video leg(s) for the 1"), "{extra:#}");
+    }
+
+    /// With the second display arranged ahead of the first on the Mac, the legs
+    /// carry them the other way round: a display is asked about, shown and
+    /// credited on the leg that carries it.
+    #[test]
+    fn the_legs_follow_the_macs_arrangement() {
+        let peer = "[fd00::2]:5900".parse().unwrap();
+        let local = "[fd00::1]:50000".parse().unwrap();
+        let relaxed = std::sync::atomic::Ordering::Relaxed;
+        let (mut m, _pictures) = MediaStream::new(peer, local, false, 2);
+        m.asked = true;
+        m.invited = true;
+        assert_eq!((m.leg_of(0), m.leg_of(1)), (0, 1));
+        m.show(0, true);
+        m.arrange(true);
+        assert_eq!((m.leg_of(0), m.leg_of(1)), (1, 0));
+        assert!(m.legs[1].shown.load(relaxed) && !m.legs[0].shown.load(relaxed), "shown goes with the display");
+        m.show(1, true);
+        assert!(m.legs[0].shown.load(relaxed));
+
+        // The first display's picture comes on the second leg, and is what that
+        // leg owed.
+        let sizes = [(1920, 911), (1915, 910)];
+        assert!(m.offer(&sizes).is_some());
+        m.pictured(0, (1920, 911));
+        let Owed::Stream { pictured, .. } = m.owed else { panic!("an offer owes its stream") };
+        assert!(pictured[1].is_some() && pictured[0].is_none());
+        m.pictured(1, (1920, 911));
+        let Owed::Stream { pictured, .. } = m.owed else { panic!("an offer owes its stream") };
+        assert!(pictured[0].is_none(), "the second display is the other size");
+
+        m.arrange(false);
+        assert_eq!((m.leg_of(0), m.leg_of(1)), (0, 1));
+        // One display has nothing to swap.
+        let mut one = media();
+        one.arrange(true);
+        assert_eq!(one.leg_of(0), 0);
+    }
+
+    /// Each display owes its first picture. One nobody is shown hands none on, and
+    /// its first packet stands for it; one coming into view long after its offer
+    /// is not overdue for the picture it is only now asked for.
+    #[test]
+    fn a_display_nobody_is_shown_owes_its_packets_and_one_coming_into_view_its_next() {
+        let peer = "[fd00::2]:5900".parse().unwrap();
+        let local = "[fd00::1]:50000".parse().unwrap();
+        let (mut m, _pictures) = MediaStream::new(peer, local, false, 2);
+        m.asked = true;
+        m.invited = true;
+        let offered = std::time::Instant::now();
+        assert!(m.offer(&[(1600, 1000), (1280, 800)]).is_some());
+        m.on_reply(&unhex("000200020000000000020003000100000000aabbccddeeff")).unwrap();
+        let first = m.deadline().expect("the offer owes both pictures and sound");
+
+        // The first display's picture and the sound arrive; the second, in no
+        // tab, has sent nothing.
+        m.pictured(0, (1600, 1000));
+        let now = Some(std::time::Instant::now());
+        *m.sounded.lock().unwrap() = now;
+        *m.sound_heard.lock().unwrap() = now;
+        assert_eq!(m.deadline(), Some(first), "the second display's picture is still owed");
+        let missing = m.overdue(first).expect("overdue without it");
+        assert!(missing.to_string().contains("named no ports"), "{missing}");
+
+        // Its packets are what it owes while nobody is shown it.
+        *m.legs[1].pictured.lock().unwrap() = now;
+        *m.legs[1].heard.lock().unwrap() = now;
+        assert!(m.overdue(first).is_none());
+        assert!(m.deadline().expect("a running stream") >= offered + STREAM_SILENCE);
+
+        // Shown in a tab an age after the offer, it has no picture on record, and
+        // is given from here to send one.
+        assert!(m.show(1, true), "it came into view");
+        assert!(!m.show(1, true), "and is in view");
+        assert!(m.overdue(first + STREAM_START).is_none());
+        let Owed::Stream { pictured: [Some(_), Some(shown)], .. } = m.owed else {
+            panic!("the display coming into view was not noted: {:?}", m.owed)
+        };
+        *m.legs[1].heard.lock().unwrap() = Some(shown);
+        *m.legs[0].heard.lock().unwrap() = Some(shown + STREAM_SILENCE);
+        *m.sound_heard.lock().unwrap() = Some(shown + STREAM_SILENCE);
+        let silent = m.overdue(shown + STREAM_SILENCE).expect("overdue after the silence");
+        assert!(silent.to_string().contains("the leg of display 2's picture for 48s"), "{silent}");
     }
 
     /// A display change while an offer is out still owes that offer's answer by
@@ -3275,19 +4214,79 @@ mod tests {
     #[test]
     fn an_offer_out_across_a_display_change_still_owes_its_answer() {
         let mut m = media();
-        m.offer((1600, 1000)).unwrap();
+        offer_on_ports(&mut m, (1600, 1000));
         let first = m.deadline().unwrap();
         m.stopped();
         m.stopped();
         assert!(m.pending());
-        assert!(m.offer((1280, 800)).is_none(), "not while the first is out");
+        m.invited = true;
+        assert!(m.offer(&[(1280, 800)]).is_none(), "not while the first is out, ports named or not");
         assert_eq!(m.deadline(), Some(first), "the answer is still owed");
         assert!(m.overdue(first - std::time::Duration::from_millis(1)).is_none());
         let unanswered = m.overdue(first).expect("unanswered at the deadline");
         assert!(unanswered.to_string().contains("did not answer"), "{unanswered}");
 
-        assert!(!m.on_reply(&unhex("000200020000000000000000000000000000")).unwrap());
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
         assert_eq!(m.deadline(), None, "answered, for a display that has gone");
-        assert!(m.offer((1280, 800)).is_some(), "the new display's offer goes out");
+        assert!(m.offer(&[(1280, 800)]).is_some(), "the new display's offer goes out");
+    }
+
+    /// An offer whose first picture never comes ends the session with what did
+    /// come: another screen's pictures, with both sizes; packets that made no
+    /// picture; or nothing, which alone is what a firewall or a NAT looks like.
+    /// The sizes are a MacBook Pro's with its lid open (macOS 27): offered for the
+    /// 8448×3600 of its two screens, it sent the main one's 6400×3600.
+    #[tokio::test]
+    async fn an_offer_that_brings_no_picture_says_what_came_instead() {
+        let mut m = media();
+        offer_on_ports(&mut m, (8448, 3600));
+        assert!(!m.on_reply(&unhex(ANSWER)).unwrap());
+        // The ports are named and bound, which this address cannot be: the
+        // receiver's place is held by a task that does nothing.
+        m.receiver = Some((Ports { audio: 5900, videos: vec![5901] }, tokio::spawn(async {})));
+        let due = m.deadline().expect("the offer owes its first picture");
+
+        // Each of the three is its own cause for the page, with what fills its words.
+        let cause = |error: &anyhow::Error| crate::cause::find(error).cloned();
+        let nothing = m.overdue(due).expect("overdue with nothing heard");
+        assert_eq!(cause(&nothing), Some(Cause::new("AL-7703").with("seconds", 10).with("port", 5901)));
+        let nothing = nothing.to_string();
+        assert!(nothing.contains("if nothing reached UDP 5901, a firewall or NAT"), "{nothing}");
+
+        *m.legs[0].heard.lock().unwrap() = Some(std::time::Instant::now());
+        let reached = m.overdue(due).expect("overdue with packets and no picture");
+        assert_eq!(cause(&reached), Some(Cause::new("AL-7702").with("seconds", 10)));
+        let reached = reached.to_string();
+        assert!(reached.contains("reached this gateway and brought no picture of its display within 10s"), "{reached}");
+        assert!(!reached.contains("firewall"), "{reached}");
+
+        m.pictured(0, (6400, 3600));
+        assert_eq!(m.deadline(), Some(due), "another screen's picture pays nothing");
+        let other = m.overdue(due).expect("overdue with another screen's pictures");
+        assert_eq!(
+            cause(&other),
+            Some(Cause::new("AL-7701").with("got", "6400 × 3600").with("wanted", "8448 × 3600"))
+        );
+        let other = other.to_string();
+        assert!(
+            other.contains("brought pictures of 6400x3600, not of the 8448x3600 display it was offered for, within 10s"),
+            "{other}"
+        );
+        assert!(!other.contains("firewall"), "{other}");
+
+        // The picture comes and the sound does not: the sound's own cause, on the
+        // sound's port, and never the picture's.
+        m.pictured(0, (8448, 3600));
+        let soundless = m.overdue(due).expect("overdue with a picture and no sound");
+        assert_eq!(cause(&soundless), Some(Cause::new("AL-7704").with("seconds", 10).with("port", 5900)));
+        let soundless = soundless.to_string();
+        assert!(soundless.starts_with("no sound came over the Mac's media stream within 10s"), "{soundless}");
+
+        // The next offer starts from nothing.
+        m.stopped();
+        offer_on_ports(&mut m, (6400, 3600));
+        assert_eq!(m.strange, None);
+        m.pictured(0, (6400, 3600));
+        assert!(matches!(m.owed, Owed::Stream { pictured: [Some(_), None], .. }), "{:?}", m.owed);
     }
 }

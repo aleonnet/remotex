@@ -19,7 +19,7 @@
 //                         at the scale the desktop is shown at
 //
 // The state machine keeps its thresholds local to this file. The output layer
-// sends remotex ClientMsg JSON (a scroll tick is one wheel message carrying the
+// sends alumia ClientMsg JSON (a scroll tick is one wheel message carrying the
 // remote distance it stands for, in points), and the view transform is owned by
 // useRemoteDesktop's applyCanvasCss, reached through GestureDeps.
 
@@ -98,7 +98,31 @@ export interface GestureDeps {
   // the browser's own CSS cursor already tracks that one, with no lag.
   // Optional: absent means nothing is drawn.
   onCursor?(x: number, y: number, real: boolean): void;
+  // The cursor was held at an edge of what is on screen while the view, asked
+  // to pan by the overflow, did not move: where it stopped, in remote pixels,
+  // and the view as it was. Said once a second at most (EDGE_EVERY_MS), for
+  // the laboratory: the one measure of a phone's browser the tests cannot
+  // take, and what is read when the cursor stops short of the picture's edge.
+  // Optional: absent means nothing is said.
+  onEdge?(edge: GestureEdge): void;
+  // The clock the edge's rate is kept by; `Date.now` where absent.
+  now?(): number;
 }
+
+/** Where the cursor was held, and the view that held it. */
+export interface GestureEdge {
+  side: "top" | "bottom" | "left" | "right";
+  /** The cursor's position on the axis of the edge, in remote pixels. */
+  cursor: number;
+  /** The remote's extent on that axis. */
+  remote: number;
+  /** The view's pan on that axis, in CSS pixels. */
+  pan: number;
+  zoom: number;
+}
+
+/** How often at most the cursor held at an edge is said. */
+export const EDGE_EVERY_MS = 1_000;
 
 export interface TouchGestures {
   detach(): void;
@@ -222,6 +246,8 @@ export function attachTouchGestures(
   // The virtual trackpad cursor, in remote framebuffer coordinates.
   let cursor: Point = { x: 0, y: 0 };
   let hasCursor = false;
+  // When the cursor held at an edge was last said.
+  let lastEdgeAt = Number.NEGATIVE_INFINITY;
   // Whether the gesture layer is holding the remote left button down.
   let leftHeld = false;
 
@@ -344,8 +370,8 @@ export function attachTouchGestures(
   //
   // Pixels, because that is what the deltas are: a step is a step's worth of
   // the desktop passing under the fingers. RDP spends the distance as proportional wheel rotation and
-  // an Apple VNC target as as many wheel pulses as it is worth there, and
-  // wlshare is sent it as a distance; generic VNC reads only the sign, so a
+  // an Apple VNC target and
+  // wlshare are sent it as a distance; generic VNC reads only the sign, so a
   // step is a notch there.
   function sendScrollTick(dx: number, dy: number): void {
     const c = currentCursor();
@@ -379,11 +405,61 @@ export function attachTouchGestures(
     const overflowX = desired.x - constrained.x;
     const overflowY = desired.y - constrained.y;
     if (overflowX !== 0 || overflowY !== 0) {
+      const before = { x: view.pan.x, y: view.pan.y };
       deps.applyView(view.zoom, {
-        x: view.pan.x - overflowX * scale,
-        y: view.pan.y - overflowY * scale,
+        x: before.x - overflowX * scale,
+        y: before.y - overflowY * scale,
       });
+      sayEdge(before, { x: overflowX, y: overflowY }, constrained);
     }
+  }
+
+  // The view was asked to follow the cursor by `overflow` and stayed where it
+  // was on that axis: the cursor is held at that edge, and the laboratory is
+  // told where, once a second at most.
+  function sayEdge(before: Point, overflow: Point, at: Point): void {
+    if (!deps.onEdge) {
+      return;
+    }
+    const held = heldAt(deps.view(), before, overflow, at);
+    if (!held) {
+      return;
+    }
+    const now = deps.now?.() ?? Date.now();
+    if (now - lastEdgeAt >= EDGE_EVERY_MS) {
+      lastEdgeAt = now;
+      deps.onEdge(held);
+    }
+  }
+
+  // Which edge holds the cursor, with the view as it is after the pan was asked
+  // for; null where the view moved, or nothing overflowed.
+  function heldAt(
+    after: GestureView,
+    before: Point,
+    overflow: Point,
+    at: Point,
+  ): GestureEdge | null {
+    const size = remoteSize();
+    if (overflow.y !== 0 && after.pan.y === before.y) {
+      return {
+        side: overflow.y > 0 ? "bottom" : "top",
+        cursor: at.y,
+        remote: size.h,
+        pan: after.pan.y,
+        zoom: after.zoom,
+      };
+    }
+    if (overflow.x !== 0 && after.pan.x === before.x) {
+      return {
+        side: overflow.x > 0 ? "right" : "left",
+        cursor: at.x,
+        remote: size.w,
+        pan: after.pan.x,
+        zoom: after.zoom,
+      };
+    }
+    return null;
   }
 
   function cancelPendingTap(): void {

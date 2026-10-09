@@ -1,0 +1,19 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The gateway's binary inside the app, Contents/Helpers/alumia.
+
+  It decodes a Mac's picture with FFmpeg's libavcodec, which it loads from where
+  Homebrew installs it (src/libav.rs) and which Alumia does not ship. The Hardened
+  Runtime a notarized binary runs under refuses a library unless it is "signed by
+  Apple or signed with the same Team ID as the main executable", and Homebrew's is
+  signed with no team at all. This one entitlement lifts that, for this
+  executable and no other: "You add entitlements only to executables."
+  (docs/research/2026-10-05-0030-app-de-mac.md)
+-->
+<plist version="1.0">
+<dict>
+    <key>com.apple.security.cs.disable-library-validation</key>
+    <true/>
+</dict>
+</plist>

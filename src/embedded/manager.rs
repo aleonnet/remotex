@@ -28,6 +28,8 @@ use tokio::process::{Child, Command};
 use tokio::sync::RwLock;
 
 use super::{Handshake, transport};
+use crate::cause::{Cause, Caused as _};
+use crate::words::say;
 use crate::config::{
     DEFAULT_BRANDING, DEFAULT_SIZE, Protocol, TargetConfig,
 };
@@ -36,21 +38,21 @@ const HANDSHAKE_TIMEOUT: Duration = Duration::from_secs(20);
 const STOP_GRACE: Duration = Duration::from_millis(1500);
 const REQUEST_HEAD_TIMEOUT: Duration = Duration::from_secs(10);
 const MAX_REQUEST_HEAD: usize = 64 * 1024;
-const MASTER_HOST: &str = "remotex.localhost";
+const MASTER_HOST: &str = "alumia.localhost";
 /// The binary's version, so the header answers what `--version` would without
 /// leaving the TUI. Every instance is a worker of this same binary.
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
 /// A first launch's complete instance config: no server block and no pretend
 /// target. The TUI creates this atomically before adding the instance to its list.
-pub const INSTANCE_TEMPLATE: &str = r#"# A remotex local instance.
+pub const INSTANCE_TEMPLATE: &str = r#"# A alumia local instance.
 #
 # There is no [server] block. The TUI control plane owns the shared loopback
 # listener, this instance's subdomain, its private endpoint, and its launch
 # token. Only [branding] and [[targets]] belong here.
 
 # [branding]
-# text = "remotex"
+# text = "alumia"
 # logo = "/path/to/logo.png"
 
 # [[targets]]
@@ -84,26 +86,30 @@ pub fn default_instances_dir() -> anyhow::Result<PathBuf> {
         let data = std::env::var_os("LOCALAPPDATA")
             .filter(|value| !value.is_empty())
             .context("LOCALAPPDATA is not set; pass --instances-dir")?;
-        Ok(PathBuf::from(data).join("remotex").join("instances"))
+        Ok(PathBuf::from(data).join("alumia").join("instances"))
     }
     #[cfg(target_os = "macos")]
     {
-        let home = std::env::home_dir().context("cannot find the home directory; pass --instances-dir")?;
-        Ok(home.join("Library/Application Support/remotex/instances"))
+        let home = std::env::home_dir()
+            .context("cannot find the home directory; pass --instances-dir")
+            .cause(|| Cause::new("AL-9601"))?;
+        Ok(home.join("Library/Application Support/alumia/instances"))
     }
     #[cfg(all(unix, not(target_os = "macos")))]
     {
         if let Some(data) = std::env::var_os("XDG_DATA_HOME").filter(|value| !value.is_empty()) {
-            return Ok(PathBuf::from(data).join("remotex/instances"));
+            return Ok(PathBuf::from(data).join("alumia/instances"));
         }
-        let home = std::env::home_dir().context("cannot find the home directory; pass --instances-dir")?;
-        Ok(home.join(".local/share/remotex/instances"))
+        let home = std::env::home_dir()
+            .context("cannot find the home directory; pass --instances-dir")
+            .cause(|| Cause::new("AL-9601"))?;
+        Ok(home.join(".local/share/alumia/instances"))
     }
 }
 
 /// Run the terminal UI and its shared-port router until `q` or a shutdown signal.
 pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
-    let binary = std::env::current_exe().context("cannot locate the remotex executable")?;
+    let binary = std::env::current_exe().context("cannot locate the alumia executable")?;
     let mut supervisor = Supervisor::open(options.instances_dir.clone(), binary).await?;
     let router = SharedPort::bind(options.port, supervisor.routes()).await?;
 
@@ -115,10 +121,7 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
     let mut interrupt = Box::pin(tokio::signal::ctrl_c());
     let mut selected = 0usize;
     let mut view = View::List;
-    let mut message = format!(
-        "control plane listening on http://{MASTER_HOST}:{}",
-        router.port()
-    );
+    let mut message = say("tui.listening", &[("host", &MASTER_HOST), ("port", &router.port())]);
 
     loop {
         let instances = supervisor.instances();
@@ -150,7 +153,7 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                     match key.code {
                         KeyCode::Esc => {
                             view = View::List;
-                            message = "instance creation cancelled".to_owned();
+                            message = say("tui.cancelled", &[]);
                         }
                         KeyCode::Backspace => {
                             name.pop();
@@ -166,9 +169,9 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                                 Ok(index) => {
                                     selected = index;
                                     view = View::List;
-                                    message = format!("created {requested}; edit its config, then start it");
+                                    message = say("tui.created", &[("name", &requested)]);
                                 }
-                                Err(error) => message = format!("cannot create instance: {error:#}"),
+                                Err(error) => message = told(&error),
                             }
                         }
                         _ => {}
@@ -202,30 +205,30 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                     KeyCode::Char('n') => view = View::Naming(String::new()),
                     KeyCode::Char('R') => {
                         supervisor.rescan().await?;
-                        message = "rescanned the instances directory".to_owned();
+                        message = say("tui.rescanned", &[]);
                     }
                     KeyCode::Char('a') => {
                         let names: Vec<_> = supervisor.instances().into_iter().map(|i| i.name).collect();
                         let mut failed = false;
                         for name in names {
                             if let Err(error) = supervisor.start(&name).await {
-                                message = format!("{name}: {error:#}");
+                                message = format!("{name}: {}", told(&error));
                                 failed = true;
                             }
                         }
                         if !failed {
-                            message = "started every stopped instance".to_owned();
+                            message = say("tui.started.all", &[]);
                         }
                     }
                     KeyCode::Char('s') => {
                         if let Some(instance) = instances.get(selected) {
                             let name = instance.name.clone();
                             message = if instance.status == InstanceStatus::Running {
-                                format!("{name} is already running; x stops it")
+                                say("tui.running.already", &[("name", &name)])
                             } else {
                                 match supervisor.start(&name).await {
-                                    Ok(()) => format!("started {name}"),
-                                    Err(error) => format!("{name}: {error:#}"),
+                                    Ok(()) => say("tui.started", &[("name", &name)]),
+                                    Err(error) => format!("{name}: {}", told(&error)),
                                 }
                             };
                         }
@@ -243,8 +246,8 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                         if let Some(instance) = instances.get(selected) {
                             let name = instance.name.clone();
                             message = match supervisor.stop(&name).await {
-                                Ok(()) => format!("stopped {name}"),
-                                Err(error) => format!("{name}: {error:#}"),
+                                Ok(()) => say("tui.stopped", &[("name", &name)]),
+                                Err(error) => format!("{name}: {}", told(&error)),
                             };
                         }
                     }
@@ -252,8 +255,8 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                         if let Some(instance) = instances.get(selected) {
                             let name = instance.name.clone();
                             message = match supervisor.restart(&name).await {
-                                Ok(()) => format!("restarted {name}"),
-                                Err(error) => format!("{name}: {error:#}"),
+                                Ok(()) => say("tui.restarted", &[("name", &name)]),
+                                Err(error) => format!("{name}: {}", told(&error)),
                             };
                         }
                     }
@@ -261,11 +264,11 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                         if let Some(instance) = instances.get(selected) {
                             let url = instance_url(&instance.name, router.port());
                             message = if instance.status != InstanceStatus::Running {
-                                format!("{} is {}; s starts it", instance.name, instance.status.label())
+                                say("tui.not.running", &[("name", &instance.name), ("state", &instance.status.label())])
                             } else {
                                 match open_browser(&url) {
-                                    Ok(()) => format!("opening {url}"),
-                                    Err(error) => format!("cannot open {url}: {error:#}"),
+                                    Ok(()) => say("tui.opening", &[("url", &url)]),
+                                    Err(error) => format!("{url}: {}", told(&error)),
                                 }
                             };
                         }
@@ -280,8 +283,8 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
                             screen.invalidate();
                             events = EventStream::new();
                             message = match edited.and_then(|()| validate_config(&path)) {
-                                Ok(()) => format!("{name} config is valid; restart it to apply changes"),
-                                Err(error) => format!("{name} config: {error:#}"),
+                                Ok(()) => say("tui.config.valid", &[("name", &name)]),
+                                Err(error) => format!("{name}: {}", told(&error)),
                             };
                         }
                     }
@@ -294,8 +297,14 @@ pub async fn run_tui(options: TuiOptions) -> anyhow::Result<()> {
     terminal.suspend()?;
     supervisor.shutdown().await;
     drop(router);
-    println!("remotex: every instance stopped");
+    println!("{}", say("tui.goodbye", &[]));
     Ok(())
+}
+
+/// What the status line says of `error`: the catalogue's sentence in the reader's
+/// language, its code, and the error's own sentence after them.
+fn told(error: &anyhow::Error) -> String {
+    crate::words::tell_line(error, "AL-9600")
 }
 
 /// Opens the instance config in the operator's editor and waits for it.
@@ -317,8 +326,9 @@ async fn edit_config(path: &Path) -> anyhow::Result<()> {
     let status = editor_command(&editor, path)
         .status()
         .await
-        .with_context(|| format!("cannot start editor {editor}"))?;
-    anyhow::ensure!(status.success(), "editor {editor} exited with {status}");
+        .with_context(|| format!("cannot start editor {editor}"))
+        .cause(|| Cause::new("AL-9603").with("editor", &editor))?;
+    crate::ensure_known!("AL-9604", editor = editor; status.success(), "editor {editor} exited with {status}");
     Ok(())
 }
 
@@ -340,7 +350,7 @@ fn editor_command(editor: &str, path: &Path) -> Command {
 /// The line is handed over raw, because cmd does not split its command line the
 /// way a program's `argv` is split and an escaped argument would reach it with
 /// its escapes. `/s` strips exactly the outer pair of quotes, leaving
-/// `<editor> "%REMOTEX_EDIT_PATH%"`. The path arrives in that variable rather than
+/// `<editor> "%ALUMIA_EDIT_PATH%"`. The path arrives in that variable rather than
 /// in the line, because cmd expands `%NAME%` inside quotes too and a directory may
 /// be called `%TEMP%`; what a variable expands to is not expanded again, and a
 /// Windows path cannot hold a `"` to break out of its quotes. `/v:off` keeps a `!`
@@ -350,8 +360,8 @@ fn editor_command(editor: &str, path: &Path) -> Command {
 fn editor_command(editor: &str, path: &Path) -> Command {
     let mut command = Command::new("cmd.exe");
     command
-        .env("REMOTEX_EDIT_PATH", path)
-        .raw_arg(format!("/d /v:off /s /c \"{editor} \"%REMOTEX_EDIT_PATH%\"\""));
+        .env("ALUMIA_EDIT_PATH", path)
+        .raw_arg(format!("/d /v:off /s /c \"{editor} \"%ALUMIA_EDIT_PATH%\"\""));
     command
 }
 
@@ -370,7 +380,8 @@ fn open_browser(url: &str) -> anyhow::Result<()> {
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn()
-        .context("cannot start the browser launcher")?;
+        .context("cannot start the browser launcher")
+        .cause(|| Cause::new("AL-9605"))?;
     Ok(())
 }
 
@@ -399,7 +410,8 @@ fn browser_command(url: &str) -> Command {
 
 fn validate_config(path: &Path) -> anyhow::Result<()> {
     let text = std::fs::read_to_string(path)
-        .with_context(|| format!("cannot read {}", path.display()))?;
+        .with_context(|| format!("cannot read {}", path.display()))
+        .cause(|| Cause::new("AL-9559").with("path", path.display()))?;
     super::check(&text)
 }
 
@@ -409,8 +421,16 @@ struct TerminalSession {
 
 impl TerminalSession {
     fn enter() -> anyhow::Result<Self> {
-        anyhow::ensure!(std::io::IsTerminal::is_terminal(&std::io::stdin()), "the TUI needs a terminal");
-        anyhow::ensure!(std::io::IsTerminal::is_terminal(&std::io::stdout()), "the TUI needs a terminal");
+        crate::ensure_known!(
+            "AL-9602";
+            std::io::IsTerminal::is_terminal(&std::io::stdin()),
+            "the TUI needs a terminal"
+        );
+        crate::ensure_known!(
+            "AL-9602";
+            std::io::IsTerminal::is_terminal(&std::io::stdout()),
+            "the TUI needs a terminal"
+        );
         terminal::enable_raw_mode().context("cannot enable terminal raw mode")?;
         if let Err(error) = execute!(std::io::stdout(), EnterAlternateScreen, Hide) {
             let _ = terminal::disable_raw_mode();
@@ -502,45 +522,37 @@ fn render(
     view: &View,
     message: &str,
 ) -> anyhow::Result<Vec<u8>> {
-    let (width, height) = terminal::size().context("cannot read terminal size")?;
+    let size = terminal::size().context("cannot read terminal size")?;
+    render_at(size, options, port, instances, selected, view, message)
+}
+
+/// The same frame for a terminal of the size given, which a test names itself.
+fn render_at(
+    (width, height): (u16, u16),
+    options: &TuiOptions,
+    port: u16,
+    instances: &[InstanceInfo],
+    selected: usize,
+    view: &View,
+    message: &str,
+) -> anyhow::Result<Vec<u8>> {
     let mut frame = Vec::new();
     queue!(frame, MoveTo(0, 0), Clear(ClearType::All))?;
     if let View::Specs { name, lines, offset } = view {
         render_specs(&mut frame, width, height, name, lines, *offset)?;
         return Ok(frame);
     }
-    line(
-        &mut frame,
-        0,
-        width,
-        &format!("remotex {VERSION} local control plane"),
-        Some(Color::Cyan),
-        true,
-    )?;
-    line(
-        &mut frame,
-        2,
-        width,
-        &format!("master   http://{MASTER_HOST}:{port}"),
-        None,
-        false,
-    )?;
+    line(&mut frame, 0, width, &say("tui.title", &[("version", &VERSION)]), Some(Color::Cyan), true)?;
+    line(&mut frame, 2, width, &say("tui.master", &[("host", &MASTER_HOST), ("port", &port)]), None, false)?;
     line(
         &mut frame,
         3,
         width,
-        &format!("instances {}", options.instances_dir.display()),
+        &say("tui.instances", &[("path", &options.instances_dir.display())]),
         None,
         false,
     )?;
-    line(
-        &mut frame,
-        5,
-        width,
-        "  instance              state      URL",
-        Some(Color::DarkGrey),
-        false,
-    )?;
+    line(&mut frame, 5, width, &say("tui.columns", &[]), Some(Color::DarkGrey), false)?;
 
     let available = height.saturating_sub(10) as usize;
     let start = if selected >= available && available > 0 {
@@ -566,29 +578,15 @@ fn render(
         )?;
     }
     if instances.is_empty() {
-        line(&mut frame, 6, width, "  no instances — press n to create one", Some(Color::Yellow), false)?;
+        line(&mut frame, 6, width, &say("tui.empty", &[]), Some(Color::Yellow), false)?;
     }
 
     let footer = height.saturating_sub(3);
     if let View::Naming(name) = view {
-        line(
-            &mut frame,
-            footer,
-            width,
-            &format!("new instance name: {name}_"),
-            Some(Color::Yellow),
-            true,
-        )?;
-        line(&mut frame, footer + 1, width, "Enter create · Esc cancel", Some(Color::DarkGrey), false)?;
+        line(&mut frame, footer, width, &say("tui.naming", &[("name", name)]), Some(Color::Yellow), true)?;
+        line(&mut frame, footer + 1, width, &say("tui.naming.keys", &[]), Some(Color::DarkGrey), false)?;
     } else {
-        line(
-            &mut frame,
-            footer,
-            width,
-            "↑↓ select · Enter specs · s start · x stop · r restart · a start all · o open · n new · e edit · R rescan · q quit",
-            Some(Color::DarkGrey),
-            false,
-        )?;
+        line(&mut frame, footer, width, &say("tui.keys", &[]), Some(Color::DarkGrey), false)?;
         let detail = instances
             .get(selected)
             .and_then(|instance| instance.detail.as_deref())
@@ -606,17 +604,17 @@ fn render_specs(
     lines: &[String],
     offset: usize,
 ) -> anyhow::Result<()> {
-    line(frame, 0, width, &format!("instance {name}"), Some(Color::Cyan), true)?;
+    line(frame, 0, width, &say("tui.specs.title", &[("name", &name)]), Some(Color::Cyan), true)?;
     let available = height.saturating_sub(4) as usize;
     for (row, text) in lines.iter().skip(offset).take(available).enumerate() {
         line(frame, 2 + row as u16, width, text, None, false)?;
     }
-    let more = if offset + available < lines.len() { " · more below" } else { "" };
+    let more = if offset + available < lines.len() { say("tui.specs.more", &[]) } else { String::new() };
     line(
         frame,
         height.saturating_sub(1),
         width,
-        &format!("↑↓ scroll · Esc back{more}"),
+        &format!("{}{more}", say("tui.specs.keys", &[])),
         Some(Color::DarkGrey),
         false,
     )?;
@@ -633,20 +631,21 @@ fn render_specs(
 /// wants to check, and the same reason `e` says to restart.
 fn describe_instance(instance: &InstanceInfo, port: u16) -> Vec<String> {
     let mut lines = vec![
-        spec("state", instance.status.label()),
-        spec("url", &instance_url(&instance.name, port)),
-        spec("config", &instance.config_path().display().to_string()),
-        spec("log", &instance.log_path().display().to_string()),
+        spec("tui.spec.state", &instance.status.label()),
+        spec("tui.spec.url", &instance_url(&instance.name, port)),
+        spec("tui.spec.config", &instance.config_path().display().to_string()),
+        spec("tui.spec.log", &instance.log_path().display().to_string()),
     ];
     if let Some(detail) = &instance.detail {
-        lines.push(spec("detail", detail));
+        lines.push(spec("tui.spec.detail", detail));
     }
 
     let file = match super::Instance::new(&instance.dir).load() {
         Ok(file) => file,
         Err(error) => {
             lines.push(String::new());
-            lines.push(format!("this config will not start: {error:#}"));
+            lines.push(say("tui.spec.refused", &[]));
+            lines.push(told(&error));
             return lines;
         }
     };
@@ -657,16 +656,16 @@ fn describe_instance(instance: &InstanceInfo, port: u16) -> Vec<String> {
         .map(str::trim)
         .filter(|text| !text.is_empty())
         .unwrap_or(DEFAULT_BRANDING);
-    lines.push(spec("shown as", branding));
-    lines.push(spec("targets", &file.targets.len().to_string()));
+    lines.push(spec("tui.spec.shown", branding));
+    lines.push(spec("tui.spec.targets", &file.targets.len().to_string()));
 
     if file.targets.is_empty() {
         lines.push(String::new());
-        lines.push("no targets yet — press e to add one".to_owned());
+        lines.push(say("tui.spec.none", &[]));
     }
     for target in &file.targets {
         lines.push(String::new());
-        lines.push(format!("target {}", target.name));
+        lines.push(say("tui.spec.target", &[("name", &target.name)]));
         lines.extend(target_specs(target));
     }
     lines
@@ -682,46 +681,43 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
         None => target.protocol.name().to_owned(),
         Some(subtype) => format!("{} {}", target.protocol.name(), subtype.name()),
     };
-    lines.push(spec("protocol", &protocol));
-    lines.push(spec("address", &format!("{}:{}", target.host, target.port)));
+    lines.push(spec("tui.spec.protocol", &protocol));
+    lines.push(spec("tui.spec.address", &format!("{}:{}", target.host, target.port)));
 
     let mut credentials = Vec::new();
     if !target.username.is_empty() {
-        credentials.push(format!("user {}", target.username));
+        credentials.push(say("tui.spec.user", &[("name", &target.username)]));
     }
     if let Some(domain) = target.domain.as_deref().filter(|domain| !domain.is_empty()) {
-        credentials.push(format!("domain {domain}"));
+        credentials.push(say("tui.spec.domain", &[("name", &domain)]));
     }
     if !target.password.is_empty() {
-        credentials.push("account password set".to_owned());
+        credentials.push(say("tui.spec.password", &[]));
     }
     if !target.vnc_password.is_empty() {
-        credentials.push("vnc password set".to_owned());
+        credentials.push(say("tui.spec.vncpassword", &[]));
     }
     if credentials.is_empty() {
-        credentials.push("none configured".to_owned());
+        credentials.push(say("tui.spec.nocredentials", &[]));
     }
-    lines.push(spec("sign-in", &credentials.join(", ")));
+    lines.push(spec("tui.spec.signin", &credentials.join(", ")));
 
-    lines.push(spec("size", &describe_size(target)));
-    lines.push(spec("picker", &describe_offers(target)));
+    lines.push(spec("tui.spec.size", &describe_size(target)));
+    lines.push(spec("tui.spec.picker", &describe_offers(target)));
 
     if target.protocol == Protocol::Rdp {
-        lines.push(spec("security", "nla — the credentials are checked before the session"));
+        lines.push(spec("tui.spec.security", &say("tui.spec.nla", &[])));
         lines.push(spec(
-            "graphics",
-            if target.egfx() {
-                "egfx pipeline; a resize is a graphics reset"
-            } else {
-                "bitmap updates at the opening size"
-            },
+            "tui.spec.graphics",
+            &say(if target.egfx() { "tui.spec.egfx" } else { "tui.spec.bitmaps" }, &[]),
         ));
     }
 
     // Beside the clipboard rather than inside the block above: sound is the
     // protocol's own question, and it is VNC that answers it today.
-    lines.push(spec("audio", &describe_audio(target)));
-    lines.push(spec("render", &target.render_summary()));
+    lines.push(spec("tui.spec.audio", &describe_audio(target)));
+    // The render's own words are the config's: the keys and values a file is written in.
+    lines.push(spec("tui.spec.render", &target.render_summary()));
     lines
 }
 
@@ -729,14 +725,14 @@ fn target_specs(target: &TargetConfig) -> Vec<String> {
 /// the picker offers following it.
 fn describe_size(target: &TargetConfig) -> String {
     if !target.sized() {
-        return "the Mac's displays as they are".to_owned();
+        return say("tui.size.mac", &[]);
     }
     let (w, h) = DEFAULT_SIZE;
     match (target.size, target.offers().resize) {
-        (Some((w, h)), true) => format!("{w}×{h} points, or the client's window"),
-        (Some((w, h)), false) => format!("{w}×{h} points"),
-        (None, true) => format!("the client's window, or {w}×{h} points on a phone"),
-        (None, false) => format!("{w}×{h} points, the default"),
+        (Some((w, h)), true) => say("tui.size.or.window", &[("width", &w), ("height", &h)]),
+        (Some((w, h)), false) => say("tui.size.kept", &[("width", &w), ("height", &h)]),
+        (None, true) => say("tui.size.window", &[("width", &w), ("height", &h)]),
+        (None, false) => say("tui.size.default", &[("width", &w), ("height", &h)]),
     }
 }
 
@@ -746,18 +742,21 @@ fn describe_offers(target: &TargetConfig) -> String {
     let offers = target.offers();
     let mut choices = Vec::new();
     if offers.resize {
-        choices.push("resize".to_owned());
+        choices.push(say("tui.offers.resize", &[]));
     }
     if offers.audio {
-        choices.push("sound".to_owned());
+        choices.push(say("tui.offers.sound", &[]));
     }
     if let Some(passthrough) = offers.passthrough {
-        choices.push(format!("{} passed through", passthrough.stream()));
+        choices.push(say("tui.offers.passed", &[("stream", &passthrough.stream())]));
+    }
+    if offers.placement {
+        choices.push(say("tui.offers.placement", &[]));
     }
     if choices.is_empty() {
-        "nothing to choose".to_owned()
+        say("tui.offers.nothing", &[])
     } else {
-        format!("offers {}", choices.join(", "))
+        say("tui.offers", &[("choices", &choices.join(", "))])
     }
 }
 
@@ -767,25 +766,26 @@ fn describe_offers(target: &TargetConfig) -> String {
 /// has no key to describe.
 fn describe_audio(target: &TargetConfig) -> String {
     if target.media_stream() {
-        return "the Mac's AAC-ELD, passed through".to_owned();
+        return say("tui.audio.mac", &[]);
     }
     if !target.offers().audio {
-        return "none".to_owned();
+        return say("tui.audio.none", &[]);
     }
     let plan = target.audio_plan();
     let ceiling = plan.bitrate_bps / 1000;
-    match plan.adaptive_floor_bps {
-        Some(floor) if floor < plan.bitrate_bps => {
-            format!("opus ≤{ceiling} kbit/s, adaptive down to {} kbit/s, or flac", floor / 1000)
-        }
-        // A walk clamped to its ceiling, or none: the rate is the rate.
-        Some(_) | None => format!("opus at {ceiling} kbit/s, or flac"),
+    let floor = sound_opus::walk::BITRATE_FLOOR as i32;
+    if plan.adaptive && floor < plan.bitrate_bps {
+        say("tui.audio.adaptive", &[("ceiling", &ceiling), ("floor", &(floor / 1000))])
+    } else {
+        // A walk with nothing under it, or none: the rate is the rate.
+        say("tui.audio.fixed", &[("ceiling", &ceiling)])
     }
 }
 
-/// One `label   value` row of a specs page, indented under its heading.
-fn spec(label: &str, value: &str) -> String {
-    format!("  {label:<10} {value}")
+/// One `label   value` row of a specs page, indented under its heading. The label
+/// is the dictionary's text for `key`.
+fn spec(key: &str, value: &str) -> String {
+    format!("  {:<10} {value}", say(key, &[]))
 }
 
 fn line(
@@ -822,14 +822,17 @@ pub enum InstanceStatus {
 }
 
 impl InstanceStatus {
-    fn label(self) -> &'static str {
-        match self {
-            Self::Stopped => "stopped",
-            Self::Starting => "starting",
-            Self::Running => "running",
-            Self::Exited => "exited",
-            Self::Failed => "failed",
-        }
+    fn label(self) -> String {
+        say(
+            match self {
+                Self::Stopped => "tui.state.stopped",
+                Self::Starting => "tui.state.starting",
+                Self::Running => "tui.state.running",
+                Self::Exited => "tui.state.exited",
+                Self::Failed => "tui.state.failed",
+            },
+            &[],
+        )
     }
 }
 
@@ -929,7 +932,8 @@ impl Supervisor {
     pub async fn rescan(&mut self) -> anyhow::Result<()> {
         let mut names = BTreeSet::new();
         for entry in std::fs::read_dir(&self.root)
-            .with_context(|| format!("cannot list {}", self.root.display()))?
+            .with_context(|| format!("cannot list {}", self.root.display()))
+            .cause(|| Cause::new("AL-9606").with("path", self.root.display()))?
         {
             let entry = entry?;
             if !entry.file_type()?.is_dir() {
@@ -977,7 +981,8 @@ impl Supervisor {
         valid_instance_name(name)?;
         let dir = self.root.join(name);
         std::fs::create_dir(&dir)
-            .with_context(|| format!("cannot create {}", dir.display()))?;
+            .with_context(|| format!("cannot create {}", dir.display()))
+            .cause(|| Cause::new("AL-9607").with("path", dir.display()))?;
         transport::make_private(&dir)?;
         if let Err(error) = bootstrap_config(&dir) {
             let _ = std::fs::remove_dir(&dir);
@@ -1001,7 +1006,8 @@ impl Supervisor {
         let dir = self.instances[index].dir.clone();
         let instance = super::Instance::new(&dir);
         validate_config(&instance.config_path())
-            .with_context(|| format!("instance {name:?} has an invalid config"))?;
+            .with_context(|| format!("instance {name:?} has an invalid config"))
+            .cause(|| Cause::new("AL-9608").with("name", name))?;
         // Asked here as well as by the worker, which holds the claim, so an
         // instance another control plane is serving says so instead of ending in a
         // handshake that never comes. A start that races past this one still meets
@@ -1052,7 +1058,8 @@ impl Supervisor {
             };
             if let Some(status) = gateway.child.try_wait().context("cannot inspect gateway child")? {
                 let exit = ExitKind::of(status);
-                let detail = format!("{exit}; see {}", instance.dir.join("gateway.log").display());
+                let log = instance.dir.join("gateway.log");
+                let detail = say("tui.exit.see", &[("exit", &exit), ("path", &log.display())]);
                 ended = Some(format!("{}: {exit}", instance.name));
                 instance.state = if exit.is_clean() {
                     InstanceState::Exited(detail)
@@ -1109,7 +1116,7 @@ impl Supervisor {
 /// How a gateway this manager did not stop came to end.
 ///
 /// The gateway exits 0 on SIGINT or SIGTERM after logging "shutdown signal
-/// received", and on its stdin closing; a `pkill` aimed at some other remotex
+/// received", and on its stdin closing; a `pkill` aimed at some other alumia
 /// therefore shows up here as a clean exit, not a crash. Only a non-zero code
 /// or a crash is a failure.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1211,43 +1218,32 @@ impl std::fmt::Display for ExitKind {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match *self {
             #[cfg(unix)]
-            Self::Clean => write!(
-                f,
-                "the gateway shut down cleanly (exit code 0) without this control plane asking; \
-                 something else sent it SIGINT or SIGTERM, such as a pkill matching 'remotex serve'"
-            ),
+            Self::Clean => f.write_str(&say("tui.exit.clean.signalled", &[])),
             // A worker has a console of its own on Windows, so no Ctrl+C typed
             // anywhere reaches it: there is no outside hand to name.
             #[cfg(windows)]
-            Self::Clean => write!(
-                f,
-                "the gateway shut down cleanly (exit code 0) without this control plane asking"
-            ),
-            Self::Code(code) => write!(f, "the gateway failed with exit code {code}"),
+            Self::Clean => f.write_str(&say("tui.exit.clean", &[])),
+            Self::Code(code) => f.write_str(&say("tui.exit.code", &[("code", &code)])),
             #[cfg(unix)]
-            Self::Stopped(signal) => write!(
-                f,
-                "the gateway was stopped from outside by signal {signal} ({})",
-                termination_name(signal)
-            ),
+            Self::Stopped(signal) => f.write_str(&say(
+                "tui.exit.stopped.signal",
+                &[("signal", &signal), ("name", &termination_name(signal))],
+            )),
             #[cfg(windows)]
-            Self::Stopped(status) => write!(
-                f,
-                "the gateway was stopped from outside with status {status:#010X} ({})",
-                termination_name(status)
-            ),
+            Self::Stopped(status) => f.write_str(&say(
+                "tui.exit.stopped.status",
+                &[("status", &format!("{status:#010X}")), ("name", &termination_name(status))],
+            )),
             #[cfg(unix)]
-            Self::Crashed(signal) => write!(
-                f,
-                "the gateway died on signal {signal} ({})",
-                termination_name(signal)
-            ),
+            Self::Crashed(signal) => f.write_str(&say(
+                "tui.exit.crashed.signal",
+                &[("signal", &signal), ("name", &termination_name(signal))],
+            )),
             #[cfg(windows)]
-            Self::Crashed(status) => write!(
-                f,
-                "the gateway died with status {status:#010X} ({})",
-                termination_name(status)
-            ),
+            Self::Crashed(status) => f.write_str(&say(
+                "tui.exit.crashed.status",
+                &[("status", &format!("{status:#010X}")), ("name", &termination_name(status))],
+            )),
         }
     }
 }
@@ -1258,7 +1254,8 @@ async fn spawn_gateway(binary: &Path, dir: &Path) -> anyhow::Result<RunningGatew
         .create(true)
         .append(true)
         .open(&log_path)
-        .with_context(|| format!("cannot open {}", log_path.display()))?;
+        .with_context(|| format!("cannot open {}", log_path.display()))
+        .cause(|| Cause::new("AL-9609").with("path", log_path.display()))?;
     writeln!(log, "\n--- gateway launch ---")?;
     let stderr = log.try_clone()?;
     let mut command = Command::new(binary);
@@ -1278,14 +1275,21 @@ async fn spawn_gateway(binary: &Path, dir: &Path) -> anyhow::Result<RunningGatew
     command.creation_flags(CREATE_NO_WINDOW);
     let mut child = command
         .spawn()
-        .with_context(|| format!("cannot start gateway for {}", dir.display()))?;
+        .with_context(|| format!("cannot start gateway for {}", dir.display()))
+        .cause(|| Cause::new("AL-9610").with("path", dir.display()))?;
     let stdout = child.stdout.take().context("gateway stdout was not piped")?;
     let mut stdout = tokio::io::BufReader::new(stdout);
     let mut line = String::new();
     let bytes = tokio::time::timeout(HANDSHAKE_TIMEOUT, stdout.read_line(&mut line))
         .await
-        .context("gateway did not print its handshake within 20 seconds")??;
-    anyhow::ensure!(bytes != 0, "gateway exited before printing its handshake; see {}", log_path.display());
+        .context("gateway did not print its handshake within 20 seconds")
+        .cause(|| Cause::new("AL-9611"))??;
+    crate::ensure_known!(
+        "AL-9612", path = log_path.display();
+        bytes != 0,
+        "gateway exited before printing its handshake; see {}",
+        log_path.display()
+    );
     let handshake: Handshake = serde_json::from_str(line.trim_end())
         .with_context(|| format!("gateway printed a malformed handshake: {line:?}"))?;
     transport::check_endpoint(dir, &handshake.endpoint)?;
@@ -1309,27 +1313,34 @@ async fn stop_gateway(mut gateway: RunningGateway) {
 }
 
 fn valid_instance_name(name: &str) -> anyhow::Result<()> {
-    anyhow::ensure!(!name.is_empty(), "the name is empty");
-    anyhow::ensure!(name.len() <= 63, "the name is longer than one DNS label");
-    anyhow::ensure!(
+    crate::ensure_known!("AL-9613"; !name.is_empty(), "the name is empty");
+    crate::ensure_known!("AL-9614"; name.len() <= 63, "the name is longer than one DNS label");
+    crate::ensure_known!(
+        "AL-9615";
         name.bytes().all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit() || byte == b'-'),
         "use lowercase ASCII letters, digits, and hyphens only"
     );
-    anyhow::ensure!(!name.starts_with('-') && !name.ends_with('-'), "the name may not start or end with '-'");
+    crate::ensure_known!(
+        "AL-9616";
+        !name.starts_with('-') && !name.ends_with('-'),
+        "the name may not start or end with '-'"
+    );
     Ok(())
 }
 
 fn create_private_dir(path: &Path) -> anyhow::Result<()> {
-    std::fs::create_dir_all(path).with_context(|| format!("cannot create {}", path.display()))?;
+    std::fs::create_dir_all(path)
+        .with_context(|| format!("cannot create {}", path.display()))
+        .cause(|| Cause::new("AL-9607").with("path", path.display()))?;
     transport::make_private(path)
 }
 
 fn bootstrap_config(dir: &Path) -> anyhow::Result<()> {
-    let path = dir.join("remotex.toml");
+    let path = dir.join("alumia.toml");
     if path.exists() {
         return Ok(());
     }
-    let temporary = dir.join(format!("remotex.toml.{}.new", std::process::id()));
+    let temporary = dir.join(format!("alumia.toml.{}.new", std::process::id()));
     let result = (|| {
         let mut options = std::fs::OpenOptions::new();
         options.write(true).create_new(true);
@@ -1341,11 +1352,13 @@ fn bootstrap_config(dir: &Path) -> anyhow::Result<()> {
         }
         let mut file = options
             .open(&temporary)
-            .with_context(|| format!("cannot create {}", temporary.display()))?;
+            .with_context(|| format!("cannot create {}", temporary.display()))
+            .cause(|| Cause::new("AL-9607").with("path", temporary.display()))?;
         file.write_all(INSTANCE_TEMPLATE.as_bytes())?;
         file.sync_all()?;
         std::fs::rename(&temporary, &path)
             .with_context(|| format!("cannot install {}", path.display()))
+            .cause(|| Cause::new("AL-9607").with("path", path.display()))
     })();
     let _ = std::fs::remove_file(&temporary);
     result
@@ -1377,7 +1390,7 @@ pub struct SharedPort {
 impl SharedPort {
     /// Take both loopbacks at `port`, under `serve`'s binding policy.
     ///
-    /// The port is the caller's and is never asked of the kernel: `remotex.localhost`
+    /// The port is the caller's and is never asked of the kernel: `alumia.localhost`
     /// and every instance subdomain are typed into a browser, and a port the operator
     /// did not choose is one nobody can type. That is why there is no ephemeral path
     /// here even for tests — a test picks a concrete free port the way `serve`'s do,
@@ -1389,13 +1402,15 @@ impl SharedPort {
     /// answering and keep routing to *its* instance workers, and which one a page
     /// reached would be the resolver's choice.
     pub async fn bind(port: u16, routes: RouteTable) -> anyhow::Result<Self> {
-        anyhow::ensure!(port != 0, "the control plane needs a port a browser can be told");
+        crate::ensure_known!("AL-9401"; port != 0, "the control plane needs a port a browser can be told");
         let addrs = [
             SocketAddr::new(IpAddr::V6(Ipv6Addr::LOCALHOST), port),
             SocketAddr::new(IpAddr::V4(Ipv4Addr::LOCALHOST), port),
         ];
         let mut tasks = Vec::new();
-        for listener in crate::server::bind_all(&addrs, &format!("{MASTER_HOST}:{port}"))? {
+        let listeners = crate::server::bind_all(&addrs, &format!("{MASTER_HOST}:{port}"))
+            .cause(|| Cause::new("AL-9411").with("address", format!("{MASTER_HOST}:{port}")))?;
+        for listener in listeners {
             listener
                 .set_nonblocking(true)
                 .context("cannot make a control-plane listener non-blocking")?;
@@ -1451,21 +1466,21 @@ async fn route_connection(
     }
 
     let Some(name) = host.strip_suffix(&format!(".{MASTER_HOST}")) else {
-        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown remotex host\n", &[]).await?;
+        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown alumia host\n", &[]).await?;
         return Ok(());
     };
     if valid_instance_name(name).is_err() {
-        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown remotex instance\n", &[]).await?;
+        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown alumia instance\n", &[]).await?;
         return Ok(());
     }
     let published = routes.inner.read().await.get(name).cloned();
     let Some(published) = published else {
-        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown remotex instance\n", &[]).await?;
+        write_response(&mut client, "404 Not Found", "text/plain; charset=utf-8", "unknown alumia instance\n", &[]).await?;
         return Ok(());
     };
     let Some(target) = published.target else {
         let body = format!(
-            "instance {name} is {}; start it from the remotex TUI\n",
+            "instance {name} is {}; start it from the alumia TUI\n",
             published.status.label()
         );
         write_response(&mut client, "503 Service Unavailable", "text/plain; charset=utf-8", &body, &[]).await?;
@@ -1481,13 +1496,13 @@ async fn route_connection(
     // inside a document. What follows is that **any local user may drive any
     // instance** — including one who could not open the worker's owner-only
     // endpoint directly. This is a single-user desktop tool: do not run
-    // `remotex tui` on a machine you share with people you would not give the
+    // `alumia tui` on a machine you share with people you would not give the
     // desktops to. A launch nonce would not change that, only make it a step
     // longer: the page it authenticates has to keep something the next request
     // presents, and the redirect is where that something is handed over.
     if !cookie_has_token(parsed.cookie.as_deref(), &target.token) {
         let cookie = format!(
-            "remotex_session={}; HttpOnly; SameSite=Strict; Path=/",
+            "alumia_session={}; HttpOnly; SameSite=Strict; Path=/",
             target.token
         );
         write_response(
@@ -1603,7 +1618,7 @@ fn cookie_has_token(cookie: Option<&str>, expected: &str) -> bool {
     cookie.is_some_and(|cookies| {
         cookies.split(';').any(|pair| {
             pair.trim().split_once('=').is_some_and(|(name, value)| {
-                name == "remotex_session" && crate::auth::secrets_match(expected, value)
+                name == "alumia_session" && crate::auth::secrets_match(expected, value)
             })
         })
     })
@@ -1648,13 +1663,14 @@ fn landing_page(port: u16, instances: &BTreeMap<String, PublishedInstance>) -> S
         rows.push_str("<li>No instances. Press <kbd>n</kbd> in the TUI to create one.</li>");
     }
     format!(
-        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"2\"><meta name=\"viewport\" content=\"width=device-width\"><title>remotex instances</title><style>body{{font:16px system-ui;max-width:720px;margin:4rem auto;padding:0 1rem;background:#101014;color:#eee}}a{{color:#85b7ff}}span{{color:#999;margin-left:.5rem}}li{{margin:.8rem 0}}</style></head><body><h1>remotex instances</h1><p>Start and stop gateways in the terminal control plane.</p><ul>{rows}</ul></body></html>"
+        "<!doctype html><html><head><meta charset=\"utf-8\"><meta http-equiv=\"refresh\" content=\"2\"><meta name=\"viewport\" content=\"width=device-width\"><title>alumia instances</title><style>body{{font:16px system-ui;max-width:720px;margin:4rem auto;padding:0 1rem;background:#101014;color:#eee}}a{{color:#85b7ff}}span{{color:#999;margin-left:.5rem}}li{{margin:.8rem 0}}</style></head><body><h1>alumia instances</h1><p>Start and stop gateways in the terminal control plane.</p><ul>{rows}</ul></body></html>"
     )
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::words::{Language, speaking};
 
     /// The tick is not a reason to touch the terminal. A repaint that changes
     /// nothing still erases the display, and a selection made over this screen
@@ -1705,10 +1721,11 @@ mod tests {
         )
         .unwrap();
 
-        let page = describe_instance(&instance, 52380).join("\n");
-        assert!(page.contains(&spec("state", "running")), "{page}");
-        assert!(page.contains("http://work.remotex.localhost:52380"), "{page}");
-        assert!(page.contains(&spec("shown as", "work laptop")), "{page}");
+        let in_english = |describe: &dyn Fn() -> String| speaking(Language::English, describe);
+        let page = in_english(&|| describe_instance(&instance, 52380).join("\n"));
+        assert!(page.contains("  state      running"), "{page}");
+        assert!(page.contains("http://work.alumia.localhost:52380"), "{page}");
+        assert!(page.contains("  shown as   work laptop"), "{page}");
         assert!(page.contains("target win"), "{page}");
         assert!(page.contains("192.168.1.20:3389"), "the standard port is filled in: {page}");
         assert!(page.contains("account password set"), "{page}");
@@ -1719,33 +1736,139 @@ mod tests {
         );
         assert!(page.contains("video q70"), "the render plan describes itself: {page}");
         assert!(
-            page.contains(&spec(
-                "picker",
-                "offers resize, sound, the host's graphics pipeline passed through"
-            )),
+            page.contains("  picker     offers resize, sound, the host's graphics pipeline passed through"),
             "what a session's starter chooses is the type's to offer: {page}"
         );
         assert!(
-            page.lines().any(|line| line == spec("picker", "offers resize, sound")),
+            page.lines().any(|line| line == "  picker     offers resize, sound"),
             "a wlshare target's picture is not a choice: {page}"
         );
 
         // A config the gateway would refuse says so, instead of a page of
         // defaults for a start that will not happen.
         std::fs::write(instance.config_path(), "[server]\n").unwrap();
-        let page = describe_instance(&instance, 52380).join("\n");
+        let page = in_english(&|| describe_instance(&instance, 52380).join("\n"));
         assert!(page.contains("will not start"), "{page}");
         assert!(page.contains("[server]"), "it names what is wrong: {page}");
     }
 
+    /// The list and the specs page are drawn whole in each language: a line that
+    /// reads the same in both is one that carries no words of the panel's own, a
+    /// path, an address or what the config calls a thing, and nothing else. And no
+    /// password is on either.
+    #[test]
+    fn the_panel_is_drawn_in_both_languages() {
+        let temp = tempfile::tempdir().unwrap();
+        let dir = temp.path().join("work");
+        std::fs::create_dir(&dir).unwrap();
+        let instance = InstanceInfo {
+            name: "work".to_owned(),
+            status: InstanceStatus::Failed,
+            dir,
+            detail: Some(speaking(Language::English, || ExitKind::Code(2).to_string())),
+        };
+        std::fs::write(
+            instance.config_path(),
+            "[[targets]]\nname = \"win\"\nprotocol = \"rdp\"\nhost = \"192.168.1.20\"\n\
+             username = \"andrew\"\npassword = \"hunter2\"\n\n\
+             [[targets]]\nname = \"mac\"\nprotocol = \"vnc\"\nsubtype = \"ard\"\nhost = \"192.168.1.22\"\n\
+             username = \"andrew\"\npassword = \"hunter2\"\n",
+        )
+        .unwrap();
+        let options = TuiOptions { port: 52380, instances_dir: temp.path().to_path_buf() };
+        // What the terminal is told, without the escapes that place and colour it.
+        let read = |frame: Vec<u8>| {
+            let text = String::from_utf8(frame).unwrap();
+            let mut said = String::new();
+            let mut escape = false;
+            for character in text.chars() {
+                match (escape, character) {
+                    (false, '\u{1b}') => escape = true,
+                    (true, letter) if letter.is_ascii_alphabetic() => {
+                        escape = false;
+                        said.push('\n');
+                    }
+                    (true, _) => {}
+                    (false, other) => said.push(other),
+                }
+            }
+            said
+        };
+        let drawn = |language: Language| {
+            speaking(language, || {
+                let exit = ExitKind::Code(2).to_string();
+                let detailed = InstanceInfo { detail: Some(exit), ..instance.clone() };
+                let listed = std::slice::from_ref(&detailed);
+                let list = render_at((200, 40), &options, 52380, listed, 0, &View::List, "").unwrap();
+                let naming =
+                    render_at((200, 40), &options, 52380, &[], 0, &View::Naming("new".to_owned()), "").unwrap();
+                let specs = View::Specs {
+                    name: detailed.name.clone(),
+                    lines: describe_instance(&detailed, 52380),
+                    offset: 0,
+                };
+                let page = render_at((200, 60), &options, 52380, &[detailed], 0, &specs, "").unwrap();
+                format!("{}\n{}\n{}", read(list), read(naming), read(page))
+            })
+        };
+        let (portuguese, english) = (drawn(Language::Portuguese), drawn(Language::English));
+        assert!(!portuguese.contains("hunter2") && !english.contains("hunter2"), "{portuguese}");
+        assert!(portuguese.contains("instância work"), "{portuguese}");
+        assert!(portuguese.contains("o servidor falhou com o código de saída 2"), "{portuguese}");
+        assert!(english.contains("the gateway failed with exit code 2"), "{english}");
+
+        // The lines both languages draw alike are counted out, one by one: each
+        // carries no words of the panel's own, only what the config calls a thing.
+        // A text left in one language shows here as a line more.
+        // A row of the specs page is read without its label, which is translated
+        // whatever its value is: `  label      value`.
+        let root = temp.path().display().to_string();
+        let said = |frame: &str| -> Vec<String> {
+            frame
+                .lines()
+                .filter(|line| !line.trim().is_empty())
+                .map(|line| match line.strip_prefix("  ") {
+                    Some(row) if row.chars().count() > 11 && !row.starts_with(' ') => {
+                        row.chars().skip(11).collect::<String>()
+                    }
+                    _ => line.trim().to_owned(),
+                })
+                .map(|value| value.trim().replace(&root, "<root>"))
+                .collect()
+        };
+        let other = said(&english);
+        let mut alike: Vec<String> = said(&portuguese).into_iter().filter(|value| other.contains(value)).collect();
+        alike.sort();
+        alike.dedup();
+        assert_eq!(
+            alike,
+            [
+                "192.168.1.20:3389",
+                "192.168.1.22:5900",
+                "2",
+                "<root>/work/alumia.toml",
+                "<root>/work/gateway.log",
+                "alumia",
+                "http://work.alumia.localhost:52380",
+                "rdp",
+                // The render plan in the config's own words (`TargetConfig::render_summary`).
+                "video q90 chroma auto · adaptive",
+                "vnc ard",
+            ],
+            "{portuguese}"
+        );
+    }
+
     /// A clean exit this manager did not request is not a failure, and the
-    /// account of it says which it was, so a `pkill` aimed at some other remotex
+    /// account of it says which it was, so a `pkill` aimed at some other alumia
     /// is not read as a crash.
     #[cfg(unix)]
     #[test]
     fn an_unrequested_exit_is_only_a_failure_when_the_gateway_says_so() {
         use std::os::unix::process::ExitStatusExt as _;
         let status = |raw: i32| std::process::ExitStatus::from_raw(raw);
+        // The account is read here in English, whatever this terminal's language.
+        speaking(Language::English, || {
 
         let clean = ExitKind::of(status(0));
         assert_eq!(clean, ExitKind::Clean);
@@ -1769,6 +1892,8 @@ mod tests {
         assert!(!segv.is_clean());
         assert!(segv.to_string().contains("SIGSEGV"), "{segv}");
         assert!(!ExitKind::of(status(libc::SIGKILL)).is_clean());
+
+        });
     }
 
     /// Windows says all of it with the exit code: a status the system ended the
@@ -1779,6 +1904,8 @@ mod tests {
     fn an_unrequested_exit_is_only_a_failure_when_the_gateway_says_so() {
         use std::os::windows::process::ExitStatusExt as _;
         let status = |raw: u32| std::process::ExitStatus::from_raw(raw);
+        // The account is read here in English, whatever this terminal's language.
+        speaking(Language::English, || {
 
         let clean = ExitKind::of(status(0));
         assert_eq!(clean, ExitKind::Clean);
@@ -1803,6 +1930,8 @@ mod tests {
         let abort = ExitKind::of(status(0xC000_0409));
         assert!(!abort.is_clean());
         assert!(abort.to_string().contains("abort"), "a panic's end is named: {abort}");
+
+        });
     }
 
     #[test]
@@ -1818,10 +1947,10 @@ mod tests {
     #[test]
     fn request_parsing_separates_host_target_and_cookie() {
         let parsed = parse_request(
-            b"GET /api/targets?q=1 HTTP/1.1\r\nHost: Work.remotex.localhost:52380\r\nCookie: other=1; remotex_session=secret\r\n\r\n",
+            b"GET /api/targets?q=1 HTTP/1.1\r\nHost: Work.alumia.localhost:52380\r\nCookie: other=1; alumia_session=secret\r\n\r\n",
         )
         .unwrap();
-        assert_eq!(hostname(&parsed.host), "work.remotex.localhost");
+        assert_eq!(hostname(&parsed.host), "work.alumia.localhost");
         assert_eq!(parsed.target, "/api/targets?q=1");
         assert!(cookie_has_token(parsed.cookie.as_deref(), "secret"));
         assert!(!cookie_has_token(parsed.cookie.as_deref(), "other"));
@@ -1831,7 +1960,7 @@ mod tests {
     fn a_new_instance_gets_the_embedded_config_shape() {
         let temp = tempfile::tempdir().unwrap();
         bootstrap_config(temp.path()).unwrap();
-        let text = std::fs::read_to_string(temp.path().join("remotex.toml")).unwrap();
+        let text = std::fs::read_to_string(temp.path().join("alumia.toml")).unwrap();
         assert!(!text.lines().any(|line| line.trim() == "[server]"));
         super::super::check(&text).unwrap();
     }
@@ -1844,7 +1973,7 @@ mod tests {
         let temp = tempfile::tempdir().unwrap();
         let dir = temp.path().join("%TEMP% & !PATH! ^ (x)");
         std::fs::create_dir(&dir).unwrap();
-        let path = dir.join("remotex.toml");
+        let path = dir.join("alumia.toml");
         std::fs::write(&path, "the-right-file").unwrap();
 
         let output = editor_command("type", &path).output().await.unwrap();
@@ -1860,7 +1989,7 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn an_instance_another_gateway_holds_is_refused_before_spawning() {
         let root = tempfile::tempdir().unwrap();
-        let mut supervisor = Supervisor::open(root.path().to_path_buf(), PathBuf::from("no-such-remotex"))
+        let mut supervisor = Supervisor::open(root.path().to_path_buf(), PathBuf::from("no-such-alumia"))
             .await
             .unwrap();
         supervisor.create("alpha").await.unwrap();
@@ -1902,14 +2031,14 @@ mod tests {
 
         let first_response = request(
             router.port(),
-            "one.remotex.localhost",
-            Some("remotex_session=token-one"),
+            "one.alumia.localhost",
+            Some("alumia_session=token-one"),
         )
         .await;
         let second_response = request(
             router.port(),
-            "two.remotex.localhost",
-            Some("remotex_session=token-two"),
+            "two.alumia.localhost",
+            Some("alumia_session=token-two"),
         )
         .await;
         assert!(first_response.ends_with("one"), "{first_response}");
@@ -1932,9 +2061,9 @@ mod tests {
             },
         );
         let router = SharedPort::bind(free_port(), routes).await.unwrap();
-        let response = request(router.port(), "one.remotex.localhost", None).await;
+        let response = request(router.port(), "one.alumia.localhost", None).await;
         assert!(response.starts_with("HTTP/1.1 307 Temporary Redirect"), "{response}");
-        assert!(response.contains("Set-Cookie: remotex_session=launch-token;"), "{response}");
+        assert!(response.contains("Set-Cookie: alumia_session=launch-token;"), "{response}");
         assert!(response.contains("Location: /"), "{response}");
     }
 

@@ -33,7 +33,7 @@
 //! # The two graphics paths
 //!
 //! [`Connect::egfx`] chooses. With the graphics pipeline (MS-RDPEGFX), the server
-//! draws through surfaces on a dynamic channel — [`remotex_rdp_graphics::gfx`]
+//! draws through surfaces on a dynamic channel — [`alumia_rdp_graphics::gfx`]
 //! composes them into the framebuffer — marks its frames ([`Event::Frame`]), and answers a monitor
 //! layout with a graphics reset, which surfaces here as one [`Event::Resize`].
 //! Without it, the server sends plain bitmap updates on the share and the desktop
@@ -82,7 +82,10 @@
 //!   interceptor cannot replay the credentials; it is **not** defensible under
 //!   plain TLS security, where the credentials go to whoever answered.
 //! - **No Kerberos.** CredSSP runs NTLM with the target's user name and password.
-//! - **One monitor.** [`Input::resize`] sends a layout of exactly one.
+//! - **One monitor, or a second against it.** [`Connect::monitors`] asks for
+//!   same-sized monitors at connect, the second against the edge of the first that
+//!   [`Connect::placement`] names, and each layout after names each monitor's own
+//!   size; the framebuffer spans them, and the caller shows what it will of it.
 
 mod camera;
 mod connect;
@@ -98,5 +101,5 @@ pub use microphone::{MicrophoneFeed, MicrophoneSink};
 pub use error::Error;
 pub use input::{Input, MouseButton, sanitise_scale, sanitise_size};
 pub use pointer::{Cursor, CursorImage};
-pub use remotex_rdp_graphics::{Composed, Compositor, Frame, Framebuffer, Rect};
-pub use session::{AudioSink, Connect, Event, Session};
+pub use alumia_rdp_graphics::{Composed, Compositor, Frame, Framebuffer, Rect};
+pub use session::{AudioSink, Connect, Event, Placed, Session};

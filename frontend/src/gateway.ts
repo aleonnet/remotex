@@ -75,10 +75,36 @@ export function gatewaySocketUrl(
   return url.toString();
 }
 
-/// The software HEVC decoder's files, `hevc.js` and `hevc.wasm`: a release of
-/// andrewtheguy/hevc-wasm the gateway serves beside the bundle when it has the
-/// release archive, as they were built, because the module starts its slice
-/// threads as workers of its own script, found by its own URL.
+/// The WebSocket URL of display `display`'s socket: its picture, and the input
+/// made over it.
+///
+/// No claim rides on it. The display socket attaches by the login cookie, which
+/// a page of this browser carries and nothing else does — and which is all a
+/// display opened in another tab has: that tab is given no session token. What
+/// such a tab presents is `tab`, its own name for itself, which tells its reload
+/// from another tab, and `takeover` once its user has confirmed taking the
+/// display from the tab showing it.
+export function gatewayDisplaySocketUrl(
+  display: number,
+  tab: { id: string; takeover: boolean } | null = null,
+): string {
+  const url = new URL(gatewayUrl("/ws/display"));
+  url.protocol = url.protocol === "https:" ? "wss:" : "ws:";
+  url.searchParams.set("display", String(display));
+  if (tab) {
+    url.searchParams.set("tab", tab.id);
+    if (tab.takeover) {
+      url.searchParams.set("takeover", "true");
+    }
+  }
+  return url.toString();
+}
+
+/// The software HEVC decoder's files, `hevc.js` (wasm-bindgen's glue) and
+/// `hevc.wasm`: a release of andrewtheguy/hevc-wasm the gateway serves beside
+/// the bundle when it has the release archive. The decode worker and each
+/// thread of the decoder's pool import the glue by this URL, and the glue is
+/// given the module's.
 export function hevcDecoderUrl(file: "hevc.js" | "hevc.wasm"): string {
   return gatewayUrl(`/hevc/${file}`);
 }

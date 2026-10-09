@@ -1,0 +1,14 @@
+{
+  "version": "0.0.325",
+  "serving": false,
+  "stopped": false,
+  "listen": null,
+  "session": null,
+  "ffmpeg": false,
+  "cause": {
+    "code": "AL-9901",
+    "says": "O Alumia ainda não foi configurado neste Mac. Abra o Alumia e conclua a configuração.",
+    "detail": "no settings yet at /a/alumia.toml"
+  },
+  "binary": "16777234-48213"
+}

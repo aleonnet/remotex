@@ -9,8 +9,11 @@
 // Run with `bun test src/framePainter.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
+import type { RelayMessage, RelayPort } from "./displayRelay.ts";
 import type { ComposedRun, EgfxCompositor, Scanned } from "./egfxCompositor.ts";
+import type { PicturePart } from "./egfxPicture.ts";
 import type { EgfxVideo } from "./egfxVideo.ts";
+import type { Fault } from "./fault.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
 
 const OP_VIDEO = 0x03;
@@ -63,9 +66,11 @@ let cropped: {
   dh: number;
 }[] = [];
 let decoded: FakeFrame[] = [];
-let videoErrors: (string | null)[] = [];
+let videoErrors: (Fault | null)[] = [];
 /** Chains that were cut. The stub never goes quiet, so these are failures. */
 let videoKeyframeAsks: string[] = [];
+/** How often the painter said a keyframe it asked for is owed no more. */
+let videoSettles = 0;
 
 const context = {
   drawImage(_source: unknown, ...args: number[]) {
@@ -164,11 +169,14 @@ beforeEach(() => {
   uploaded = [];
   pictures = { made: 0, closed: 0 };
   blanked = [];
+  windows = [];
+  patched = [];
   shown = [];
   cropped = [];
   decoded = [];
   videoErrors = [];
   videoKeyframeAsks = [];
+  videoSettles = 0;
   chunkTypes = [];
   decoders = 0;
   closes = 0;
@@ -202,6 +210,9 @@ function painter(ctx: CanvasRenderingContext2D | null = context) {
     },
     onVideoNeedsKeyframe: (reason) => {
       videoKeyframeAsks.push(reason);
+    },
+    onVideoSettled: () => {
+      videoSettles += 1;
     },
   });
 }
@@ -317,10 +328,10 @@ test("a failed decoder asks for a keyframe, and the complaint goes when video pa
   poison = 0xbd;
   const p = announced();
   await p.draw(batchFrame([{ w: 320, h: 64, payload: [...KEYFRAME, 0xbd] }]));
-  assert.equal(
-    videoErrors.at(-1),
-    "This browser's video decoder failed (Error: this decoder gave up).",
-  );
+  assert.deepEqual(videoErrors.at(-1), {
+    code: "AL-4602",
+    detail: "Error: this decoder gave up",
+  });
   assert.equal(
     videoKeyframeAsks.length,
     1,
@@ -336,6 +347,78 @@ test("a failed decoder asks for a keyframe, and the complaint goes when video pa
   );
 });
 
+test("the first picture of the decoder built after a cut says the stream is back, once", async () => {
+  poison = 0xbd;
+  const p = announced();
+  // An ordinary stream owes nothing, and its pictures say nothing of coming back.
+  await p.draw(batchFrame([{ w: 320, h: 64, payload: KEYFRAME }]));
+  assert.equal(videoSettles, 0);
+
+  await p.draw(
+    batchFrame([{ w: 320, h: 64, payload: [1, 0xbd], keyframe: false }]),
+  );
+  assert.equal(videoKeyframeAsks.length, 1);
+  // Deltas the new decoder has no history for are dropped: nothing is back yet.
+  await p.draw(batchFrame([{ w: 320, h: 64, payload: [2], keyframe: false }]));
+  assert.equal(videoSettles, 0);
+
+  poison = null;
+  await p.draw(batchFrame([{ w: 320, h: 64, payload: KEYFRAME }]));
+  assert.equal(videoSettles, 1, "the keyframe that was asked for, painted");
+  await p.draw(batchFrame([{ w: 320, h: 64, payload: [3], keyframe: false }]));
+  assert.equal(videoSettles, 1, "said once, and not with every picture after");
+});
+
+test("a decoder that fails on the keyframe it asked for asks again, and nothing says the stream is back", async () => {
+  poison = 0xbd;
+  const p = announced();
+  const failing = () =>
+    p.draw(batchFrame([{ w: 320, h: 64, payload: [...KEYFRAME, 0xbd] }]));
+  await failing();
+  await failing();
+  await failing();
+  assert.equal(videoKeyframeAsks.length, 3, "one ask for each decoder lost");
+  assert.equal(videoSettles, 0);
+  assert.equal(videoErrors.at(-1)?.code, "AL-4602");
+  assert.deepEqual(cropped, []);
+});
+
+test("a malformed batch's cut ends with the next keyframe painted, and the stream's end settles what is still owed", async () => {
+  const p = announced();
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
+  const frame = batchFrame([{ w: 64, h: 64, payload: [1], keyframe: false }]);
+  await p.draw(frame.slice(0, frame.byteLength - 1));
+  assert.equal(videoKeyframeAsks.length, 1);
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
+  assert.equal(videoSettles, 1);
+
+  // Cut again, and the attachment ends before a picture comes: nothing is owed
+  // any more, which is said then and there, for whoever is still asking. The
+  // next attachment's first picture is its own, and says nothing.
+  await p.draw(frame.slice(0, frame.byteLength - 1));
+  assert.equal(videoKeyframeAsks.length, 2);
+  p.clear();
+  assert.equal(videoSettles, 2, "the attachment's end left a keyframe owed");
+  p.clear();
+  assert.equal(videoSettles, 2, "said with nothing owed");
+  p.setVideoFormat({ decode: "vp09.00.40.08" });
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
+  assert.equal(videoSettles, 2);
+});
+
+test("a pipeline that takes the picture settles a keyframe the stream still owed", async () => {
+  // The stream is done with: no keyframe of it will ever be painted, and a page
+  // left asking would ask until it gave up, over a picture that is there.
+  const p = announced();
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
+  const frame = batchFrame([{ w: 64, h: 64, payload: [1], keyframe: false }]);
+  await p.draw(frame.slice(0, frame.byteLength - 1));
+  assert.equal(videoKeyframeAsks.length, 1);
+  assert.equal(videoSettles, 0);
+  p.startGraphics();
+  assert.equal(videoSettles, 1);
+});
+
 test("a refused stream says so, asks for nothing, and stays said", async () => {
   // The whole reason this is reported at all: the stream is all a target sends, so the
   // alternative is a desktop that never paints and never explains itself.
@@ -344,7 +427,7 @@ test("a refused stream says so, asks for nothing, and stays said", async () => {
   await p.draw(batchFrame([{ w: 64, h: 64, payload: [...KEYFRAME, 0xbd] }]));
   const said = videoErrors.filter(Boolean);
   assert.equal(said.length, 1);
-  assert.match(String(said[0]), /cannot decode/);
+  assert.equal(said[0]?.code, "AL-4601");
   assert.deepEqual(
     videoKeyframeAsks,
     [],
@@ -412,11 +495,15 @@ test("a unit decode() throws on cuts the chain without misplacing a frame", asyn
     ]),
   );
   assert.equal(videoKeyframeAsks.length, 1, "no keyframe was asked for");
-  // Raised, then taken down again by the keyframe decoded ahead of the cut, which
-  // still paints.
-  assert.ok(
-    videoErrors.some((error) => error?.includes("refused a frame")),
-    String(videoErrors),
+  // The keyframe decoded ahead of the cut still paints, and is not the stream
+  // coming back: the chain is cut behind it, so what was said stays said and
+  // the picture is still owed.
+  assert.equal(cropped.length, 1, "the picture ahead of the cut was painted");
+  assert.equal(videoErrors.at(-1)?.code, "AL-4603", String(videoErrors));
+  assert.equal(
+    videoSettles,
+    0,
+    "a picture from before the cut read as its end",
   );
   assert.deepEqual(chunkTypes, ["key"], "a delta was fed past the cut");
   assert.ok(decoded.every((frame) => frame.closed));
@@ -424,6 +511,7 @@ test("a unit decode() throws on cuts the chain without misplacing a frame", asyn
   rejected = null;
   await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
   assert.equal(videoErrors.at(-1), null, "the stream did not recover");
+  assert.equal(videoSettles, 1);
 });
 
 test("a refusal gives way to a configuration the browser takes", async () => {
@@ -433,18 +521,18 @@ test("a refusal gives way to a configuration the browser takes", async () => {
   const p = painter();
   p.setVideoFormat({ decode: "vp09.01.51.08" });
   await p.draw(batchFrame([{ w: 64, h: 64, payload: [...KEYFRAME, 0xbd] }]));
-  assert.match(String(videoErrors.at(-1)), /cannot decode/);
+  assert.equal(videoErrors.at(-1)?.code, "AL-4601");
 
   // The same configuration again changes nothing.
   p.setVideoFormat({ decode: "vp09.01.51.08" });
   await p.draw(batchFrame([{ w: 64, h: 64, payload: [3], keyframe: false }]));
-  assert.match(String(videoErrors.at(-1)), /cannot decode/);
+  assert.equal(videoErrors.at(-1)?.code, "AL-4601");
 
   refused = null;
   p.setVideoFormat({ decode: "vp09.01.40.08" });
-  assert.match(
-    String(videoErrors.at(-1)),
-    /cannot decode/,
+  assert.equal(
+    videoErrors.at(-1)?.code,
+    "AL-4601",
     "the banner came down before anything painted",
   );
   await p.draw(batchFrame([{ w: 32, h: 32, payload: KEYFRAME }]));
@@ -519,6 +607,13 @@ function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
         supplied: [] as number[][],
       };
       made.push(record);
+      // The picture: 64 by 48, every byte the last run's first byte, and of
+      // nothing before the first run, as a compositor's is before its reset.
+      const pixels = new Uint8ClampedArray(64 * 48 * 4);
+      const picture = () =>
+        record.fed.length === 0
+          ? { width: 0, height: 0, pixels: new Uint8ClampedArray(0) }
+          : { width: 64, height: 48, pixels };
       return {
         scan: h264Runs,
         supply(number, _window, frame) {
@@ -538,15 +633,16 @@ function fakeCompositors(options: { refuse?: number; fail?: boolean } = {}) {
             throw new Error("a command that does not decode");
           }
           record.fed.push([...commands]);
+          pixels.fill(commands[0]);
           return {
-            // Each run paints one rectangle named by its first byte.
+            // Each run paints one rectangle named by its first byte; the first
+            // run of a pipeline is the reset that lays the picture out.
             painted: new Uint32Array([commands[0], 2, 3, 4]),
-            width: 64,
-            height: 48,
-            resized: false,
-            pixels: new Uint8ClampedArray(64 * 48 * 4),
+            resized: record.fed.length === 1,
+            ...picture(),
           };
         },
+        picture,
         close() {
           record.closed = true;
         },
@@ -622,8 +718,37 @@ let uploaded: number[][] = [];
 let pictures = { made: 0, closed: 0 };
 /** The sizes a picture was blanked at. */
 let blanked: number[][] = [];
+/** The parts a picture was told to show, in order. */
+let windows: (PicturePart | null)[] = [];
+/** What a picture was patched with: its size, the rectangles, the bytes. */
+let patched: [number, number, number[], number][] = [];
 /** What the page was told about showing the picture, in order. */
 let shown: boolean[] = [];
+
+/** One end of the second display's channel, by hand: what it posted, and a way to
+ * deliver what the other end says. */
+function fakeRelay() {
+  const posted: RelayMessage[] = [];
+  let handler: (message: RelayMessage) => void = () => {};
+  let closed = 0;
+  const port: RelayPort = {
+    post: (message) => {
+      posted.push(message);
+    },
+    onMessage: (next) => {
+      handler = next;
+    },
+    close: () => {
+      closed += 1;
+    },
+  };
+  return {
+    port,
+    posted,
+    deliver: (message: RelayMessage) => handler(message),
+    closed: () => closed,
+  };
+}
 
 function graphicsPainter(
   load: ReturnType<typeof fakeCompositors>["load"],
@@ -631,9 +756,11 @@ function graphicsPainter(
     noPicture?: boolean;
     blankFails?: boolean;
     video?: () => EgfxVideo;
+    relay?: RelayPort;
   } = {},
 ) {
   return createFramePainter({
+    makeRelay: () => options.relay ?? fakeRelay().port,
     makeGraphicsVideo:
       options.video ??
       (() => {
@@ -655,6 +782,12 @@ function graphicsPainter(
       return {
         upload(run) {
           uploaded.push([...run.painted]);
+        },
+        window(part) {
+          windows.push(part);
+        },
+        patch(w, h, rects, pixels) {
+          patched.push([w, h, Array.from(rects), pixels.length]);
         },
         blank(w, h) {
           if (options.blankFails) {
@@ -744,6 +877,179 @@ test("a desktop resized under a pipeline blanks its picture", async () => {
   );
 });
 
+test("the part of the picture a display is, is what the picture shows", async () => {
+  const { load } = fakeCompositors();
+  const p = graphicsPainter(load);
+  // Named ahead of the pipeline, as the gateway's `resize` and `graphicsView`
+  // come ahead of its `graphicsStart`: applied to the picture when it is made.
+  p.setGraphicsView({ x: 32, y: 0, w: 32, h: 48 });
+  p.startGraphics();
+  await p.draw(graphicsFrame([[1]]));
+  assert.deepEqual(windows, [{ x: 32, y: 0, w: 32, h: 48 }]);
+  // The picker moving to the other display: shown at once, from what the
+  // picture holds, and kept by the next pipeline.
+  p.setGraphicsView({ x: 0, y: 0, w: 32, h: 48 });
+  p.startGraphics();
+  await p.draw(graphicsFrame([[2]]));
+  assert.deepEqual(windows, [
+    { x: 32, y: 0, w: 32, h: 48 },
+    { x: 0, y: 0, w: 32, h: 48 },
+    { x: 0, y: 0, w: 32, h: 48 },
+  ]);
+  // The attachment boundary forgets it: the next names its own.
+  p.clear();
+  p.startGraphics();
+  await p.draw(graphicsFrame([[3]]));
+  assert.equal(windows[windows.length - 1], null);
+});
+
+test("a tab showing the second display is sent its column of the picture", async () => {
+  const { load } = fakeCompositors();
+  const relay = fakeRelay();
+  const p = graphicsPainter(load, { relay: relay.port });
+  p.startGraphics();
+  assert.deepEqual(
+    relay.posted,
+    [{ kind: "composing" }],
+    "a source that starts asks",
+  );
+  // The tab answers before the first run: it is owed everything once there is a
+  // picture, which the first run — the reset — lays out.
+  relay.deliver({
+    kind: "shown",
+    display: 2,
+    part: { x: 32, y: 0, w: 32, h: 48 },
+  });
+  await p.draw(graphicsFrame([[40]]));
+  assert.equal(relay.posted.length, 2);
+  const first = relay.posted[1];
+  assert.equal(first.kind, "paint");
+  if (first.kind !== "paint") {
+    return;
+  }
+  assert.deepEqual(
+    [first.seq, first.w, first.h, first.rects],
+    [1, 32, 48, [0, 0, 32, 48]],
+  );
+  const bytes = new Uint8Array(first.pixels);
+  assert.equal(bytes.length, 32 * 48 * 4);
+  assert.ok(
+    bytes.every((byte) => byte === 40),
+    "the column, out of the picture",
+  );
+  // While that is in flight, what the runs paint waits and is merged; what
+  // falls outside the column is nothing to the tab.
+  await p.draw(graphicsFrame([[36]]));
+  await p.draw(graphicsFrame([[50]]));
+  await p.draw(graphicsFrame([[7]]));
+  assert.equal(relay.posted.length, 2, "one update in flight at a time");
+  relay.deliver({ kind: "painted", seq: 1 });
+  const second = relay.posted[2];
+  assert.equal(second?.kind, "paint");
+  if (second?.kind !== "paint") {
+    return;
+  }
+  // Relative to the column, and out of the picture as it stands now.
+  assert.deepEqual([second.seq, second.rects], [2, [4, 2, 3, 4, 18, 2, 3, 4]]);
+  const latest = new Uint8Array(second.pixels);
+  assert.equal(latest.length, 2 * 3 * 4 * 4);
+  assert.ok(latest.every((byte) => byte === 7));
+  // A pipeline that starts again owes nothing of the old picture; its first run
+  // owes the column again.
+  relay.deliver({ kind: "painted", seq: 2 });
+  p.startGraphics();
+  await p.draw(graphicsFrame([[9]]));
+  const third = relay.posted[3];
+  assert.equal(third?.kind, "paint");
+  if (third?.kind === "paint") {
+    assert.deepEqual(third.rects, [0, 0, 32, 48]);
+  }
+});
+
+test("a malformed batch in a tab painted from the session page's picture asks for nothing", async () => {
+  // The tab decodes no stream: there is no keyframe that would settle the ask,
+  // and the page would ask until it said the picture had stopped.
+  const { load } = fakeCompositors();
+  const relay = fakeRelay();
+  const p = graphicsPainter(load, { relay: relay.port });
+  p.blank(32, 48);
+  p.mirrorGraphics(2, { x: 32, y: 0, w: 32, h: 48 });
+  const frame = batchFrame([{ w: 64, h: 64, payload: [1], keyframe: false }]);
+  await p.draw(frame.slice(0, frame.byteLength - 1));
+  assert.deepEqual(videoKeyframeAsks, []);
+  assert.equal(videoSettles, 0);
+});
+
+test("a tab is painted from the session page's picture, not composed", async () => {
+  const { made, load } = fakeCompositors();
+  const relay = fakeRelay();
+  const p = graphicsPainter(load, { relay: relay.port });
+  p.blank(32, 48);
+  p.mirrorGraphics(2, { x: 32, y: 0, w: 32, h: 48 });
+  assert.deepEqual(relay.posted, [
+    { kind: "shown", display: 2, part: { x: 32, y: 0, w: 32, h: 48 } },
+  ]);
+  assert.deepEqual(shown, [], "nothing to show until the first update");
+  relay.deliver({
+    kind: "paint",
+    seq: 3,
+    w: 32,
+    h: 48,
+    rects: [0, 0, 32, 48],
+    pixels: new ArrayBuffer(32 * 48 * 4),
+  });
+  assert.deepEqual(patched, [[32, 48, [0, 0, 32, 48], 32 * 48 * 4]]);
+  assert.deepEqual(relay.posted[1], { kind: "painted", seq: 3 });
+  assert.deepEqual(shown, [true]);
+  // A session page that starts composing asks; the tab says again what it shows.
+  relay.deliver({ kind: "composing" });
+  assert.deepEqual(relay.posted[2], {
+    kind: "shown",
+    display: 2,
+    part: { x: 32, y: 0, w: 32, h: 48 },
+  });
+  // A layout change: the tab's desktop blanks its picture, and the new part is
+  // said on the same channel.
+  p.blank(40, 48);
+  p.mirrorGraphics(2, { x: 32, y: 0, w: 40, h: 48 });
+  assert.deepEqual(blanked, [[40, 48]]);
+  assert.equal(relay.posted.length, 4);
+  assert.equal(made.length, 0, "a tab composes nothing");
+  // The attachment boundary gives the picture back and hides it.
+  p.clear();
+  assert.deepEqual(shown, [true, false]);
+  assert.deepEqual(pictures, { made: 1, closed: 1 });
+  assert.equal(relay.closed(), 1);
+});
+
+test("a video format takes the display back from a tab's mirror", async () => {
+  // The session stops passing (a host that draws with bitmap updates after all):
+  // the tab is sent a stream, which is drawn on the desktop's canvas the mirror's
+  // picture covered.
+  const { load } = fakeCompositors();
+  const relay = fakeRelay();
+  const p = graphicsPainter(load, { relay: relay.port });
+  p.mirrorGraphics(2, { x: 32, y: 0, w: 32, h: 48 });
+  relay.deliver({
+    kind: "paint",
+    seq: 1,
+    w: 32,
+    h: 48,
+    rects: [0, 0, 32, 48],
+    pixels: new ArrayBuffer(32 * 48 * 4),
+  });
+  assert.deepEqual(shown, [true]);
+  p.setVideoFormat({ decode: "vp09.00.40.08" });
+  await p.draw(batchFrame([{ w: 64, h: 64, payload: KEYFRAME }]));
+  assert.deepEqual(chunkTypes, ["key"]);
+  assert.deepEqual(shown, [true, false]);
+  assert.deepEqual(pictures, { made: 1, closed: 1 });
+  assert.equal(relay.closed(), 1);
+  // A display passed again is mirrored afresh.
+  p.mirrorGraphics(2, { x: 32, y: 0, w: 32, h: 48 });
+  assert.equal(pictures.made, 2);
+});
+
 test("a picture that cannot be blanked ends its pipeline", async () => {
   const { made, load } = fakeCompositors();
   const p = graphicsPainter(load, { blankFails: true });
@@ -753,7 +1059,8 @@ test("a picture that cannot be blanked ends its pipeline", async () => {
   await p.draw(graphicsFrame([[2]]));
   assert.deepEqual(made[0].fed, [[1]]);
   const said = videoErrors.filter((error) => error !== null);
-  assert.match(said[0] ?? "", /the GPU refused the picture/);
+  assert.equal(said[0]?.code, "AL-4605");
+  assert.match(String(said[0]?.fill?.detail), /the GPU refused the picture/);
 });
 
 test("a run's H.264 is decoded and supplied before the run is composed", async () => {
@@ -807,8 +1114,8 @@ test("an H.264 unit that gives no picture ends the pipeline and says so", async 
   assert.equal(made[0].closed, true);
   const said = videoErrors.filter((error) => error !== null);
   assert.equal(said.length, 1);
-  assert.match(said[0] ?? "", /could not compose the host's graphics/);
-  assert.match(said[0] ?? "", /H\.264 decoder failed/);
+  assert.equal(said[0]?.code, "AL-4605");
+  assert.match(String(said[0]?.fill?.detail), /H\.264 decoder failed/);
   assert.deepEqual(
     videoKeyframeAsks,
     [],
@@ -864,7 +1171,7 @@ test("a command that does not decode ends the pipeline and says so", async () =>
   assert.deepEqual([pictures.closed, shown], [1, [true, false]]);
   const said = videoErrors.filter((error) => error !== null);
   assert.equal(said.length, 1);
-  assert.match(said[0] ?? "", /could not compose the host's graphics/);
+  assert.equal(said[0]?.code, "AL-4605");
   assert.deepEqual(
     videoKeyframeAsks,
     [],
@@ -878,10 +1185,36 @@ test("a browser without WebGL 2 is told the compositor could not be loaded", asy
   p.startGraphics();
   await p.draw(graphicsFrame([[1]]));
   const said = videoErrors.filter((error) => error !== null);
-  assert.match(said[0] ?? "", /could not load the graphics compositor/);
-  assert.match(said[0] ?? "", /WebGL 2 is not available/);
+  assert.equal(said[0]?.code, "AL-4607");
+  assert.match(String(said[0]?.fill?.detail), /WebGL 2 is not available/);
   assert.equal(made[0]?.closed, true, "the compositor made is given back");
   assert.deepEqual(uploaded, []);
+});
+
+test("a tab whose display's picture cannot be shown says which display, by its cause", async () => {
+  // No WebGL 2 for the picture a tab is painted on: said at once, with the
+  // display's number for the sentence and the browser's words kept beside it.
+  const { load } = fakeCompositors();
+  const without = graphicsPainter(load, { noPicture: true });
+  without.mirrorGraphics(2, { x: 32, y: 0, w: 32, h: 48 });
+  const refused = videoErrors.filter((error) => error !== null);
+  assert.equal(refused[0]?.code, "AL-4608");
+  assert.equal(refused[0]?.fill?.n, 2);
+  assert.match(String(refused[0]?.fill?.detail), /WebGL 2 is not available/);
+  // A picture that was made and then cannot be blanked is given back, and the
+  // same cause names the display it was of.
+  videoErrors = [];
+  const relay = fakeRelay();
+  const failing = graphicsPainter(load, {
+    relay: relay.port,
+    blankFails: true,
+  });
+  failing.mirrorGraphics(2, { x: 32, y: 0, w: 32, h: 48 });
+  failing.blank(32, 48);
+  const blanked = videoErrors.filter((error) => error !== null);
+  assert.equal(blanked[0]?.code, "AL-4608");
+  assert.equal(blanked[0]?.fill?.n, 2);
+  assert.equal(relay.closed(), 1);
 });
 
 test("a compositor that will not load says so, and the next pipeline tries again", async () => {
@@ -890,7 +1223,7 @@ test("a compositor that will not load says so, and the next pipeline tries again
   p.startGraphics();
   await p.draw(graphicsFrame([[1]]));
   const said = videoErrors.filter((error) => error !== null);
-  assert.match(said[0] ?? "", /could not load the graphics compositor/);
+  assert.equal(said[0]?.code, "AL-4607");
   assert.deepEqual(uploaded, []);
 });
 
@@ -941,7 +1274,7 @@ test("a malformed batch ends a pipeline: what it held is never composed, and no 
   assert.equal(uploaded.length, 1);
   const said = videoErrors.filter((error) => error !== null);
   assert.equal(said.length, 1, "the end of a pipeline is said once");
-  assert.match(said[0] ?? "", /could not compose the host's graphics/);
+  assert.equal(said[0]?.code, "AL-4605");
   assert.deepEqual(
     videoKeyframeAsks,
     [],
@@ -1068,7 +1401,8 @@ test("a picture the GPU refuses is said once, and the pictures after it dropped"
   await p.draw(batchFrame([{ w: 640, h: 480, payload: [1], keyframe: false }]));
   const said = videoErrors.filter((error) => error !== null);
   assert.equal(said.length, 1);
-  assert.match(said[0] ?? "", /the GPU refused the picture/);
+  assert.equal(said[0]?.code, "AL-4606");
+  assert.match(String(said[0]?.fill?.detail), /the GPU refused the picture/);
   assert.deepEqual(shown, [], "nothing was drawn to show");
   assert.deepEqual([hevc.made, hevc.closed], [1, 1]);
   assert.deepEqual(

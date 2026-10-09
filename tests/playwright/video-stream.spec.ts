@@ -8,10 +8,10 @@
 //
 //     cargo run -- serve --config tmp/qa_video.toml
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52889/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=… \
-//     REMOTEX_PLAYWRIGHT_VIDEO_TARGET=video \
+//     ALUMIA_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52889/ \
+//     ALUMIA_PLAYWRIGHT_USERNAME=admin \
+//     ALUMIA_PLAYWRIGHT_PASSWORD=… \
+//     ALUMIA_PLAYWRIGHT_VIDEO_TARGET=video \
 //     npx playwright test video-stream
 import { expect, type Page, test } from "@playwright/test";
 
@@ -20,7 +20,7 @@ import { leaveSession, logInAndConnectTo } from "./support";
 /// The opt-in, and the target name in one — the same bargain the audio spec makes.
 /// Its presence is the claim that this gateway has a live target to stream; without
 /// one the spec would be asserting against a picture that never arrives.
-const VIDEO_TARGET = process.env.REMOTEX_PLAYWRIGHT_VIDEO_TARGET;
+const VIDEO_TARGET = process.env.ALUMIA_PLAYWRIGHT_VIDEO_TARGET;
 
 /// The wire, copied from src/protocol.rs rather than imported from the SPA: this spec
 /// is the independent check that the gateway and the client agree, and reading the
@@ -120,8 +120,10 @@ function watchSession(page: Page): Session {
     unannounced: 0,
     missized: 0,
   };
+  // Both the session socket and the display socket that carries its picture.
   page.on("websocket", (ws) => {
-    if (new URL(ws.url()).pathname !== "/ws") {
+    const path = new URL(ws.url()).pathname;
+    if (path !== "/ws" && path !== "/ws/display") {
       return;
     }
     ws.on("framereceived", ({ payload }) => {
@@ -211,7 +213,7 @@ function assertTheEnvelopeHolds(seen: Session): void {
 test.describe("a video target", () => {
   test.skip(
     !VIDEO_TARGET,
-    "set REMOTEX_PLAYWRIGHT_VIDEO_TARGET=<target> against a gateway with a live target",
+    "set ALUMIA_PLAYWRIGHT_VIDEO_TARGET=<target> against a gateway with a live target",
   );
 
   // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.

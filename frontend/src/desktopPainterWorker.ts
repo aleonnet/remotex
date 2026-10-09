@@ -32,7 +32,8 @@
 // also the cure and not only the escape — closing the decoders settles every access
 // unit the stuck draw is holding, so the chain it abandoned unwedges behind it.
 
-import { createGraphicsPicture } from "./egfxPicture.ts";
+import { createGraphicsPicture, type PicturePart } from "./egfxPicture.ts";
+import type { Fault } from "./fault.ts";
 import { createFramePainter, type FramePainter } from "./framePainter.ts";
 import { createHevcPicture } from "./hevcPicture.ts";
 import type { MosaicView } from "./mosaic.ts";
@@ -56,7 +57,7 @@ export type PainterCommand =
        * and the software HEVC decoder's (hevcPicture.ts).
        */
       graphics: OffscreenCanvas;
-      /** EXPERIMENTAL: decode passed HEVC in software (appleMedia.ts). */
+      /** BETA: decode passed HEVC in software (appleMedia.ts). */
       softwareHevc: boolean;
     }
   | {
@@ -90,17 +91,45 @@ export type PainterCommand =
    * Echoed as `resized` like a resize.
    */
   | { type: "view"; view: MosaicView | null; seq: number }
+  /**
+   * A place in the queue, echoed back as `reached` once everything posted
+   * before it has been drawn: how the page holds a notice over the canvas
+   * until the picture that ends it is on screen.
+   */
+  | { type: "mark"; seq: number }
   | { type: "videoFormat"; format: VideoFormat }
+  /**
+   * The page is back in sight: the decoder it had goes, and the stream starts
+   * again from the keyframe asked for (`FramePainter.restartVideo`).
+   */
+  | { type: "restartVideo" }
   /** An RDP host's graphics pipeline starts, and this worker composes it. */
   | { type: "graphicsStart" }
+  /** The part of the pipeline's picture this page's display is, to show. */
+  | { type: "graphicsView"; part: PicturePart }
+  /**
+   * This page shows display `display` in a tab of its own, which is `part` of
+   * the picture the session's page composes: painted from there, not composed.
+   */
+  | { type: "graphicsMirror"; display: number; part: PicturePart }
   /** The attachment boundary: wipe the bitmap and the decoder. */
   | { type: "clear" };
 
 /** What the worker sends back: the painter's callbacks and the resize echo. */
 export type PainterEvent =
-  | { type: "videoError"; reason: string | null }
-  /** The decoder was thrown away, and needs a keyframe to resume. */
-  | { type: "videoNeedsKeyframe"; reason: string }
+  | { type: "videoError"; fault: Fault | null }
+  /**
+   * The decoder was thrown away, and needs a keyframe to resume. `epoch` is how
+   * many `clear`s this worker had taken when it said so, as for `graphicsShown`
+   * below: the page asks the gateway on this word, and must not on one said for
+   * an attachment it has since cleared.
+   */
+  | { type: "videoNeedsKeyframe"; reason: string; epoch: number }
+  /**
+   * That keyframe is owed no more: its picture is painted, or the stream it was
+   * asked of is done with.
+   */
+  | { type: "videoSettled"; epoch: number }
   | {
       type: "painted";
       sequence: number;
@@ -109,6 +138,7 @@ export type PainterEvent =
       drawMs: number;
     }
   | { type: "resized"; seq: number }
+  | { type: "reached"; seq: number }
   /**
    * Whether the canvas over the desktop's is to be shown: it holds a pipeline's
    * picture, or the software HEVC decoder's.
@@ -204,7 +234,9 @@ export function createPainterWorker(
     }
   };
 
-  // The draw-ordered chain. The catch keeps a garbled frame from stalling it.
+  // The draw-ordered chain. The catch keeps a garbled frame from stalling it,
+  // and says what it caught: a command that failed with no word left nothing to
+  // tell a picture that never came from one that was never asked for.
   let queue: Promise<void> = Promise.resolve();
   // Which attachment the queued commands belong to, bumped by `clear`. A command
   // queued before the boundary is not merely late by the time its turn comes, it is
@@ -219,7 +251,24 @@ export function createPainterWorker(
           return task();
         }
       })
-      .catch(() => {});
+      .catch((error: unknown) => {
+        console.warn("paint: a queued command failed:", String(error));
+      });
+  };
+
+  // Apply a change of size, and echo it whatever became of it. The echo is
+  // what the page's layout waits on, and what takes down the plate a session
+  // opens under: a size that could not be applied is said here, and the page
+  // still leaves its plate, where a notice can be read, in place of waiting for
+  // ever on an echo nothing will send.
+  const sized = (seq: number, what: string, apply: () => void) => {
+    try {
+      apply();
+    } catch (error) {
+      console.warn(`paint: the ${what} could not be applied:`, String(error));
+    } finally {
+      post({ type: "resized", seq });
+    }
   };
 
   return {
@@ -234,9 +283,10 @@ export function createPainterWorker(
           ctx = canvas.getContext("2d", { alpha: false });
           painter = makePainter({
             context: () => (framebuffer ? framebufferCtx : ctx),
-            onVideoError: (reason) => post({ type: "videoError", reason }),
+            onVideoError: (fault) => post({ type: "videoError", fault }),
             onVideoNeedsKeyframe: (reason) =>
-              post({ type: "videoNeedsKeyframe", reason }),
+              post({ type: "videoNeedsKeyframe", reason, epoch }),
+            onVideoSettled: () => post({ type: "videoSettled", epoch }),
             makePicture: () => createGraphicsPicture(command.graphics),
             makeHevcPicture: () => createHevcPicture(command.graphics),
             onGraphicsShown: (shown) =>
@@ -286,8 +336,13 @@ export function createPainterWorker(
           break;
         }
         case "resize":
-          queued(() => {
-            if (canvas && ctx) {
+          // Echoed even with no canvas: the page's layout state must not wait
+          // forever on a bitmap that cannot exist.
+          queued(() =>
+            sized(command.seq, "resize", () => {
+              if (!canvas || !ctx) {
+                return;
+              }
               if (command.view) {
                 framebuffer ??= new OffscreenCanvas(command.w, command.h);
                 framebufferCtx ??= framebuffer.getContext("2d", {
@@ -303,23 +358,29 @@ export function createPainterWorker(
                 blank(canvas, ctx, command.w, command.h);
               }
               painter?.blank(command.w, command.h);
-            }
-            // Echoed even with no canvas: the page's layout state must not
-            // wait forever on a bitmap that cannot exist.
-            post({ type: "resized", seq: command.seq });
-          });
+            }),
+          );
           break;
         case "view":
-          queued(() => {
-            setView(command.view);
-            post({ type: "resized", seq: command.seq });
-          });
+          queued(() => sized(command.seq, "view", () => setView(command.view)));
+          break;
+        case "mark":
+          queued(() => post({ type: "reached", seq: command.seq }));
           break;
         case "videoFormat":
           queued(() => painter?.setVideoFormat(command.format));
           break;
+        case "restartVideo":
+          queued(() => painter?.restartVideo());
+          break;
         case "graphicsStart":
           queued(() => painter?.startGraphics());
+          break;
+        case "graphicsView":
+          queued(() => painter?.setGraphicsView(command.part));
+          break;
+        case "graphicsMirror":
+          queued(() => painter?.mirrorGraphics(command.display, command.part));
           break;
         case "clear":
           // Out of the chain, and starting a new one — see the module comment.

@@ -3,6 +3,7 @@
 // in whichever form of its configuration this browser both says it takes and takes.
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { FaultError } from "./fault.ts";
 
 type Behaviour = "sound" | "error" | "silent" | "unsupported";
 
@@ -184,7 +185,7 @@ test("the picture and the sound are answered apart", async () => {
         channels: 2,
         head: new Uint8Array(4),
       }),
-    /does not decode the Mac's AAC-ELD/,
+    (thrown) => thrown instanceof FaultError && thrown.fault.code === "AL-5104",
   );
 
   // And the sound plays in one sent VP9 for its picture.
@@ -254,7 +255,7 @@ test("the question is asked once, and the answer is not available before it", as
 });
 
 /**
- * EXPERIMENTAL: a page that can run the software HEVC decoder — cross-origin
+ * BETA: a page that can run the software HEVC decoder — cross-origin
  * isolated, with a WebGL 2 canvas that takes the Mac's primaries to present its
  * pictures on — or, with `isolated` false, one that cannot. `webgl` is that
  * canvas's context: whole, without a color space to set, or none. Returns the undo.

@@ -3,15 +3,15 @@
 # libavcodec61 installed, the High Performance decoder its gateway loads at run
 # time — and the EXPERIMENTAL
 # software HEVC decoder's release archive, which no release artifact holds — and
-# push it to the operator's private registry, ghcr.io/andrewtheguy/remotex-full,
+# push it to the operator's private registry, ghcr.io/aleonnet/alumia-full,
 # under the tag's own name (v0.0.294).
 #
-# The tags it builds are release tags, and it builds nothing of remotex: the
+# The tags it builds are release tags, and it builds nothing of alumia: the
 # release workflow has published the public image of the tag, and this is one
 # layer over that image's linux/amd64 half, installing the library and
 # placing the archive the tag's src/hevc_wasm.rs pins, downloaded from the
 # private andrewtheguy/hevc-wasm-archives through `gh` and checked against that
-# pin, in /opt/remotex/versions/<version>/share/remotex, the release tree's data
+# pin, in /opt/alumia/versions/<version>/share/alumia, the release tree's data
 # directory, where the gateway looks for it (src/config.rs, data_dir) and,
 # finding it, serves it: the mounted config says nothing of it.
 #
@@ -41,12 +41,12 @@ repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$repo_root"
 
 registry=ghcr.io
-package=andrewtheguy/remotex-full
+package=aleonnet/alumia-full
 image="${registry}/${package}"
 
 [ $# -eq 1 ] && [ "${1#-}" = "$1" ] || { echo "usage: $0 TAG" >&2; exit 2; }
 tag="$1"
-public="${registry}/andrewtheguy/remotex:${tag}"
+public="${registry}/aleonnet/alumia:${tag}"
 
 case "$(uname -s)-$(uname -m)" in
   Linux-x86_64) ;;
@@ -72,7 +72,7 @@ wasm_sha256="$(sed -n 's/^const SHA256: &str = "\([0-9a-f]\{64\}\)";$/\1/p' <<<"
   || { echo "could not read the pinned version and SHA-256 from ${tag}'s src/hevc_wasm.rs" >&2; exit 1; }
 wasm_archive="hevc-wasm-v${wasm_version}.tar.gz"
 git grep -q 'fn data_dir_for_exe' "$commit" -- src/config.rs \
-  || { echo "${tag}'s gateway does not look for the decoder in its release tree's share/remotex" >&2; exit 1; }
+  || { echo "${tag}'s gateway does not look for the decoder in its release tree's share/alumia" >&2; exit 1; }
 
 # Before the build rather than after it.
 podman login --get-login "$registry" >/dev/null 2>&1 \
@@ -81,8 +81,8 @@ podman login --get-login "$registry" >/dev/null 2>&1 \
 echo ">> pulling ${public}"
 podman pull --platform linux/amd64 "$public"
 reported="$(podman run --rm --platform linux/amd64 "$public" --version)"
-[ "$reported" = "remotex ${tag#v}" ] \
-  || { echo "${public} reports '${reported}', not remotex ${tag#v}" >&2; exit 1; }
+[ "$reported" = "alumia ${tag#v}" ] \
+  || { echo "${public} reports '${reported}', not alumia ${tag#v}" >&2; exit 1; }
 
 layer="$(mktemp -d)"
 trap 'rm -rf "$layer"' EXIT
@@ -101,7 +101,7 @@ ARG WASM_ARCHIVE
 RUN apt-get update \
     && apt-get install -y --no-install-recommends libavcodec61 \
     && rm -rf /var/lib/apt/lists/*
-COPY ${WASM_ARCHIVE} /opt/remotex/versions/${VERSION}/share/remotex/${WASM_ARCHIVE}
+COPY ${WASM_ARCHIVE} /opt/alumia/versions/${VERSION}/share/alumia/${WASM_ARCHIVE}
 CONTAINERFILE
 
 echo ">> building ${image}:${tag}"
@@ -149,4 +149,4 @@ access="$(anonymous_access)"
   || { echo "${image} is not confirmed private after the push (${access}): anyone may pull ${tag}. Make the package private" >&2; exit 1; }
 
 echo ">> pushed ${image}:${tag} (${commit}); anonymous pull refused"
-echo ">> its software HEVC decoder: /opt/remotex/versions/${tag#v}/share/remotex/${wasm_archive}"
+echo ">> its software HEVC decoder: /opt/alumia/versions/${tag#v}/share/alumia/${wasm_archive}"

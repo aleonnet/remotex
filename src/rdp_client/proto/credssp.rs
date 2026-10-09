@@ -22,12 +22,13 @@
 //!
 //! [MS-CSSP]: https://learn.microsoft.com/en-us/openspecs/windows_protocols/ms-cssp/9664994d-0784-4659-b85b-83b8d54c2336
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use sspi::credssp::{ClientMode, ClientState, CredSspClient, CredSspMode, TsRequest};
 use sspi::{AuthIdentity, Username};
 use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
 
 use super::tls::Stream;
+use crate::cause::{Cause, Caused as _};
 
 /// Who to log on as.
 pub struct Credentials<'a> {
@@ -49,7 +50,8 @@ pub async fn authenticate(
     server_public_key: Vec<u8>,
 ) -> Result<()> {
     let username = Username::new(credentials.username, credentials.domain)
-        .with_context(|| format!("{:?} is not a user name", credentials.username))?;
+        .with_context(|| format!("{:?} is not a user name", credentials.username))
+        .cause(|| Cause::new("AL-7205"))?;
     let identity =
         AuthIdentity { username, password: credentials.password.to_owned().into() };
 
@@ -63,7 +65,7 @@ pub async fn authenticate(
         // CredSSP carries it and a server may log it.
         format!("TERMSRV/{server_name}"),
     )
-    .context("starting CredSSP")?;
+    .context("starting CredSSP").cause(|| crate::cause::Cause::new("AL-7213"))?;
 
     // The first message is produced from an empty request: there is nothing from the
     // server yet, and the client speaks first.
@@ -72,7 +74,8 @@ pub async fn authenticate(
         let state = client
             .process(from_server)
             .resolve_to_result()
-            .context("the logon attempt was refused")?;
+            .context("the logon attempt was refused")
+            .cause(|| Cause::new("AL-7204"))?;
         let (reply, done) = match state {
             ClientState::ReplyNeeded(reply) => (reply, false),
             // The last message carries the credentials themselves. It is sent and not
@@ -89,9 +92,9 @@ pub async fn authenticate(
 
 async fn send(stream: &mut Stream, request: &TsRequest) -> Result<()> {
     let mut bytes = Vec::with_capacity(usize::from(request.buffer_len()));
-    request.encode_ts_request(&mut bytes).context("encoding a CredSSP request")?;
-    stream.write_all(&bytes).await.context("sending a CredSSP request")?;
-    stream.flush().await.context("sending a CredSSP request")?;
+    request.encode_ts_request(&mut bytes).context("encoding a CredSSP request").cause(|| crate::cause::Cause::new("AL-7213"))?;
+    stream.write_all(&bytes).await.context("sending a CredSSP request").cause(|| crate::cause::Cause::new("AL-7213"))?;
+    stream.flush().await.context("sending a CredSSP request").cause(|| crate::cause::Cause::new("AL-7213"))?;
     Ok(())
 }
 
@@ -111,11 +114,11 @@ async fn receive(stream: &mut Stream) -> Result<TsRequest> {
     let mut bytes = Vec::with_capacity(512);
     let length = loop {
         let mut byte = [0_u8; 1];
-        if stream.read(&mut byte).await.context("reading a CredSSP response")? == 0 {
-            bail!(
+        if stream.read(&mut byte).await.context("reading a CredSSP response").cause(|| Cause::new("AL-7213"))? == 0 {
+            return Err(Cause::new("AL-7208").of(anyhow::anyhow!(
                 "the server closed the connection during the logon attempt, after {} bytes",
                 bytes.len()
-            );
+            )));
         }
         bytes.push(byte[0]);
         match TsRequest::read_length(bytes.as_slice()) {
@@ -125,16 +128,16 @@ async fn receive(stream: &mut Stream) -> Result<TsRequest> {
             // "this is not a TSRequest at all".
             Err(_) if bytes.len() < HEADER => {}
             Err(e) => {
-                return Err(e).context("the server's answer is not a CredSSP response");
+                return Err(e).context("the server's answer is not a CredSSP response").cause(|| crate::cause::Cause::new("AL-7213"));
             }
         }
     };
     if length < bytes.len() {
-        bail!("a CredSSP response announced {length} bytes, fewer than its own header");
+        crate::bail_known!("AL-7213"; "a CredSSP response announced {length} bytes, fewer than its own header");
     }
 
     let already = bytes.len();
     bytes.resize(length, 0);
-    stream.read_exact(&mut bytes[already..]).await.context("reading a CredSSP response")?;
-    TsRequest::from_buffer(&bytes).context("decoding a CredSSP response")
+    stream.read_exact(&mut bytes[already..]).await.context("reading a CredSSP response").cause(|| crate::cause::Cause::new("AL-7213"))?;
+    TsRequest::from_buffer(&bytes).context("decoding a CredSSP response").cause(|| crate::cause::Cause::new("AL-7213"))
 }

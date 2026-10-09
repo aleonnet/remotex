@@ -17,10 +17,10 @@
 //
 //     cargo run -- serve --config tmp/qa_egfx.toml
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52890/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=… \
-//     REMOTEX_PLAYWRIGHT_EGFX_TARGET=win \
+//     ALUMIA_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52890/ \
+//     ALUMIA_PLAYWRIGHT_USERNAME=admin \
+//     ALUMIA_PLAYWRIGHT_PASSWORD=… \
+//     ALUMIA_PLAYWRIGHT_EGFX_TARGET=win \
 //     bunx playwright test '/egfx-passthrough\.spec\.ts$'
 //
 // EXPERIMENTAL: a target with `egfx_h264 = true` is told it may draw with H.264,
@@ -28,16 +28,22 @@
 // needs the host to be playing a video when the spec runs: a host draws H.264
 // only for what moves like one.
 //
-//     REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET=win-h264 \
+//     ALUMIA_PLAYWRIGHT_EGFX_H264_TARGET=win-h264 \
 //     bunx playwright test '/egfx-passthrough\.spec\.ts$'
 import { expect, type Page, test } from "@playwright/test";
 
-import { leaveSession, logInAndConnectTo, returnToPicker } from "./support";
+import {
+  handle,
+  leaveSession,
+  logInAndConnectTo,
+  openBar,
+  returnToPicker,
+} from "./support";
 
 /// The opt-in, and the target name in one, as the video spec has it.
-const EGFX_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_TARGET;
+const EGFX_TARGET = process.env.ALUMIA_PLAYWRIGHT_EGFX_TARGET;
 /// The same for a target whose pipeline may carry H.264.
-const EGFX_H264_TARGET = process.env.REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET;
+const EGFX_H264_TARGET = process.env.ALUMIA_PLAYWRIGHT_EGFX_H264_TARGET;
 
 /// What every session here is started with: the pipeline passed, and nothing else.
 const PASSED = { passthrough: true };
@@ -167,7 +173,8 @@ interface Session {
   decodesH264?: string | null;
 }
 
-/// Watch the session socket. Registered before navigation, so nothing is missed.
+/// Watch the session socket, and the display socket that carries its picture.
+/// Registered before navigation, so nothing is missed.
 function watchSession(page: Page): Session {
   const seen: Session = {
     controlTypes: [],
@@ -178,12 +185,31 @@ function watchSession(page: Page): Session {
   };
   page.on("websocket", (ws) => {
     const url = new URL(ws.url());
-    if (url.pathname !== "/ws") {
+    if (url.pathname === "/ws") {
+      seen.decodesH264 = url.searchParams.get("rdp_h264");
+      ws.on("framereceived", ({ payload }) => {
+        if (typeof payload !== "string") {
+          return;
+        }
+        const message = JSON.parse(payload);
+        if (typeof message.type !== "string") {
+          return;
+        }
+        seen.controlTypes.push(message.type);
+        if (message.type === "connected") {
+          seen.connected = { render: message.render };
+        }
+      });
       return;
     }
-    seen.decodesH264 = url.searchParams.get("rdp_h264");
-    // Whether this session's pipeline has been announced: a socket's own, and a
-    // session's own on it, so the one before cannot answer for the one after.
+    if (url.pathname !== "/ws/display") {
+      return;
+    }
+    // A display socket is an attachment of its own, whose batches and
+    // acknowledgments are numbered from one. Whether its pipeline has been
+    // announced is its own too, so the socket before cannot answer for it.
+    seen.batches = [];
+    seen.acknowledged = [];
     let started = false;
     ws.on("framesent", ({ payload }) => {
       if (typeof payload !== "string") {
@@ -200,13 +226,7 @@ function watchSession(page: Page): Session {
         return;
       }
       seen.controlTypes.push(message.type);
-      if (message.type === "connected") {
-        seen.connected = { render: message.render };
-        // A session that starts is a socket's count starting over.
-        seen.batches = [];
-        seen.acknowledged = [];
-        started = false;
-      } else if (message.type === "graphicsStart") {
+      if (message.type === "graphicsStart") {
         started = true;
       }
     };
@@ -235,7 +255,7 @@ const runs = (seen: Session): number[] => seen.batches.flatMap((b) => b.runs);
 test.describe("a target that passes its graphics pipeline", () => {
   test.skip(
     !EGFX_TARGET,
-    "set REMOTEX_PLAYWRIGHT_EGFX_TARGET=<target> against a gateway with a live RDP host",
+    "set ALUMIA_PLAYWRIGHT_EGFX_TARGET=<target> against a gateway with a live RDP host",
   );
 
   // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.
@@ -310,13 +330,20 @@ test.describe("a target that passes its graphics pipeline", () => {
     // no role to be found by: it is the one laid over the desktop's.
     await expect(page.locator("canvas.graphics")).toBeVisible();
 
-    // And the session card says which of the two this browser is doing.
-    await page.getByRole("button", { name: "Open menu" }).click();
-    await page.getByRole("button", { name: "Info", exact: true }).click();
-    const card = page.getByRole("dialog", { name: "Info" });
-    await expect(card).toContainText("composed by this browser");
+    // And the information sheet says which of the two this browser is doing: in
+    // plain words on the sheet, and behind Details the gateway's own line and
+    // why no video decoder is in use.
+    const bar = await openBar(page);
+    await bar.getByRole("button", { name: "More" }).click();
+    await page.getByRole("button", { name: "Information" }).click();
+    const card = page.getByRole("dialog", { name: "Information" });
+    await expect(card).toContainText("Composed in this browser");
+    await card.getByText("Details").click();
     await expect(card).toContainText(
       "the host's graphics pipeline, passed through",
+    );
+    await expect(card).toContainText(
+      "No video in use: Windows' drawing is composed by this browser.",
     );
     await page.keyboard.press("Escape");
     await expect(card).toHaveCount(0);
@@ -336,9 +363,7 @@ test.describe("a target that passes its graphics pipeline", () => {
     // starts, with nothing resumed in between.
     const before = seen.controlTypes.length;
     await page.reload();
-    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
-      timeout: 20_000,
-    });
+    await expect(handle(page)).toBeVisible({ timeout: 20_000 });
     await expect
       .poll(() => seen.acknowledged.length, { timeout: 20_000 })
       .toBeGreaterThan(0);
@@ -360,7 +385,7 @@ test.describe("a target that passes its graphics pipeline", () => {
 test.describe("a target whose passed pipeline may carry H.264", () => {
   test.skip(
     !EGFX_H264_TARGET,
-    "set REMOTEX_PLAYWRIGHT_EGFX_H264_TARGET=<target> against a gateway with a live RDP host that is playing a video",
+    "set ALUMIA_PLAYWRIGHT_EGFX_H264_TARGET=<target> against a gateway with a live RDP host that is playing a video",
   );
 
   test.afterEach(async ({ page }) => {

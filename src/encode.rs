@@ -21,7 +21,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use log::{debug, info, warn};
-use tokio::sync::{Notify, Semaphore, mpsc, oneshot};
+use tokio::sync::{Notify, Semaphore, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tokio::time::MissedTickBehavior;
 
@@ -29,6 +29,7 @@ use screen_vp9::walk::{LAG_CLEAR, QualityWalk};
 
 use crate::config::{Chroma, RenderPlan};
 use crate::feedback::LinkFeedback;
+use crate::overuse::{Overuse, budget_after};
 use crate::protocol::{GraphicsUnit, Held, HoldCause, Painted, ServerMsg, VideoUnit};
 use crate::stream::{DesktopStream, Produced, Round};
 use crate::shadow::Rect;
@@ -107,6 +108,19 @@ const SETTLE_TICK: Duration = Duration::from_millis(250);
 /// doubled, up to three times ([`QualityWalk::interval`]).
 const VIDEO_FRAME_INTERVAL: Duration = Duration::from_micros(33_333);
 
+/// The least time between two keyframes the page asks for.
+///
+/// A page asks for a whole picture again every two seconds until one is painted
+/// (`frontend/src/keyframeAsk.ts`), and each ask was a keyframe encoded and sent:
+/// on a phone seconds behind its desktop, eight in one session, each a whole
+/// picture that put the phone further behind. libwebrtc's sender answers a
+/// picture-loss request with a keyframe at most once in 300 ms
+/// (`kMinKeyFrameRequestIntervalMs`, `video/encoder_rtcp_feedback.cc`), whatever
+/// arrives meanwhile, and so does this one: a keyframe owed inside the interval
+/// stays owed and goes when the interval has passed. A resize's keyframe is never
+/// held: its stream is a new one.
+const KEYFRAME_MIN_INTERVAL: Duration = Duration::from_millis(300);
+
 
 /// The stream, and what the link will bear.
 struct Video {
@@ -129,6 +143,9 @@ struct Video {
     /// gone out, which sharpens every block, moved or not. What [`settle_stream`]
     /// comes back for.
     coarse_at: Option<tokio::time::Instant>,
+    /// When the last keyframe was taken, for [`KEYFRAME_MIN_INTERVAL`]. `None`
+    /// before the first and after a resize, whose keyframe is never held.
+    last_keyframe_at: Option<tokio::time::Instant>,
 }
 
 /// What a source's desktop too large for a video stream ([`video::within_ceiling`])
@@ -211,14 +228,22 @@ struct Shared {
     pass_restart: AtomicBool,
     /// The configuration string last announced for the passed stream.
     pass_announced: Mutex<Option<String>>,
-    /// The browser's resize notice is to come down behind the next unit queued —
-    /// see [`VideoSink::uncover`].
+    /// The browser's notice that the screen is not available is to come down
+    /// behind the next unit queued — see [`VideoSink::uncover`].
     uncover_owed: AtomicBool,
     /// Set by [`VideoSink::reset_render`], consumed by [`VideoSink::frame`]. An atomic
     /// rather than a field on [`Video`] so that resetting stays synchronous: its call
     /// sites are already awaiting other things, and none of them should have to wait
     /// out an encode to say "the client needs to start again".
     keyframe_owed: AtomicBool,
+    /// Whether the page is out of sight ([`VideoSink::sight`]): nothing is encoded
+    /// or passed while it is, and the mirror keeps what is blitted for the keyframe
+    /// it comes back to.
+    hidden: AtomicBool,
+    /// The pixels the picture reduced here is held to, as the encoder's usage moves
+    /// it ([`crate::overuse`]), or none. Written by the order task, read by the
+    /// engine that reduces ([`VideoSink::pixels`]).
+    pixels: watch::Sender<Option<u32>>,
     /// The link as the attached browser's paint window measures it — see
     /// [`crate::feedback`]. [`VideoSink::adjust`] hands its lag to an adaptive
     /// congestion walk beside the push-blocked signal, and the settle tick asks it
@@ -272,6 +297,7 @@ impl Shared {
                 congestion: QualityWalk::new(quality, VIDEO_FRAME_INTERVAL, adaptive),
                 due_at: None,
                 coarse_at: None,
+                last_keyframe_at: None,
             }),
             round_returned: Notify::new(),
             passing: AtomicBool::new(false),
@@ -279,6 +305,8 @@ impl Shared {
             pass_announced: Mutex::default(),
             uncover_owed: AtomicBool::new(false),
             keyframe_owed: AtomicBool::new(false),
+            hidden: AtomicBool::new(false),
+            pixels: watch::channel(None).0,
             feedback,
             units: AtomicU64::new(0),
             encoded_bytes: AtomicU64::new(0),
@@ -345,16 +373,20 @@ impl VideoSink {
     /// starts at a keyframe behind its announcement for a browser whose decoder was
     /// the passed stream's. The passed stream starts over the same way when it comes
     /// back. A Mac's media stream has no such gap: its rectangles never reach here
-    /// ([`crate::vnc::DesktopState::media_only`]).
+    /// ([`crate::vnc::DesktopState::media_stream`]).
     pub async fn damage(&self, rect: Rect, rgb: &[u8]) -> anyhow::Result<()> {
         if self.oversized() {
             return Ok(());
         }
+        let mut video = self.shared.video.lock().await;
         if self.shared.passing.swap(false, Ordering::Relaxed) {
             debug!("{}: the source's rectangles carry the picture again, as video encoded here", self.engine);
             self.reset_render();
+            // The decoder this stream's keyframe is for is one the passed stream
+            // displaced: a new stream, whose keyframe is held for no earlier one.
+            video.last_keyframe_at = None;
         }
-        self.shared.video.lock().await.stream.blit(rect, rgb)
+        video.stream.blit(rect, rgb)
     }
 
     /// Whether the desktop's picture is held ([`Oversize::Hold`]): past the video
@@ -366,7 +398,7 @@ impl VideoSink {
     }
 
     /// Say whether the desktop the next `Resize` describes spans more screens than
-    /// one view shows: a Mac's All Displays over more than
+    /// one view shows: a Mac's Combined Display over more than
     /// [`crate::vnc_apple::MAX_COMBINED_SCREENS`]. Read at that `Resize` and every
     /// one after it, a reattach's included, on a source that holds; a count that
     /// changes always changes the combined desktop's size with it.
@@ -395,7 +427,7 @@ impl VideoSink {
     /// must also call it when [`Self::due_at`] says to — see there for why that second
     /// half is not optional.
     pub async fn frame(&self) -> anyhow::Result<()> {
-        if self.oversized() {
+        if self.oversized() || self.hidden() {
             return Ok(());
         }
         // The browser is decoding the passed stream: a unit coded here would be one
@@ -413,10 +445,13 @@ impl VideoSink {
             return Ok(());
         }
         // Read before it is consumed, because it decides whether the interval below
-        // applies at all. A forced keyframe is never deferred: `reset_render` arms it
-        // for a repaint, a reattach or a resize, and every one of those is
-        // a client sitting in front of nothing until the keyframe arrives. Holding one
-        // back to keep a frame rate would be keeping time with an empty window.
+        // applies at all. A forced keyframe is not held for the frame rate:
+        // `reset_render` arms it for a repaint, a reattach or a resize, and every one
+        // of those is a client sitting in front of nothing until the keyframe
+        // arrives. Holding one back to keep a frame rate would be keeping time with
+        // an empty window. It is held for the last keyframe's interval alone
+        // ([`KEYFRAME_MIN_INTERVAL`]): the client that asked again inside it is one
+        // the last keyframe is still on its way to.
         let owed = self.shared.keyframe_owed.load(Ordering::Relaxed);
         let now = tokio::time::Instant::now();
         if !owed && video.due_at.is_some_and(|due| now < due) {
@@ -424,6 +459,16 @@ impl VideoSink {
             // blitted into it and the next round carries it as an ordinary delta.
             // Something must come back for it, which is what `due_at` tells the
             // engines.
+            return Ok(());
+        }
+        if owed
+            && let Some(at) = video.last_keyframe_at
+            && now < at + KEYFRAME_MIN_INTERVAL
+        {
+            // Asked for inside the interval of the last one: it stays owed, the
+            // mirror is marked for it, and the engine is called back when it may go.
+            video.stream.force_keyframe();
+            video.due_at = Some(at + KEYFRAME_MIN_INTERVAL);
             return Ok(());
         }
         if self.shared.keyframe_owed.swap(false, Ordering::Relaxed) {
@@ -453,6 +498,7 @@ impl VideoSink {
         let keyframe = round.keyframe();
         if keyframe {
             video.congestion.keyframe(now.into_std());
+            video.last_keyframe_at = Some(now);
         }
         // Dropped before the spawn and the push: the whole point is that `damage`
         // gets the lock back while the worker encodes.
@@ -467,7 +513,6 @@ impl VideoSink {
         let round_bytes = usize::try_from(self.shared.round_bytes.load(Ordering::Relaxed)).unwrap_or(usize::MAX);
         let held = self.hold(round_bytes).await;
         let pushed = self.push(Pending::Round(handle, held)).await;
-        let pushed = if pushed.is_ok() { self.uncover_behind().await } else { pushed };
         // How long that took is the congestion signal, and it is read whether or not
         // the push succeeded: a push that failed waited just as long, and the verdict
         // is about the link rather than about this round. Waiting on the budget and
@@ -507,7 +552,7 @@ impl VideoSink {
     /// [`std::future::pending`] instead of waking an engine to encode nothing, and
     /// while a passed stream is the picture, when [`Self::frame`] encodes nothing.
     pub async fn due_at(&self) -> Option<tokio::time::Instant> {
-        if self.passing() {
+        if self.passing() || self.hidden() {
             return None;
         }
         let video = self.shared.video.lock().await;
@@ -563,6 +608,33 @@ impl VideoSink {
                 blocked.as_millis()
             );
         }
+    }
+
+    /// Whether the page is out of sight — see [`Self::sight`].
+    fn hidden(&self) -> bool {
+        self.shared.hidden.load(Ordering::Relaxed)
+    }
+
+    /// The page said whether it is in sight ([`crate::protocol::ClientMsg::Sight`]).
+    /// Hidden, nothing is encoded or passed: an iPhone with the page in the
+    /// background runs no script to paint with, and every batch sent meanwhile is
+    /// one it has to paint on coming back, seconds behind. The mirror keeps what is
+    /// blitted. Back in sight the stream starts over at a keyframe, announced again
+    /// where it is passed, which is also what the decoder the page builds afresh
+    /// needs: the one it had is not valid after the background.
+    pub fn sight(&self, visible: bool) {
+        let was_hidden = self.shared.hidden.swap(!visible, Ordering::Relaxed);
+        if visible && was_hidden {
+            self.reset_render();
+            self.shared.round_returned.notify_one();
+        }
+    }
+
+    /// Where the budget of pixels the encoder's usage sets is read
+    /// ([`crate::overuse`]): the engine that reduces a picture presents it again
+    /// under each new budget.
+    pub fn pixels(&self) -> watch::Receiver<Option<u32>> {
+        self.shared.pixels.subscribe()
     }
 
     /// Start the stream over for a client that has to be able to decode from here.
@@ -636,6 +708,11 @@ impl VideoSink {
     /// while the browser waits for a keyframe.
     async fn forward(&self, w: u16, h: u16, frame: Vec<u8>, passed: crate::stream::Passed) -> anyhow::Result<bool> {
         self.shared.passing.store(true, Ordering::Relaxed);
+        if self.hidden() {
+            // Nobody is looking: dropped, and the stream starts over at a keyframe
+            // behind a fresh announcement when the page is back ([`Self::sight`]).
+            return Ok(false);
+        }
         let restart = if passed.keyframe {
             self.shared.pass_restart.swap(false, Ordering::Relaxed)
         } else if self.shared.pass_restart.load(Ordering::Relaxed) {
@@ -671,21 +748,31 @@ impl VideoSink {
         Ok(true)
     }
 
-    /// Bring the browser's resize notice down behind the next unit queued, encoded
-    /// here or passed: a `Resizing { active: false }` follows that unit on the
-    /// channel, so the notice never lifts on an empty canvas. For an engine whose
-    /// picture is a stream that has just delivered its first picture of a display
-    /// ([`crate::vnc::DesktopState::covered`]): the engine cannot tell when that
-    /// picture is queued, since [`Self::frame`] defers it while a round is out or
-    /// the interval has not passed, and a passed unit may be dropped for a keyframe.
+    /// Bring the browser's notice that the screen is not available down behind the
+    /// next unit sent, encoded here or passed: a
+    /// `ScreenUnavailable { active: false }` follows that unit on the channel, so
+    /// the notice never lifts on a canvas with nothing new on it. For an engine
+    /// whose picture is a stream that has just delivered its first picture of a
+    /// display ([`crate::vnc::DesktopState::canvas_live`]): the engine cannot tell
+    /// when that picture is queued, since [`Self::frame`] defers it while a round is
+    /// out or the interval has not passed, and a passed unit may be dropped for a
+    /// keyframe.
     pub fn uncover(&self) {
         self.shared.uncover_owed.store(true, Ordering::Relaxed);
     }
 
-    /// The notice [`Self::uncover`] owes, once a unit has been queued.
+    /// The stream stopped before the notice [`Self::uncover`] owes came down: it
+    /// stays up for the next stream's first unit.
+    pub fn cover(&self) {
+        self.shared.uncover_owed.store(false, Ordering::Relaxed);
+    }
+
+    /// The notice [`Self::uncover`] owes, behind a passed unit just queued. An
+    /// encoded round's follows the unit it produces, in the order task, since a
+    /// round may produce none.
     async fn uncover_behind(&self) -> anyhow::Result<()> {
         if self.shared.uncover_owed.swap(false, Ordering::Relaxed) {
-            self.push(Pending::Msg(ServerMsg::Resizing { active: false })).await?;
+            self.push(Pending::Msg(ServerMsg::ScreenUnavailable { active: false })).await?;
         }
         Ok(())
     }
@@ -805,7 +892,12 @@ impl VideoSink {
                     self.reset_render();
                 }
             }
-            self.shared.video.lock().await.stream.want(w, h);
+            {
+                let mut video = self.shared.video.lock().await;
+                video.stream.want(w, h);
+                // A new stream: its keyframe is never held for the last one's.
+                video.last_keyframe_at = None;
+            }
             if self.shared.oversize == Oversize::Hold {
                 self.push(Pending::Msg(msg)).await?;
                 return self.push(Pending::Msg(ServerMsg::Oversize { cause })).await;
@@ -944,6 +1036,9 @@ async fn order_loop(
     // whose settle is still owed, and firing the backlog at once would only stack
     // re-encodes behind whatever made it late.
     settle.set_missed_tick_behavior(MissedTickBehavior::Delay);
+    // The encoder's usage, judged on the settle's tick: what each round cost over
+    // the interval it was paced at, and the budget of pixels that follows.
+    let mut overuse = Overuse::new();
 
     loop {
         let item = tokio::select! {
@@ -953,6 +1048,12 @@ async fn order_loop(
             },
             _ = settle.tick() => {
                 settle_stream(engine, &shared).await;
+                if let Some(verdict) = overuse.check(tokio::time::Instant::now()) {
+                    let picture = shared.video.lock().await.stream.size().map_or(0, |(w, h)| u32::from(w) * u32::from(h));
+                    let next = budget_after(verdict, *shared.pixels.borrow(), picture);
+                    debug!("{engine}: the encoder's usage says {verdict:?}: a reduced picture is held to {next:?} pixels");
+                    shared.pixels.send_replace(next);
+                }
                 continue;
             }
         };
@@ -982,7 +1083,9 @@ async fn order_loop(
             // Only reachable by cancellation — `panic = "abort"` in release means a
             // panicking worker never gets this far.
             Err(e) => {
-                give_up(engine, &shared, anyhow::Error::new(e).context("video encoder stopped"));
+                let stopped = crate::cause::Cause::new("AL-7723")
+                    .of(anyhow::Error::new(e).context("video encoder stopped"));
+                give_up(engine, &shared, &frame_tx, stopped).await;
                 break;
             }
         };
@@ -997,6 +1100,7 @@ async fn order_loop(
         let dirty = {
             let mut video = shared.video.lock().await;
             video.stream.put_back(round);
+            overuse.round(Duration::from_micros(encode_micros), video.congestion.interval());
             video.stream.dirty()
         };
         // Damage may have landed while the round was out, and the engine may be
@@ -1012,7 +1116,8 @@ async fn order_loop(
             // to a keyframe, which is wrong pixels rather than coarse ones, and the
             // shadow already counts the real ones as delivered.
             Err(e) => {
-                give_up(engine, &shared, e.context("video encode failed"));
+                let failed = crate::cause::Cause::new("AL-7723").of(e.context("video encode failed"));
+                give_up(engine, &shared, &frame_tx, failed).await;
                 break;
             }
         };
@@ -1047,12 +1152,27 @@ async fn order_loop(
         if frame_tx.send(ServerMsg::Video(unit)).await.is_err() {
             break; // browser gone; the engine learns it from its own next push
         }
+        // Here and not where the round was queued: a round that produced no unit
+        // has put no picture ahead of the notice, and its pixels ride the next.
+        if shared.uncover_owed.swap(false, Ordering::Relaxed)
+            && frame_tx.send(ServerMsg::ScreenUnavailable { active: false }).await.is_err()
+        {
+            break;
+        }
     }
 }
 
-/// Record why the queue stopped, for the engine's next push to report.
-fn give_up(engine: &str, shared: &Shared, error: anyhow::Error) {
+/// Record why the queue stopped, for the engine's next push to report, and tell the
+/// page: this task holds the only way to it, and the engine's own word for the
+/// session's end would find the queue already closed.
+async fn give_up(engine: &str, shared: &Shared, frame_tx: &mpsc::Sender<ServerMsg>, error: anyhow::Error) {
     warn!("{engine}: {error:#}");
+    let _ = frame_tx
+        .send(ServerMsg::Error {
+            message: format!("the picture stopped: {error:#}"),
+            cause: Some(crate::cause::or_general(&error, "AL-7400")),
+        })
+        .await;
     *shared.failure.lock().unwrap() = Some(error);
 }
 
@@ -1146,6 +1266,7 @@ impl fmt::Display for Totals {
 mod tests {
     use super::*;
     use crate::config::Chroma;
+    use crate::overuse::{BUDGET_FLOOR, Verdict};
     use crate::protocol::{UNSCALED, VideoUnit};
 
     /// A fresh, never-written link measurement: what every sink here runs on, so
@@ -1297,8 +1418,9 @@ mod tests {
         assert!(frame_rx.try_recv().is_err());
     }
 
-    /// The resize notice comes down behind the next unit queued, not when the engine
-    /// asks: a clean mirror queues nothing, and the notice waits with it.
+    /// The notice that the screen is not available comes down behind the next unit
+    /// queued, not when the engine asks: a clean mirror queues nothing, and the
+    /// notice waits with it.
     #[tokio::test(start_paused = true)]
     async fn the_notice_comes_down_behind_the_next_unit() {
         let (sink, mut frame_rx) = video_sink(64, 48).await;
@@ -1314,7 +1436,7 @@ mod tests {
         sink.flush().await;
         let out = drain(&mut frame_rx, 3).await;
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe), "{:?}", out[1]);
-        assert!(matches!(&out[2], ServerMsg::Resizing { active: false }), "{:?}", out[2]);
+        assert!(matches!(&out[2], ServerMsg::ScreenUnavailable { active: false }), "{:?}", out[2]);
 
         // Owed once: the next unit brings no second notice.
         tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
@@ -1336,12 +1458,21 @@ mod tests {
         sink.flush().await;
         let out = drain(&mut frame_rx, 3).await;
         assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe), "{:?}", out[1]);
-        assert!(matches!(&out[2], ServerMsg::Resizing { active: false }), "{:?}", out[2]);
+        assert!(matches!(&out[2], ServerMsg::ScreenUnavailable { active: false }), "{:?}", out[2]);
+
+        // A stream that stopped before its unit went leaves the notice up.
+        sink.uncover();
+        sink.cover();
+        assert!(sink.pass_hevc(64, 48, vec![3; 900], hevc(true)).await.unwrap());
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 1).await;
+        assert!(matches!(&out[0], ServerMsg::Video(_)), "{:?}", out[0]);
+        assert!(frame_rx.try_recv().is_err());
     }
 
     /// The sink can switch from passed HEVC back to encoded rectangles for a source
     /// that uses both, each beginning at a keyframe behind its announcement. A High
-    /// Performance Mac no longer uses that capability: its rectangles never reach
+    /// Performance Mac does not use that capability: its rectangles never reach
     /// [`VideoSink::damage`]. A unit dropped for a keyframe says so to the engine.
     #[tokio::test]
     async fn a_source_can_switch_between_passed_hevc_and_encoded_rectangles() {
@@ -1576,7 +1707,8 @@ mod tests {
 
         // A repaint does. This is the reattach: `reset_render` is what
         // `ClientMsg::Refresh` reaches, and the browser it is for has seen neither the format nor
-        // a keyframe.
+        // a keyframe. Past the last keyframe's interval, which a repaint inside it waits out.
+        tokio::time::sleep(KEYFRAME_MIN_INTERVAL).await;
         sink.reset_render();
         sink.damage(area, &rgb(area.w(), area.h(), 3)).await.unwrap();
         sink.frame().await.unwrap();
@@ -1767,10 +1899,11 @@ mod tests {
         );
     }
 
-    /// A forced keyframe is never deferred. `reset_render` arms one for a repaint, a
-    /// reattach or a resize, and every one of those is a client sitting in
-    /// front of nothing until it arrives — keeping time there would be keeping time
-    /// with an empty window.
+    /// A forced keyframe is not deferred for the frame interval. `reset_render` arms
+    /// one for a repaint, a reattach or a resize, and every one of those is a client
+    /// sitting in front of nothing until it arrives — keeping time there would be
+    /// keeping time with an empty window. Only the last keyframe's own interval
+    /// holds it ([`KEYFRAME_MIN_INTERVAL`]), which is past here.
     #[tokio::test(start_paused = true)]
     async fn a_forced_keyframe_does_not_wait_for_the_interval() {
         let (sink, mut frame_rx) = video_sink(320, 240).await;
@@ -1780,9 +1913,15 @@ mod tests {
         sink.frame().await.unwrap();
         sink.flush().await;
         drain_units(&mut frame_rx, 1).await;
+        // An ordinary round past the keyframe's interval: the frame interval is in force now.
+        tokio::time::sleep(KEYFRAME_MIN_INTERVAL).await;
+        sink.damage(area, &rgb(area.w(), area.h(), 3)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        drain_units(&mut frame_rx, 1).await;
         let before = sink.shared.keyframes.load(Ordering::Relaxed);
 
-        // Inside the interval, so without the bypass this would be held.
+        // Inside the frame interval, so without the bypass this would be held.
         sink.reset_render();
         sink.damage(area, &rgb(area.w(), area.h(), 2)).await.unwrap();
         sink.frame().await.unwrap();
@@ -1896,6 +2035,38 @@ mod tests {
         assert!(!units[0].keyframe, "a settle is an inter frame, not a keyframe");
     }
 
+    /// An encoder that fails ends the session, and the page is told why by the task
+    /// that holds the way to it: the engine's own word for the session's end would
+    /// find the queue already closed.
+    #[tokio::test(start_paused = true)]
+    async fn an_encoder_that_fails_tells_the_page_its_cause() {
+        let (sink, mut frame_rx) = video_sink(320, 240).await;
+        coarse_round(&sink, &mut frame_rx, 1).await;
+
+        sink.shared.video.lock().await.stream.fail_encodes(1);
+        let area = rect(0, 0, 320, 64);
+        sink.damage(area, &rgb(area.w(), area.h(), 2)).await.unwrap();
+        tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
+        // The round is taken and handed to the ordered task, which is where it fails.
+        let _ = sink.frame().await;
+        sink.flush().await;
+
+        let told = loop {
+            match frame_rx.recv().await {
+                Some(ServerMsg::Error { message, cause }) => break (message, cause),
+                Some(_) => {}
+                None => panic!("the queue closed with no word of why"),
+            }
+        };
+        assert_eq!(told.1.map(|cause| cause.code), Some("AL-7723"));
+        assert_eq!(told.0, "the picture stopped: video encode failed: an encode failed on the test's orders");
+        // And the engine's next push says the same failure, as it always did.
+        sink.damage(area, &rgb(area.w(), area.h(), 3)).await.unwrap();
+        tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
+        let pushed = sink.frame().await.unwrap_err();
+        assert_eq!(format!("{pushed:#}"), "video encode failed: an encode failed on the test's orders");
+    }
+
     /// Under `render_adaptive`, the settle waits for the client's lag to clear rather
     /// than sharpening onto a link that would walk it straight back down.
     #[tokio::test(start_paused = true)]
@@ -1926,6 +2097,96 @@ mod tests {
             .await
             .expect("the settle never came once the lag cleared");
         assert_eq!(sink.shared.video.lock().await.stream.quality(), 60);
+    }
+
+    /// A page out of sight is sent nothing: the mirror keeps what is blitted and
+    /// nothing is encoded, a passed unit is dropped, and nothing is due. Back in
+    /// sight the stream starts over at a keyframe, which is what a decoder built
+    /// afresh can start from, and the mirror's pixels ride it.
+    #[tokio::test(start_paused = true)]
+    async fn a_hidden_page_is_sent_nothing_and_a_keyframe_when_it_is_back() {
+        let (sink, mut frame_rx) = video_sink(320, 240).await;
+        coarse_round(&sink, &mut frame_rx, 1).await;
+        sink.sight(false);
+        let area = rect(0, 0, 320, 64);
+        sink.damage(area, &rgb(area.w(), area.h(), 2)).await.unwrap();
+        tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        assert!(frame_rx.try_recv().is_err(), "a hidden page was sent a unit");
+        assert!(sink.due_at().await.is_none(), "a hidden page's engine was asked to come back");
+        sink.sight(true);
+        assert!(sink.due_at().await.is_some(), "back in sight, the pixels are owed again");
+        // The keyframe it is owed is held for the last one's interval like any other.
+        tokio::time::sleep(KEYFRAME_MIN_INTERVAL).await;
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let units = drain_units(&mut frame_rx, 1).await;
+        assert!(units[0].keyframe, "a page back in sight starts at a keyframe");
+        assert!(frame_rx.try_recv().is_err(), "and nothing of what was blitted while it was hidden went apart");
+    }
+
+    /// A unit the remote coded is dropped while the page is hidden, and the stream
+    /// starts over at a keyframe, announced again, once it is back.
+    #[tokio::test]
+    async fn a_passed_stream_is_dropped_while_the_page_is_hidden() {
+        let (sink, mut frame_rx) = video_sink(1280, 800).await;
+        sink.pass(1280, 800, passed_frame(true, 900)).await.unwrap();
+        sink.flush().await;
+        assert_eq!(drain(&mut frame_rx, 2).await.len(), 2, "the announcement and the keyframe");
+        sink.sight(false);
+        sink.pass(1280, 800, passed_frame(false, 50)).await.unwrap();
+        sink.pass(1280, 800, passed_frame(true, 900)).await.unwrap();
+        sink.flush().await;
+        assert!(frame_rx.try_recv().is_err(), "a hidden page was sent a passed unit");
+        sink.sight(true);
+        sink.pass(1280, 800, passed_frame(false, 50)).await.unwrap();
+        sink.pass(1280, 800, passed_frame(true, 900)).await.unwrap();
+        sink.flush().await;
+        let out = drain(&mut frame_rx, 2).await;
+        assert!(matches!(&out[0], ServerMsg::VideoFormat { passthrough: true, .. }), "announced again: {:?}", out[0]);
+        assert!(matches!(&out[1], ServerMsg::Video(unit) if unit.keyframe), "and from a keyframe");
+    }
+
+    /// A keyframe asked for within the interval of the last one waits for it: the
+    /// stream encodes no second whole picture inside 300 ms, however many times
+    /// the page asks, and the one it owes goes out when the interval has passed.
+    #[tokio::test(start_paused = true)]
+    async fn a_keyframe_is_not_repeated_inside_its_interval() {
+        let (sink, mut frame_rx) = video_sink(320, 240).await;
+        let area = rect(0, 0, 320, 64);
+        sink.damage(area, &rgb(area.w(), area.h(), 1)).await.unwrap();
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        assert!(drain_units(&mut frame_rx, 1).await[0].keyframe, "the first unit is a keyframe");
+        // Asked twice, right after: the keyframe is owed, and waits.
+        sink.reset_render();
+        sink.reset_render();
+        tokio::time::sleep(VIDEO_FRAME_INTERVAL).await;
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        assert!(frame_rx.try_recv().is_err(), "a keyframe went out inside the interval");
+        let due = sink.due_at().await.expect("the owed keyframe has a time");
+        assert!(due > tokio::time::Instant::now(), "and it is later");
+        tokio::time::sleep(KEYFRAME_MIN_INTERVAL).await;
+        sink.frame().await.unwrap();
+        sink.flush().await;
+        let units = drain_units(&mut frame_rx, 1).await;
+        assert!(units[0].keyframe, "the interval passed: the keyframe goes, once");
+        assert!(frame_rx.try_recv().is_err(), "and only once for the two asks");
+    }
+
+    /// The pixel budget's steps are libwebrtc's: three fifths down, never under the
+    /// floor; five thirds up, until there is no budget to speak of.
+    #[test]
+    fn the_pixel_budget_steps_down_by_three_fifths_and_up_by_five_thirds() {
+        let picture = 2532 * 1424;
+        assert_eq!(budget_after(Verdict::Down, None, picture), Some(picture * 3 / 5));
+        assert_eq!(budget_after(Verdict::Down, Some(1_000_000), picture), Some(600_000));
+        assert_eq!(budget_after(Verdict::Down, Some(60_000), picture), Some(BUDGET_FLOOR), "never under the floor");
+        assert_eq!(budget_after(Verdict::Up, Some(600_000), picture), Some(1_000_000));
+        assert_eq!(budget_after(Verdict::Up, None, picture), None, "nothing to raise");
+        assert_eq!(budget_after(Verdict::Up, Some(9_000_000), picture), None, "past the ceiling the budget is gone");
     }
 
     /// What the engines park on. `None` has to mean "nothing is owed", or a still

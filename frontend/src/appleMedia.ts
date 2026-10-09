@@ -28,9 +28,9 @@
 //   yes to both forms, so a yes only narrows the forms worth decoding and decoding
 //   picks one.
 //
-// EXPERIMENTAL: a picture the browser's `VideoDecoder` refuses can still be decoded
-// in software — libavcodec's HEVC decoder compiled to WebAssembly, with SIMD128 and
-// slice threads (hevcWasmDecoder.ts) — where the gateway has the decoder's
+// BETA: a picture the browser's `VideoDecoder` refuses can still be decoded
+// in software — andrewtheguy/hevc-wasm's decoder, written for the Mac's stream and
+// compiled to WebAssembly with SIMD128 and threads (hevcWasmDecoder.ts) — where the gateway has the decoder's
 // archive, and so serves it, and the browser runs shared-memory SIMD
 // WebAssembly on the cross-origin isolated page every gateway serves, and presents
 // its pictures on a WebGL 2 canvas (hevcPicture.ts). The page asks the
@@ -43,6 +43,7 @@
 // throws reads as "no". The one target it can leave unstartable is a Mac on a gateway
 // whose host lacks the HEVC decoder's library, which has no other picture to send.
 
+import { FaultError } from "./fault.ts";
 import { hevcDecoderUrl } from "./gateway.ts";
 
 /**
@@ -357,7 +358,7 @@ export function appleEldConfig(format: {
   }
   const form = soundForm;
   if (!form) {
-    throw new Error("This browser does not decode the Mac's AAC-ELD sound.");
+    throw new FaultError({ code: "AL-5104" });
   }
   return {
     codec: ELD_DECODE_CODEC,

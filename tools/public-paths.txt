@@ -1,0 +1,17 @@
+# What leaves the tree before it is published to the public repository, aleonnet/alumia:
+# one path a line, relative to the root, read by tools/publish-public.sh from the version
+# being exported. A directory under docs/ named here also takes its section of docs/README.md
+# with it, and every link into it from a document that stays becomes plain text.
+#
+# The plans, the research and the comparisons are this house's working notes, with names of
+# machines and of people in them; the mockups are the documents the design was approved in,
+# and nothing builds or checks from them since 2026-10-09 (docs/design/words.json and
+# docs/design/glyphs/ are the sources). tmp is never tracked. ci/ and .devtools.conf are the
+# bridge to a tooling repository the public does not have.
+docs/plans
+docs/research
+docs/comparisons
+docs/mockups
+tmp
+ci
+.devtools.conf

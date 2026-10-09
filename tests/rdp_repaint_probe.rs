@@ -9,8 +9,8 @@
 //! It needs a real Windows host, which the gateway's RDP client speaks to and nothing
 //! else. The target comes out of a config file that is not in the tree:
 //!
-//!   REMOTEX_PROBE_CONFIG=tmp/test_config.toml \
-//!   REMOTEX_PROBE_TARGET=desktop-vnvgdaf \
+//!   ALUMIA_PROBE_CONFIG=tmp/test_config.toml \
+//!   ALUMIA_PROBE_TARGET=desktop-vnvgdaf \
 //!     cargo test --release --test rdp_repaint_probe -- --ignored --nocapture
 //!
 //! `--release` is not optional here. A debug PNG encode is several times slower, which
@@ -36,7 +36,7 @@ use std::path::Path;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::server;
+use alumia::server;
 use tokio::net::TcpListener;
 use tokio_tungstenite::tungstenite::Message;
 
@@ -55,11 +55,11 @@ const QUIET: Duration = Duration::from_millis(300);
 /// Only the target profile is taken from it: the site password is the tests' own, so
 /// that `common::login` works, and the listener is ephemeral on localhost.
 async fn spawn_app() -> (SocketAddr, String, (u16, u16)) {
-    let path = std::env::var("REMOTEX_PROBE_CONFIG")
-        .expect("set REMOTEX_PROBE_CONFIG to a config file holding a real RDP target");
-    let target = std::env::var("REMOTEX_PROBE_TARGET")
-        .expect("set REMOTEX_PROBE_TARGET to the name of the target to measure");
-    let (file, _) = remotex::config::load(Some(Path::new(&path))).expect("read the probe config");
+    let path = std::env::var("ALUMIA_PROBE_CONFIG")
+        .expect("set ALUMIA_PROBE_CONFIG to a config file holding a real RDP target");
+    let target = std::env::var("ALUMIA_PROBE_TARGET")
+        .expect("set ALUMIA_PROBE_TARGET to the name of the target to measure");
+    let (file, _) = alumia::config::load(Some(Path::new(&path))).expect("read the probe config");
     let mut config = file.resolve().expect("resolve the probe config");
     config.targets.retain(|t| t.name == target);
     let profile = config
@@ -69,7 +69,7 @@ async fn spawn_app() -> (SocketAddr, String, (u16, u16)) {
         .clone();
     let size = profile.kept_size();
 
-    config.listen = remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned());
+    config.listen = alumia::config::ListenAddr::Tcp("127.0.0.1:0".to_owned());
     config.auth = common::test_auth();
 
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();

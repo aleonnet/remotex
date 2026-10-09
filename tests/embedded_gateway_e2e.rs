@@ -16,7 +16,7 @@ use std::io::{BufRead as _, BufReader};
 use std::process::{Child, Command, Stdio};
 use std::time::{Duration, Instant};
 
-use remotex::embedded::transport;
+use alumia::embedded::transport;
 
 /// A running embedded gateway, its handshake already read.
 struct Embedded {
@@ -40,7 +40,7 @@ impl Embedded {
     /// its handshake.
     fn start(config: &str) -> Self {
         let dir = common::ScratchDir::new("embedded");
-        dir.write("remotex.toml", config);
+        dir.write("alumia.toml", config);
         let (child, endpoint, token) = launch(dir.path());
         Self {
             child,
@@ -70,7 +70,7 @@ impl Embedded {
             None => String::new(),
         };
         let req = format!(
-            "GET {path} HTTP/1.1\r\nHost: embedded.remotex.localhost\r\n{header}Connection: close\r\n\r\n"
+            "GET {path} HTTP/1.1\r\nHost: embedded.alumia.localhost\r\n{header}Connection: close\r\n\r\n"
         );
         let (status, _head, body) = endpoint_http_request(&self.endpoint, &req).await;
         (status, body)
@@ -79,7 +79,7 @@ impl Embedded {
     /// The cookie the master listener seeds, spelled the way a browser sends it
     /// back to the child.
     fn cookie(&self) -> String {
-        format!("remotex_session={}", self.token)
+        format!("alumia_session={}", self.token)
     }
 
     async fn get_authorized(&self, path: &str) -> (u16, String) {
@@ -108,7 +108,7 @@ impl Embedded {
 /// Start a gateway in `dir` and read its handshake: the child, its endpoint
 /// and its token.
 fn launch(dir: &std::path::Path) -> (Child, String, String) {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_remotex"))
+    let mut child = Command::new(env!("CARGO_BIN_EXE_alumia"))
         .arg("serve-embedded")
         .arg("--instance-dir")
         .arg(dir)
@@ -212,8 +212,8 @@ async fn nothing_but_the_token_gets_past_the_guard() {
 
     for cookie in [
         None,
-        Some("remotex_session="),
-        Some("remotex_session=not-the-token"),
+        Some("alumia_session="),
+        Some("alumia_session=not-the-token"),
         // The right value under the wrong name.
         Some(&format!("session={}", embedded.token) as &str),
     ] {
@@ -229,7 +229,7 @@ async fn nothing_but_the_token_gets_past_the_guard() {
 
     // A bearer header is not another spelling of the cookie credential.
     let req = format!(
-        "GET /api/targets HTTP/1.1\r\nHost: embedded.remotex.localhost\r\nAuthorization: Bearer {}\r\n\
+        "GET /api/targets HTTP/1.1\r\nHost: embedded.alumia.localhost\r\nAuthorization: Bearer {}\r\n\
          Connection: close\r\n\r\n",
         embedded.token
     );
@@ -246,7 +246,7 @@ async fn the_login_routes_refuse_rather_than_vanish() {
 
     let body = r#"{"username":"admin","password":"hunter2"}"#;
     let req = format!(
-        "POST /api/auth/login HTTP/1.1\r\nHost: embedded.remotex.localhost\r\nConnection: close\r\n\
+        "POST /api/auth/login HTTP/1.1\r\nHost: embedded.alumia.localhost\r\nConnection: close\r\n\
          Content-Type: application/json\r\nContent-Length: {}\r\n\r\n{body}",
         body.len()
     );
@@ -288,7 +288,7 @@ async fn the_status_route_answers_for_the_token() {
 #[tokio::test]
 async fn the_socket_upgrade_takes_the_cookie() {
     let embedded = Embedded::start(one_target());
-    let url = "ws://embedded.remotex.localhost/ws?session=not-a-claim&chroma=444&apple_media=false&rdp_graphics=false&rdp_h264=false";
+    let url = "ws://embedded.alumia.localhost/ws?session=not-a-claim&chroma=444&apple_media=false&rdp_graphics=false&rdp_h264=false";
 
     let stream = transport::connect(&embedded.endpoint).await.unwrap();
     let err = tokio_tungstenite::client_async(url, stream)
@@ -316,7 +316,7 @@ async fn the_socket_upgrade_takes_the_cookie() {
     assert_eq!(response.status(), 101);
 }
 
-/// This gateway serves the same SPA as `remotex serve`, out of the same binary:
+/// This gateway serves the same SPA as `alumia serve`, out of the same binary:
 /// real files as themselves, unknown paths as the index, and — the part worth
 /// pinning — the document itself without any credential, because the browser has
 /// to be able to load the page before its own scripts can present the cookie to
@@ -329,20 +329,24 @@ async fn the_spa_is_served_and_unknown_api_paths_are_not() {
     assert_eq!(status, 200, "the document is public");
     assert!(body.contains("<div id=\"root\">"), "{body}");
 
-    // The document names its script by content hash; that file is in the binary too.
+    // The document names its script by content hash, from the origin root so a
+    // page deeper than one segment finds it too; that file is in the binary too.
     let script = body
-        .split("src=\"./")
+        .split("src=\"/")
         .nth(1)
         .and_then(|rest| rest.split('"').next())
-        .expect("the document references its script");
+        .expect("the document references its script from the root");
     let (status, body) = embedded.get_authorized(&format!("/{script}")).await;
     assert_eq!(status, 200, "{script}");
     assert!(!body.contains("<div id=\"root\">"), "a script, not the index: {script}");
 
-    // A client-side route is the index with a 200, not a 404.
-    let (status, body) = embedded.get_authorized("/login").await;
-    assert_eq!(status, 200);
-    assert!(body.contains("<div id=\"root\">"), "{body}");
+    // A client-side route is the index with a 200, not a 404, the page a display
+    // shows in a tab of its own among them.
+    for route in ["/login", "/display/2"] {
+        let (status, body) = embedded.get_authorized(route).await;
+        assert_eq!(status, 200, "{route}");
+        assert!(body.contains("<div id=\"root\">"), "{route}: {body}");
+    }
 
     // But an unknown API path is still an honest 404 rather than an SPA shell.
     let (status, body) = embedded.get_authorized("/api/nope").await;
@@ -388,7 +392,7 @@ async fn a_second_gateway_for_the_same_instance_is_refused() {
 
     // No stdin to hold it: were it let through, it would stop by itself rather
     // than hang the test.
-    let second = Command::new(env!("CARGO_BIN_EXE_remotex"))
+    let second = Command::new(env!("CARGO_BIN_EXE_alumia"))
         .arg("serve-embedded")
         .arg("--instance-dir")
         .arg(embedded.dir.path())
@@ -430,11 +434,11 @@ async fn a_config_with_no_targets_still_serves() {
 fn a_server_block_refuses_the_start() {
     let dir = common::ScratchDir::new("embedded-server-block");
     dir.write(
-        "remotex.toml",
+        "alumia.toml",
         &format!("[server]\nlisten = \"0.0.0.0:1234\"\n{}", one_target()),
     );
 
-    let output = Command::new(env!("CARGO_BIN_EXE_remotex"))
+    let output = Command::new(env!("CARGO_BIN_EXE_alumia"))
         .arg("serve-embedded")
         .arg("--instance-dir")
         .arg(dir.path())
@@ -464,7 +468,7 @@ fn a_server_block_refuses_the_start() {
 #[test]
 fn check_config_agrees_with_what_the_gateway_would_do() {
     let check = |text: &str, embedded: bool| {
-        let mut command = Command::new(env!("CARGO_BIN_EXE_remotex"));
+        let mut command = Command::new(env!("CARGO_BIN_EXE_alumia"));
         command.arg("check-config");
         if embedded {
             command.arg("--embedded");

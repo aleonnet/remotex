@@ -32,7 +32,7 @@ camera = true
 makes the gateway list the extension to it. The key is accepted on a `wlshare`
 target and refused on a plain `vnc` target and on both Apple subtypes, none of
 which has anywhere to put a camera. As on RDP it is capability only: the camera
-is plugged when a browser enables it from the floating menu, per session and never
+is plugged when a browser enables it from the session bar's menu, per session and never
 remembered, and unplugged when that socket closes, the session changes hands, or
 the engine ends. wlshare's own `camera` key (default `false`) is the server's side
 of the same switch.

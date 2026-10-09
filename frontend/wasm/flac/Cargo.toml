@@ -12,7 +12,7 @@
 # member of the gateway's workspace, which names it in `exclude`: it builds for
 # `wasm32-unknown-unknown` alone, with the profile and the lockfile here.
 [package]
-name = "remotex-flac"
+name = "alumia-flac"
 version = "0.0.0"
 license = "MIT"
 edition = "2024"

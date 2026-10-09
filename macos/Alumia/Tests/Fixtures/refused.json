@@ -1,0 +1,7 @@
+{
+  "refused": {
+    "code": "AL-9520",
+    "says": "O computador escritorio está com o endereço vazio. Informe o nome dele na rede ou o IP.",
+    "detail": "target \"escritorio\" has an empty host"
+  }
+}

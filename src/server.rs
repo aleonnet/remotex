@@ -36,9 +36,28 @@ pub struct AppState {
     pub auth: Arc<AuthSessions>,
     /// Every browser socket's byte counters, and the database `[meter]` records them in.
     pub throughput: Throughput,
-    /// EXPERIMENTAL: the software HEVC decoder, read at start-up.
+    /// BETA: the software HEVC decoder, read at start-up.
     pub hevc_decoder: Option<HevcDecoder>,
+    /// Who finds the other computers with Alumia, on a gateway a Mac app hosts.
+    /// `None` on every other gateway, which lists none.
+    pub neighbours: Option<Neighbours>,
 }
+
+/// Another computer with Alumia, as the list of computers shows it: the name that
+/// computer gives itself, and where its own Alumia is reached. Opening it is
+/// leaving for that address, where that computer asks for its own login: no
+/// gateway holds another's credentials.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Neighbour {
+    pub name: String,
+    pub url: String,
+}
+
+/// Who finds the [`Neighbour`]s: the Mac app, asked by the gateway it hosts
+/// ([`crate::app`]). What it answers is already held to a name and an `https`
+/// address.
+pub type Neighbours =
+    Arc<dyn Fn() -> std::pin::Pin<Box<dyn Future<Output = Vec<Neighbour>> + Send>> + Send + Sync>;
 
 /// A [`tokio::net::TcpListener`] whose accepted sockets have `TCP_NODELAY` set.
 ///
@@ -118,7 +137,7 @@ pub fn bind_all(
                 // `listeners` drops here, releasing anything already taken.
                 anyhow::bail!(
                     "{socket} is already in use — something else is serving that \
-                     port (an earlier `remotex serve`?). Stop it first; starting \
+                     port (an earlier `alumia serve`?). Stop it first; starting \
                      beside it would leave two gateways answering {addr} \
                      unpredictably"
                 );
@@ -221,8 +240,39 @@ pub fn router(
     throughput: Throughput,
     hevc_decoder: Option<HevcDecoder>,
 ) -> Router {
+    router_with_logins(config, AuthSessions::default(), throughput, hevc_decoder)
+}
+
+/// [`router`] over the logins the caller opened.
+///
+/// A served gateway opens them from its state directory
+/// ([`AuthSessions::open`]), so a kept login outlives it. [`router`] holds them
+/// in memory, which is all an embedded gateway, with no login, has to hold.
+pub fn router_with_logins(
+    config: AppConfig,
+    logins: AuthSessions,
+    throughput: Throughput,
+    hevc_decoder: Option<HevcDecoder>,
+) -> Router {
     let sessions = Arc::new(SessionManager::new(config.targets.clone()));
-    router_with_sessions(config, sessions, throughput, hevc_decoder)
+    build_router(config, sessions, logins, throughput, hevc_decoder, None)
+}
+
+/// [`router_with_logins`] for the gateway a Mac app hosts. The session slot is
+/// handed back with the router, for the host to say whether a session is open and
+/// to end one ([`SessionManager::end_from_host`]), and the other computers with
+/// Alumia are `neighbours`' to find.
+pub fn router_for_host(
+    config: AppConfig,
+    logins: AuthSessions,
+    throughput: Throughput,
+    hevc_decoder: Option<HevcDecoder>,
+    neighbours: Neighbours,
+) -> (Router, Arc<SessionManager>) {
+    let sessions = Arc::new(SessionManager::new(config.targets.clone()));
+    let router =
+        build_router(config, Arc::clone(&sessions), logins, throughput, hevc_decoder, Some(neighbours));
+    (router, sessions)
 }
 
 /// [`router`] over a caller-supplied session slot.
@@ -230,11 +280,23 @@ pub fn router(
 /// The seam exists for one thing: the manual audio harness
 /// ([`tests::serve_a_test_tone`]) needs the real router — SPA, login, and `/ws` — in
 /// front of a scripted engine rather than a real RDP connect.
+#[cfg(test)]
 pub(crate) fn router_with_sessions(
     config: AppConfig,
     sessions: Arc<SessionManager>,
     throughput: Throughput,
     hevc_decoder: Option<HevcDecoder>,
+) -> Router {
+    build_router(config, sessions, AuthSessions::default(), throughput, hevc_decoder, None)
+}
+
+fn build_router(
+    config: AppConfig,
+    sessions: Arc<SessionManager>,
+    logins: AuthSessions,
+    throughput: Throughput,
+    hevc_decoder: Option<HevcDecoder>,
+    neighbours: Option<Neighbours>,
 ) -> Router {
     // Two shapes of the same three routes, and which one is registered is decided
     // here rather than inside the handlers. An embedded gateway *has* no login —
@@ -264,9 +326,10 @@ pub(crate) fn router_with_sessions(
     let state = AppState {
         config,
         sessions,
-        auth: Arc::new(AuthSessions::default()),
+        auth: Arc::new(logins),
         throughput,
         hevc_decoder,
+        neighbours,
     };
     let require_auth = middleware::from_fn_with_state(state.clone(), require_auth);
 
@@ -279,6 +342,9 @@ pub(crate) fn router_with_sessions(
         // Public for the same reason: the tab's icon is set the moment the page
         // loads, which is before anybody has typed a password.
         .route("/logo", get(logo_handler))
+        // Public: it is how another computer's Alumia learns there is one here, and
+        // it says nothing the answers above and the network do not already say.
+        .route("/announce", get(announce_handler))
         .merge(auth_routes)
         .merge(
             Router::new()
@@ -296,6 +362,7 @@ pub(crate) fn router_with_sessions(
             Router::new()
                 .route("/throughput", get(throughput_handler))
                 .route("/throughput/live", get(throughput_live_handler))
+                .route("/neighbours", get(neighbours_handler))
                 .route_layer(require_auth.clone()),
         )
         .fallback(|| async { AppError::NotFound });
@@ -308,6 +375,9 @@ pub(crate) fn router_with_sessions(
         .merge(
             Router::new()
                 .route("/ws", any(ws::handler))
+                // A display's picture and the input made over it, one socket per
+                // display, attached by the login cookie alone.
+                .route("/ws/display", any(ws::display_handler))
                 // Sound, on a socket of its own so it never queues behind a picture.
                 // Same guard, same credential kinds; only the payload differs.
                 .route("/ws/audio", any(ws::audio_handler))
@@ -344,7 +414,7 @@ pub(crate) fn router_with_sessions(
 ///   `127.0.0.1`;
 /// - `localhost`;
 /// - **anything under `.localhost`**, which RFC 6761 §6.3 reserves for loopback in
-///   its entirety. So `gw-a.remotex.localhost`, the `gateway-1.localhost` of some
+///   its entirety. So `gw-a.alumia.localhost`, the `gateway-1.localhost` of some
 ///   other tool and any other label somebody types are all this machine, and all of
 ///   them are names this gateway may find itself serving under.
 ///
@@ -358,7 +428,7 @@ fn is_loopback_name(name: &str) -> bool {
     name == "localhost" || name.ends_with(".localhost")
 }
 
-/// Send a loopback browser to `<label>.remotex.localhost`, so this gateway has a
+/// Send a loopback browser to `<label>.alumia.localhost`, so this gateway has a
 /// cookie origin of its own (see `[server].dev_subdomain`).
 ///
 /// Three deliberate limits, because a redirect is a thing to be careful with:
@@ -371,7 +441,7 @@ fn is_loopback_name(name: &str) -> bool {
 ///   is no input that makes it point somewhere else.
 /// - **The home page only**, and not merely "not the API". Opening the gateway is
 ///   the one request that decides which origin everything else belongs to: the
-///   document that lands on `<label>.remotex.localhost` asks for its assets, its `/api`
+///   document that lands on `<label>.alumia.localhost` asks for its assets, its `/api`
 ///   and its `/ws` from there by itself. Redirecting anything else would be
 ///   redundant at best and harmful at worst — a `fetch` that followed a
 ///   cross-origin redirect would drop its credentials, and a WebSocket upgrade
@@ -407,7 +477,7 @@ async fn dev_hostname_redirect(State(state): State<AppState>, req: Request, next
     };
     let name = name.trim_start_matches('[').trim_end_matches(']');
     // Any loopback name that is not *this* gateway's own, which is stricter than it
-    // first looks and deliberately so. `gw-b.remotex.localhost` on gateway A's port is a
+    // first looks and deliberately so. `gw-b.alumia.localhost` on gateway A's port is a
     // browser about to give gateway A a cookie under gateway B's name — the exact
     // collision this whole mechanism exists to prevent, arrived at by editing the
     // port in the URL bar and not the label. So the test is not "did you come in on
@@ -445,7 +515,7 @@ async fn dev_hostname_redirect(State(state): State<AppState>, req: Request, next
 /// Middleware guarding everything session-related: whatever this gateway's
 /// [`GatewayAuth`] asks for, or no service.
 ///
-/// Both modes read the same `remotex_session` cookie and differ only in what
+/// Both modes read the same `alumia_session` cookie and differ only in what
 /// makes it valid — a login gateway looks the value up in [`AuthSessions`], an
 /// embedded one compares it against the token it minted at startup. One carrier
 /// for both, because a cookie is the only credential a *document* can carry: the
@@ -460,7 +530,7 @@ async fn require_auth(State(state): State<AppState>, req: Request, next: Next) -
 }
 
 /// The header an answer states this gateway's version in.
-const VERSION_HEADER: HeaderName = HeaderName::from_static("x-remotex-version");
+const VERSION_HEADER: HeaderName = HeaderName::from_static("x-alumia-version");
 
 /// State this gateway's version on a response.
 ///
@@ -507,6 +577,11 @@ fn cookie_flags(headers: &HeaderMap) -> &'static str {
 struct LoginRequest {
     username: String,
     password: String,
+    /// "Keep me signed in": the login lasts [`auth::KEPT_TTL`] from now and
+    /// outlives the browser and the gateway. Left out, it is a login that ends
+    /// with either.
+    #[serde(default)]
+    keep: bool,
 }
 
 #[derive(Serialize)]
@@ -516,6 +591,9 @@ struct OkResponse {
 
 /// Verify the credentials against `[server].site_passwd` and set the session
 /// cookie. 401 on a mismatch, with no hint which of the two fields was wrong.
+///
+/// The cookie of a kept login states its lifetime, which is what makes a browser
+/// hold it past its own exit; any other is a session cookie, as it always was.
 async fn login_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
@@ -529,18 +607,25 @@ async fn login_handler(
         return Err(AppError::Forbidden);
     };
     let site_passwd = site_passwd.clone();
+    let keep = req.keep;
+    let logins = state.auth.clone();
     // bcrypt verification burns tens of milliseconds by design — keep it off
-    // the async workers.
-    let ok = tokio::task::spawn_blocking(move || {
-        site_passwd.verify(&req.username, &req.password)
+    // the async workers. The login is minted there too: a kept one is written
+    // to its file.
+    let token = tokio::task::spawn_blocking(move || {
+        site_passwd
+            .verify(&req.username, &req.password)
+            .then(|| logins.create(keep))
     })
     .await
     .map_err(anyhow::Error::from)?;
-    if !ok {
+    let Some(token) = token else {
         return Err(AppError::Unauthorized);
+    };
+    let mut cookie = format!("{}={token}; {}", auth::COOKIE_NAME, cookie_flags(&headers));
+    if keep {
+        cookie.push_str(&format!("; Max-Age={}", auth::KEPT_TTL.as_secs()));
     }
-    let token = state.auth.create();
-    let cookie = format!("{}={token}; {}", auth::COOKIE_NAME, cookie_flags(&headers));
     Ok(([(header::SET_COOKIE, cookie)], Json(OkResponse { ok: true })))
 }
 
@@ -560,9 +645,13 @@ async fn login_handler(
 async fn logout_handler(
     State(state): State<AppState>,
     headers: HeaderMap,
-) -> impl IntoResponse {
+) -> ApiResult<impl IntoResponse> {
     if let Some(token) = auth::token_from_headers(&headers) {
-        state.auth.invalidate(&token);
+        let logins = state.auth.clone();
+        // Off the async workers: a kept login is taken out of its file.
+        tokio::task::spawn_blocking(move || logins.invalidate(&token))
+            .await
+            .map_err(anyhow::Error::from)?;
     }
     state.sessions.log_out();
     let cookie = format!(
@@ -570,7 +659,7 @@ async fn logout_handler(
         auth::COOKIE_NAME,
         cookie_flags(&headers)
     );
-    ([(header::SET_COOKIE, cookie)], Json(OkResponse { ok: true }))
+    Ok(([(header::SET_COOKIE, cookie)], Json(OkResponse { ok: true })))
 }
 
 #[derive(Serialize)]
@@ -661,6 +750,16 @@ struct TargetInfo {
     subtype: Option<&'static str>,
     host: String,
     port: u16,
+    /// What this gateway's own computer calls itself, where the target is that
+    /// very computer's Screen Sharing ([`crate::engine::own_computer`]), and
+    /// `null` for any other target. The list names its line by it, rather than by
+    /// the name the config entry was given.
+    computer: Option<String>,
+    /// Whether the browser that asked is at that very computer ([`viewer_is_here`]):
+    /// the list does not open it there on a virtual display, which would take the
+    /// screens whoever is asking is looking at. Never set where `computer` is
+    /// `null`.
+    here: bool,
     /// Whether the picker offers the window driving the desktop's size.
     resize: bool,
     /// The size the operator configured, in points, `null` where there is none.
@@ -680,9 +779,11 @@ struct TargetInfo {
     /// cannot take the picture cannot start the target.
     #[serde(rename = "passthroughOnly")]
     passthrough_only: bool,
+    /// Whether where the second virtual display sits is a choice.
+    placement: bool,
 }
 
-/// A desktop size in points, as the picker shows it before Start.
+/// A desktop size in points, as the picker shows it before Open.
 #[derive(Serialize)]
 struct Points {
     w: u16,
@@ -697,21 +798,26 @@ impl From<(u16, u16)> for Points {
 
 impl TargetInfo {
     /// `apple_decoders` is whether this gateway's host can decode a Mac's
-    /// picture.
-    fn of(target: &crate::config::TargetConfig, apple_decoders: bool) -> Self {
+    /// picture, and `viewer_here` whether the browser that asks is at this
+    /// gateway's own computer.
+    fn of(target: &crate::config::TargetConfig, apple_decoders: bool, viewer_here: bool) -> Self {
         let offers = target.offers();
+        let computer = crate::engine::own_computer(target);
         Self {
             name: target.name.clone(),
             protocol: target.protocol.name(),
             subtype: target.subtype.map(crate::config::Subtype::name),
             host: target.host.clone(),
             port: target.port,
+            here: viewer_here && computer.is_some(),
+            computer,
             resize: offers.resize,
             size: target.size.map(Points::from),
             default_size: target.sized().then(|| crate::config::DEFAULT_SIZE.into()),
             audio: offers.audio,
             passthrough: offers.passthrough,
             passthrough_only: target.media_stream() && !apple_decoders,
+            placement: offers.placement,
         }
     }
 }
@@ -721,14 +827,125 @@ impl TargetInfo {
 /// never leave the server.
 ///
 /// The Mac's HEVC decoder is looked for here, where a High Performance target is
-/// listed, so the picker can say before Start what the engine would otherwise say
+/// listed, so the picker can say before Open what the engine would otherwise say
 /// after it. Asked on every listing rather than remembered: a library installed
 /// while the gateway runs is found by the next one.
-async fn targets_handler(State(state): State<AppState>) -> Json<Vec<TargetInfo>> {
-    let targets = &state.config.targets;
-    let apple_decoders = !targets.iter().any(crate::config::TargetConfig::media_stream)
-        || crate::vnc::apple_decoders().is_ok();
-    Json(targets.iter().map(|target| TargetInfo::of(target, apple_decoders)).collect())
+///
+/// Whether a target is this gateway's own computer resolves the target's name, so
+/// the list is made on a thread that may block.
+async fn targets_handler(State(state): State<AppState>, headers: HeaderMap) -> Json<Vec<TargetInfo>> {
+    let forwarded = headers.get(FORWARDED_FOR).map(|from| from.to_str().unwrap_or_default().to_owned());
+    let listed = tokio::task::spawn_blocking(move || {
+        let targets = &state.config.targets;
+        let apple_decoders = !targets.iter().any(crate::config::TargetConfig::media_stream)
+            || crate::vnc::apple_decoders().is_ok();
+        let here = viewer_is_here(forwarded.as_deref(), listens_here_alone(&state.config.listen), own_address);
+        targets.iter().map(|target| TargetInfo::of(target, apple_decoders, here)).collect()
+    });
+    Json(listed.await.unwrap_or_default())
+}
+
+/// The header a proxy in front of the gateway names the address a request came
+/// from in.
+const FORWARDED_FOR: HeaderName = HeaderName::from_static("x-forwarded-for");
+
+/// Whether the browser that asks is at this gateway's own computer.
+///
+/// The gateway does not see a browser's address through a proxy, and the one a
+/// Mac app's gateway is published by is Tailscale's, which names it: `tailscale
+/// serve` sets `X-Forwarded-For` to the address the request came from
+/// (`ipn/ipnlocal/serve.go` in Tailscale 1.102.4: `r.Out.Header.Set("X-Forwarded-For",
+/// c.SrcAddr.Addr().String())`). So:
+///
+/// - with the header, the browser is here where every address it lists is one of
+///   this computer's (`own`). Every one, because a proxy that adds to the header
+///   keeps what the request already said, and a browser somewhere else can write
+///   anything there but cannot take its own address off the end;
+/// - without it, nothing stands between the browser and the gateway, and the
+///   browser is here where the gateway listens to this computer alone
+///   (`listens_here_alone`). A gateway that listens to its network is reached
+///   from anywhere on it, and says nothing.
+///
+/// With the header, erring is towards "not here": the list then offers what it
+/// always offered. Without it, erring is towards "here", and knowingly. A
+/// browser on another device that reaches a gateway listening to this computer
+/// alone through something that names no address, an SSH tunnel or a proxy that
+/// adds no header, cannot be told from one at this computer, and is taken for
+/// one: it is offered this computer's screens mirrored and not a virtual
+/// display. The other mistake is the one that costs: a browser at this computer
+/// taken for one elsewhere opens a virtual display and loses every screen it
+/// has.
+fn viewer_is_here(forwarded: Option<&str>, listens_here_alone: bool, own: impl Fn(std::net::IpAddr) -> bool) -> bool {
+    match forwarded {
+        // An empty header is one address that is none, and so is nobody's.
+        Some(from) => from.split(',').all(|address| address.trim().parse::<std::net::IpAddr>().is_ok_and(&own)),
+        None => listens_here_alone,
+    }
+}
+
+/// Whether `listen` takes connections from this computer alone: a loopback
+/// address or name, and not a socket file, which whatever proxy serves it stands
+/// in front of.
+fn listens_here_alone(listen: &crate::config::ListenAddr) -> bool {
+    match listen {
+        crate::config::ListenAddr::Tcp(address) => {
+            let host = address.rsplit_once(':').map_or(address.as_str(), |(host, _)| host);
+            is_loopback_name(host.trim_start_matches('[').trim_end_matches(']'))
+        }
+        _ => false,
+    }
+}
+
+/// Whether `address` is one of this computer's own.
+#[cfg(target_os = "macos")]
+fn own_address(address: std::net::IpAddr) -> bool {
+    crate::engine::is_this_host(&std::net::SocketAddr::new(address, 0).to_string())
+}
+
+/// No computer but a Mac is told apart as the gateway's own
+/// ([`crate::engine::own_computer`]).
+#[cfg(not(target_os = "macos"))]
+fn own_address(_address: std::net::IpAddr) -> bool {
+    false
+}
+
+/// What a gateway says of itself to anybody who asks: that it is an Alumia, of
+/// which version, on a computer of which name.
+#[derive(Serialize)]
+struct Announcement {
+    version: &'static str,
+    /// What the computer calls itself, `null` where the system does not say.
+    name: Option<&'static str>,
+}
+
+/// The answer another computer's Alumia looks for to list this one. Without a
+/// login, because whoever asks has none here: the version is the one every
+/// guarded answer states in its header, refused ones included, and the name is
+/// the one the computer already gives the network it is on.
+async fn announce_handler() -> Json<Announcement> {
+    // The name is asked of the system once, on a thread that may block.
+    let name = tokio::task::spawn_blocking(computer_name).await.unwrap_or_default();
+    Json(Announcement { version: env!("CARGO_PKG_VERSION"), name })
+}
+
+#[cfg(target_os = "macos")]
+fn computer_name() -> Option<&'static str> {
+    crate::engine::computer_name()
+}
+
+/// No system but macOS is asked its computer's name.
+#[cfg(not(target_os = "macos"))]
+fn computer_name() -> Option<&'static str> {
+    None
+}
+
+/// The other computers with Alumia, for the list of computers to show after its
+/// own. None on a gateway no Mac app hosts.
+async fn neighbours_handler(State(state): State<AppState>) -> Json<Vec<Neighbour>> {
+    match &state.neighbours {
+        Some(find) => Json(find().await),
+        None => Json(Vec::new()),
+    }
 }
 
 #[derive(Deserialize)]
@@ -850,11 +1067,17 @@ struct ClaimResponse {
 /// present the token alone — `chroma`, the most colour this browser's video
 /// decoder takes, is the session socket's and is required there
 /// ([`crate::ws`]).
+///
+/// The claim remembers the login cookie it was made with: the display sockets
+/// carry no token and attach by that login instead ([`crate::ws`]).
 async fn claim_handler(
     State(state): State<AppState>,
+    headers: HeaderMap,
     Json(req): Json<ClaimRequest>,
 ) -> ApiResult<Json<ClaimResponse>> {
-    let session_id = state.sessions.claim(req.force, req.session_id.as_deref())?;
+    // The route's guard has already checked the cookie, so it is there.
+    let login = auth::token_from_headers(&headers).unwrap_or_default();
+    let session_id = state.sessions.claim(req.force, req.session_id.as_deref(), &login)?;
     Ok(Json(ClaimResponse { session_id }))
 }
 
@@ -1069,6 +1292,7 @@ mod tests {
                 size: Some((1280, 800)),
                 egfx: None,
                 egfx_h264: false,
+                virtual_displays: 1,
                 camera: false,
                 microphone: false,
                 video_quality: None,
@@ -1077,7 +1301,6 @@ mod tests {
                 virtual_display: false,
                 audio_bitrate: None,
                 audio_adaptive: None,
-                audio_adaptive_min: None,
             }],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(
@@ -1086,7 +1309,7 @@ mod tests {
                 .unwrap(),
             ),
             branding: crate::config::Branding {
-                text: "remotex".to_owned(),
+                text: "alumia".to_owned(),
                 logo: None,
             },
             dev_hostname: dev_hostname.map(str::to_owned),
@@ -1128,26 +1351,26 @@ mod tests {
     /// The hole this closes, and the reason the rule is "not already where you
     /// belong" rather than "arrived on a bare address".
     ///
-    /// `gw-b.remotex.localhost:52675` is somebody who edited the port in the URL bar and
+    /// `gw-b.alumia.localhost:52675` is somebody who edited the port in the URL bar and
     /// not the label. Serving it would put *this* gateway's cookie under the other
     /// one's hostname, which is precisely the collision the whole mechanism exists
     /// to prevent — so it is redirected like any other name that is not ours.
     #[tokio::test]
     async fn another_gateways_hostname_on_this_port_is_redirected_here() {
         for host in [
-            "gw-b.remotex.localhost:52675",
+            "gw-b.alumia.localhost:52675",
             "gateway-1.localhost:52675",
             // A sub-subdomain of our own name is still not our own name.
-            "x.gw-a.remotex.localhost:52675",
+            "x.gw-a.alumia.localhost:52675",
             // Nor is the suffix every gateway's name hangs off: no gateway is
             // called that, and a cookie left there would be every gateway's.
-            "remotex.localhost:52675",
+            "alumia.localhost:52675",
             // The rest of 127/8 is loopback too, not just .0.1.
             "127.0.0.2:52675",
         ] {
             assert_eq!(
-                redirect_for(dev_router(Some("gw-a.remotex.localhost")), host, "/").await,
-                Some("http://gw-a.remotex.localhost:52675/".to_owned()),
+                redirect_for(dev_router(Some("gw-a.alumia.localhost")), host, "/").await,
+                Some("http://gw-a.alumia.localhost:52675/".to_owned()),
                 "{host} should have been sent to this gateway's own hostname"
             );
         }
@@ -1159,12 +1382,12 @@ mod tests {
     #[tokio::test]
     async fn this_gateways_own_hostname_is_never_redirected_again() {
         for host in [
-            "gw-a.remotex.localhost:52675",
-            "GW-A.REMOTEX.LOCALHOST:52675",
-            "gw-a.remotex.localhost",
+            "gw-a.alumia.localhost:52675",
+            "GW-A.ALUMIA.LOCALHOST:52675",
+            "gw-a.alumia.localhost",
         ] {
             assert_eq!(
-                redirect_for(dev_router(Some("gw-a.remotex.localhost")), host, "/").await,
+                redirect_for(dev_router(Some("gw-a.alumia.localhost")), host, "/").await,
                 None,
                 "{host} is already where it belongs"
             );
@@ -1177,15 +1400,15 @@ mod tests {
     async fn a_loopback_browser_is_sent_to_the_dev_hostname() {
         for host in ["127.0.0.1:52675", "localhost:52675", "[::1]:52675"] {
             assert_eq!(
-                redirect_for(dev_router(Some("gw-a.remotex.localhost")), host, "/").await,
-                Some("http://gw-a.remotex.localhost:52675/".to_owned()),
+                redirect_for(dev_router(Some("gw-a.alumia.localhost")), host, "/").await,
+                Some("http://gw-a.alumia.localhost:52675/".to_owned()),
                 "{host} should have been redirected"
             );
         }
         // No port in the Host is legal (port 80) and must not invent one.
         assert_eq!(
-            redirect_for(dev_router(Some("gw-a.remotex.localhost")), "localhost", "/").await,
-            Some("http://gw-a.remotex.localhost/".to_owned())
+            redirect_for(dev_router(Some("gw-a.alumia.localhost")), "localhost", "/").await,
+            Some("http://gw-a.alumia.localhost/".to_owned())
         );
     }
 
@@ -1194,8 +1417,8 @@ mod tests {
     #[tokio::test]
     async fn a_request_that_did_not_arrive_on_loopback_is_left_alone() {
         for host in [
-            "remotex.example.com",
-            "remotex.example.com:52675",
+            "alumia.example.com",
+            "alumia.example.com:52675",
             "192.0.2.10:52675",
             "[fdb8:d92a::1]:52675",
             // Not loopback however much it reads like it: the suffix is what
@@ -1204,7 +1427,7 @@ mod tests {
             "notlocalhost:52675",
         ] {
             assert_eq!(
-                redirect_for(dev_router(Some("gw-a.remotex.localhost")), host, "/").await,
+                redirect_for(dev_router(Some("gw-a.alumia.localhost")), host, "/").await,
                 None,
                 "{host} must not be redirected"
             );
@@ -1218,7 +1441,7 @@ mod tests {
     async fn nothing_but_the_home_page_is_redirected() {
         for path in ["/api/health", "/api/auth/status", "/ws", "/assets/app.js"] {
             assert_eq!(
-                redirect_for(dev_router(Some("gw-a.remotex.localhost")), "127.0.0.1:52675", path).await,
+                redirect_for(dev_router(Some("gw-a.alumia.localhost")), "127.0.0.1:52675", path).await,
                 None,
                 "{path} must not be redirected"
             );
@@ -1261,8 +1484,8 @@ mod tests {
     /// cargo test --lib serve_a_test_tone -- --ignored --nocapture
     /// ```
     ///
-    /// Then open the printed URL, log in, pick the target, and press ☰ → Enable
-    /// audio. A 440 Hz tone means the whole browser-side path works, on that
+    /// Then open the printed URL, log in, press the sound key on the target's
+    /// monitor, and Open. A 440 Hz tone means the whole browser-side path works, on that
     /// browser — and **this is where a codec's browser support is settled**,
     /// because there is no fallback: a browser whose `AudioDecoder` will not take
     /// what the gateway sends says so under the button and plays nothing. Worth
@@ -1311,6 +1534,7 @@ mod tests {
             size: Some((640, 480)),
             egfx: None,
             egfx_h264: false,
+            virtual_displays: 1,
             camera: false,
             microphone: false,
             video_quality: None,
@@ -1319,18 +1543,86 @@ mod tests {
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,
-            audio_adaptive_min: None,
         };
 
-        // The scripted engine: announce a desktop size so the SPA leaves its
-        // "waiting for the remote desktop" overlay and shows the floating menu,
+        // A second scripted computer, "two-screens": a host opened on two virtual
+        // displays, for what the page does with a display in a tab of its own.
+        // Nothing is drawn. Each display is announced by its size, and the list
+        // says which is shown where, which is all the page decides by.
+        let two = TargetConfig { name: "two-screens".to_owned(), virtual_displays: 2, ..target.clone() };
+
+        /// The scripted engine of "two-screens". It starts on *All Displays*, the
+        /// first display on the session's page and the second in a tab, as a real
+        /// host opened on two does; a display chosen alone is in no tab; and a
+        /// tab that attaches is told its display's size on its own feed.
+        fn two_screens(
+            mut input_rx: tokio::sync::mpsc::UnboundedReceiver<crate::protocol::ClientMsg>,
+            frame_tx: tokio::sync::mpsc::Sender<ServerMsg>,
+        ) {
+            use crate::protocol::{ClientMsg, DisplayInfo};
+            const ALL: u32 = 2;
+            let size = ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED };
+            let list = |active: u32| ServerMsg::Displays {
+                active,
+                displays: (0..ALL)
+                    .map(|column| DisplayInfo {
+                        id: column,
+                        label: format!("Display {}", column + 1),
+                        detail: "640×480 at 1x".to_owned(),
+                        main: column == 0,
+                        virtual_display: true,
+                        tab: (active == ALL && column == 1).then_some(2),
+                    })
+                    .chain(std::iter::once(DisplayInfo {
+                        id: ALL,
+                        label: "All Displays".to_owned(),
+                        detail: "One browser tab each".to_owned(),
+                        main: false,
+                        virtual_display: false,
+                        tab: None,
+                    }))
+                    .collect(),
+            };
+            let mut active = ALL;
+            let said = |active: u32| {
+                frame_tx.blocking_send(size.clone()).is_ok() && frame_tx.blocking_send(list(active)).is_ok()
+            };
+            if !said(active) {
+                return;
+            }
+            while let Some(msg) = input_rx.blocking_recv() {
+                let heard = match msg {
+                    ClientMsg::Refresh => said(active),
+                    ClientMsg::SelectDisplay { id } if id <= ALL => {
+                        active = id;
+                        frame_tx.blocking_send(list(active)).is_ok()
+                    }
+                    ClientMsg::DisplayShown { feed: Some(feed), .. } => {
+                        // A tab that went away meanwhile is nothing to this engine.
+                        let _ = feed.frames.blocking_send(size.clone());
+                        true
+                    }
+                    _ => true,
+                };
+                if !heard {
+                    return;
+                }
+            }
+        }
+
+        // The scripted engine: announce a desktop size so the SPA leaves the
+        // screen that lights and shows the session's bar,
         // then feed the bridge in real time. A plain thread rather than a task
         // because everything it touches is synchronous, and it holds both channel
         // ends so the session layer sees a live engine. A session started without
         // sound is given no bridge, and is the same desktop with nothing to play.
         let sessions = Arc::new(SessionManager::with_test_spawner(
-            vec![target.clone()],
-            |_target, _choices, input_rx, frame_tx, audio: Option<Arc<AudioBridge>>, _camera| {
+            vec![target.clone(), two.clone()],
+            |target, _choices, input_rx, frame_tx, audio: Option<Arc<AudioBridge>>, _camera| {
+                if target.name == "two-screens" {
+                    std::thread::spawn(move || two_screens(input_rx, frame_tx));
+                    return;
+                }
                 std::thread::spawn(move || {
                     let mut input_rx = input_rx;
                     let size = ServerMsg::Resize { w: 640, h: 480, scale: UNSCALED };
@@ -1389,7 +1681,7 @@ mod tests {
 
         let config = AppConfig {
             listen: crate::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
-            targets: vec![target],
+            targets: vec![target, two],
             auth: crate::auth::GatewayAuth::Login(
                 crate::auth::SitePasswd::parse(
                     &crate::auth::generate("admin", "hunter2", 4).unwrap(),
@@ -1415,12 +1707,13 @@ mod tests {
 
         // println! rather than log: this is the test's whole user interface.
         println!("\n  Open  http://{addr}/   (admin / hunter2)");
-        println!("  Open \"test-tone\", choose Opus under Sound and Start. 440 Hz for 5s, quiet for 5s.");
+        println!("  On \"test-tone\", press the sound key on its monitor, and Open. 440 Hz for 5s, quiet for 5s.");
         println!("  The tone must arrive on its own, go away, and come back, untouched,");
-        println!("  and ☰ → Mute and Unmute must stop and start it.");
-        println!("  Serving Opus through WebCodecs. A line under the button instead");
+        println!("  and Mute on the session's bar must stop and start it.");
+        println!("  Serving Opus through WebCodecs. A message hanging from the bar instead");
         println!("  means this browser has no decoder for it.");
         // A real RDP target started with sound separately covers server negotiation.
+        println!("  \"two-screens\" opens on two displays, the second in a tab of its own.");
         println!("  Ctrl-C when done; this waits 15 minutes.\n");
         std::io::stdout().flush().unwrap();
         tokio::time::sleep(std::time::Duration::from_secs(900)).await;
@@ -1444,36 +1737,148 @@ mod tests {
             target("mac", "protocol = \"vnc\"\nsubtype = \"ard\"", "192.0.2.10"),
             target("win", "protocol = \"rdp\"\nsize = \"1920x1080\"", "192.0.2.11"),
             target("fast", "protocol = \"vnc\"\nsubtype = \"ard-high-performance\"", "192.0.2.10"),
-        ) + &target("sway", "protocol = \"vnc\"\nsubtype = \"wlshare\"", "192.0.2.12");
+        ) + &target("two", "protocol = \"rdp\"\nvirtual_displays = 2", "192.0.2.11")
+            + &target("sway", "protocol = \"vnc\"\nsubtype = \"wlshare\"", "192.0.2.12");
         let targets = crate::config::ConfigFile::parse(&text).expect("the targets parse").targets;
+        // Only this computer's own Screen Sharing is called by the computer's
+        // name: a Mac target at the loopback, on the port a Mac shares its screen
+        // on. Another port there, or another kind of server, may be a forwarded
+        // port to another computer, and keeps the name its entry was given.
+        let here = format!(
+            "[server]\nsite_passwd = \"{passwd}\"\n\n{}{}{}",
+            target("own", "protocol = \"vnc\"\nsubtype = \"ard-mirror\"", "127.0.0.1"),
+            target("tunnel", "protocol = \"vnc\"\nsubtype = \"ard\"\nport = 5901", "127.0.0.1"),
+            target("vm", "protocol = \"rdp\"", "127.0.0.1"),
+        );
+        let here = crate::config::ConfigFile::parse(&here).expect("the targets parse").targets;
+        let computer = |name: &str| crate::engine::own_computer(here.iter().find(|t| t.name == name).unwrap());
+        #[cfg(target_os = "macos")]
+        assert_eq!(computer("own").as_deref(), crate::engine::computer_name());
+        #[cfg(not(target_os = "macos"))]
+        assert_eq!(computer("own"), None);
+        assert_eq!(computer("tunnel"), None);
+        assert_eq!(computer("vm"), None);
         let entry = |name: &str, apple_decoders| {
             let target = targets.iter().find(|t| t.name == name).unwrap();
-            serde_json::to_string(&TargetInfo::of(target, apple_decoders)).unwrap()
+            serde_json::to_string(&TargetInfo::of(target, apple_decoders, false)).unwrap()
         };
 
         // Standard mode offers nothing: physical displays, which no session
         // sizes, no sound, no stream.
         assert_eq!(
             entry("mac", true),
-            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"resize":false,"size":null,"defaultSize":null,"audio":false,"passthrough":null,"passthroughOnly":false}"#
+            r#"{"name":"mac","protocol":"vnc","subtype":"ard","host":"192.0.2.10","port":5900,"computer":null,"here":false,"resize":false,"size":null,"defaultSize":null,"audio":false,"passthrough":null,"passthroughOnly":false,"placement":false}"#
         );
         // The size the operator configured, beside the default every sized
         // target has.
         assert_eq!(
             entry("win", true),
-            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"passthrough":"rdp-graphics","passthroughOnly":false}"#
+            r#"{"name":"win","protocol":"rdp","subtype":null,"host":"192.0.2.11","port":3389,"computer":null,"here":false,"resize":true,"size":{"w":1920,"h":1080},"defaultSize":{"w":1440,"h":900},"audio":true,"passthrough":"rdp-graphics","passthroughOnly":false,"placement":false}"#
         );
+        // A browser at the gateway's own computer is said to be there on that
+        // computer's own entry, and on no other, whatever address the other has.
+        let at_the_host = |name: &str| {
+            let target = here.iter().find(|t| t.name == name).unwrap();
+            TargetInfo::of(target, true, true).here
+        };
+        assert_eq!(at_the_host("own"), cfg!(target_os = "macos"), "this computer's own Screen Sharing");
+        assert!(!at_the_host("tunnel") && !at_the_host("vm"), "a forwarded port leads to another computer");
+        let anywhere = TargetInfo::of(here.iter().find(|t| t.name == "own").unwrap(), true, false);
+        assert!(!anywhere.here, "and a browser somewhere else is not");
         // High Performance's sound is always carried, so it is not offered. Its
         // stream is, and is the only way in on a host without its decoders.
         let fast = entry("fast", true);
-        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"passthrough":"apple-media","passthroughOnly":false}"#), "{fast}");
-        assert!(entry("fast", false).ends_with(r#""passthroughOnly":true}"#));
+        assert!(fast.ends_with(r#""resize":true,"size":null,"defaultSize":{"w":1440,"h":900},"audio":false,"passthrough":"apple-media","passthroughOnly":false,"placement":false}"#), "{fast}");
+        assert!(entry("fast", false).ends_with(r#""passthroughOnly":true,"placement":false}"#));
         // Which says nothing about a target with no such stream.
-        assert!(entry("win", false).ends_with(r#""passthroughOnly":false}"#));
+        assert!(entry("win", false).ends_with(r#""passthroughOnly":false,"placement":false}"#));
+        // Where the second display sits is offered by a host asked for two.
+        assert!(entry("two", true).ends_with(r#""placement":true}"#));
         // wlshare's sound is offered, and a target with no sound to choose
         // offers none.
         assert!(entry("sway", true).contains(r#""audio":true,"#));
         assert!(entry("mac", true).contains(r#""audio":false,"#));
+    }
+
+    /// A browser is at the gateway's own computer where nothing stands between
+    /// the two and the gateway listens to that computer alone, or where the proxy
+    /// in front says the request came from one of that computer's addresses; and
+    /// the list says so on that computer's own entry, to that browser.
+    #[tokio::test]
+    async fn a_browser_on_this_computer_is_told_apart() {
+        use tower::ServiceExt as _;
+
+        let own = |address: std::net::IpAddr| address.is_loopback() || address.to_string() == "100.64.0.7";
+        // Straight to the gateway: here only where it listens to this computer.
+        assert!(viewer_is_here(None, true, own));
+        assert!(!viewer_is_here(None, false, own), "a gateway on its network is reached from anywhere on it");
+        // Through a proxy: by the address the proxy names, wherever it listens.
+        for listens in [true, false] {
+            assert!(viewer_is_here(Some("100.64.0.7"), listens, own), "this computer's own address");
+            assert!(viewer_is_here(Some("::1"), listens, own));
+            assert!(!viewer_is_here(Some("100.64.0.9"), listens, own), "another device's address");
+            assert!(!viewer_is_here(Some("100.64.0.7, 100.64.0.9"), listens, own), "what came before the last hop is not it");
+            assert!(viewer_is_here(Some("127.0.0.1, 100.64.0.7"), listens, own), "every hop this computer's");
+            assert!(!viewer_is_here(Some(""), listens, own));
+            assert!(!viewer_is_here(Some("mac-da-ana.example.ts.net"), listens, own), "a name is no address");
+            assert!(!viewer_is_here(Some("100.64.0.7,"), listens, own));
+        }
+
+        let listen = |address: &str| crate::config::ListenAddr::Tcp(address.to_owned());
+        for alone in ["127.0.0.1:52380", "localhost:52380", "[::1]:52380", "127.0.0.2:1"] {
+            assert!(listens_here_alone(&listen(alone)), "{alone}");
+        }
+        for open in ["0.0.0.0:52380", "[::]:52380", "192.0.2.4:52380", "alumia.example.com:52380"] {
+            assert!(!listens_here_alone(&listen(open)), "{open}");
+        }
+        #[cfg(unix)]
+        assert!(!listens_here_alone(&crate::config::ListenAddr::Unix("/run/alumia/gateway.sock".into())));
+
+        // And as the list is answered: this computer's own Screen Sharing beside
+        // another computer, by a gateway that listens to this computer alone.
+        let mut config = router_config(None);
+        let other = config.targets[0].clone();
+        config.targets = vec![
+            crate::config::TargetConfig {
+                name: "own".to_owned(),
+                subtype: Some(crate::config::Subtype::ArdHighPerformance),
+                port: 5900,
+                username: "u".to_owned(),
+                password: "p".to_owned(),
+                size: None,
+                ..other.clone()
+            },
+            other,
+        ];
+        let app = router(config, Throughput::default(), None);
+        let login = axum::http::Request::builder()
+            .method("POST")
+            .uri("/api/auth/login")
+            .header(header::CONTENT_TYPE, "application/json")
+            .body(axum::body::Body::from(r#"{"username":"admin","password":"hunter2"}"#))
+            .unwrap();
+        let response = app.clone().oneshot(login).await.unwrap();
+        let cookie = response.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap();
+        let cookie = cookie.split(';').next().unwrap().to_owned();
+        let listed = |forwarded: Option<&'static str>| {
+            let (app, cookie) = (app.clone(), cookie.clone());
+            async move {
+                let mut request = axum::http::Request::builder().uri("/api/targets").header(header::COOKIE, cookie);
+                if let Some(from) = forwarded {
+                    request = request.header("x-forwarded-for", from);
+                }
+                let response = app.oneshot(request.body(axum::body::Body::empty()).unwrap()).await.unwrap();
+                assert_eq!(response.status(), StatusCode::OK);
+                let body = axum::body::to_bytes(response.into_body(), 1 << 16).await.unwrap();
+                let list: serde_json::Value = serde_json::from_slice(&body).unwrap();
+                (list[0]["here"].as_bool().unwrap(), list[1]["here"].as_bool().unwrap())
+            }
+        };
+        // Only a Mac tells its own computer apart at all.
+        let mac = cfg!(target_os = "macos");
+        assert_eq!(listed(None).await, (mac, false), "a browser on this computer's own address");
+        assert_eq!(listed(Some("127.0.0.1")).await, (mac, false), "and through a proxy, from this computer");
+        assert_eq!(listed(Some("192.0.2.77")).await, (false, false), "a browser on another device");
     }
 
     /// The exact `/api/config` body. Pinned because the login screen reads the
@@ -1481,14 +1886,14 @@ mod tests {
     #[test]
     fn config_response_contains_only_public_branding() {
         let json = serde_json::to_string(&ConfigResponse {
-            branding: "remotex".to_owned(),
+            branding: "alumia".to_owned(),
             logo: false,
             throughput: false,
         })
         .unwrap();
         assert_eq!(
             json,
-            r#"{"branding":"remotex","logo":false,"throughput":false}"#
+            r#"{"branding":"alumia","logo":false,"throughput":false}"#
         );
     }
 
@@ -1527,6 +1932,110 @@ mod tests {
                 env!("CARGO_PKG_VERSION"),
                 "{uri}"
             );
+        }
+    }
+
+    /// What another computer's Alumia asks to learn there is one here: the version
+    /// and the computer's name, to anybody, and nothing else.
+    #[tokio::test]
+    async fn the_announcement_says_the_version_and_the_name() {
+        use tower::ServiceExt as _;
+
+        let app = router(router_config(None), Throughput::default(), None);
+        let request = axum::http::Request::builder().uri("/api/announce").body(axum::body::Body::empty()).unwrap();
+        let response = app.oneshot(request).await.unwrap();
+        assert_eq!(response.status(), StatusCode::OK, "it asks for no login");
+        let body = axum::body::to_bytes(response.into_body(), 1 << 16).await.unwrap();
+        let said: serde_json::Value = serde_json::from_slice(&body).unwrap();
+        let said = said.as_object().unwrap();
+        assert_eq!(said.keys().collect::<Vec<_>>(), ["name", "version"], "the two, and nothing else");
+        assert_eq!(said["version"], env!("CARGO_PKG_VERSION"));
+        assert_eq!(said["name"].as_str(), computer_name(), "as the system says it, or null");
+
+        // The exact body, with a name and without one.
+        let with = Announcement { version: "1.2.3", name: Some("Mac mini da sala") };
+        assert_eq!(serde_json::to_string(&with).unwrap(), r#"{"version":"1.2.3","name":"Mac mini da sala"}"#);
+        let without = Announcement { version: "1.2.3", name: None };
+        assert_eq!(serde_json::to_string(&without).unwrap(), r#"{"version":"1.2.3","name":null}"#);
+    }
+
+    /// The other computers with Alumia are listed to somebody signed in, and to
+    /// nobody else; a gateway no Mac app hosts lists none.
+    #[tokio::test]
+    async fn neighbours_need_a_login() {
+        use tower::ServiceExt as _;
+
+        let found = vec![Neighbour { name: "MacBook da Ana".to_owned(), url: "https://ana.example.ts.net".to_owned() }];
+        let finds = found.clone();
+        let find: Neighbours = Arc::new(move || {
+            let found = finds.clone();
+            Box::pin(async move { found })
+        });
+        let (hosted, _sessions) =
+            router_for_host(router_config(None), AuthSessions::default(), Throughput::default(), None, find);
+        let plain = router(router_config(None), Throughput::default(), None);
+
+        for (app, listed) in [(hosted, found), (plain, Vec::new())] {
+            let request = |cookie: Option<&str>, method: &str, uri: &str, body: &'static str| {
+                let mut request = axum::http::Request::builder()
+                    .method(method)
+                    .uri(uri)
+                    .header(header::CONTENT_TYPE, "application/json");
+                if let Some(cookie) = cookie {
+                    request = request.header(header::COOKIE, cookie);
+                }
+                request.body(axum::body::Body::from(body)).unwrap()
+            };
+            let refused = app.clone().oneshot(request(None, "GET", "/api/neighbours", "")).await.unwrap();
+            assert_eq!(refused.status(), StatusCode::UNAUTHORIZED);
+
+            let login = r#"{"username":"admin","password":"hunter2"}"#;
+            let response = app.clone().oneshot(request(None, "POST", "/api/auth/login", login)).await.unwrap();
+            let set_cookie = response.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap();
+            let cookie = set_cookie.split(';').next().unwrap().to_owned();
+            let response = app.oneshot(request(Some(&cookie), "GET", "/api/neighbours", "")).await.unwrap();
+            assert_eq!(response.status(), StatusCode::OK);
+            let body = axum::body::to_bytes(response.into_body(), 1 << 16).await.unwrap();
+            assert_eq!(serde_json::from_slice::<Vec<Neighbour>>(&body).unwrap(), listed);
+        }
+    }
+
+    /// A login asked to be kept gets a cookie that says for how long, which is
+    /// what a browser holds past its own exit; any other gets a session cookie,
+    /// a request that does not say included.
+    #[tokio::test]
+    async fn only_a_kept_login_gets_a_cookie_with_a_lifetime() {
+        use tower::ServiceExt as _;
+
+        let app = router(router_config(None), Throughput::default(), None);
+        let cookie_of = |body: &'static str| {
+            let app = app.clone();
+            async move {
+                let response = app
+                    .oneshot(
+                        axum::http::Request::builder()
+                            .method("POST")
+                            .uri("/api/auth/login")
+                            .header(header::CONTENT_TYPE, "application/json")
+                            .body(axum::body::Body::from(body))
+                            .unwrap(),
+                    )
+                    .await
+                    .unwrap();
+                assert_eq!(response.status(), StatusCode::OK, "{body}");
+                response.headers().get(header::SET_COOKIE).unwrap().to_str().unwrap().to_owned()
+            }
+        };
+
+        let kept = cookie_of(r#"{"username":"admin","password":"hunter2","keep":true}"#).await;
+        assert!(kept.ends_with("; HttpOnly; SameSite=Strict; Path=/; Max-Age=2592000"), "{kept}");
+        for body in [
+            r#"{"username":"admin","password":"hunter2","keep":false}"#,
+            r#"{"username":"admin","password":"hunter2"}"#,
+        ] {
+            let cookie = cookie_of(body).await;
+            assert!(cookie.ends_with("; HttpOnly; SameSite=Strict; Path=/"), "{cookie}");
+            assert!(!cookie.contains("Max-Age"), "{cookie}");
         }
     }
 

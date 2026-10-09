@@ -17,8 +17,8 @@
 // Which is why this is a menu item and not something the client arranges for itself:
 // `requestFullscreen` needs a user gesture, and the button click is it.
 //
-// `documentElement`, not the desktop canvas, so the floating menu, its docked panels and
-// the Help card are still on screen in the mode. The way out is that button again, or
+// `documentElement`, not the desktop canvas, so the session's bar and the sheets
+// that hang from it are still on screen in the mode. The way out is that button again, or
 // holding Escape, which is Chromium's own exit from a locked full screen.
 
 /** Whether this browser will grant element full screen at all. */

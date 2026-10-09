@@ -25,7 +25,7 @@ const LIMIT = 524_288;
 // of an n-character string measures about 4n, and `MAX_ARCHIVE_BYTES` in
 // src/vnc_apple_clipboard.rs refuses to inflate past 4 × the limit plus 64 KiB,
 // so past roughly 540 000 characters the reader declines before any size is
-// taken and the panel shows `LEN 0B`.
+// taken and the sheet has no size to say.
 const OVERSIZED = 530_000;
 
 // Cleanup, so it runs even when an assertion below threw: see `leaveSession`. The
@@ -49,7 +49,7 @@ test("a remote clipboard over the limit is reported, not truncated", async ({
   // Set *after* the session is up, on purpose: the gateway starts the remote
   // pasteboard watch during connection, so a value that was already there is not
   // a change and is never read at all. `logInAndConnect` returns once it is.
-  const localSentinel = `remotex-ui-local-${Date.now()}`;
+  const localSentinel = `alumia-ui-local-${Date.now()}`;
   await page.evaluate(
     (text) => navigator.clipboard.writeText(text),
     localSentinel,
@@ -58,16 +58,15 @@ test("a remote clipboard over the limit is reported, not truncated", async ({
 
   await openClipboardPanel(page);
 
-  // No CRC32 line: there are no bytes here to checksum. The size and the limit
-  // are the whole of what the panel knows.
-  const card = page.getByRole("button", {
-    name: "Remote clipboard too large; switch to typing",
-  });
-  await expect(card).toBeVisible({ timeout: 20_000 });
-  await expect(card).toContainText(`LEN ${OVERSIZED}B`);
-  await expect(card).toContainText(`LIMIT ${LIMIT}B`);
-  await expect(card).toContainText("Too large to transfer");
-  await expect(card).not.toContainText("CRC32");
+  // No count of characters or lines: none of the text was transferred to count.
+  // Its size is the whole of what the sheet knows.
+  const sheet = page.getByRole("dialog", { name: "Clipboard" });
+  const box = sheet.getByLabel("On the remote computer");
+  await expect(box).toBeVisible({ timeout: 20_000 });
+  expect(OVERSIZED).toBeGreaterThan(LIMIT);
+  await expect(box).toContainText("530 kB");
+  await expect(sheet).toContainText("Too large to transfer");
+  await expect(sheet).not.toContainText("characters");
 
   // The refusal costs the local clipboard nothing — the whole point of not
   // mirroring a value that was never transferred.
@@ -77,49 +76,46 @@ test("a remote clipboard over the limit is reported, not truncated", async ({
 
   // Copy names the size as the reason. "Nothing to copy" would be the answer for
   // a remote that copied nothing, which is the case this is kept apart from.
-  await page.getByRole("button", { name: "Copy" }).click();
+  await page.getByRole("button", { name: "Copy to this device" }).click();
   await expect(
-    page.getByText("Remote clipboard too large to transfer"),
+    sheet.getByText("The remote clipboard is too large to transfer."),
   ).toBeVisible();
   await expect
     .poll(() => page.evaluate(() => navigator.clipboard.readText()))
     .toBe(localSentinel);
 
-  // The card is also the way out of this state: it opens the editor empty, and
-  // Send works from there. Without that, Send would stay disabled for as long as
-  // the remote's clipboard is oversized.
-  await card.click();
-  const input = page.getByLabel("Clipboard text");
+  // Sending is not held by it: Write… opens the field empty, and Send works
+  // from there, for as long as the remote's clipboard is oversized.
+  await page.getByRole("button", { name: "Write…" }).click();
+  const input = sheet.getByLabel("From this device");
   await expect(input).toBeVisible();
   await expect(input).toHaveValue("");
-  const typed = `remotex-ui-typed-${Date.now()}`;
+  const typed = `alumia-ui-typed-${Date.now()}`;
   await input.fill(typed);
-  await page.getByRole("button", { name: "Send" }).click();
-  await expect(page.getByText("Clipboard sent to remote")).toBeVisible();
+  await page.getByRole("button", { name: "Send", exact: true }).click();
+  await expect(sheet.getByText("Sent to the remote computer.")).toBeVisible();
   await expect.poll(readRemoteClipboard).toBe(typed);
 
   // And a value that fits still comes through afterwards, so the refusal left
-  // nothing behind that suppresses the next copy — the panel shows it as an
-  // ordinary concealed snapshot again.
+  // nothing behind that suppresses the next copy — the sheet shows it as an
+  // ordinary text again.
   //
-  // Asserted through a panel Fetch rather than through this browser's clipboard:
+  // Asserted through the sheet's own fetch rather than through this browser's clipboard:
   // mirroring into the OS clipboard is best-effort by design (writeText can
   // reject), so it is the wrong signal for "did the value arrive". The approved
   // clipboard spec is where that mirror is covered.
-  const afterValue = `remotex-ui-after-${Date.now()}`;
+  const afterValue = `alumia-ui-after-${Date.now()}`;
   setRemoteClipboard(afterValue);
-  await page.getByRole("button", { name: "Close clipboard" }).click();
+  await sheet.getByRole("button", { name: "Close" }).click();
   await openClipboardPanel(page);
-  const reopened = page.getByRole("button", {
-    name: "Reveal remote clipboard content",
+  await expect(sheet.getByLabel("On the remote computer")).toHaveText(afterValue, {
+    timeout: 20_000,
   });
-  await expect(reopened).toBeVisible({ timeout: 20_000 });
-  await expect(reopened).toContainText(`LEN ${Buffer.byteLength(afterValue)}B`);
-  await expect(reopened).not.toContainText("Too large to transfer");
+  await expect(sheet).toContainText(`${afterValue.length} characters`);
+  await expect(sheet).not.toContainText("Too large to transfer");
 
-  // Closed before leaving: the panel is a sheet along the bottom of the window,
-  // and the menu's button can be under it.
-  await page.getByRole("button", { name: "Close clipboard" }).click();
+  // Closed before leaving: the bar's End is under whatever hangs from it.
+  await sheet.getByRole("button", { name: "Close" }).click();
   await returnToPicker(page);
   expect(pageErrors).toEqual([]);
 });

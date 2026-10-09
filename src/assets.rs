@@ -1,7 +1,7 @@
 //! The browser client, compiled into the gateway.
 //!
 //! `build.rs` writes the bundle to Cargo's `OUT_DIR` and every file in it becomes
-//! bytes in the binary, so `remotex` is one file wherever it runs: no web root to
+//! bytes in the binary, so `alumia` is one file wherever it runs: no web root to
 //! install beside it, no `[server]` key to point at one, and no launcher argument
 //! for a managed worker. The build refuses to continue without the bundle, which
 //! is where "the web UI will 404" used to be a warning at start-up.
@@ -18,10 +18,10 @@
 //! through (`frontend/src/egfxCompositor.ts`), as the software HEVC decoder's do.
 //! It costs the page nothing, since all it loads is this origin's.
 //!
-//! EXPERIMENTAL: a gateway that has the archive also serves the software
+//! BETA: a gateway that has the archive also serves the software
 //! HEVC decoder ([`crate::hevc_wasm`]), which it read at start-up, at `/hevc/` under
-//! the names it was built with: the module starts its slice threads as workers of
-//! its own script, found by its own URL. Without it `/hevc/` is a 404 and the
+//! the names it was built with, which the page's decode worker and the decoder's
+//! threads import the glue by. Without it `/hevc/` is a 404 and the
 //! page, which asks for the decoder before choosing it, decodes as it did before.
 
 use std::fmt::Write as _;
@@ -181,6 +181,40 @@ mod tests {
             .expect("the bundle has a stylesheet");
         let response = get(&format!("/{stylesheet}"), None);
         assert_eq!(response.headers()[header::CONTENT_TYPE], "text/css; charset=utf-8");
+    }
+
+    /// The web app manifest and the icons it names are in the bundle too, each
+    /// served with its own type, so a browser can install the page: Chromium
+    /// requires the 192 and 512 pixel icons (MDN, "Making PWAs installable").
+    #[tokio::test]
+    async fn the_manifest_and_its_icons_are_served() {
+        let manifest = get("/manifest.webmanifest", None);
+        assert_eq!(manifest.status(), StatusCode::OK);
+        assert_eq!(
+            manifest.headers()[header::CONTENT_TYPE],
+            "application/manifest+json"
+        );
+        assert_eq!(manifest.headers()["cross-origin-opener-policy"], "same-origin");
+        let said: serde_json::Value = serde_json::from_str(&body(manifest).await).unwrap();
+        assert_eq!(said["name"], "alumia");
+        assert_eq!(said["start_url"], "/");
+        assert_eq!(said["display"], "standalone");
+        let icons = said["icons"].as_array().expect("icons");
+        let mut sizes: Vec<&str> = icons.iter().map(|icon| icon["sizes"].as_str().unwrap()).collect();
+        sizes.sort_unstable();
+        assert_eq!(sizes, ["192x192", "512x512"]);
+        for icon in icons {
+            let src = icon["src"].as_str().unwrap();
+            let response = get(src, None);
+            assert_eq!(response.status(), StatusCode::OK, "{src}");
+            assert_eq!(response.headers()[header::CONTENT_TYPE], "image/png", "{src}");
+        }
+        assert_eq!(get("/icons/apple-touch-icon.png", None).status(), StatusCode::OK);
+        // A name the bundle does not have is the document, as any other path is.
+        assert_eq!(
+            get("/manifest.json", None).headers()[header::CONTENT_TYPE],
+            "text/html; charset=utf-8"
+        );
     }
 
     /// The document, a script a worker may start from, and a revalidation of

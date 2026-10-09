@@ -1,0 +1,2 @@
+/* O que o macOS mostra quando o servidor alcança outro computador da rede pela primeira vez. */
+"NSLocalNetworkUsageDescription" = "O Alumia alcança os outros computadores da sua rede para abrir a tela deles.";

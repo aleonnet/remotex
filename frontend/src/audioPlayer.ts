@@ -11,7 +11,9 @@
 // not a question asked here: it is the client's entry condition (preflight.ts).
 
 import { APPLE_ELD_CODEC, appleEldConfig } from "./appleMedia.ts";
+import { createJitterMeter } from "./audioJitter.ts";
 import { type Scheduled, scheduleBuffer } from "./audioSchedule.ts";
+import { type Fault, faultOf } from "./fault.ts";
 import { type FlacDecoder, type FlacFactory, loadFlac } from "./flacDecoder.ts";
 
 /**
@@ -65,8 +67,12 @@ export function decodeAudioHead(head: string): Uint8Array {
 }
 
 export interface AudioPlayer {
-  /** One audio frame's encoded packets, in arrival order. */
-  push(packets: Uint8Array[]): void;
+  /**
+   * One audio frame's encoded packets, in arrival order, and when the frame
+   * arrived in seconds on the page's clock (`performance.now() / 1000`): what the
+   * lead the sound is given is measured from (audioJitter.ts).
+   */
+  push(packets: Uint8Array[], arrivedAt: number): void;
   /**
    * Packets were dropped before the next one pushed. A decoder that carries
    * state between packets starts afresh, rather than decode what follows
@@ -202,9 +208,12 @@ export interface AudioHandlers {
    * fallback to switch to — the codec is the gateway's to choose — so this is
    * reported rather than worked around.
    */
-  onError: (reason: string) => void;
-  /** Current scheduling lead and seconds trimmed from this buffer. */
-  onLead?: (lead: number, trimmed: number) => void;
+  onError: (fault: Fault) => void;
+  /**
+   * Current scheduling lead, seconds trimmed from this buffer, and whether the
+   * timeline had run out before it: a first buffer, or one after an underrun.
+   */
+  onLead?: (lead: number, trimmed: number, restarted: boolean) => void;
 }
 
 /**
@@ -225,6 +234,9 @@ export function createAudioPlayer(
   loadFlacModule: () => Promise<FlacFactory> = loadFlac,
 ): AudioPlayer {
   const packetUs = packetDurationUs(format);
+  const packetS = format.packetFrames / format.sampleRate;
+  // How late the packets arrive, which is the lead a start is given.
+  const jitter = createJitterMeter();
   let nextAt = 0;
   let timestamp = 0;
   let closed = false;
@@ -258,7 +270,7 @@ export function createAudioPlayer(
     }
     console.error("audio: the FLAC decoder could not be set up", e);
     close();
-    handlers.onError("This browser could not load the FLAC decoder.");
+    handlers.onError({ code: "AL-5101" });
   }
 
   const decoder = format.codec === FLAC_CODEC ? null : webCodecsDecoder(format);
@@ -279,15 +291,15 @@ export function createAudioPlayer(
       // Nothing is recoverable here: a decoder that has failed will not decode the
       // next packet either, and there is no second representation to switch to. This
       // is also where "this browser cannot decode this codec" lands — `configure`
-      // accepts an unsupported codec and fails asynchronously — so the message names
+      // accepts an unsupported codec and fails asynchronously — so the cause names
       // the codec, which is the thing worth putting in a bug report.
       error: (e) => {
         console.error("audio: the decoder failed", e);
         close();
         handlers.onError(
           e instanceof Error && e.name === "NotSupportedError"
-            ? `This browser cannot decode the ${format.codec} audio the gateway sends.`
-            : "This browser's audio decoder failed.",
+            ? { code: "AL-5102", fill: { codec: format.codec } }
+            : faultOf(e, "AL-5103"),
         );
       },
     });
@@ -308,6 +320,7 @@ export function createAudioPlayer(
       nextAt,
       context.currentTime,
       buffer.duration,
+      jitter.lead(),
     );
     if (at.clamped) {
       // Everything already scheduled beyond the ceiling gives way to this
@@ -323,7 +336,7 @@ export function createAudioPlayer(
       }
     }
     nextAt = at.nextAt;
-    handlers.onLead?.(at.nextAt - context.currentTime, at.trim);
+    handlers.onLead?.(at.nextAt - context.currentTime, at.trim, at.restarted);
     if (at.trim >= buffer.duration) {
       return; // nothing of it is still worth playing
     }
@@ -392,9 +405,12 @@ export function createAudioPlayer(
   }
 
   return {
-    push(packets) {
+    push(packets, arrivedAt) {
       if (closed) {
         return;
+      }
+      for (const _ of packets) {
+        jitter.arrived(arrivedAt, packetS);
       }
       if (!decoder) {
         playFlac(packets);
@@ -420,7 +436,9 @@ export function createAudioPlayer(
       }
       // What was queued to decode came before the gap and goes with it: sound
       // was lost there already, and the timestamps carry on from where they
-      // were, which is all a decoder asks of them.
+      // were, which is all a decoder asks of them. The sender's clock is counted
+      // again from the next packet, or every one after the gap would read as late.
+      jitter.reset();
       decoder.reset();
       decoder.configure(decoderConfig(format));
     },

@@ -1,0 +1,721 @@
+{
+  "description": "What the page's two dictionaries (frontend/src/words) hold that is not simply the browser texts of docs/design/words.json. tools/product-words.py writes the dictionaries from words.json and from this file, and tools/check-design.py holds the product to both. `own` is a text the product needs and words.json does not have, with why. `unused` is a browser text of words.json the product does not use, with why. `server` is a label the gateway writes in English and the page says in the reader's language (frontend/src/serverWords.ts), with the Rust that writes it, so that a label the gateway changes fails the check instead of going stale.",
+  "own": {
+    "displays.numbered": {
+      "why": "a Mac numbers its displays, and the gateway names them \"Display 2\" in English (src/vnc_apple.rs); the mockup's list shows monitors with names of their own",
+      "pt-BR": "Tela {n}",
+      "en-US": "Display {n}"
+    },
+    "info.tab.lab": {
+      "why": "the laboratory's tab of the information sheet (frontend/src/InfoSheet.tsx), a live panel of what the page sees while its laboratory is on; the mockup's sheet has four tabs",
+      "pt-BR": "Laboratório",
+      "en-US": "Laboratory"
+    },
+    "info.lab.since": {
+      "why": "how long the laboratory has been on, at the head of its panel",
+      "pt-BR": "ligado há {t}",
+      "en-US": "on for {t}"
+    },
+    "info.lab.arrives": {
+      "why": "the size the picture arrives at, as last presented",
+      "pt-BR": "chega a {w}×{h}",
+      "en-US": "arrives at {w}×{h}"
+    },
+    "info.lab.last": {
+      "why": "how long ago the last batch of the picture was painted",
+      "pt-BR": "última há {t}",
+      "en-US": "last {t} ago"
+    },
+    "info.lab.keyframes": {
+      "why": "whole pictures asked of the gateway, painted and given up on",
+      "pt-BR": "inteiras: pedidas {asked} · pintadas {painted} · desistidas {gaveUp}",
+      "en-US": "whole: asked {asked} · painted {painted} · given up {gaveUp}"
+    },
+    "info.lab.decoder": {
+      "why": "the video decoder thrown away on the way back into sight, and what it said",
+      "pt-BR": "decodificador: refeito {restarted} · erros {errors}",
+      "en-US": "decoder: restarted {restarted} · errors {errors}"
+    },
+    "info.lab.restarts": {
+      "why": "the sound started over after a hole",
+      "pt-BR": "buracos {n}",
+      "en-US": "holes {n}"
+    },
+    "info.lab.trims": {
+      "why": "sound thrown away to stay near live",
+      "pt-BR": "cortes {n}",
+      "en-US": "cuts {n}"
+    },
+    "info.lab.away": {
+      "why": "how long the page was out of sight in all",
+      "pt-BR": "{t} fora de vista",
+      "en-US": "{t} out of sight"
+    },
+    "info.lab.back": {
+      "why": "how long ago the page came back into sight",
+      "pt-BR": "voltou há {t}",
+      "en-US": "back {t} ago"
+    },
+    "info.lab.drops": {
+      "why": "how many times the connection to the gateway dropped",
+      "pt-BR": "quedas {n}",
+      "en-US": "drops {n}"
+    },
+    "info.lab.resizes": {
+      "why": "how many times the desktop's size was named, and how long the last took to be on screen",
+      "pt-BR": "redimensionou {n} · eco {ms} ms",
+      "en-US": "resized {n} · echo {ms} ms"
+    },
+    "info.lab.minutes": {
+      "why": "a length of time of minutes and seconds, in the panel",
+      "pt-BR": "{m} min {s} s",
+      "en-US": "{m} min {s} s"
+    },
+    "info.lab.seconds": {
+      "why": "a length of time under a minute, in the panel",
+      "pt-BR": "{s} s",
+      "en-US": "{s} s"
+    },
+    "info.lab.none": {
+      "why": "a measure the page has not seen yet, in the panel",
+      "pt-BR": "—",
+      "en-US": "—"
+    },
+    "info.lab.trace": {
+      "why": "the caption of the panel's trace: the last minute of the picture",
+      "pt-BR": "últimos 60 s",
+      "en-US": "last 60 s"
+    },
+    "info.lab.trace.lit": {
+      "why": "the trace's key: a lit column is a second the picture came in",
+      "pt-BR": "aceso: a imagem chegou",
+      "en-US": "lit: the picture came"
+    },
+    "info.lab.trace.ask": {
+      "why": "the trace's key: a red column is a second a whole picture was asked for in",
+      "pt-BR": "vermelho: imagem inteira pedida",
+      "en-US": "red: whole picture asked for"
+    },
+    "info.lab.trace.away": {
+      "why": "the trace's key: a dark column is a second the page was out of sight in",
+      "pt-BR": "apagado: fora de vista",
+      "en-US": "dark: out of sight"
+    },
+    "info.lab.gauge.shown": {
+      "why": "the caption of the gauge whose big number is the width the picture is shown at",
+      "pt-BR": "mostrada a",
+      "en-US": "shown at"
+    },
+    "info.lab.gauge.lead": {
+      "why": "the caption of the gauge whose big number is the sound's lead",
+      "pt-BR": "folga do som",
+      "en-US": "sound's lead"
+    },
+    "info.lab.gauge.hidden": {
+      "why": "the caption of the gauge whose big number is how many times the page went out of sight",
+      "pt-BR": "escondida",
+      "en-US": "hidden"
+    },
+    "info.lab.gauge.connected": {
+      "why": "the caption of the gauge whose big number is how long the session has been open",
+      "pt-BR": "conectada há",
+      "en-US": "connected for"
+    },
+    "info.lab.event": {
+      "why": "the panel's last event, said in words with how long ago it was",
+      "pt-BR": "último evento, há {t}:",
+      "en-US": "last event, {t} ago:"
+    },
+    "info.lab.event.connected": {
+      "why": "the session opened on this page, by its protocol and subtype",
+      "pt-BR": "a sessão abriu ({how})",
+      "en-US": "the session opened ({how})"
+    },
+    "info.lab.event.dropped": {
+      "why": "the connection to the gateway dropped",
+      "pt-BR": "a conexão com o servidor caiu",
+      "en-US": "the connection to the server dropped"
+    },
+    "info.lab.event.resize": {
+      "why": "the gateway named the desktop's size",
+      "pt-BR": "o servidor nomeou a tela: {w}×{h} a {scale}×",
+      "en-US": "the server named the screen: {w}×{h} at {scale}×"
+    },
+    "info.lab.event.presented": {
+      "why": "the paint worker echoed the size: the bitmap is on screen",
+      "pt-BR": "a tela foi apresentada: {w}×{h} a {scale}×",
+      "en-US": "the screen was presented: {w}×{h} at {scale}×"
+    },
+    "info.lab.event.asked": {
+      "why": "a whole picture asked of the gateway, and why",
+      "pt-BR": "imagem inteira pedida: {why}",
+      "en-US": "whole picture asked for: {why}"
+    },
+    "info.lab.event.painted": {
+      "why": "the whole picture asked for was painted",
+      "pt-BR": "imagem inteira pintada",
+      "en-US": "whole picture painted"
+    },
+    "info.lab.event.gaveUp": {
+      "why": "the page gave up asking for the picture, and why it was asked",
+      "pt-BR": "a página desistiu de pedir a imagem: {why}",
+      "en-US": "the page gave up asking for the picture: {why}"
+    },
+    "info.lab.event.restarted": {
+      "why": "the decoder thrown away on the way back into sight",
+      "pt-BR": "decodificador refeito ao voltar à vista",
+      "en-US": "decoder started over on coming back into sight"
+    },
+    "info.lab.event.error": {
+      "why": "what the decoder said, its code and its own words",
+      "pt-BR": "o decodificador falhou: {said}",
+      "en-US": "the decoder failed: {said}"
+    },
+    "info.lab.event.hidden": {
+      "why": "the page went out of sight",
+      "pt-BR": "a página saiu de vista",
+      "en-US": "the page went out of sight"
+    },
+    "info.lab.event.visible": {
+      "why": "the page came back into sight",
+      "pt-BR": "a página voltou à vista",
+      "en-US": "the page came back into sight"
+    },
+    "info.lab.event.shown": {
+      "why": "the page said the width it shows the picture at",
+      "pt-BR": "a imagem passou a ser mostrada a {w} px",
+      "en-US": "the picture is now shown at {w} px"
+    },
+    "info.lab.event.sound": {
+      "why": "the sound's report of the last ten seconds",
+      "pt-BR": "som: folga {ms} ms, {restarts} buracos e {trims} cortes em 10 s",
+      "en-US": "sound: lead {ms} ms, {restarts} holes and {trims} cuts in 10 s"
+    },
+    "info.lab.event.batch": {
+      "why": "a batch of the picture painted, the event that is counted and not said to the gateway",
+      "pt-BR": "um lote da imagem pintado",
+      "en-US": "a batch of the picture painted"
+    },
+    "info.lab.event.edge": {
+      "why": "the cursor held at an edge of what is on screen while the view could not move (touchGestures.ts, plan 6): where it stopped, the window the page clamps by, and the browser's own visual viewport, which is what is read when a phone's cursor stops short of the picture's edge",
+      "pt-BR": "o cursor parou na borda {side}: {cursor} de {remote}; janela de {clientH} px; viewport visual {visual}",
+      "en-US": "the cursor stopped at the {side} edge: {cursor} of {remote}; window {clientH} px; visual viewport {visual}"
+    },
+    "info.lab.side.top": {
+      "why": "the edge the cursor was held at, in that sentence",
+      "pt-BR": "de cima",
+      "en-US": "top"
+    },
+    "info.lab.side.bottom": {
+      "why": "the edge the cursor was held at, in that sentence",
+      "pt-BR": "de baixo",
+      "en-US": "bottom"
+    },
+    "info.lab.side.left": {
+      "why": "the edge the cursor was held at, in that sentence",
+      "pt-BR": "da esquerda",
+      "en-US": "left"
+    },
+    "info.lab.side.right": {
+      "why": "the edge the cursor was held at, in that sentence",
+      "pt-BR": "da direita",
+      "en-US": "right"
+    },
+    "info.lab.why.sight": {
+      "why": "why a whole picture was asked for: the page had been out of sight (framePainter.ts)",
+      "pt-BR": "a página estava fora de vista",
+      "en-US": "the page was out of sight"
+    },
+    "info.lab.why.malformed": {
+      "why": "why a whole picture was asked for: a malformed batch was dropped (framePainter.ts)",
+      "pt-BR": "um lote malformado foi descartado",
+      "en-US": "a malformed batch was dropped"
+    },
+    "info.lab.why.decoder": {
+      "why": "why a whole picture was asked for: the decoder failed, in its own words after (videoDecoder.ts)",
+      "pt-BR": "o decodificador falhou",
+      "en-US": "the decoder failed"
+    },
+    "info.lab.copy": {
+      "why": "the panel's button, which copies the panel as text to this device's clipboard",
+      "pt-BR": "Copiar relatório",
+      "en-US": "Copy report"
+    },
+    "displays.virtual": {
+      "why": "the one display a High Performance Mac makes for the session, which the gateway names \"Virtual display\" (src/vnc_apple.rs); the mockup shows physical displays only",
+      "pt-BR": "Tela virtual",
+      "en-US": "Virtual display"
+    },
+    "start.missing.video": {
+      "why": "the mockup shows the browser lacking both decoders (\"video and sound\"); one that lacks only the video decoder is told which",
+      "pt-BR": "vídeo",
+      "en-US": "video"
+    },
+    "start.missing.sound": {
+      "why": "the same, for a browser that lacks only the sound decoder",
+      "pt-BR": "som",
+      "en-US": "sound"
+    },
+    "dialog.confirm.body.unnamed": {
+      "why": "the page does not know which computer the other browser opened (the claim answers 409 and names none), so the takeover's question names none; the mockup's sentence has the example's name in it",
+      "pt-BR": "A sessão está aberta em outro navegador, que será desconectado.",
+      "en-US": "The session is open in another browser, which will be disconnected."
+    },
+    "dialog.destructive.body.named": {
+      "why": "the mockup's sentence has the example's name, \"Mac mini\", written in it; the product says the name of the computer that is open",
+      "pt-BR": "A sessão aberta com {name} termina agora. O que estiver aberto no computador remoto continua lá.",
+      "en-US": "The session open with {name} ends now. Whatever is open on the remote computer stays there."
+    },
+    "dialog.error.title": {
+      "why": "the mockup's error dialog is titled with the example it shows, a computer that cannot be opened; the product's is for a session that was on screen and ended, and says so",
+      "pt-BR": "A sessão terminou",
+      "en-US": "The session ended"
+    },
+    "info.waiting": {
+      "why": "the mockup's sheet shows a session already playing and painting; one whose sound or picture format has not arrived yet says so",
+      "pt-BR": "Aguardando o formato",
+      "en-US": "Waiting for the format"
+    },
+    "info.sound.muted": {
+      "why": "the mockup's sheet shows the sound playing; one muted in this browser says so",
+      "pt-BR": "Silenciado aqui",
+      "en-US": "Muted here"
+    },
+    "info.sound.none": {
+      "why": "the mockup's sheet shows a session with sound; one that carries none says so",
+      "pt-BR": "Sem som nesta sessão",
+      "en-US": "None in this session"
+    },
+    "info.sound.stopped": {
+      "why": "the mockup's sheet shows the sound playing; one whose decoder failed says so, with the cause under it (AL-5700)",
+      "pt-BR": "Parou",
+      "en-US": "Stopped"
+    },
+    "info.picture.encoded": {
+      "why": "the mockup's sheet shows a picture passed through; one the gateway encodes says so",
+      "pt-BR": "Codificada pelo servidor",
+      "en-US": "Encoded by the server"
+    },
+    "info.picture.composed": {
+      "why": "the mockup's sheet shows a Mac's video; a Windows host's drawing passed through is composed by this browser, which says so",
+      "pt-BR": "Composta neste navegador",
+      "en-US": "Composed in this browser"
+    },
+    "info.here.fitted": {
+      "why": "the mockup's sheet is a pointer client's, at 100% with scrolling; a touch client fits the picture to its width (docs/architecture.md, Input and display), and says so",
+      "pt-BR": "ajustada à largura, com zoom de pinça",
+      "en-US": "fitted to the width, with pinch zoom"
+    },
+    "info.lab.on": {
+      "why": "the mockup's sheet has no laboratory: seven taps on the version row switch the page's laboratory on (frontend/src/lab.ts), and the row says so under the version while it is",
+      "pt-BR": "Laboratório ligado: a página conta ao servidor o que vê",
+      "en-US": "Lab on: the page tells the gateway what it sees"
+    },
+    "info.short.2.b.nolock": {
+      "why": "the mockup's line is for a browser that hands every key over in full screen; one with no keyboard lock gets the larger screen and no more, and is told so (frontend/src/keyboardLock.ts)",
+      "pt-BR": "Tela cheia, na barra. Este navegador não trava o teclado: Super, Alt+Tab e os atalhos do navegador continuam com este aparelho.",
+      "en-US": "Full screen, on the bar. This browser has no keyboard lock: Super, Alt+Tab and the browser's own chords stay with this device."
+    },
+    "info.short.3.a.nolock": {
+      "why": "the same browser: without a keyboard lock the full screen is not the immersive one",
+      "pt-BR": "Sair da tela cheia",
+      "en-US": "Leave full screen"
+    },
+    "info.short.3.b.nolock": {
+      "why": "the same browser: without a keyboard lock Esc leaves at one press, not held",
+      "pt-BR": "Aperte Esc, ou use o mesmo botão.",
+      "en-US": "Press Esc, or use the same button."
+    },
+    "session.handle.camera": {
+      "why": "the mockup's handle is shown with the camera and the microphone both in use; with the camera alone it says the camera",
+      "pt-BR": "Abrir a barra da sessão. Câmera em uso pelo computador remoto.",
+      "en-US": "Open the session bar. Camera in use by the remote computer."
+    },
+    "session.handle.microphone": {
+      "why": "the same, with the microphone alone",
+      "pt-BR": "Abrir a barra da sessão. Microfone em uso pelo computador remoto.",
+      "en-US": "Open the session bar. Microphone in use by the remote computer."
+    },
+    "session.handle.muted": {
+      "why": "the sheet of 2026-10-07 (docs/mockups/2026-10-07-2100-sinal-de-mudo.html), approved by the owner with the plan that brings it: a session muted here is marked on the closed bar's handle, and the mockup's handle has no such mark",
+      "pt-BR": "Abrir a barra da sessão. O som está silenciado aqui.",
+      "en-US": "Open the session bar. The sound is muted here."
+    },
+    "throughput.picker": {
+      "why": "the gateway counts what moves while the browser is on the list, with no computer open (src/throughput.rs); the mockup's list of computers to choose from shows only computers",
+      "pt-BR": "Na lista, sem computador",
+      "en-US": "On the list, no computer"
+    },
+    "throughput.unread": {
+      "why": "a second the page could not read is a gap in the trace, and is said so under the cursor; the mockup's trace has every second",
+      "pt-BR": "sem leitura",
+      "en-US": "not read"
+    },
+    "throughput.averages": {
+      "why": "a range longer than the seconds kept is drawn a point per span of time, each the average over it, and the scale says so; the mockup draws a point per second",
+      "pt-BR": "médias de {span}",
+      "en-US": "{span} averages"
+    },
+    "info.pckeys.4.b.short": {
+      "why": "the owner's order of 2026-10-04, using the product: the mockup's sentence said twice what the row already shows, and broke the line",
+      "pt-BR": "Use o Alt direito.",
+      "en-US": "Use the right Alt."
+    },
+    "info.mackeys.1.lead": {
+      "why": "the owner's order of 2026-10-04, using the product: the eight chords and their sentence took two lines; one sentence and the eight letters as keys take one",
+      "pt-BR": "⌘ chega como Ctrl em",
+      "en-US": "⌘ arrives as Ctrl with"
+    },
+    "info.short.2.b.bar": {
+      "why": "the owner's order of 2026-10-04, using the product: the full screen is a button of the bar, where the mockup's sentence sent the reader to More; and the sentence was three lines",
+      "pt-BR": "Tela cheia, na barra. A do próprio navegador não faz isso.",
+      "en-US": "Full screen, on the bar. The browser's own does not do this."
+    },
+    "info.short.4.b.short": {
+      "why": "the owner's order of 2026-10-04, using the product: the row's own name already says what installing the page gives",
+      "pt-BR": "Menu do Chrome → Instalar página como app.",
+      "en-US": "Chrome menu → Install page as app."
+    },
+    "type.mac": {
+      "why": "the owner's order of 2026-10-04 for the list (docs/mockups/2026-10-04-1245-lista-monitores.html): a Mac opened over its media stream is one line, named a Mac under its name, and its mode is the line's key to say",
+      "pt-BR": "Mac",
+      "en-US": "Mac"
+    },
+    "mode.virtual": {
+      "why": "the owner's order of 2026-10-04 for the list (docs/mockups/2026-10-04-1245-lista-monitores.html): a Mac's two modes are called Virtual and Mirrored everywhere, in the owner's words; the mockup calls this one \"Its own screen\"",
+      "pt-BR": "Virtual",
+      "en-US": "Virtual"
+    },
+    "mode.mirrored": {
+      "why": "the owner's order of 2026-10-04 for the list (docs/mockups/2026-10-04-1245-lista-monitores.html): the same; the mockup calls this one \"Mirror the screen\"",
+      "pt-BR": "Espelhado",
+      "en-US": "Mirrored"
+    },
+    "list.keys": {
+      "why": "the owner's order of 2026-10-04 for the list (docs/mockups/2026-10-04-1245-lista-monitores.html): the three places at the base of a line's monitor are a group, and a screen reader is told whose",
+      "pt-BR": "O que Abrir traz de {name}",
+      "en-US": "What Open brings from {name}"
+    },
+    "list.says.virtual": {
+      "why": "the owner's order of 2026-10-04 for the list (docs/mockups/2026-10-04-1245-lista-monitores.html): what the Virtual mode does, in the owner's definition, said by the mode's glyph in the tip",
+      "pt-BR": "Virtual: imagem e som vêm para cá; o Mac fica sem imagem e sem som",
+      "en-US": "Virtual: picture and sound come here; the Mac is left without picture and without sound"
+    },
+    "list.says.mirror": {
+      "why": "the owner's order of 2026-10-04 for the list (docs/mockups/2026-10-04-1245-lista-monitores.html): what the Mirrored mode does, in the owner's definition",
+      "pt-BR": "Espelhado: espelha tudo, com o som perfeito",
+      "en-US": "Mirrored: mirrors everything, the sound perfect"
+    },
+    "list.says.mirror.here": {
+      "why": "the owner's order of 2026-10-05, using the app: the Mac the browser is at is not opened in the Virtual mode, which turns off the screens the page is on, so its line stays Mirrored and the mode's glyph is a mark that says why the other mode is not offered",
+      "pt-BR": "Espelhado. O Virtual fica desligado neste Mac: ele apagaria as telas que você está usando.",
+      "en-US": "Mirrored. Virtual is off on this Mac: it would turn off the screens you are using."
+    },
+    "list.says.fitted.window": {
+      "why": "the owner's order of 2026-10-04 for the list (docs/mockups/2026-10-04-1245-lista-monitores.html): a mirrored Mac's picture is fitted to the window by the gateway, which the size's glyph says in the tip",
+      "pt-BR": "Imagem ajustada a esta janela",
+      "en-US": "Picture fitted to this window"
+    },
+    "list.says.fitted.screen": {
+      "why": "the same, on a tablet, whose screen is what the picture is fitted to",
+      "pt-BR": "Imagem ajustada a esta tela",
+      "en-US": "Picture fitted to this screen"
+    },
+    "list.says.sound.always": {
+      "why": "the owner's order of 2026-10-04 for the list (docs/mockups/2026-10-04-1245-lista-monitores.html): a Mac's media stream carries its sound with its picture, so the sound's glyph is a mark and not a key, and says why",
+      "pt-BR": "Som sempre junto com a imagem",
+      "en-US": "Sound always comes with the picture"
+    },
+    "list.says.sound.on": {
+      "why": "the owner's order of 2026-10-04 for the list (docs/mockups/2026-10-04-1245-lista-monitores.html): the sound's key, pressed; the format is no longer a choice at the list, so the mockup's \"With compressed sound\" would name one",
+      "pt-BR": "Som trazido para cá",
+      "en-US": "Sound brought here"
+    },
+    "list.far.title": {
+      "why": "the pieces drawn after the mockup, which the owner approved on 2026-10-05 (docs/mockups/2026-10-05-0030-app-de-mac-pecas-novas.html): the other Macs with Alumia come after the computers, under a title of their own",
+      "pt-BR": "Outros Macs com Alumia",
+      "en-US": "Other Macs with Alumia"
+    },
+    "list.far.kind": {
+      "why": "the same: what stands under the name of another Mac, where a computer of the list has its kind",
+      "pt-BR": "Mac com Alumia",
+      "en-US": "Mac with Alumia"
+    },
+    "list.far.go": {
+      "why": "the same: the one thing a line of another Mac does, which is to take this window to that Mac's own Alumia (the plan's decision 3)",
+      "pt-BR": "Ir para este Mac",
+      "en-US": "Go to this Mac"
+    },
+    "list.far.says": {
+      "why": "the same: what going there means, said by the line's tip as a computer's tip says what Open brings",
+      "pt-BR": "Abre o Alumia daquele Mac nesta janela. Lá se entra com a senha de lá.",
+      "en-US": "Opens that Mac's Alumia in this window. You sign in there with its password."
+    },
+    "dialog.ack.body.mirrored": {
+      "why": "the owner's order of 2026-10-04 for the list (docs/mockups/2026-10-04-1245-lista-monitores.html): the mode is called Mirrored and is no longer tagged unofficial; the mockup's sentence says \"Mirror the screen\", which is not official",
+      "pt-BR": "No modo Espelhado o Mac continua aceso e mostra o que você faz.",
+      "en-US": "In Mirrored mode the Mac stays lit and shows what you do."
+    },
+    "size.asis.plain": {
+      "why": "the owner's order of 2026-10-04, using the product: the mockup's sentence without its comma",
+      "pt-BR": "As telas do computador como estão",
+      "en-US": "The computer's screens as they are"
+    },
+    "common.original": {
+      "why": "the owner's order of 2026-10-04: no message takes somebody else's words into its sentence; what the gateway, the browser or the remote said is kept under Details, and this names it there",
+      "pt-BR": "Texto original",
+      "en-US": "Original text"
+    },
+    "covers.left": {
+      "why": "the cover over a display in a tab of its own whose session's page is gone (the gateway's `sessionPage`): a state the second display's tab brought, which no mockup draws; the sentence under it is the catalogue's (AL-4900), and the two read as its owner approved them on 2026-10-07",
+      "pt-BR": "A página da sessão foi fechada",
+      "en-US": "The session's page was closed"
+    },
+    "displays.combined": {
+      "why": "a Mac's screens in one picture, which the gateway names \"Combined Display\" (src/vnc.rs) since \"All Displays\" became each display in a tab of its own; the mockup has one name for both",
+      "pt-BR": "Tela combinada",
+      "en-US": "Combined display"
+    },
+    "displays.tabeach": {
+      "why": "the line the gateway writes under \"All Displays\", \"One browser tab each\" (src/rdp.rs, src/vnc.rs); the mockup's list shows sizes there",
+      "pt-BR": "Uma aba para cada",
+      "en-US": "A tab each"
+    },
+    "displays.opentab": {
+      "why": "the way to a display shown in a tab of its own, in the Screens sheet; drawn and approved in docs/mockups/2026-10-06-2338-segunda-tela.html, after the mockup",
+      "pt-BR": "Abrir a {name} em outra aba",
+      "en-US": "Open {name} in another tab"
+    },
+    "common.connect": {
+      "why": "the one thing to do in a display's tab that was disconnected by its own bar; the mockup has no screen that connects by a button of that name",
+      "pt-BR": "Conectar",
+      "en-US": "Connect"
+    },
+    "dialog.display.title": {
+      "why": "taking a display from the tab that shows it is asked about first, as taking a session is; the mockup asks about the session only",
+      "pt-BR": "Assumir a Tela {n}?",
+      "en-US": "Take over Display {n}?"
+    },
+    "dialog.display.body": {
+      "why": "what taking a display from another tab does to that tab; the mockup's question is about another browser",
+      "pt-BR": "A outra aba deixa de mostrá-la.",
+      "en-US": "The other tab stops showing it."
+    },
+    "session.handle.display": {
+      "why": "the handle of a display's tab, which opens that display's bar and not the session's",
+      "pt-BR": "Abrir a barra da Tela {n}",
+      "en-US": "Open Display {n}'s bar"
+    },
+    "session.bar.display": {
+      "why": "the bar of a display's tab, named for whoever cannot see the number on its handle",
+      "pt-BR": "Barra da Tela {n}",
+      "en-US": "Display {n}'s bar"
+    },
+    "session.disconnect": {
+      "why": "what a display's tab has where the session's page has End: it stops showing the display here and ends nothing",
+      "pt-BR": "Desconectar",
+      "en-US": "Disconnect"
+    },
+    "list.says.second.right": {
+      "why": "where the second of two virtual displays sits, said by the first place of a line that has no mode; drawn and approved in docs/mockups/2026-10-06-2338-segunda-tela.html, after the mockup",
+      "pt-BR": "Segunda tela à direita",
+      "en-US": "Second display on the right"
+    },
+    "list.says.second.left": {
+      "why": "where the second of two virtual displays sits, said by the first place of a line that has no mode; drawn and approved in docs/mockups/2026-10-06-2338-segunda-tela.html, after the mockup",
+      "pt-BR": "Segunda tela à esquerda",
+      "en-US": "Second display on the left"
+    },
+    "list.says.second.top": {
+      "why": "where the second of two virtual displays sits, said by the first place of a line that has no mode; drawn and approved in docs/mockups/2026-10-06-2338-segunda-tela.html, after the mockup",
+      "pt-BR": "Segunda tela em cima",
+      "en-US": "Second display above"
+    },
+    "list.says.second.bottom": {
+      "why": "where the second of two virtual displays sits, said by the first place of a line that has no mode; drawn and approved in docs/mockups/2026-10-06-2338-segunda-tela.html, after the mockup",
+      "pt-BR": "Segunda tela embaixo",
+      "en-US": "Second display below"
+    },
+    "keyboard.left": {
+      "why": "an arrow key of the keyboard on screen is a glyph, and this is its name for whoever cannot see it; the strip of arrows is the phone's keyboard as drawn and approved in docs/mockups/2026-10-07-0926-teclado-no-celular.html, after the mockup",
+      "pt-BR": "Seta para a esquerda",
+      "en-US": "Left arrow"
+    },
+    "keyboard.up": {
+      "why": "an arrow key of the keyboard on screen is a glyph, and this is its name for whoever cannot see it; the strip of arrows is the phone's keyboard as drawn and approved in docs/mockups/2026-10-07-0926-teclado-no-celular.html, after the mockup",
+      "pt-BR": "Seta para cima",
+      "en-US": "Up arrow"
+    },
+    "keyboard.down": {
+      "why": "an arrow key of the keyboard on screen is a glyph, and this is its name for whoever cannot see it; the strip of arrows is the phone's keyboard as drawn and approved in docs/mockups/2026-10-07-0926-teclado-no-celular.html, after the mockup",
+      "pt-BR": "Seta para baixo",
+      "en-US": "Down arrow"
+    },
+    "keyboard.right": {
+      "why": "an arrow key of the keyboard on screen is a glyph, and this is its name for whoever cannot see it; the strip of arrows is the phone's keyboard as drawn and approved in docs/mockups/2026-10-07-0926-teclado-no-celular.html, after the mockup",
+      "pt-BR": "Seta para a direita",
+      "en-US": "Right arrow"
+    },
+    "keyboard.super": {
+      "why": "the Super key of a phone's keyboard is a glyph where the word does not fit (docs/mockups/2026-10-07-0926-teclado-no-celular.html), and this is its name for whoever cannot see it: the key's own cap, the same in both languages",
+      "pt-BR": "Super",
+      "en-US": "Super"
+    },
+    "keyboard.stickyKey": {
+      "why": "what the phone's Sticky key does, as its name and its tip: the key is the addendum's (docs/design/2026-10-07-0926-adendo-teclado-no-celular.md, section 3), after the mockup, whose sentence under the keys (keyboard.sticky) it takes the place of on a phone",
+      "pt-BR": "Prender Shift, Ctrl, Alt e Super até a próxima tecla",
+      "en-US": "Hold Shift, Ctrl, Alt and Super until the next key"
+    },
+    "clipboard.remote": {
+      "why": "the clipboard sheet in its two directions, each with a button of its own (plan 6, docs/mockups/2026-10-10-0030-folha-area-de-transferencia-no-celular.html): the mockup's sheet has a card that reveals a field, and Send, Copy and Paste together",
+      "pt-BR": "No computador remoto",
+      "en-US": "On the remote computer"
+    },
+    "clipboard.here": {
+      "why": "the clipboard sheet in its two directions, each with a button of its own (plan 6, docs/mockups/2026-10-10-0030-folha-area-de-transferencia-no-celular.html): the mockup's sheet has a card that reveals a field, and Send, Copy and Paste together",
+      "pt-BR": "Deste aparelho",
+      "en-US": "From this device"
+    },
+    "clipboard.copyhere": {
+      "why": "the clipboard sheet in its two directions, each with a button of its own (plan 6, docs/mockups/2026-10-10-0030-folha-area-de-transferencia-no-celular.html): the mockup's sheet has a card that reveals a field, and Send, Copy and Paste together",
+      "pt-BR": "Copiar para este aparelho",
+      "en-US": "Copy to this device"
+    },
+    "clipboard.sendcopied": {
+      "why": "the clipboard sheet in its two directions, each with a button of its own (plan 6, docs/mockups/2026-10-10-0030-folha-area-de-transferencia-no-celular.html): the mockup's sheet has a card that reveals a field, and Send, Copy and Paste together",
+      "pt-BR": "Enviar o que copiei aqui",
+      "en-US": "Send what I copied here"
+    },
+    "clipboard.write": {
+      "why": "the clipboard sheet in its two directions, each with a button of its own (plan 6, docs/mockups/2026-10-10-0030-folha-area-de-transferencia-no-celular.html): the mockup's sheet has a card that reveals a field, and Send, Copy and Paste together",
+      "pt-BR": "Escrever…",
+      "en-US": "Write…"
+    },
+    "clipboard.placeholder": {
+      "why": "the clipboard sheet in its two directions, each with a button of its own (plan 6, docs/mockups/2026-10-10-0030-folha-area-de-transferencia-no-celular.html): the mockup's sheet has a card that reveals a field, and Send, Copy and Paste together",
+      "pt-BR": "Escreva ou cole aqui",
+      "en-US": "Write or paste here"
+    },
+    "clipboard.count": {
+      "why": "the clipboard sheet in its two directions, each with a button of its own (plan 6, docs/mockups/2026-10-10-0030-folha-area-de-transferencia-no-celular.html): the mockup's sheet has a card that reveals a field, and Send, Copy and Paste together",
+      "pt-BR": "{chars} caracteres, {lines} linhas",
+      "en-US": "{chars} characters, {lines} lines"
+    }
+  },
+  "unused": {
+    "dialog.confirm.body": "it names the example's computer, \"Mac mini\"; the product says dialog.confirm.body.unnamed",
+    "dialog.destructive.body": "it names the example's computer, \"Mac mini\"; the product says dialog.destructive.body.named",
+    "owner.back": "none of the four states of a session that is not this page's has a list to go back to: without the session there is no list (frontend/src/RemoteDesktop.tsx), so the second action there is Sign out",
+    "throughput.socket.control": "the gateway has four sockets to count, the screen's, the sound's, the camera's and the microphone's (src/throughput.rs); there is no control socket apart from the screen's",
+    "common.back": "the mockup's dictionary has it and none of its browser scenes says it; every way back the product has is named for where it goes (\"Back to the computers\")",
+    "info.touch": "the heading of the touch gestures in the mockup's first sheet; in the sheet as approved they are a tab, named by info.tab.gestures",
+    "size.own": "the product names a size the computer keeps by the size itself (\"1920 × 1080\"), which says more than that there is one (frontend/src/targetChoices.ts)",
+    "size.mirror": "the product says how a mirrored Mac's picture is sized under the choice it applies to, with size.fitted.window.note and size.fitted.screen.note",
+    "info.pckeys.1.b": "the owner's order of 2026-10-04, using the product: \"So Alt+C copies.\" is a word too many beside the two keys",
+    "info.pckeys.4.b": "the owner's order of 2026-10-04, using the product: the product says info.pckeys.4.b.short",
+    "info.mackeys.1.b": "the owner's order of 2026-10-04, using the product: the product says info.mackeys.1.lead, ahead of the letters",
+    "info.short.2.b": "the owner's order of 2026-10-04, using the product: it sends the reader to More for a button that is on the bar; the product says info.short.2.b.bar",
+    "info.short.4.b": "the owner's order of 2026-10-04, using the product: the product says info.short.4.b.short",
+    "session.handle.hint": "the owner's order of 2026-10-04, using the product: the hint named two devices' chords at once, and the chord's own semicolon read as punctuation; the handle's hint is its name, and the chord is drawn as keys in Information",
+    "list.options": "the owner's order of 2026-10-04 for the list: what a session is started with is chosen by the keys of the line's monitor, with no \"Options\" under it",
+    "group.size": "the owner's order of 2026-10-04 for the list: what a session is started with is chosen by the keys of the line's monitor, with no \"Options\" under it",
+    "group.sound": "the owner's order of 2026-10-04 for the list: what a session is started with is chosen by the keys of the line's monitor, with no \"Options\" under it",
+    "group.pass": "the owner's order of 2026-10-04 for the list: what a session is started with is chosen by the keys of the line's monitor, with no \"Options\" under it",
+    "opt.sound.bring": "the owner's order of 2026-10-04 for the list: what a session is started with is chosen by the keys of the line's monitor, with no \"Options\" under it; the sound's key says what it does in the tip, with sound.off and list.says.sound.on",
+    "size.window.note": "the owner's order of 2026-10-04 for the list: what a session is started with is chosen by the keys of the line's monitor, with no \"Options\" under it; the size's key says the size, and the monitor's screen shows the picture filling the window",
+    "size.screen.note": "the owner's order of 2026-10-04 for the list: what a session is started with is chosen by the keys of the line's monitor, with no \"Options\" under it; the size's key says the size",
+    "size.own.note": "the owner's order of 2026-10-04 for the list: what a session is started with is chosen by the keys of the line's monitor, with no \"Options\" under it; the size's key says the size, and the monitor's screen shows the picture larger than the window",
+    "opt.pass.mac": "the owner's order of 2026-10-04 for the list: passing a stream through is no longer a choice at the list; the gateway does it where it can do nothing else, and the page's address asks for it",
+    "opt.pass.mac.note": "the owner's order of 2026-10-04 for the list: passing a stream through is no longer a choice at the list; the gateway does it where it can do nothing else, and the page's address asks for it",
+    "opt.pass.rdp": "the owner's order of 2026-10-04 for the list: passing a stream through is no longer a choice at the list; the gateway does it where it can do nothing else, and the page's address asks for it",
+    "opt.pass.rdp.note": "the owner's order of 2026-10-04 for the list: passing a stream through is no longer a choice at the list; the gateway does it where it can do nothing else, and the page's address asks for it",
+    "pass.off": "the owner's order of 2026-10-04 for the list: passing a stream through is no longer a choice at the list; the gateway does it where it can do nothing else, and the page's address asks for it; a stream encoded by the gateway is the ordinary case and is not said",
+    "opt.sound.opus": "the owner's order of 2026-10-04 for the list: the sound's format is no longer a choice at the list; a sound that is brought is Opus, and the page's address asks for lossless",
+    "opt.sound.opus.note": "the owner's order of 2026-10-04 for the list: the sound's format is no longer a choice at the list; a sound that is brought is Opus, and the page's address asks for lossless",
+    "opt.sound.flac": "the owner's order of 2026-10-04 for the list: the sound's format is no longer a choice at the list; a sound that is brought is Opus, and the page's address asks for lossless",
+    "opt.sound.flac.note": "the owner's order of 2026-10-04 for the list: the sound's format is no longer a choice at the list; a sound that is brought is Opus, and the page's address asks for lossless",
+    "sound.opus": "the owner's order of 2026-10-04 for the list: the sound's format is no longer a choice at the list; a sound that is brought is Opus, and the page's address asks for lossless; the product says list.says.sound.on, which names no format",
+    "sound.always": "the owner's order of 2026-10-04 for the list: the line says of a Mac's sound only that it always comes with the picture (list.says.sound.always), and what the Virtual mode leaves the Mac without is said by the mode (list.says.virtual)",
+    "mode.own": "the owner's order of 2026-10-04 for the list: a Mac's two modes are called Virtual and Mirrored; the product says mode.virtual",
+    "mode.mirror": "the owner's order of 2026-10-04 for the list: the product says mode.mirrored",
+    "tag.unofficial": "the owner's order of 2026-10-04 for the list: the tag is gone from the list and from the information sheet",
+    "dialog.ack.body": "the owner's order of 2026-10-04 for the list: it names the mode \"Mirror the screen\" and calls it unofficial; the product says dialog.ack.body.mirrored",
+    "size.asis": "the owner's order of 2026-10-04, using the product: the comma goes; the product says size.asis.plain",
+    "session.fullscreen.refused": "the owner's order of 2026-10-04: it was a reason put inside the refusal's sentence; a full screen asked for without a press is a cause of its own in the catalogue (AL-5001), with its own sentence",
+    "keyboard.letters": "the phone's keyboard changes page with the key in its corner, \"?123\" and \"ABC\", where the mockup has two tabs (docs/design/2026-10-07-0926-adendo-teclado-no-celular.md, section 2)",
+    "keyboard.symbols": "the phone's keyboard changes page with the key in its corner, \"?123\" and \"ABC\", where the mockup has two tabs (docs/design/2026-10-07-0926-adendo-teclado-no-celular.md, section 2)",
+    "clipboard.copy": "the clipboard sheet in its two directions (plan 6, docs/mockups/2026-10-10-0030-folha-area-de-transferencia-no-celular.html): the button that copies says where to, clipboard.copyhere",
+    "clipboard.meta": "the same sheet: the remote's text is shown as it is, under a heading that says whose it is (clipboard.remote), and the count stands alone under it (clipboard.count)",
+    "clipboard.text": "the same sheet: the field is labelled by where its text goes, clipboard.here"
+  },
+  "server": [
+    {
+      "says": "All Displays",
+      "file": "src/vnc.rs",
+      "snippet": "label: \"All Displays\".into(),",
+      "key": "displays.all"
+    },
+    {
+      "says": "All Displays",
+      "file": "src/rdp.rs",
+      "snippet": "label: \"All Displays\".into(),",
+      "key": "displays.all"
+    },
+    {
+      "says": "Combined Display",
+      "file": "src/vnc.rs",
+      "snippet": "label: \"Combined Display\".into(),",
+      "key": "displays.combined"
+    },
+    {
+      "says": "One browser tab each",
+      "file": "src/vnc.rs",
+      "snippet": "detail: \"One browser tab each\".into(),",
+      "key": "displays.tabeach",
+      "line": "detail"
+    },
+    {
+      "says": "One browser tab each",
+      "file": "src/rdp.rs",
+      "snippet": "detail: \"One browser tab each\".into(),",
+      "key": "displays.tabeach",
+      "line": "detail"
+    },
+    {
+      "says": "Display 2",
+      "file": "src/rdp.rs",
+      "snippet": "label: format!(\"Display {}\", column + 1),",
+      "key": "displays.numbered"
+    },
+    {
+      "says": "Display 2",
+      "file": "src/vnc_apple.rs",
+      "snippet": "format!(\"Display {}\", index + 1)",
+      "key": "displays.numbered"
+    },
+    {
+      "says": "Virtual display",
+      "file": "src/vnc_apple.rs",
+      "snippet": "\"Virtual display\".to_owned()",
+      "key": "displays.virtual"
+    },
+    {
+      "says": "1600×1000 at 2x",
+      "file": "src/vnc_apple.rs",
+      "snippet": "format!(\" at {density}x\")",
+      "key": null
+    },
+    {
+      "says": "1600×1000 at 2x",
+      "file": "src/vnc.rs",
+      "snippet": "format!(\" at {scale}x\")",
+      "key": null
+    },
+    {
+      "says": "1600×1000 at 2x",
+      "file": "src/rdp.rs",
+      "snippet": "format!(\"{}×{} at {}x\", points(w), points(h), density.percent() / 100)",
+      "key": null
+    }
+  ]
+}

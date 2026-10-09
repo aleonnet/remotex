@@ -1,6 +1,6 @@
 //! The gateway's own RDP code, against a real Windows host.
 //!
-//! [`remotex::rdp_client::proto`] is tested against the specification by its own unit
+//! [`alumia::rdp_client::proto`] is tested against the specification by its own unit
 //! tests. This asks the other question — whether Windows agrees — by driving the
 //! connection sequence over a real socket with nothing else in the process: our bytes
 //! out, the host's bytes in, our decoding of the answer.
@@ -10,7 +10,7 @@
 //! named by [`TARGET_ENV`]:
 //!
 //! ```sh
-//! REMOTEX_UAT_TARGET=windows-ent-sandbox \
+//! ALUMIA_UAT_TARGET=windows-ent-sandbox \
 //!   cargo test --test rdp_proto_probe -- --ignored --nocapture
 //! ```
 //!
@@ -32,27 +32,27 @@ mod common;
 
 use std::time::Duration;
 
-use remotex::rdp_client::proto::bitmap::{self, Scratch};
-use remotex::rdp_client::proto::capabilities::{ConfirmActive, DemandActive};
-use remotex::rdp_client::proto::credssp::{self, Credentials};
-use remotex::rdp_client::proto::fastpath::{self, Fragments};
-use remotex::rdp_client::proto::finalization::{self, Response};
-use remotex::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
-use remotex::rdp_client::proto::channel::Chunk;
-use remotex::rdp_client::proto::{channel, cliprdr, display, dvc};
-use remotex::rdp_client::proto::input::{self, Button, Event};
-use remotex::rdp_client::proto::pointer::{self, Pointer};
-use remotex::rdp_client::proto::info::ClientInfo;
-use remotex::rdp_client::proto::share::{self, Pdu};
-use remotex::rdp_client::proto::{license, mcs, tls};
-use remotex::rdp_client::proto::x224::{
+use alumia::rdp_client::proto::bitmap::{self, Scratch};
+use alumia::rdp_client::proto::capabilities::{ConfirmActive, DemandActive};
+use alumia::rdp_client::proto::credssp::{self, Credentials};
+use alumia::rdp_client::proto::fastpath::{self, Fragments};
+use alumia::rdp_client::proto::finalization::{self, Response};
+use alumia::rdp_client::proto::gcc::{Channel, ConferenceCreateRequest, ConferenceCreateResponse};
+use alumia::rdp_client::proto::channel::Chunk;
+use alumia::rdp_client::proto::{channel, cliprdr, display, dvc};
+use alumia::rdp_client::proto::input::{self, Button, Event};
+use alumia::rdp_client::proto::pointer::{self, Pointer};
+use alumia::rdp_client::proto::info::ClientInfo;
+use alumia::rdp_client::proto::share::{self, Pdu};
+use alumia::rdp_client::proto::{license, mcs, tls};
+use alumia::rdp_client::proto::x224::{
     ConfirmFlags, ConnectionConfirm, ConnectionRequest, Security, TPKT_HEADER, frame_length,
 };
 use tokio::io::{AsyncRead, AsyncReadExt as _, AsyncWrite, AsyncWriteExt as _};
 use tokio::net::TcpStream;
 
 /// Which target in `tmp/test_uat.toml` to dial — see the module docs.
-const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
+const TARGET_ENV: &str = "ALUMIA_UAT_TARGET";
 
 /// How long the whole sequence gets. Generous: a Windows host that is asleep takes
 /// its time over the first packet.
@@ -146,8 +146,10 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
         let conference = ConferenceCreateRequest {
             width: DESKTOP.0,
             height: DESKTOP.1,
+            monitors: 1,
+            placement: alumia::config::Placement::Right,
             scale_percent: 0,
-            client_name: "remotex",
+            client_name: "alumia",
             keyboard_layout: KEYBOARD_LAYOUT,
             selected_protocol: protocol.bits(),
             channels: &CHANNELS,
@@ -303,7 +305,7 @@ async fn a_windows_host_hands_over_a_live_desktop_to_our_connection_sequence() {
             display.caps.is_some(),
             "Display Control is not usable until its capabilities arrive"
         );
-        let layout = display::monitor_layout(RESIZED.0.into(), RESIZED.1.into(), 100);
+        let layout = display::monitor_layout(&[(RESIZED.0.into(), RESIZED.1.into())], alumia::config::Placement::Right, 100);
         let pdu = dvc::data(control, &layout).unwrap();
         for chunk in channel::chunks(&pdu, demand.chunk, Channel::DYNAMIC.chunk_flags()).unwrap()
         {
@@ -888,7 +890,7 @@ fn our_monitor_layout_encodes_to_the_bytes_ironrdp_sends() {
         )),
     ];
     for (width, height, scale, theirs) in LAYOUTS {
-        let ours = display::monitor_layout(width, height, scale);
+        let ours = display::monitor_layout(&[(width, height)], alumia::config::Placement::Right, scale);
         assert_eq!(
             hex(&ours).replace(' ', ""),
             theirs,

@@ -1,7 +1,7 @@
 //! The private transport between the control plane and one worker.
 //!
 //! On Unix it is `<instance>/gateway.sock`, `0600` in a `0700` directory. On
-//! Windows it is a named pipe, `\\.\pipe\remotex-<random>`, whose DACL admits this
+//! Windows it is a named pipe, `\\.\pipe\alumia-<random>`, whose DACL admits this
 //! user alone and which refuses clients from other machines. Either way the worker
 //! binds it before its handshake names it, and the control plane connects to what
 //! the handshake says and to nothing else.
@@ -33,8 +33,11 @@ pub fn make_private(path: &Path) -> anyhow::Result<()> {
     {
         use anyhow::Context as _;
         use std::os::unix::fs::PermissionsExt as _;
+
+        use crate::cause::{Cause, Caused as _};
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
             .with_context(|| format!("cannot make {} private", path.display()))
+            .cause(|| Cause::new("AL-9803").with("path", path.display()))
     }
     #[cfg(windows)]
     super::owner_only::protect_directory(path)
@@ -47,6 +50,7 @@ mod unix {
     use anyhow::Context as _;
 
     use super::super::Claim;
+    use crate::cause::{Cause, Caused as _};
 
     pub type WorkerStream = tokio::net::UnixStream;
 
@@ -137,12 +141,17 @@ mod unix {
             Ok(()) => {}
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
             Err(error) => {
-                return Err(error).with_context(|| format!("cannot remove stale socket {}", path.display()));
+                return Err(error)
+                    .with_context(|| format!("cannot remove stale socket {}", path.display()))
+                    .cause(|| Cause::new("AL-9406").with("path", path.display()));
             }
         }
-        let listener = UnixListener::bind(path).with_context(|| format!("cannot bind {}", path.display()))?;
+        let listener = UnixListener::bind(path)
+            .with_context(|| format!("cannot bind {}", path.display()))
+            .cause(|| Cause::new("AL-9804").with("path", path.display()))?;
         std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
-            .with_context(|| format!("cannot make {} private", path.display()))?;
+            .with_context(|| format!("cannot make {} private", path.display()))
+            .cause(|| Cause::new("AL-9803").with("path", path.display()))?;
         Ok(listener)
     }
 }
@@ -163,7 +172,7 @@ mod windows {
 
     pub type WorkerStream = NamedPipeClient;
 
-    const PIPE_PREFIX: &str = r"\\.\pipe\remotex-";
+    const PIPE_PREFIX: &str = r"\\.\pipe\alumia-";
 
     /// How many instances of the pipe wait for a client at once: a listen
     /// backlog. A page load opens several connections together, and each takes an
@@ -174,7 +183,7 @@ mod windows {
     /// How long a client keeps asking a pipe whose every instance is busy.
     const BUSY_PATIENCE: Duration = Duration::from_secs(2);
 
-    /// A fresh `\\.\pipe\remotex-<random>` per launch.
+    /// A fresh `\\.\pipe\alumia-<random>` per launch.
     ///
     /// Random rather than derived from the instance, because pipe names are one
     /// namespace for the whole machine and any user may create one: a name another

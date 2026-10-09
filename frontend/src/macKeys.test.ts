@@ -105,10 +105,10 @@ test("a bare Command tap presses and releases the remote's Windows key", () => {
   ]);
 });
 
-// The SPA's own Ctrl+Cmd+Shift+; hides the floating menu and never reaches the
+// The SPA's own Ctrl+Cmd+Shift+; hides the bar's handle and never reaches the
 // input path, so the translator only ever sees the Command — which without this is
 // indistinguishable from the bare tap above, and would open the guest's Start
-// menu every time the toolbar was hidden. See FloatingMenu's hideChromeShortcut.
+// menu every time the handle was hidden. See `useHidden` in SessionBar.tsx.
 test("a chord the client took itself is not a bare Command tap", () => {
   const t = new MacKeyboardTranslator();
   assert.deepEqual(t.translate(down("ControlLeft"), true), [

@@ -39,6 +39,7 @@
 //! not push data at me, tell me and I will ask". That is what noVNC does, and
 //! it keeps a large remote clipboard off the wire until something wants it.
 
+use crate::cause::Caused as _;
 use std::io::Read as _;
 
 use anyhow::Context as _;
@@ -235,7 +236,7 @@ pub fn request(formats: u32) -> Vec<u8> {
 pub fn provide(text: &str) -> anyhow::Result<Vec<u8>> {
     use std::io::Write as _;
 
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7721"; 
         clipboard_fits(text),
         "clipboard is {} bytes, over the {MAX_CLIPBOARD_BYTES} byte limit",
         text.len()
@@ -248,8 +249,8 @@ pub fn provide(text: &str) -> anyhow::Result<Vec<u8>> {
         flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
     encoder
         .write_all(&payload)
-        .context("deflating the clipboard payload")?;
-    let deflated = encoder.finish().context("finishing the clipboard deflate")?;
+        .context("deflating the clipboard payload").cause(|| crate::cause::Cause::new("AL-7721"))?;
+    let deflated = encoder.finish().context("finishing the clipboard deflate").cause(|| crate::cause::Cause::new("AL-7721"))?;
 
     let mut body = flags(ACTION_PROVIDE, FORMAT_TEXT).to_vec();
     body.extend_from_slice(&deflated);

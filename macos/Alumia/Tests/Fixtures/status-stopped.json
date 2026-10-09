@@ -1,0 +1,10 @@
+{
+  "version": "0.0.325",
+  "serving": false,
+  "stopped": true,
+  "listen": null,
+  "session": null,
+  "ffmpeg": true,
+  "cause": null,
+  "binary": "16777234-48213"
+}

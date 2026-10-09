@@ -1,7 +1,9 @@
 {
   "$schema": "https://biomejs.dev/schemas/2.3.15/schema.json",
   "files": {
-    "includes": ["**", "!dist", "!dist-viewer"]
+    // src/design is written by tools/check-design.py from docs/design, and held
+    // to that tool's output rather than to this formatter.
+    "includes": ["**", "!dist", "!dist-viewer", "!src/design"]
   },
   "vcs": {
     "enabled": true,

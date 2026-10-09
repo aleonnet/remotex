@@ -2,8 +2,22 @@
 <html lang="en">
   <head>
     <meta charset="UTF-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-    <title>remotex</title>
+    <!-- The whole screen of a phone, under its notch and its home indicator:
+         what the page says keeps inside the safe area by itself (alumia.css). -->
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1.0, viewport-fit=cover"
+    />
+    <title>alumia</title>
+    <!-- The mark, until the gateway says it has a logo of its own (App.tsx). -->
+    <link rel="icon" href="/src/design/favicon.svg" />
+    <!-- What installing the page needs: the manifest and the icons in public/,
+         written from the mark and the tokens by tools/product-icons.mjs, and the
+         colour of the browser's own chrome around an installed page, which the
+         page fills in from the theme it paints (preferences.tsx). -->
+    <link rel="manifest" href="/manifest.webmanifest" />
+    <link rel="apple-touch-icon" href="/icons/apple-touch-icon.png" />
+    <meta name="theme-color" content="" />
   </head>
   <body>
     <div id="root"></div>

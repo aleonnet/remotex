@@ -1,0 +1,31 @@
+name: Public repository check
+
+# Whether the public repository, aleonnet/alumia, is the photograph of the version its last
+# commit names: tools/publish-public.sh --check exports that version's tag from this
+# repository, with the same filter the publication applies, and compares. It runs here, in
+# aleonnet/alumia-app, by hand and when a version's tag is pushed; in the public repository
+# itself the job is skipped (it has no tags of the private history to export from).
+on:
+  push:
+    tags:
+      - v*
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    if: github.repository != 'aleonnet/alumia'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # --check exports the named version and filters it (the filter is Python, run through
+      # uv) and compares; it runs no other check, so nothing else is installed.
+      - uses: astral-sh/setup-uv@v6
+
+      - name: The public repository is the photograph of its last version
+        run: bash tools/publish-public.sh --check

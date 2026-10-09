@@ -1,0 +1,1633 @@
+{
+  "$description": "Alumia's design tokens, in the Design Tokens Community Group format, 2025.10. The one source of every colour, size and time: the mockup and the product read these values, and tools/check-design.py fails when they differ. Each colour is OKLCH with the same colour in hexadecimal beside it.",
+  "color": {
+    "$type": "color",
+    "light": {
+      "surface": {
+        "base": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.9722,
+              0.0034,
+              247.86
+            ],
+            "hex": "#F4F6F8"
+          },
+          "$description": "The page's ground."
+        },
+        "raised": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              1.0,
+              0,
+              0
+            ],
+            "hex": "#FFFFFF"
+          },
+          "$description": "A surface lifted off the ground: a row, a panel, a dialog."
+        },
+        "sunken": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.9419,
+              0.0063,
+              255.48
+            ],
+            "hex": "#E9ECF0"
+          },
+          "$description": "A surface set into the ground: a field, a track. Text on it is primary or secondary only."
+        }
+      },
+      "text": {
+        "primary": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.1853,
+              0.0095,
+              255.64
+            ],
+            "hex": "#101317"
+          }
+        },
+        "secondary": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.4952,
+              0.024,
+              264.33
+            ],
+            "hex": "#5B6270"
+          }
+        },
+        "onAction": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              1.0,
+              0,
+              0
+            ],
+            "hex": "#FFFFFF"
+          },
+          "$description": "Text and glyphs on an action fill."
+        }
+      },
+      "action": {
+        "default": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.5455,
+              0.2243,
+              264.05
+            ],
+            "hex": "#2860F0"
+          },
+          "$description": "The primary button's fill, a link, the focus ring."
+        },
+        "hover": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.4832,
+              0.2056,
+              264.25
+            ],
+            "hex": "#1F4FD0"
+          },
+          "$description": "The primary button's fill under the pointer or pressed."
+        }
+      },
+      "state": {
+        "danger": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.5624,
+              0.2032,
+              29.54
+            ],
+            "hex": "#D22C1F"
+          },
+          "$description": "A problem, as text or glyph. Never the only sign: it comes with a glyph and words."
+        },
+        "ok": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.5027,
+              0.1367,
+              147.89
+            ],
+            "hex": "#157832"
+          },
+          "$description": "Connected, done. Never the only sign."
+        },
+        "warning": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.4707,
+              0.0987,
+              76.33
+            ],
+            "hex": "#7A5200"
+          },
+          "$description": "Needs attention, nothing is broken. Never the only sign."
+        }
+      },
+      "border": {
+        "subtle": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.9081,
+              0.0081,
+              253.86
+            ],
+            "hex": "#DDE1E6"
+          },
+          "$description": "A hairline that separates. Decorative: it carries no state and has no contrast floor."
+        },
+        "control": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.6085,
+              0.0214,
+              262.96
+            ],
+            "hex": "#7C8390"
+          },
+          "$description": "The outline of a field, a checkbox, a switch: what shows where a control is."
+        }
+      },
+      "focus": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.5455,
+            0.2243,
+            264.05
+          ],
+          "hex": "#2860F0"
+        },
+        "$description": "The focus ring, 2px, offset 2px."
+      },
+      "glass": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            1.0,
+            0,
+            0
+          ],
+          "alpha": 0.86,
+          "hex": "#FFFFFF"
+        },
+        "$description": "The session bar and the panels over the remote screen. Solid under reduced transparency or more contrast."
+      },
+      "scrim": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.0,
+            0,
+            0
+          ],
+          "alpha": 0.4,
+          "hex": "#000000"
+        },
+        "$description": "What dims the page behind a dialog."
+      },
+      "chart": {
+        "sent": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.5331,
+              0.1867,
+              259.25
+            ],
+            "hex": "#1B66D6"
+          },
+          "$description": "The throughput chart's line for what this browser sends."
+        },
+        "received": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.5548,
+              0.1271,
+              62.52
+            ],
+            "hex": "#A65F00"
+          },
+          "$description": "The throughput chart's line for what this browser receives."
+        }
+      }
+    },
+    "dark": {
+      "surface": {
+        "base": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.2038,
+              0.0067,
+              258.37
+            ],
+            "hex": "#15171A"
+          },
+          "$description": "The page's ground."
+        },
+        "raised": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.2505,
+              0.0088,
+              255.59
+            ],
+            "hex": "#1F2226"
+          },
+          "$description": "A surface lifted off the ground: a row, a panel, a dialog."
+        },
+        "sunken": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.1717,
+              0.0053,
+              248.14
+            ],
+            "hex": "#0E1012"
+          },
+          "$description": "A surface set into the ground: a field, a track. Text on it is primary or secondary only."
+        }
+      },
+      "text": {
+        "primary": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.9364,
+              0.0046,
+              258.33
+            ],
+            "hex": "#E8EAED"
+          }
+        },
+        "secondary": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.7072,
+              0.0192,
+              261.32
+            ],
+            "hex": "#9AA1AD"
+          }
+        },
+        "onAction": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.2038,
+              0.0067,
+              258.37
+            ],
+            "hex": "#15171A"
+          },
+          "$description": "Text and glyphs on an action fill."
+        }
+      },
+      "action": {
+        "default": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.6926,
+              0.1606,
+              265.19
+            ],
+            "hex": "#6B97FF"
+          },
+          "$description": "The primary button's fill, a link, the focus ring."
+        },
+        "hover": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.755,
+              0.1249,
+              265.88
+            ],
+            "hex": "#8AADFF"
+          },
+          "$description": "The primary button's fill under the pointer or pressed."
+        }
+      },
+      "state": {
+        "danger": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.7078,
+              0.1845,
+              28.04
+            ],
+            "hex": "#FF6A5C"
+          },
+          "$description": "A problem, as text or glyph. Never the only sign: it comes with a glyph and words."
+        },
+        "ok": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.7763,
+              0.1972,
+              148.42
+            ],
+            "hex": "#3FD769"
+          },
+          "$description": "Connected, done. Never the only sign."
+        },
+        "warning": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.8056,
+              0.1469,
+              80.6
+            ],
+            "hex": "#F0B43C"
+          },
+          "$description": "Needs attention, nothing is broken. Never the only sign."
+        }
+      },
+      "border": {
+        "subtle": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.3037,
+              0.0122,
+              258.37
+            ],
+            "hex": "#2B2F35"
+          },
+          "$description": "A hairline that separates. Decorative: it carries no state and has no contrast floor."
+        },
+        "control": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.5837,
+              0.0207,
+              258.37
+            ],
+            "hex": "#747C88"
+          },
+          "$description": "The outline of a field, a checkbox, a switch: what shows where a control is."
+        }
+      },
+      "focus": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.6926,
+            0.1606,
+            265.19
+          ],
+          "hex": "#6B97FF"
+        },
+        "$description": "The focus ring, 2px, offset 2px."
+      },
+      "glass": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.2505,
+            0.0088,
+            255.59
+          ],
+          "alpha": 0.86,
+          "hex": "#1F2226"
+        },
+        "$description": "The session bar and the panels over the remote screen. Solid under reduced transparency or more contrast."
+      },
+      "scrim": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.0,
+            0,
+            0
+          ],
+          "alpha": 0.6,
+          "hex": "#000000"
+        },
+        "$description": "What dims the page behind a dialog."
+      },
+      "chart": {
+        "sent": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.6541,
+              0.1602,
+              256.94
+            ],
+            "hex": "#4A90F0"
+          },
+          "$description": "The throughput chart's line for what this browser sends."
+        },
+        "received": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.6608,
+              0.1342,
+              72.29
+            ],
+            "hex": "#C4831A"
+          },
+          "$description": "The throughput chart's line for what this browser receives."
+        }
+      }
+    },
+    "brand": {
+      "$description": "The mark's three subpixels and the glass they sit on. The three appear together only in the mark and while the screen lights, and always on the glass, in either theme.",
+      "glass": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.2038,
+            0.0067,
+            258.37
+          ],
+          "hex": "#15171A"
+        },
+        "$description": "The unlit screen."
+      },
+      "red": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.6629,
+            0.2241,
+            29.15
+          ],
+          "hex": "#FF4536"
+        }
+      },
+      "green": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.7554,
+            0.2085,
+            147.04
+          ],
+          "hex": "#2FD158"
+        }
+      },
+      "blue": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.5803,
+            0.2292,
+            263.72
+          ],
+          "hex": "#2E6BFF"
+        }
+      },
+      "p3": {
+        "$description": "The same three on a wide-gamut display: the same numbers read as Display P3, which is more saturated. The hexadecimal is the sRGB colour shown where P3 is not.",
+        "red": {
+          "$value": {
+            "colorSpace": "display-p3",
+            "components": [
+              1.0,
+              0.2706,
+              0.2118
+            ],
+            "hex": "#FF4536"
+          },
+          "$description": "color.brand.red on a wide-gamut display."
+        },
+        "green": {
+          "$value": {
+            "colorSpace": "display-p3",
+            "components": [
+              0.1843,
+              0.8196,
+              0.3451
+            ],
+            "hex": "#2FD158"
+          },
+          "$description": "color.brand.green on a wide-gamut display."
+        },
+        "blue": {
+          "$value": {
+            "colorSpace": "display-p3",
+            "components": [
+              0.1804,
+              0.4196,
+              1.0
+            ],
+            "hex": "#2E6BFF"
+          },
+          "$description": "color.brand.blue on a wide-gamut display."
+        }
+      }
+    },
+    "backdrop": {
+      "$description": "The two extremes of what can lie behind the glass, since what lies behind it is the remote screen. Only for measuring contrast.",
+      "lightest": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            1.0,
+            0,
+            0
+          ],
+          "hex": "#FFFFFF"
+        }
+      },
+      "darkest": {
+        "$value": {
+          "colorSpace": "oklch",
+          "components": [
+            0.0,
+            0,
+            0
+          ],
+          "hex": "#000000"
+        }
+      }
+    },
+    "mac": {
+      "$description": "What the mockup paints the Mac app with. In the app these come from macOS itself (labelColor, secondaryLabelColor, windowBackgroundColor, separatorColor, controlAccentColor); these values stand in for them on a page and are not Apple's.",
+      "light": {
+        "window": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.9431,
+              0,
+              0
+            ],
+            "hex": "#ECECEC"
+          }
+        },
+        "content": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              1.0,
+              0,
+              0
+            ],
+            "hex": "#FFFFFF"
+          }
+        },
+        "label": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.257,
+              0.0037,
+              286.14
+            ],
+            "hex": "#232325"
+          }
+        },
+        "labelSecondary": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.4836,
+              0.0079,
+              286.1
+            ],
+            "hex": "#5E5E63"
+          }
+        },
+        "separator": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.8652,
+              0.0068,
+              286.26
+            ],
+            "hex": "#D2D2D7"
+          },
+          "$description": "Decorative: no contrast floor."
+        },
+        "controlBorder": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.6018,
+              0.009,
+              286.13
+            ],
+            "hex": "#808086"
+          }
+        },
+        "accent": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.5366,
+              0.2114,
+              260.02
+            ],
+            "hex": "#0B63E5"
+          },
+          "$description": "The default button's fill."
+        },
+        "onAccent": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              1.0,
+              0,
+              0
+            ],
+            "hex": "#FFFFFF"
+          }
+        },
+        "link": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.5366,
+              0.2114,
+              260.02
+            ],
+            "hex": "#0B63E5"
+          }
+        },
+        "danger": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.5438,
+              0.1971,
+              29.46
+            ],
+            "hex": "#C9291D"
+          }
+        },
+        "ok": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.51,
+              0.1343,
+              148.3
+            ],
+            "hex": "#1A7A36"
+          }
+        },
+        "warning": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.4973,
+              0.1051,
+              74.65
+            ],
+            "hex": "#855800"
+          }
+        }
+      },
+      "dark": {
+        "window": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.2359,
+              0.0038,
+              286.11
+            ],
+            "hex": "#1E1E20"
+          }
+        },
+        "content": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.2862,
+              0.0054,
+              286.05
+            ],
+            "hex": "#2A2A2D"
+          }
+        },
+        "label": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.9288,
+              0.004,
+              286.32
+            ],
+            "hex": "#E7E7EA"
+          }
+        },
+        "labelSecondary": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.7176,
+              0.01,
+              286.14
+            ],
+            "hex": "#A3A3AA"
+          }
+        },
+        "separator": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.35,
+              0.0069,
+              286.04
+            ],
+            "hex": "#3A3A3E"
+          },
+          "$description": "Decorative: no contrast floor."
+        },
+        "controlBorder": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.5678,
+              0.0091,
+              286.11
+            ],
+            "hex": "#76767C"
+          }
+        },
+        "accent": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.5407,
+              0.1997,
+              260.15
+            ],
+            "hex": "#1A66E0"
+          },
+          "$description": "The default button's fill."
+        },
+        "onAccent": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              1.0,
+              0,
+              0
+            ],
+            "hex": "#FFFFFF"
+          }
+        },
+        "link": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.6973,
+              0.1597,
+              258.16
+            ],
+            "hex": "#5B9DFF"
+          }
+        },
+        "danger": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.7078,
+              0.1845,
+              28.04
+            ],
+            "hex": "#FF6A5C"
+          }
+        },
+        "ok": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.7763,
+              0.1972,
+              148.42
+            ],
+            "hex": "#3FD769"
+          }
+        },
+        "warning": {
+          "$value": {
+            "colorSpace": "oklch",
+            "components": [
+              0.8056,
+              0.1469,
+              80.6
+            ],
+            "hex": "#F0B43C"
+          }
+        }
+      }
+    }
+  },
+  "font": {
+    "family": {
+      "$type": "fontFamily",
+      "web": {
+        "$value": [
+          "Instrument Sans",
+          "system-ui",
+          "sans-serif"
+        ],
+        "$description": "The page. The file is docs/design/fonts, under the OFL."
+      },
+      "mac": {
+        "$value": [
+          "system-ui",
+          "-apple-system",
+          "sans-serif"
+        ],
+        "$description": "The Mac app: the system's own font, which a page may not embed."
+      }
+    },
+    "width": {
+      "$type": "number",
+      "$description": "Instrument Sans' width axis, in percent.",
+      "condensed": {
+        "$value": 75,
+        "$description": "A computer's name, the wordmark."
+      },
+      "normal": {
+        "$value": 100,
+        "$description": "Everything else."
+      }
+    },
+    "weight": {
+      "$type": "fontWeight",
+      "regular": {
+        "$value": 400
+      },
+      "medium": {
+        "$value": 500
+      },
+      "semibold": {
+        "$value": 600
+      },
+      "bold": {
+        "$value": 700
+      }
+    },
+    "size": {
+      "$type": "dimension",
+      "caption": {
+        "$value": {
+          "value": 13,
+          "unit": "px"
+        },
+        "$description": "The smallest text there is."
+      },
+      "body": {
+        "$value": {
+          "value": 15,
+          "unit": "px"
+        },
+        "$description": "Interface text."
+      },
+      "lead": {
+        "$value": {
+          "value": 17,
+          "unit": "px"
+        }
+      },
+      "title": {
+        "$value": {
+          "value": 22,
+          "unit": "px"
+        }
+      },
+      "headline": {
+        "$value": {
+          "value": 34,
+          "unit": "px"
+        }
+      },
+      "display": {
+        "$value": {
+          "value": 56,
+          "unit": "px"
+        },
+        "$description": "A computer's name, at the condensed width."
+      }
+    },
+    "lineHeight": {
+      "$type": "number",
+      "tight": {
+        "$value": 1.1,
+        "$description": "Display and headline."
+      },
+      "normal": {
+        "$value": 1.45,
+        "$description": "Body."
+      }
+    }
+  },
+  "space": {
+    "$type": "dimension",
+    "1": {
+      "$value": {
+        "value": 4,
+        "unit": "px"
+      }
+    },
+    "2": {
+      "$value": {
+        "value": 8,
+        "unit": "px"
+      }
+    },
+    "3": {
+      "$value": {
+        "value": 12,
+        "unit": "px"
+      }
+    },
+    "4": {
+      "$value": {
+        "value": 16,
+        "unit": "px"
+      }
+    },
+    "5": {
+      "$value": {
+        "value": 24,
+        "unit": "px"
+      }
+    },
+    "6": {
+      "$value": {
+        "value": 32,
+        "unit": "px"
+      }
+    },
+    "7": {
+      "$value": {
+        "value": 48,
+        "unit": "px"
+      }
+    },
+    "8": {
+      "$value": {
+        "value": 64,
+        "unit": "px"
+      }
+    }
+  },
+  "radius": {
+    "$type": "dimension",
+    "control": {
+      "$value": {
+        "value": 8,
+        "unit": "px"
+      },
+      "$description": "A button, a field."
+    },
+    "card": {
+      "$value": {
+        "value": 14,
+        "unit": "px"
+      },
+      "$description": "A row, a panel."
+    },
+    "sheet": {
+      "$value": {
+        "value": 20,
+        "unit": "px"
+      },
+      "$description": "A dialog, the session bar."
+    },
+    "pill": {
+      "$value": {
+        "value": 999,
+        "unit": "px"
+      }
+    }
+  },
+  "size": {
+    "$type": "dimension",
+    "target": {
+      "touch": {
+        "$value": {
+          "value": 44,
+          "unit": "px"
+        },
+        "$description": "The smallest thing a finger is asked to hit."
+      },
+      "pointer": {
+        "$value": {
+          "value": 28,
+          "unit": "px"
+        },
+        "$description": "The smallest thing a pointer is asked to hit."
+      }
+    },
+    "hairline": {
+      "$value": {
+        "value": 1,
+        "unit": "px"
+      }
+    },
+    "focusRing": {
+      "$value": {
+        "value": 2,
+        "unit": "px"
+      }
+    },
+    "measure": {
+      "$value": {
+        "value": 560,
+        "unit": "px"
+      },
+      "$description": "The longest line of running text, about 70 characters of body."
+    }
+  },
+  "shadow": {
+    "$type": "shadow",
+    "light": {
+      "overlay": {
+        "$value": {
+          "color": {
+            "colorSpace": "oklch",
+            "components": [
+              0.0,
+              0,
+              0
+            ],
+            "alpha": 0.18,
+            "hex": "#000000"
+          },
+          "offsetX": {
+            "value": 0,
+            "unit": "px"
+          },
+          "offsetY": {
+            "value": 8,
+            "unit": "px"
+          },
+          "blur": {
+            "value": 24,
+            "unit": "px"
+          },
+          "spread": {
+            "value": 0,
+            "unit": "px"
+          }
+        },
+        "$description": "Under a dialog, a panel, the session bar."
+      }
+    },
+    "dark": {
+      "overlay": {
+        "$value": {
+          "color": {
+            "colorSpace": "oklch",
+            "components": [
+              0.0,
+              0,
+              0
+            ],
+            "alpha": 0.5,
+            "hex": "#000000"
+          },
+          "offsetX": {
+            "value": 0,
+            "unit": "px"
+          },
+          "offsetY": {
+            "value": 8,
+            "unit": "px"
+          },
+          "blur": {
+            "value": 24,
+            "unit": "px"
+          },
+          "spread": {
+            "value": 0,
+            "unit": "px"
+          }
+        }
+      }
+    }
+  },
+  "duration": {
+    "$type": "duration",
+    "fast": {
+      "$value": {
+        "value": 120,
+        "unit": "ms"
+      },
+      "$description": "A control answering: pressed, checked, focused."
+    },
+    "base": {
+      "$value": {
+        "value": 200,
+        "unit": "ms"
+      },
+      "$description": "Something opening or arriving: Options, the notice, a panel."
+    },
+    "off": {
+      "$value": {
+        "value": 400,
+        "unit": "ms"
+      },
+      "$description": "The screen going dark when a session ends."
+    },
+    "igniteMax": {
+      "$value": {
+        "value": 5,
+        "unit": "s"
+      },
+      "$description": "The longest the lighting screen moves before it settles to a still."
+    }
+  },
+  "easing": {
+    "$type": "cubicBezier",
+    "standard": {
+      "$value": [
+        0.2,
+        0,
+        0,
+        1
+      ],
+      "$description": "Arriving and settling."
+    },
+    "exit": {
+      "$value": [
+        0.4,
+        0,
+        1,
+        1
+      ],
+      "$description": "Leaving."
+    }
+  },
+  "$extensions": {
+    "com.alumia.contrast": {
+      "description": "What tools/contrast.py measures. A pair is a foreground on a background and the least ratio it may have: 4.5 for text, 3 for a component. A translucent background names what lies under it. A chart is two colours that must stay apart under each colour-vision deficiency and visible on each surface.",
+      "pairs": [
+        {
+          "fg": "color.light.text.primary",
+          "bg": "color.light.surface.base",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.text.secondary",
+          "bg": "color.light.surface.base",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.border.control",
+          "bg": "color.light.surface.base",
+          "min": 3
+        },
+        {
+          "fg": "color.light.text.primary",
+          "bg": "color.light.surface.raised",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.text.secondary",
+          "bg": "color.light.surface.raised",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.border.control",
+          "bg": "color.light.surface.raised",
+          "min": 3
+        },
+        {
+          "fg": "color.light.text.primary",
+          "bg": "color.light.surface.sunken",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.text.secondary",
+          "bg": "color.light.surface.sunken",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.border.control",
+          "bg": "color.light.surface.sunken",
+          "min": 3
+        },
+        {
+          "fg": "color.light.action.default",
+          "bg": "color.light.surface.base",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.state.danger",
+          "bg": "color.light.surface.base",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.state.ok",
+          "bg": "color.light.surface.base",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.state.warning",
+          "bg": "color.light.surface.base",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.focus",
+          "bg": "color.light.surface.base",
+          "min": 3
+        },
+        {
+          "fg": "color.light.action.default",
+          "bg": "color.light.surface.raised",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.state.danger",
+          "bg": "color.light.surface.raised",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.state.ok",
+          "bg": "color.light.surface.raised",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.state.warning",
+          "bg": "color.light.surface.raised",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.focus",
+          "bg": "color.light.surface.raised",
+          "min": 3
+        },
+        {
+          "fg": "color.light.text.onAction",
+          "bg": "color.light.action.default",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.text.onAction",
+          "bg": "color.light.action.hover",
+          "min": 4.5
+        },
+        {
+          "fg": "color.light.text.primary",
+          "bg": "color.light.glass",
+          "min": 4.5,
+          "over": "color.backdrop.lightest"
+        },
+        {
+          "fg": "color.light.text.primary",
+          "bg": "color.light.glass",
+          "min": 4.5,
+          "over": "color.backdrop.darkest"
+        },
+        {
+          "fg": "color.dark.text.primary",
+          "bg": "color.dark.surface.base",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.text.secondary",
+          "bg": "color.dark.surface.base",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.border.control",
+          "bg": "color.dark.surface.base",
+          "min": 3
+        },
+        {
+          "fg": "color.dark.text.primary",
+          "bg": "color.dark.surface.raised",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.text.secondary",
+          "bg": "color.dark.surface.raised",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.border.control",
+          "bg": "color.dark.surface.raised",
+          "min": 3
+        },
+        {
+          "fg": "color.dark.text.primary",
+          "bg": "color.dark.surface.sunken",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.text.secondary",
+          "bg": "color.dark.surface.sunken",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.border.control",
+          "bg": "color.dark.surface.sunken",
+          "min": 3
+        },
+        {
+          "fg": "color.dark.action.default",
+          "bg": "color.dark.surface.base",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.state.danger",
+          "bg": "color.dark.surface.base",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.state.ok",
+          "bg": "color.dark.surface.base",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.state.warning",
+          "bg": "color.dark.surface.base",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.focus",
+          "bg": "color.dark.surface.base",
+          "min": 3
+        },
+        {
+          "fg": "color.dark.action.default",
+          "bg": "color.dark.surface.raised",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.state.danger",
+          "bg": "color.dark.surface.raised",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.state.ok",
+          "bg": "color.dark.surface.raised",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.state.warning",
+          "bg": "color.dark.surface.raised",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.focus",
+          "bg": "color.dark.surface.raised",
+          "min": 3
+        },
+        {
+          "fg": "color.dark.text.onAction",
+          "bg": "color.dark.action.default",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.text.onAction",
+          "bg": "color.dark.action.hover",
+          "min": 4.5
+        },
+        {
+          "fg": "color.dark.text.primary",
+          "bg": "color.dark.glass",
+          "min": 4.5,
+          "over": "color.backdrop.lightest"
+        },
+        {
+          "fg": "color.dark.text.primary",
+          "bg": "color.dark.glass",
+          "min": 4.5,
+          "over": "color.backdrop.darkest"
+        },
+        {
+          "fg": "color.brand.red",
+          "bg": "color.brand.glass",
+          "min": 3
+        },
+        {
+          "fg": "color.brand.green",
+          "bg": "color.brand.glass",
+          "min": 3
+        },
+        {
+          "fg": "color.brand.blue",
+          "bg": "color.brand.glass",
+          "min": 3
+        },
+        {
+          "fg": "color.mac.light.label",
+          "bg": "color.mac.light.window",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.labelSecondary",
+          "bg": "color.mac.light.window",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.link",
+          "bg": "color.mac.light.window",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.danger",
+          "bg": "color.mac.light.window",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.ok",
+          "bg": "color.mac.light.window",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.warning",
+          "bg": "color.mac.light.window",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.controlBorder",
+          "bg": "color.mac.light.window",
+          "min": 3
+        },
+        {
+          "fg": "color.mac.light.label",
+          "bg": "color.mac.light.content",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.labelSecondary",
+          "bg": "color.mac.light.content",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.link",
+          "bg": "color.mac.light.content",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.danger",
+          "bg": "color.mac.light.content",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.ok",
+          "bg": "color.mac.light.content",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.warning",
+          "bg": "color.mac.light.content",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.controlBorder",
+          "bg": "color.mac.light.content",
+          "min": 3
+        },
+        {
+          "fg": "color.mac.light.onAccent",
+          "bg": "color.mac.light.accent",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.light.accent",
+          "bg": "color.mac.light.window",
+          "min": 3
+        },
+        {
+          "fg": "color.mac.dark.label",
+          "bg": "color.mac.dark.window",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.labelSecondary",
+          "bg": "color.mac.dark.window",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.link",
+          "bg": "color.mac.dark.window",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.danger",
+          "bg": "color.mac.dark.window",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.ok",
+          "bg": "color.mac.dark.window",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.warning",
+          "bg": "color.mac.dark.window",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.controlBorder",
+          "bg": "color.mac.dark.window",
+          "min": 3
+        },
+        {
+          "fg": "color.mac.dark.label",
+          "bg": "color.mac.dark.content",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.labelSecondary",
+          "bg": "color.mac.dark.content",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.link",
+          "bg": "color.mac.dark.content",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.danger",
+          "bg": "color.mac.dark.content",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.ok",
+          "bg": "color.mac.dark.content",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.warning",
+          "bg": "color.mac.dark.content",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.controlBorder",
+          "bg": "color.mac.dark.content",
+          "min": 3
+        },
+        {
+          "fg": "color.mac.dark.onAccent",
+          "bg": "color.mac.dark.accent",
+          "min": 4.5
+        },
+        {
+          "fg": "color.mac.dark.accent",
+          "bg": "color.mac.dark.window",
+          "min": 3
+        }
+      ],
+      "charts": [
+        {
+          "colours": [
+            "color.light.chart.sent",
+            "color.light.chart.received"
+          ],
+          "surfaces": [
+            "color.light.surface.base",
+            "color.light.surface.raised",
+            "color.light.surface.sunken"
+          ]
+        },
+        {
+          "colours": [
+            "color.dark.chart.sent",
+            "color.dark.chart.received"
+          ],
+          "surfaces": [
+            "color.dark.surface.base",
+            "color.dark.surface.raised",
+            "color.dark.surface.sunken"
+          ]
+        }
+      ]
+    }
+  }
+}

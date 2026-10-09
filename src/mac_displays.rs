@@ -24,9 +24,18 @@
 //! the system as reverting when the process ends: a gateway killed outright leaves
 //! the display on, as macOS left it, and never dark. The gateway enables it itself
 //! when the lid opens and when it stops.
+//!
+//! A process that ends therefore lights the display, and the Mac app's gateway is
+//! restarted without anybody at the Mac: by an update, or after a crash. So that
+//! gateway leaves a mark in its own folder while it holds the display off
+//! ([`resume_in`]), and the process that starts there next takes the hold up
+//! again where the mark is and the rule still says off: the lid closed and the
+//! display on. The mark outlives the process, which is its point, and goes when
+//! the lid opens.
 
 use std::ffi::{c_char, c_void};
-use std::sync::Mutex;
+use std::path::{Path, PathBuf};
+use std::sync::{Mutex, OnceLock};
 use std::time::Duration;
 
 use log::{debug, info, warn};
@@ -101,6 +110,48 @@ fn to_disable(lid_closed: Option<bool>, built_in: Option<(CGDirectDisplayID, boo
 fn to_enable(lid_closed: Option<bool>) -> bool {
     lid_closed != Some(true)
 }
+
+/// The built-in display a starting gateway takes up holding off again: only where
+/// the process before it left its mark, and where what [`to_disable`] asks still
+/// holds. Without the mark nothing here ever turned that display off, and it is
+/// nobody's to touch.
+fn to_resume(
+    marked: bool,
+    lid_closed: Option<bool>,
+    built_in: Option<(CGDirectDisplayID, bool)>,
+) -> Option<CGDirectDisplayID> {
+    if marked { to_disable(lid_closed, built_in) } else { None }
+}
+
+/// The note that a gateway of this folder holds the built-in display off.
+struct Mark(PathBuf);
+
+impl Mark {
+    fn in_dir(dir: &Path) -> Self {
+        Self(dir.join("display-held"))
+    }
+
+    fn is_there(&self) -> bool {
+        self.0.exists()
+    }
+
+    fn write(&self) {
+        if let Err(e) = std::fs::write(&self.0, b"") {
+            warn!("mac: could not note the built-in display as held in {}: {e}", self.0.display());
+        }
+    }
+
+    fn remove(&self) {
+        match std::fs::remove_file(&self.0) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => warn!("mac: could not remove {}: {e}", self.0.display()),
+        }
+    }
+}
+
+/// The mark of the gateway this process is, where it keeps one ([`resume_in`]).
+static MARK: OnceLock<Mark> = OnceLock::new();
 
 /// Whether the lid is closed, from the power manager's `AppleClamshellState`.
 fn lid_closed() -> Option<bool> {
@@ -209,14 +260,23 @@ fn settle(dest: &str) {
         }
         std::thread::sleep(SETTLE_STEP);
     };
+    hold(display, MARK.get());
+}
+
+/// Turn `display`, the built-in one, off and hold it off until the lid opens,
+/// noting the hold in `mark` where the gateway keeps one.
+fn hold(display: CGDirectDisplayID, mark: Option<&Mark>) {
     {
         // Held across the change, so a release cannot slip between the two.
         let mut held = HELD.lock().unwrap();
         if let Err(e) = set_enabled(display, false) {
-            warn!("mac: the lid is closed but the built-in display came back on, and could not be turned off: {e:#}");
+            warn!("mac: the lid is closed but the built-in display is on, and could not be turned off: {e:#}");
             return;
         }
         info!("mac: turned the built-in display back off, the lid being closed");
+        if let Some(mark) = mark {
+            mark.write();
+        }
         if held.replace(display).is_some() {
             return;
         }
@@ -227,7 +287,46 @@ fn settle(dest: &str) {
             return;
         }
     }
+    give_back(Ended::LidOpened, mark);
+}
+
+/// Why a hold on the built-in display ends.
+#[derive(Clone, Copy)]
+enum Ended {
+    /// The lid opened: no later process has a hold to take up from.
+    LidOpened,
+    /// The gateway stops: the process that starts next takes the hold up.
+    Stopped,
+}
+
+/// The hold ends: the display is given back, and the mark goes with it only
+/// where the lid opened. A gateway that stops leaves it, which is all that tells
+/// the next one there was a hold.
+fn give_back(why: Ended, mark: Option<&Mark>) {
     release();
+    if let (Ended::LidOpened, Some(mark)) = (why, mark) {
+        mark.remove();
+    }
+}
+
+/// Keep this gateway's mark in `dir`, its own folder, and take up the hold a
+/// process of that folder left there, where there is one to take up
+/// ([`to_resume`]). A mark with nothing to hold any more is one the lid has
+/// answered since, and goes.
+pub fn resume_in(dir: &Path) {
+    let mark = MARK.get_or_init(|| Mark::in_dir(dir));
+    let spawned = std::thread::Builder::new().name("mac-displays".into()).spawn(move || {
+        match to_resume(mark.is_there(), lid_closed(), built_in()) {
+            Some(display) => {
+                info!("mac: the gateway before this one held the built-in display off; holding it again");
+                hold(display, Some(mark));
+            }
+            None => mark.remove(),
+        }
+    });
+    if let Err(e) = spawned {
+        warn!("mac: could not take up the hold of the built-in display: {e}");
+    }
 }
 
 /// Enable the built-in display again if the gateway turned it off.
@@ -248,7 +347,7 @@ pub struct ReleaseOnExit;
 
 impl Drop for ReleaseOnExit {
     fn drop(&mut self) {
-        release();
+        give_back(Ended::Stopped, MARK.get());
     }
 }
 
@@ -270,5 +369,40 @@ mod tests {
         assert!(!to_enable(Some(true)), "held off while the lid stays closed");
         assert!(to_enable(Some(false)), "back on when the lid opens");
         assert!(to_enable(None), "and when the lid cannot be read");
+    }
+
+    /// A gateway that starts holds the built-in display off again only where the
+    /// one before it left its mark, the lid is closed and the display is on.
+    #[test]
+    fn holding_is_resumed_only_with_the_mark() {
+        assert_eq!(to_resume(true, Some(true), Some((1, true))), Some(1), "marked, lid closed, display on");
+        assert_eq!(to_resume(false, Some(true), Some((1, true))), None, "no mark: it was never this gateway's");
+        assert_eq!(to_resume(true, Some(false), Some((1, true))), None, "the lid is open");
+        assert_eq!(to_resume(true, None, Some((1, true))), None, "the lid unknown");
+        assert_eq!(to_resume(true, Some(true), Some((1, false))), None, "already off");
+        assert_eq!(to_resume(true, Some(true), None), None, "no built-in display");
+    }
+
+    /// The mark is written with the hold, outlives the process that wrote it,
+    /// which gives the display back as it ends, and goes when the lid opens.
+    #[test]
+    fn the_mark_is_written_kept_on_exit_and_removed_by_the_lid() {
+        let dir = tempfile::tempdir().unwrap();
+        let mark = Mark::in_dir(dir.path());
+        assert!(!mark.is_there());
+        mark.write();
+        assert!(mark.is_there());
+        assert!(Mark::in_dir(dir.path()).is_there(), "it is the folder's, for the next process to find");
+
+        // What a stopping gateway does. Nothing is held in a test, so no display is
+        // touched: what is under test is that the mark stays.
+        give_back(Ended::Stopped, Some(&mark));
+        assert!(mark.is_there(), "the process ending keeps the mark");
+
+        give_back(Ended::LidOpened, Some(&mark));
+        assert!(!mark.is_there(), "the lid opening takes it away");
+        // And taking away what is not there is not an error.
+        give_back(Ended::LidOpened, Some(&mark));
+        give_back(Ended::LidOpened, None);
     }
 }

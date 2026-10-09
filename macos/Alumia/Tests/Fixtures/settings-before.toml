@@ -1,0 +1,52 @@
+# The settings a change is made in, for the tests of both sides: the gateway's
+# (src/app.rs) and the app's. Every name, address and password here is made up.
+# The Mac is written as the app writes it: twice at its own address, once in each
+# mode, which the page and the app both show as one computer.
+
+[server]
+listen = "127.0.0.1:52380"
+site_passwd = "ana:$2b$12$gq.1PxPNg.PsUCLGdJj0a.SQugF0z8eGfxJZiMTjBTuNYC9HYn0s6"
+
+[branding]
+text = "casa"
+
+[[targets]]
+name = "Mac da Ana virtual"
+protocol = "vnc"
+subtype = "ard-high-performance"
+host = "127.0.0.1"
+port = 5900
+username = "ana"
+password = "a-senha-do-mac"
+
+[[targets]]
+name = "Mac da Ana mirrored"
+protocol = "vnc"
+subtype = "ard-mirror"
+host = "127.0.0.1"
+port = 5900
+username = "ana"
+password = "a-senha-do-mac"
+
+[[targets]]
+name = "pc-da-sala"
+protocol = "rdp"
+host = "192.0.2.10"
+username = "ana"
+password = "a-senha-do-pc"
+video_quality = 80
+
+[[targets]]
+name = "linux-antigo"
+protocol = "vnc"
+host = "192.0.2.30"
+vnc_password = "a-senha-antiga-do-vnc"
+
+# One nobody touches: a change writes it by its name alone, and every key it has
+# stays, the one the app does not know among them.
+[[targets]]
+name = "estacao"
+protocol = "vnc"
+subtype = "wlshare"
+host = "192.0.2.40"
+video_quality = 70

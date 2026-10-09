@@ -1,4 +1,4 @@
-// Keeping Tab inside a modal card. See ModalOverlay in FloatingMenu.tsx.
+// Keeping Tab inside a sheet hanging from the session's bar. See Sheet.tsx.
 
 const FOCUSABLE =
   'a[href], button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex]:not([tabindex="-1"])';

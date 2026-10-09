@@ -9,12 +9,11 @@
 //! pipeline: RFB handshake + DES auth -> the video stream -> the same
 //! binary WS frames the engines emit.
 //!
-//! This is also the ZRLE test of record — but only because the container paints a
-//! pattern on its root window (`tests/vnc-dummy/Containerfile`). TigerVNC sends a
-//! solid rectangle as RRE whatever the client preferred, so against a blank desktop
-//! this test never reaches the ZRLE encoder at all. With the pattern it does, and a
-//! decoder bug fails here rather than going unnoticed. `remotex::vnc_encodings` logs
-//! which encoding a server actually chose, which is the way to check.
+//! This is also the ZRLE test of record. The container paints a pattern on its
+//! root window (`tests/vnc-dummy/Containerfile`), so the rectangles hold real
+//! tiles rather than one solid colour, and a decoder bug fails here rather than
+//! going unnoticed. `alumia::vnc_encodings` logs which encoding a server actually
+//! chose, which is the way to check.
 //!
 //! None of the assertions below depend on the encoding: the first update is
 //! non-incremental against an empty shadow, so nothing is suppressed and the whole
@@ -26,8 +25,8 @@ use std::net::SocketAddr;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, TargetConfig};
-use remotex::server;
+use alumia::config::{AppConfig, Protocol, TargetConfig};
+use alumia::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -68,9 +67,9 @@ async fn wait_for_vnc_port(port: u16) {
 /// Start the real server pointed at the dummy VNC target.
 async fn spawn_app(vnc_port: u16) -> SocketAddr {
     let config = AppConfig {
-        listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
+        listen: alumia::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         auth: common::test_auth(),
-        branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
+        branding: alumia::config::Branding { text: "alumia".to_owned(), logo: None },
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
@@ -91,6 +90,7 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             size: Some((DEFAULT_W as u16, DEFAULT_H as u16)),
             egfx: None,
             egfx_h264: false,
+            virtual_displays: 1,
             camera: false,
             microphone: false,
             video_quality: None,
@@ -99,7 +99,6 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
             virtual_display: false,
             audio_bitrate: None,
             audio_adaptive: None,
-            audio_adaptive_min: None,
         }],
     };
     let listener = TcpListener::bind("127.0.0.1:0").await.unwrap();
@@ -187,7 +186,7 @@ async fn vnc_session_streams_the_full_desktop_at_its_configured_size() {
     common::init_logging();
     let runtime = common::container_runtime();
     let (_container, vnc_port) =
-        common::start_dummy_server(runtime, "remotex-e2e-tigervnc", "vnc-dummy", 5900);
+        common::start_dummy_server(runtime, "alumia-e2e-tigervnc", "vnc-dummy", 5900);
     wait_for_vnc_port(vnc_port).await;
 
     let addr = spawn_app(vnc_port).await;
@@ -260,7 +259,7 @@ async fn vnc_session_streams_the_full_desktop_at_its_configured_size() {
     // same token, and reattach. The still-running engine must re-announce the
     // geometry the session is *now* at — the configured size, not the server's
     // own before it — and repaint the full desktop through a real server.
-    ws.close(None).await.unwrap();
+    futures_util::SinkExt::close(&mut ws).await.unwrap();
     drop(ws);
 
     let (status, body) =
@@ -324,7 +323,7 @@ async fn vnc_session_streams_the_full_desktop_at_its_configured_size() {
     // X client to own the selection, so whether it echoes a ServerCutText is
     // its business. The in-process test (tests/protocol_e2e.rs) pins the
     // contents round trip against a scripted server.
-    ws.send(Message::text(r#"{"type":"clipboard","text":"remotex e2e"}"#))
+    ws.send(Message::text(r#"{"type":"clipboard","text":"alumia e2e"}"#))
         .await
         .unwrap();
     ws.send(Message::text(r#"{"type":"clipboardRequest"}"#)).await.unwrap();

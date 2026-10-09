@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
 # Build a distro-agnostic release tarball for the current OS/arch.
 #
-# Produces dist/remotex-<version>-<os>-<arch>.tar.gz, the payload the native
+# Produces dist/alumia-<version>-<os>-<arch>.tar.gz, the payload the native
 # packages and the container image are built from:
 #
-#   remotex-<version>/
+#   alumia-<version>/
 #   ├── VERSION
-#   ├── bin/remotex                # release binary
-#   └── share/doc/remotex/
-#       ├── remotex.example.toml   # config template
+#   ├── bin/alumia                # release binary
+#   └── share/doc/alumia/
+#       ├── alumia.example.toml   # config template
 #       └── LICENSE
 #
 # Run on each target platform you want to ship (macOS builds the mac tarball,
@@ -40,14 +40,14 @@ case "$(uname -m)" in
   *) arch="$(uname -m)" ;;
 esac
 
-pkg="remotex-${version}"
+pkg="alumia-${version}"
 stage="$(mktemp -d)"
 root="${stage}/${pkg}"
 trap 'rm -rf "$stage"' EXIT
 
 echo ">> building release binary"
 # build.rs creates the frontend in Cargo's OUT_DIR. Release CI sets
-# REMOTEX_PREBUILT_FRONTEND=frontend/dist so each target stages the one
+# ALUMIA_PREBUILT_FRONTEND=frontend/dist so each target stages the one
 # platform-independent bundle built by the frontend job instead of running Bun.
 # No env coaxing here for any prebuilt C library. Remote audio links
 # `opus-prebuilt` and `libflac-prebuilt`, and VP9 links `libvpx-prebuilt` — each
@@ -58,10 +58,10 @@ echo ">> building release binary"
 cargo build --release
 
 echo ">> assembling ${pkg}"
-mkdir -p "$root/bin" "$root/share/doc/remotex"
-cp target/release/remotex "$root/bin/remotex"
-cp remotex.example.toml LICENSE "$root/share/doc/remotex/"
-chmod +x "$root/bin/remotex"
+mkdir -p "$root/bin" "$root/share/doc/alumia"
+cp target/release/alumia "$root/bin/alumia"
+cp alumia.example.toml LICENSE "$root/share/doc/alumia/"
+chmod +x "$root/bin/alumia"
 printf '%s\n' "$version" > "$root/VERSION"
 
 mkdir -p dist

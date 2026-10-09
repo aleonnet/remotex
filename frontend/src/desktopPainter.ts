@@ -19,19 +19,27 @@
 // gone, and is terminated rather than left decoding for it.
 import { appleHevcDecoder } from "./appleMedia.ts";
 import type { PainterCommand, PainterEvent } from "./desktopPainterWorker.ts";
+import type { PicturePart } from "./egfxPicture.ts";
+import type { Fault } from "./fault.ts";
 import type { MosaicView } from "./mosaic.ts";
+import { deliverPainterEvent } from "./painterEvents.ts";
 import { batchFrameSequence } from "./protocol.ts";
 import type { VideoFormat } from "./videoDecoder.ts";
 
 export interface PainterHandlers {
   /** Why the desktop shows nothing, or null once it shows something. */
-  onVideoError: (reason: string | null) => void;
+  onVideoError: (fault: Fault | null) => void;
   /**
    * The decoder was reset out of a stall, or failed and was thrown away. Either
    * way the desktop is frozen until a keyframe arrives, and
    * asking for one is the page's job because only it holds the socket.
    */
   onVideoNeedsKeyframe: (reason: string) => void;
+  /**
+   * The keyframe that was asked for is owed no more: its picture is painted, or
+   * the stream it was asked of is done with.
+   */
+  onVideoSettled: () => void;
   /** One ordered screen batch finished in the worker. */
   onPainted: (
     sequence: number,
@@ -48,6 +56,8 @@ export interface PainterHandlers {
    * previous desktop's backlog onto the previous bitmap.
    */
   onResized: (seq: number) => void;
+  /** Everything posted before the `mark` of this number has been drawn. */
+  onReached: (seq: number) => void;
 }
 
 export interface DesktopPainter {
@@ -68,9 +78,23 @@ export interface DesktopPainter {
   ): void;
   /** Recompose what is already painted under `view`, or show it whole. */
   setView(view: MosaicView | null, seq: number): void;
+  /** Ask for `onReached(seq)` once every frame handed over so far is drawn. */
+  mark(seq: number): void;
   setVideoFormat(format: VideoFormat): void;
+  /**
+   * The page is back in sight: drop the decoder, keep the stream, and ask for
+   * the keyframe the next one starts at.
+   */
+  restartVideo(): void;
   /** An RDP host's graphics pipeline starts, for the worker to compose. */
   startGraphics(): void;
+  /** The part of the pipeline's picture this page's display is (`graphicsView`). */
+  setGraphicsView(part: PicturePart): void;
+  /**
+   * This page shows display `display` in a tab of its own, `part` of the picture
+   * the session's page composes, and is painted from there (displayRelay.ts).
+   */
+  mirrorGraphics(display: number, part: PicturePart): void;
   /** The attachment boundary: wipe the bitmap and the decoder. */
   clear(): void;
 }
@@ -99,6 +123,11 @@ export function desktopPainterFor(
     new URL("./desktopPainter.worker.ts", import.meta.url),
     { type: "module", name: "desktop-painter" },
   );
+  // A worker that does not start paints nothing and echoes nothing, and until
+  // this said so nothing told that from a picture that was never sent.
+  worker.onerror = (event) => {
+    console.error("paint: the worker failed:", event.message);
+  };
   // Most events carry no attachment tag: for a stale event to reach a
   // *new* binding, this worker would need two binds with the first having
   // produced worker activity — and two binds on one worker only happen under
@@ -113,32 +142,14 @@ export function desktopPainterFor(
   // How many `clear`s have been posted, which is the worker's epoch once it has
   // taken them all. The GPU's canvas is hidden where a clear is posted, not
   // where the worker answers it, and a `graphicsShown` the worker said before it
-  // took that clear is for the attachment the clear ended.
+  // took that clear is for the attachment the clear ended. So is a keyframe it
+  // asked for, and what settles one (painterEvents.ts).
   let clears = 0;
   const showGraphics = (shown: boolean) => {
     graphics.style.display = shown ? "block" : "";
   };
-  worker.onmessage = (ev: MessageEvent<PainterEvent>) => {
-    const event = ev.data;
-    if (event.type === "graphicsShown") {
-      if (event.epoch === clears) {
-        showGraphics(event.shown);
-      }
-    } else if (event.type === "videoError") {
-      handlers?.onVideoError(event.reason);
-    } else if (event.type === "videoNeedsKeyframe") {
-      handlers?.onVideoNeedsKeyframe(event.reason);
-    } else if (event.type === "resized") {
-      handlers?.onResized(event.seq);
-    } else {
-      handlers?.onPainted(
-        event.sequence,
-        event.generation,
-        event.queuedMs,
-        event.drawMs,
-      );
-    }
-  };
+  worker.onmessage = (ev: MessageEvent<PainterEvent>) =>
+    deliverPainterEvent(ev.data, clears, handlers, showGraphics);
   const post = (command: PainterCommand, transfer: Transferable[] = []) =>
     worker.postMessage(command, transfer);
   const offscreen = canvas.transferControlToOffscreen();
@@ -172,11 +183,23 @@ export function desktopPainterFor(
     setView(view, seq) {
       post({ type: "view", view, seq });
     },
+    mark(seq) {
+      post({ type: "mark", seq });
+    },
     setVideoFormat(format) {
       post({ type: "videoFormat", format });
     },
+    restartVideo() {
+      post({ type: "restartVideo" });
+    },
     startGraphics() {
       post({ type: "graphicsStart" });
+    },
+    setGraphicsView(part) {
+      post({ type: "graphicsView", part });
+    },
+    mirrorGraphics(display, part) {
+      post({ type: "graphicsMirror", display, part });
     },
     clear() {
       clears += 1;

@@ -68,6 +68,74 @@ dependencies = [
 ]
 
 [[package]]
+name = "alumia"
+version = "0.1.3"
+dependencies = [
+ "aes",
+ "alumia-rdp-graphics",
+ "anyhow",
+ "axum",
+ "base64",
+ "bcrypt",
+ "bytes",
+ "clap",
+ "crossterm",
+ "des 0.8.1",
+ "eax",
+ "env_logger",
+ "fast_image_resize",
+ "flate2",
+ "futures-util",
+ "hmac",
+ "libavcodec-hevc-prebuilt-sys",
+ "libc",
+ "libloading",
+ "log",
+ "md-5",
+ "num-bigint 0.4.8",
+ "opus-prebuilt",
+ "png",
+ "rand 0.10.2",
+ "rpassword",
+ "rsa",
+ "rubato",
+ "rusqlite",
+ "rust-embed",
+ "screen-vp9",
+ "serde",
+ "serde_json",
+ "sha1 0.11.0",
+ "sha2",
+ "socket2",
+ "sound-flac",
+ "sound-opus",
+ "sspi",
+ "tar",
+ "tempfile",
+ "thiserror",
+ "tikv-jemalloc-sys",
+ "tikv-jemallocator",
+ "tokio",
+ "tokio-rustls",
+ "tokio-tungstenite",
+ "toml",
+ "tower",
+ "uuid",
+ "windows-sys 0.61.2",
+ "yuv",
+]
+
+[[package]]
+name = "alumia-rdp-graphics"
+version = "0.0.0"
+dependencies = [
+ "anyhow",
+ "log",
+ "rayon",
+ "thiserror",
+]
+
+[[package]]
 name = "anstream"
 version = "1.0.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -125,9 +193,9 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "arbitrary"
-version = "1.4.2"
+version = "1.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c3d036a3c4ab069c7b410a2ce876bd74808d2d0888a82667669f8e783a898bf1"
+checksum = "3bc62ac97cc33321f50863d514c3bc38a453947a8f9e781137e47c7401020aed"
 
 [[package]]
 name = "arg_enum_proc_macro"
@@ -2756,74 +2824,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d6f6ff9a378485b298a5286656da665ba74413d36db0979633275d2e708145d4"
 
 [[package]]
-name = "remotex"
-version = "0.0.325"
-dependencies = [
- "aes",
- "anyhow",
- "axum",
- "base64",
- "bcrypt",
- "bytes",
- "clap",
- "crossterm",
- "des 0.8.1",
- "eax",
- "env_logger",
- "fast_image_resize",
- "flate2",
- "futures-util",
- "hmac",
- "libavcodec-hevc-prebuilt-sys",
- "libc",
- "libloading",
- "log",
- "md-5",
- "num-bigint 0.4.8",
- "opus-prebuilt",
- "png",
- "rand 0.10.2",
- "remotex-rdp-graphics",
- "rpassword",
- "rsa",
- "rubato",
- "rusqlite",
- "rust-embed",
- "screen-vp9",
- "serde",
- "serde_json",
- "sha1 0.11.0",
- "sha2",
- "socket2",
- "sound-flac",
- "sound-opus",
- "sspi",
- "tar",
- "tempfile",
- "thiserror",
- "tikv-jemalloc-sys",
- "tikv-jemallocator",
- "tokio",
- "tokio-rustls",
- "tokio-tungstenite",
- "toml",
- "tower",
- "uuid",
- "windows-sys 0.61.2",
- "yuv",
-]
-
-[[package]]
-name = "remotex-rdp-graphics"
-version = "0.0.0"
-dependencies = [
- "anyhow",
- "log",
- "rayon",
- "thiserror",
-]
-
-[[package]]
 name = "rfc6979"
 version = "0.6.0-pre.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3107,8 +3107,8 @@ checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "screen-vp9"
-version = "0.0.6"
-source = "git+https://github.com/andrewtheguy/screen-vp9?tag=v0.0.6#0014571b707973893adf6c077c8904fee1b00408"
+version = "0.0.7"
+source = "git+https://github.com/andrewtheguy/screen-vp9?tag=v0.0.7#194f249943bfe24b8c50e74b183844c254282ff5"
 dependencies = [
  "libvpx-prebuilt-sys",
  "log",
@@ -3379,8 +3379,8 @@ dependencies = [
 
 [[package]]
 name = "sound-opus"
-version = "0.0.2"
-source = "git+https://github.com/andrewtheguy/sound-opus?tag=v0.0.2#57147b529bd836abc2fca562c6936e5b74a71e7d"
+version = "0.0.4"
+source = "git+https://github.com/andrewtheguy/sound-opus?tag=v0.0.4#a7d8ec96b841c6fe5983eede045bddbe19b2928c"
 dependencies = [
  "opus-prebuilt",
  "thiserror",

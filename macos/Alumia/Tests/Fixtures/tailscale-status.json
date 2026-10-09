@@ -1,0 +1,74 @@
+{
+  "Version": "1.102.4-t000000000-g000000000",
+  "TUN": true,
+  "BackendState": "Running",
+  "HaveNodeKey": true,
+  "AuthURL": "",
+  "TailscaleIPs": ["100.64.0.1", "fd7a:115c:a1e0::1"],
+  "Self": {
+    "ID": "n0000000001CNTRL",
+    "HostName": "Mac da Ana",
+    "DNSName": "mac-da-ana.example.ts.net.",
+    "OS": "macOS",
+    "TailscaleIPs": ["100.64.0.1", "fd7a:115c:a1e0::1"],
+    "Online": true,
+    "CapMap": {
+      "https": null,
+      "https://tailscale.com/cap/is-owner": null,
+      "tailnet-display-name": ["example.ts.net"]
+    }
+  },
+  "Health": [],
+  "MagicDNSSuffix": "example.ts.net",
+  "CurrentTailnet": {
+    "Name": "ana@example.com",
+    "MagicDNSSuffix": "example.ts.net",
+    "MagicDNSEnabled": true
+  },
+  "CertDomains": ["mac-da-ana.example.ts.net"],
+  "ExtraRecords": null,
+  "Peer": {
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000001": {
+      "ID": "n0000000002CNTRL",
+      "HostName": "servidor",
+      "DNSName": "servidor.example.ts.net.",
+      "OS": "linux",
+      "TailscaleIPs": ["100.64.0.2"],
+      "Online": true
+    },
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000002": {
+      "ID": "n0000000003CNTRL",
+      "HostName": "iPhone da Ana",
+      "DNSName": "iphone-da-ana.example.ts.net.",
+      "OS": "iOS",
+      "TailscaleIPs": ["100.64.0.3"],
+      "Online": false
+    },
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000003": {
+      "ID": "n0000000004CNTRL",
+      "HostName": "Mac mini da sala",
+      "DNSName": "mac-mini-da-sala.example.ts.net.",
+      "OS": "macOS",
+      "TailscaleIPs": ["100.64.0.4"],
+      "Online": true
+    },
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000004": {
+      "ID": "n0000000005CNTRL",
+      "HostName": "iPad",
+      "DNSName": "ipad.example.ts.net.",
+      "OS": "iOS",
+      "TailscaleIPs": ["100.64.0.5"],
+      "Online": false
+    },
+    "nodekey:0000000000000000000000000000000000000000000000000000000000000005": {
+      "ID": "n0000000006CNTRL",
+      "HostName": "pc-da-sala",
+      "DNSName": "pc-da-sala.example.ts.net.",
+      "OS": "windows",
+      "TailscaleIPs": ["100.64.0.6"],
+      "Online": true
+    }
+  },
+  "User": {},
+  "ClientVersion": null
+}

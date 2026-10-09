@@ -17,10 +17,14 @@
 //! Three client blocks, which is the fewest a Windows host will accept: `CS_CORE`
 //! describes the client, `CS_SECURITY` says the connection carries no RDP encryption
 //! of its own — TLS is underneath it already — and `CS_NET` names the static virtual
-//! channels. Nothing asks for a message channel, a multitransport tunnel or a monitor
-//! layout, so the server has nothing to answer about them.
+//! channels. A fourth, `CS_MONITOR`, goes out only for a session that asked for more
+//! than one virtual display and a server that takes the extended blocks: it places the
+//! second monitor against the first, and the core data's desktop is their union. Nothing
+//! asks for a message channel or a multitransport tunnel, so the server has nothing
+//! to answer about them.
 
 use super::wire::{Malformed, Reader, Writer};
+use crate::config::Placement;
 use super::{channel, display, per};
 
 /// `ConnectData` up to the connectPDU length, which never varies: a CHOICE selecting
@@ -50,6 +54,16 @@ const CREATE_REQUEST: [u8; 12] =
 const CS_CORE: u16 = 0xC001;
 const CS_SECURITY: u16 = 0xC002;
 const CS_NET: u16 = 0xC003;
+/// The monitor layout, an *extended* block: sent only to a server whose X.224
+/// Connection Confirm carried `EXTENDED_CLIENT_DATA_SUPPORTED` — [MS-RDPBCGR]
+/// 2.2.1.3.6 has a client never send it otherwise.
+const CS_MONITOR: u16 = 0xC005;
+
+/// `TS_MONITOR_PRIMARY`, on the one monitor whose corner is the origin.
+const MONITOR_PRIMARY: u32 = 0x0000_0001;
+
+/// One `TS_MONITOR_DEF`: four inclusive edges and the flags.
+const MONITOR_DEF: usize = 20;
 
 /// Server data block types. The ones this client does not ask for are still named,
 /// because a server may send them anyway and the walk has to step over them.
@@ -185,8 +199,17 @@ impl Channel {
 
 /// What the client asks for, and everything the server needs before a session exists.
 pub struct ConferenceCreateRequest<'a> {
+    /// One monitor's size. The core data's desktop is the union of `monitors` of
+    /// these.
     pub width: u16,
     pub height: u16,
+    /// Where the second monitor sits against the first, the primary.
+    pub placement: Placement,
+    /// How many monitors to lay out, each against the one before it. One
+    /// sends no monitor block at all, which is the connection every server takes;
+    /// more sends `CS_MONITOR`, and the caller sends more only to a server that
+    /// said it reads the extended blocks ([`super::x224::ConfirmFlags::EXTENDED_CLIENT_DATA`]).
+    pub monitors: u16,
     /// The desktop scale factor to open at, as a percentage: 200 for a 2x desktop.
     /// Written only when inside the 100 to 500 a server reads; zero states none.
     pub scale_percent: u32,
@@ -227,18 +250,46 @@ impl ConferenceCreateRequest<'_> {
 
     /// The RDP blocks, which is what the server actually reads.
     fn blocks(&self) -> Vec<u8> {
-        let mut w = Writer::with_capacity(256 + self.channels.len() * 12);
+        let mut w = Writer::with_capacity(256 + self.channels.len() * 12 + self.monitors().len() * MONITOR_DEF);
         self.core(&mut w);
         security(&mut w);
         self.network(&mut w);
+        self.monitor(&mut w);
         w.finish()
     }
 
+    /// The desktop the core data asks for: the union of the monitors, `monitors`
+    /// of them along the way the second went. Saturating, since the field is
+    /// sixteen bits and a server's own ceiling is 32,766 ([MS-RDPBCGR] 2.2.1.3.6);
+    /// a desktop that large is refused by the server with
+    /// `ERRINFO_VIRTUALDESKTOPTOOLARGE` rather than wrapped here.
+    fn desktop(&self) -> (u16, u16) {
+        let count = self.monitors.max(1);
+        match self.placement {
+            Placement::Right | Placement::Left => (self.width.saturating_mul(count), self.height),
+            Placement::Top | Placement::Bottom => (self.width, self.height.saturating_mul(count)),
+        }
+    }
+
+    /// Each monitor's inclusive edges, the primary first, for `CS_MONITOR`; empty
+    /// for the one-monitor connection, which sends no block.
+    fn monitors(&self) -> Vec<(i32, i32, i32, i32)> {
+        if self.monitors <= 1 || self.width == 0 || self.height == 0 {
+            return Vec::new();
+        }
+        let sizes = vec![(u32::from(self.width), u32::from(self.height)); usize::from(self.monitors)];
+        display::corners(&sizes, self.placement)
+            .into_iter()
+            .map(|(left, top)| (left, top, left + i32::from(self.width) - 1, top + i32::from(self.height) - 1))
+            .collect()
+    }
+
     fn core(&self, w: &mut Writer) {
+        let (width, height) = self.desktop();
         block_header(w, CS_CORE, 230);
         w.u32_le(RDP_VERSION_5_PLUS);
-        w.u16_le(self.width);
-        w.u16_le(self.height);
+        w.u16_le(width);
+        w.u16_le(height);
         w.u16_le(RNS_UD_COLOR_8BPP); // colorDepth, superseded by highColorDepth
         w.u16_le(RNS_UD_SAS_DEL);
         w.u32_le(self.keyboard_layout);
@@ -270,6 +321,27 @@ impl ConferenceCreateRequest<'_> {
         w.u16_le(0); // desktopOrientation
         w.u32_le(if scale { self.scale_percent } else { 0 }); // desktopScaleFactor
         w.u32_le(if scale { display::DEVICE_SCALE } else { 0 }); // deviceScaleFactor
+    }
+
+    /// `CS_MONITOR`: the monitors, the primary first at the origin, as
+    /// [MS-RDPBCGR] 2.2.1.3.6 lays a client's monitors out relative to its primary:
+    /// one to its left or above it has negative edges.
+    fn monitor(&self, w: &mut Writer) {
+        let monitors = self.monitors();
+        if monitors.is_empty() {
+            return;
+        }
+        let contents = 8 + monitors.len() * MONITOR_DEF;
+        block_header(w, CS_MONITOR, u16::try_from(contents).expect("at most sixteen monitors"));
+        w.u32_le(0); // flags, reserved
+        w.u32_le(u32::try_from(monitors.len()).expect("at most sixteen monitors"));
+        for (index, (left, top, right, bottom)) in monitors.into_iter().enumerate() {
+            w.u32_le(left as u32);
+            w.u32_le(top as u32);
+            w.u32_le(right as u32);
+            w.u32_le(bottom as u32);
+            w.u32_le(if index == 0 { MONITOR_PRIMARY } else { 0 });
+        }
     }
 
     fn network(&self, w: &mut Writer) {
@@ -458,6 +530,8 @@ mod tests {
         ConferenceCreateRequest {
             width: 1920,
             height: 1080,
+            placement: Placement::Right,
+            monitors: 1,
             scale_percent: 0,
             client_name: "gateway",
             keyboard_layout: 0x0409,
@@ -542,6 +616,65 @@ mod tests {
             seen.push((block, length));
         }
         assert_eq!(seen, vec![(CS_CORE, 234), (CS_SECURITY, 12), (CS_NET, 20)]);
+    }
+
+    /// A session asking for two monitors sends the extended block after the three
+    /// every connection sends, laying them out in a row, and asks the core data for
+    /// the row's union as its desktop. One monitor sends no block and the desktop
+    /// it always did.
+    #[test]
+    fn two_monitors_are_a_row_in_an_extended_block_and_the_cores_desktop_is_their_union() {
+        let two_monitors = || ConferenceCreateRequest { monitors: 2, ..request() };
+        let two = two_monitors();
+        let bytes = two.blocks();
+        // The core desktop, right after the block header and the version.
+        let u16_at = |at: usize| u16::from_le_bytes([bytes[at], bytes[at + 1]]);
+        assert_eq!((u16_at(8), u16_at(10)), (3840, 1080));
+        assert_eq!(request().blocks()[8..12], [0x80, 0x07, 0x38, 0x04], "one monitor is 1920x1080");
+
+        let mut r = Reader::new("a test", &bytes);
+        let mut seen = Vec::new();
+        let mut monitor = None;
+        while !r.is_empty() {
+            let block = r.u16_le().unwrap();
+            let length = usize::from(r.u16_le().unwrap());
+            let contents = r.bytes(length - BLOCK_HEADER).unwrap();
+            if block == CS_MONITOR {
+                monitor = Some(contents.to_vec());
+            }
+            seen.push(block);
+        }
+        assert_eq!(seen, vec![CS_CORE, CS_SECURITY, CS_NET, CS_MONITOR]);
+        assert!(!request().blocks().windows(2).any(|w| w == CS_MONITOR.to_le_bytes()), "one monitor sends no block");
+
+        let monitor = monitor.unwrap();
+        let mut r = Reader::new("a test", &monitor);
+        assert_eq!(r.u32_le().unwrap(), 0, "flags are reserved");
+        assert_eq!(r.u32_le().unwrap(), 2);
+        let mut defs = Vec::new();
+        for _ in 0..2 {
+            let mut def = [0_u32; 5];
+            for field in &mut def {
+                *field = r.u32_le().unwrap();
+            }
+            defs.push(def);
+        }
+        assert!(r.is_empty());
+        // Inclusive edges, the primary at the origin and the second starting where it ends.
+        assert_eq!(defs[0], [0, 0, 1919, 1079, MONITOR_PRIMARY]);
+        assert_eq!(defs[1], [1920, 0, 3839, 1079, 0]);
+
+        // Against any other edge the primary stays at the origin, the second's
+        // edges go negative to its left and above it, and the desktop is the union.
+        for (placement, desktop, second) in [
+            (Placement::Left, (3840, 1080), (-1920, 0, -1, 1079)),
+            (Placement::Top, (1920, 2160), (0, -1080, 1919, -1)),
+            (Placement::Bottom, (1920, 2160), (0, 1080, 1919, 2159)),
+        ] {
+            let placed = ConferenceCreateRequest { placement, ..two_monitors() };
+            assert_eq!(placed.desktop(), desktop);
+            assert_eq!(placed.monitors(), vec![(0, 0, 1919, 1079), second]);
+        }
     }
 
     /// The one field in `CS_CORE` that is neither constant nor copied straight from a

@@ -30,6 +30,7 @@
 // time, so there is never a later frame to shake the FIFO loose. Hence the backstop below, which is what makes the promise
 // this file hands out a promise rather than a hope.
 
+import { type Fault, faultOf, logged } from "./fault.ts";
 import {
   createWasmHevcDecoder,
   type DecodedPicture,
@@ -93,11 +94,15 @@ export function createDesktopVideo(
   handlers: VideoHandlers,
   stallMs: number = STALL_MS,
   /**
-   * EXPERIMENTAL: decode a passed HEVC stream in software (hevcWasmDecoder.ts)
+   * BETA: decode a passed HEVC stream in software (hevcWasmDecoder.ts)
    * rather than with the browser's `VideoDecoder`, which appleMedia.ts found does
    * not take it.
    */
   softwareHevc = false,
+  /** What builds that decoder: injectable for a test, which has no worker to run it in. */
+  makeSoftware: (
+    init: VideoDecoderLikeInit,
+  ) => VideoDecoderLike = createWasmHevcDecoder,
 ): DesktopVideo {
   interface Live {
     stream: VideoStream;
@@ -137,21 +142,26 @@ export function createDesktopVideo(
     // carries no resolution, and an in-band size change is not a thing to bet two
     // browsers on, so the decoder is replaced rather than reused.
     dropDecoder();
+    const software = softwareHevc && isHevc(format.decode);
     let entry: Live | undefined;
-    const failed = (reason: string, recoverable: boolean, decode: string) => {
+    const failed = (fault: Fault, recoverable: boolean, decode: string) => {
       // Only if this entry is still the live one: a stream that restarted on a new
       // size has already replaced it, and dropping the newer decoder because the older
       // one errored would lose a chain that is decoding fine.
       if (live === entry) {
         live = null;
       }
-      handlers.onError(reason, recoverable, decode);
+      // What a browser said of its decoder goes with the cause, for the notice's
+      // Details. The software decoder's words are this page's own, written in its
+      // code: they are in the console with the ask below, and not on the screen.
+      const { detail: _words, ...cause } = fault;
+      handlers.onError(software ? cause : fault, recoverable, decode);
       if (recoverable) {
         // Asked for, exactly as a stall is. The next unit builds a fresh decoder,
         // and a fresh decoder can start at nothing but a keyframe — so without this
         // the desktop is not "one failed frame" but every frame after it, and the
         // banner the error just raised would go on telling the truth.
-        handlers.onNeedsKeyframe(reason);
+        handlers.onNeedsKeyframe(logged(fault));
       }
     };
     let stream: VideoStream;
@@ -171,14 +181,12 @@ export function createDesktopVideo(
           },
         },
         stallMs,
-        softwareHevc && isHevc(format.decode)
-          ? createWasmHevcDecoder
-          : undefined,
+        software ? makeSoftware : undefined,
       );
     } catch (e) {
       // A throw from here would escape into the paint loop and drop the batch.
       handlers.onError(
-        e instanceof Error ? e.message : "This browser cannot decode video.",
+        faultOf(e, "AL-4604"),
         // A runtime with no decoder at all. No keyframe repairs that either.
         false,
         format.decode,
@@ -264,7 +272,7 @@ export interface VideoHandlers {
    * `decode` is the configuration the failing decoder ran, which is what a refusal
    * is a fact about: a later `videoFormat` naming another one may well be taken.
    */
-  onError: (reason: string, recoverable: boolean, decode: string) => void;
+  onError: (fault: Fault, recoverable: boolean, decode: string) => void;
   /**
    * The stream's chain has been cut and it cannot pick up again until a keyframe
    * arrives. Both ways of cutting it come here — a decoder that went quiet and one
@@ -414,20 +422,26 @@ export function createVideoStream(
     // unit is settled, so the next picture resolves its own unit and not this one.
     noPicture: () => settle(null),
     error: (e) => {
+      if (closed) {
+        // Its stream is done with, closed here or cut already: a failure it
+        // reports now is nobody's, and said it would be the next stream's notice
+        // and a keyframe asked for on the next stream's account.
+        return;
+      }
       // Terminal: a decoder that has errored decodes nothing further, and every
       // frame after this one depends on frames it did not produce.
       closed = true;
       disarm();
       drain();
       const refused = e instanceof Error && e.name === "NotSupportedError";
-      // The exception's name and message travel with the sentence. The decoder that
+      // The exception's name and message travel with the cause. The decoder that
       // knew what went wrong is gone by the time anyone reads it, and which name it
       // was is the whole diagnosis: `EncodingError` indicts the bytes the gateway
       // sent, where a platform name indicts the decoder they were fed to.
       handlers.onError(
         refused
-          ? `This browser cannot decode the video this target sends (${format.decode}).`
-          : `This browser's video decoder failed (${e.name}: ${e.message}).`,
+          ? { code: "AL-4601", fill: { format: format.decode } }
+          : { code: "AL-4602", detail: `${e.name}: ${e.message}` },
         !refused,
         format.decode,
       );
@@ -495,7 +509,7 @@ export function createVideoStream(
         shut();
         const name = e instanceof Error ? `${e.name}: ${e.message}` : String(e);
         handlers.onError(
-          `This browser's video decoder refused a frame (${name}).`,
+          { code: "AL-4603", detail: name },
           true,
           format.decode,
         );

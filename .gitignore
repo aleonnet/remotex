@@ -1,13 +1,18 @@
 /target
 frontend/node_modules
 tests/playwright/node_modules
+tests/mockup/node_modules
 frontend/dist
 /dist
+# What `swift build` leaves under the Mac app's package.
+macos/Alumia/.build/
 tmp/
 .env
 .DS_Store
 CLAUDE.local.md
-/remotex.toml
+/alumia.toml
+# The kept logins the gateway writes beside its config when it runs from here.
+/logins
 # Editor scaffolding, written by whichever one is open. Nothing here is shared.
 .vscode/
 .claude/worktrees

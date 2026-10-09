@@ -17,6 +17,8 @@ use crate::audio::PcmFormat;
 #[cfg(feature = "embedded-gateway")]
 use crate::auth::EmbeddedToken;
 use crate::auth::{GatewayAuth, SitePasswd};
+use crate::cause::{Cause, Caused as _};
+use crate::{bail_known, ensure_known};
 use crate::protocol::HostDisplay;
 use crate::throughput::MeterConfig;
 
@@ -58,14 +60,14 @@ pub enum Subtype {
     /// With the unofficial [`TargetConfig::virtual_display`], the same session
     /// opens on one of the Mac's virtual displays instead — High Performance's
     /// display and resizing under Standard's picture, a combination Apple's viewer
-    /// never offers and remotex tested against macOS 26 alone.
+    /// never offers and alumia tested against macOS 26 alone.
     Ard,
     /// The same Mac in High Performance Screen Sharing, as Apple's viewer has it:
     /// the same wire as [`Subtype::Ard`] on a virtual display, with the picture as
     /// HEVC and the sound as AAC-ELD over the media
     /// stream Screen Sharing negotiates on the RFB connection and sends over UDP
-    /// with SRTP ([`crate::vnc_apple_media`]). ZRLE rectangles are decoded only to
-    /// keep their deflate stream in step and never shown; the browser stays covered
+    /// with SRTP ([`crate::vnc_apple_media`]). ZRLE rectangles are stepped over
+    /// unread and never shown; the browser says the screen is not available
     /// until the media stream sends the display's first picture. A stream that
     /// fails ends the session, as it ends Apple's viewer's.
     ///
@@ -104,7 +106,9 @@ pub enum Subtype {
     /// reduced here to the viewer's window and the video ceiling
     /// ([`crate::video::fit_within`]) — the one place the gateway resamples a
     /// remote's pixels. In a session that follows the window the window drives
-    /// that size; in any other the ceiling alone holds it. A picture passed
+    /// that size, and a client that fits the picture to its width, a phone above
+    /// all, is sent it no wider than its screen is long
+    /// (`DesktopState::present` in src/vnc.rs). A picture passed
     /// through ([`Passthrough::AppleMedia`]) reaches the browser as the Mac sent
     /// it, at the screen's size.
     ///
@@ -299,29 +303,25 @@ pub struct AudioPlan {
     /// The Opus target bitrate — the average the encoder holds to, and the
     /// ceiling of the walk when the plan is adaptive.
     pub bitrate_bps: i32,
-    /// `Some(floor)` exactly when the bitrate should track the audio socket's
-    /// backpressure, walking between the floor and [`Self::bitrate_bps`] — and
-    /// silence should be shed while the link is behind. See
-    /// [`TargetConfig::audio_adaptive`].
-    pub adaptive_floor_bps: Option<i32>,
+    /// Whether the bitrate tracks the audio socket's backpressure, walking
+    /// between sound-opus's floor and [`Self::bitrate_bps`] — and silence is
+    /// shed while the link is behind. See [`TargetConfig::audio_adaptive`].
+    pub adaptive: bool,
 }
 
 impl AudioPlan {
     /// The default rate with no walk — what `audio_adaptive = false` resolves to.
     pub fn fixed() -> Self {
-        Self { adaptive_floor_bps: None, ..Self::default() }
+        Self { adaptive: false, ..Self::default() }
     }
 }
 
 impl Default for AudioPlan {
     /// What an unset dial means: Opus at the default rate, walking down to the
-    /// default floor when the link is behind. The fallback [`crate::session`]
-    /// uses when no target is selected, where there is no config to read.
+    /// floor when the link is behind. The fallback [`crate::session`] uses when
+    /// no target is selected, where there is no config to read.
     fn default() -> Self {
-        Self {
-            bitrate_bps: DEFAULT_AUDIO_BITRATE_KBPS as i32 * 1000,
-            adaptive_floor_bps: Some(DEFAULT_AUDIO_ADAPTIVE_MIN_KBPS as i32 * 1000),
-        }
+        Self { bitrate_bps: DEFAULT_AUDIO_BITRATE_KBPS as i32 * 1000, adaptive: true }
     }
 }
 
@@ -340,14 +340,15 @@ pub struct RenderPlan {
     /// [`TargetConfig::render_chroma`], resolved.
     pub chroma: Chroma,
     /// The Mac's picture passes as it came, its HEVC rather than VP9 encoded
-    /// here: [`Passthrough::AppleMedia`], chosen at the picker. None of the fields
-    /// above reach such a picture.
+    /// here: [`Passthrough::AppleMedia`], which the session asked for
+    /// ([`Choices::passthrough`]). None of the fields above reach such a picture.
     pub apple_media: bool,
     /// An RDP host's graphics pipeline passes as it came, for the browser to
     /// compose, rather than composed here and encoded as VP9:
-    /// [`Passthrough::RdpGraphics`], chosen at the picker. The fields above reach
-    /// only the picture of a host that answers the offer of the pipeline with
-    /// bitmap updates, which is encoded here as always.
+    /// [`Passthrough::RdpGraphics`], which the session asked for
+    /// ([`Choices::passthrough`]). The fields above reach only the picture of a
+    /// host that answers the offer of the pipeline with bitmap updates, which is
+    /// encoded here as always.
     pub rdp_graphics: bool,
     /// The host may draw with H.264 on that passed pipeline, for the browser to
     /// decode: [`TargetConfig::egfx_h264`], in a session that passes the pipeline
@@ -358,8 +359,10 @@ pub struct RenderPlan {
 
 /// A remote's own stream, passed to the browser as it came instead of decoded
 /// here and encoded as VP9. Which one a target has to pass is its type's to say
-/// ([`TargetConfig::offers`]); whether a session passes it is chosen at the picker
-/// ([`Choices::passthrough`]).
+/// ([`TargetConfig::offers`]); whether a session passes it is the page's to ask
+/// ([`Choices::passthrough`]), and no screen offers it: the page asks where its
+/// address says so (`?passthrough=1`) and where the stream is the only way this
+/// gateway serves the target.
 ///
 /// For a LAN either way: the stream is the remote's own, with no quality walk
 /// behind it, so [`TargetConfig::video_quality`], [`TargetConfig::render_chroma`]
@@ -375,10 +378,11 @@ pub enum Passthrough {
     /// nothing a running session can be resumed onto: a reattach reconnects the
     /// host instead.
     ///
-    /// **Experimental.** The compositor the page runs is the gateway's own and is
+    /// The compositor the page runs is the gateway's own and is
     /// unit tested as it is there, and what is passed is checked against a real
-    /// host, by the probe and by a headless browser. That is one Windows 11 host,
-    /// with sound and the clipboard beside it;
+    /// host, by the probe, by a headless browser and by hand. That is a physical
+    /// Windows 11 computer, from a desktop browser and from a mobile browser on iOS, with sound
+    /// and the clipboard beside it;
     /// [`TargetConfig::camera`] and [`TargetConfig::microphone`] beside it have not
     /// been tried.
     RdpGraphics,
@@ -418,6 +422,10 @@ pub struct Offers {
     pub audio: bool,
     /// The stream this target can pass untouched, where it has one.
     pub passthrough: Option<Passthrough>,
+    /// Whether where the second virtual display sits is a choice
+    /// ([`Placement`]): on a target that asks for two of a host that is told
+    /// where each is.
+    pub placement: bool,
 }
 
 /// What whoever started a session chose under its target at the picker, carried by
@@ -438,18 +446,63 @@ pub struct Choices {
     /// wlshare's audio extension, Opus or FLAC on the RFB connection
     /// ([`crate::vnc_audio`]). At [`Sound::Off`] neither is asked, so the host keeps
     /// playing where it did. Packets are sent only while the attached browser
-    /// subscribes, which is what its Mute and Unmute change.
+    /// subscribes, which is what its Mute changes.
     #[serde(default)]
     pub audio: Sound,
     /// Pass the target's [`Passthrough`].
     #[serde(default)]
     pub passthrough: bool,
+    /// Where the second virtual display sits.
+    #[serde(default)]
+    pub placement: Placement,
 }
 
 impl Choices {
     /// Whether the client's window drives the desktop's size.
     pub fn resize(self) -> bool {
         self.size == Sizing::Window
+    }
+}
+
+/// Where the second of two virtual displays sits against the first:
+/// [`Choices::placement`], on a target that offers it ([`Offers::placement`]).
+///
+/// An RDP host is told each monitor's position, in the connect-time monitor data
+/// and in every layout after, so it arranges the two as asked: a window dragged
+/// over that edge of the first display arrives on the second. Beside the first
+/// the two are top-aligned, and above or below it left-aligned. A High
+/// Performance Mac places its second display itself, on the right, and offers
+/// no choice.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum Placement {
+    #[default]
+    Right,
+    Left,
+    Top,
+    Bottom,
+}
+
+impl Placement {
+    /// Where the second monitor's corner is against the first's, the first being
+    /// `first` in size and the second `second`: what a monitor's position is
+    /// stated relative to ([MS-RDPBCGR] 2.2.1.3.6.1, [MS-RDPEDISP] 2.2.2.2.1).
+    pub fn second_corner(self, first: (u32, u32), second: (u32, u32)) -> (i32, i32) {
+        let signed = |v: u32| i32::try_from(v).unwrap_or(i32::MAX);
+        match self {
+            Self::Right => (signed(first.0), 0),
+            Self::Left => (-signed(second.0), 0),
+            Self::Top => (0, -signed(second.1)),
+            Self::Bottom => (0, signed(first.1)),
+        }
+    }
+
+    /// The desktop two monitors of these sizes make: their union.
+    pub fn union(self, first: (u32, u32), second: (u32, u32)) -> (u32, u32) {
+        match self {
+            Self::Right | Self::Left => (first.0.saturating_add(second.0), first.1.max(second.1)),
+            Self::Top | Self::Bottom => (first.0.max(second.0), first.1.saturating_add(second.1)),
+        }
     }
 }
 
@@ -464,7 +517,7 @@ pub enum Sound {
     /// At the rate the audio keys hold: an RDP host's PCM encoded here, or
     /// wlshare's own Opus packets, coded there at that rate, passed as they came.
     Opus,
-    /// EXPERIMENTAL. Lossless: wlshare's own FLAC frames passed as they came, or
+    /// Lossless: wlshare's own FLAC frames passed as they came, or
     /// an RDP host's PCM coded as FLAC here by libFLAC, decoded by the page's
     /// WebAssembly module either way. The uncompressed rate less a third or so,
     /// about a megabit a second of music, with no walk under it: for a link with
@@ -473,7 +526,7 @@ pub enum Sound {
 }
 
 /// How a session's desktop is sized: at a size it keeps, or by the client's
-/// window. The picker shows the size a session will have before Start.
+/// window. The picker shows the size a session will have before Open.
 ///
 /// Which are offered depends on the target and on the client. A target the
 /// window cannot drive ([`Offers::resize`]) has [`Self::Target`] alone. One it
@@ -499,8 +552,9 @@ pub enum Sizing {
     /// On RDP this also turns on density matching, because there a density *is* a
     /// resize: the Display Control channel this negotiates is the only way to tell
     /// a live session to render at 200%, so a Retina client gets twice the pixels
-    /// and a UI drawn twice as large. At a kept size an RDP session ignores the
-    /// client's density entirely. An RDP resize is the graphics pipeline's, so a
+    /// and a UI drawn twice as large. At a kept size an RDP session ignores a
+    /// pointer client's density, and states a pinch-zoom client's once at connect.
+    /// An RDP resize is the graphics pipeline's, so a
     /// target with `egfx = false` does not offer it.
     ///
     /// On a virtual display — `ard-high-performance`, or `ard` with
@@ -524,8 +578,9 @@ pub struct NotOffered {
 /// What the attached browser said it can take, from its session socket
 /// ([`crate::ws`]): the questions the page asks once at load and states on every
 /// session socket it opens. The chroma *selects* a stream. The two after it say which
-/// passthrough this browser can be served, which is what the picker greys a choice
-/// by and what ends a session whose owner comes back unable to take its own
+/// passthrough this browser can be served, which is what the page reads before it
+/// asks for one, what keeps it from opening a target only that stream serves, and
+/// what ends a session whose owner comes back unable to take its own
 /// ([`TargetConfig::beyond`]).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct Decoders {
@@ -576,7 +631,7 @@ impl RenderPlan {
         }
     }
 
-    /// This plan in one line, for the client's session card.
+    /// This plan in one line, for the client's information sheet.
     ///
     /// The resolved plan rather than the config keys: what a target *does* is the
     /// plan its keys collapse to, defaults and the browser's chroma included, and a
@@ -739,7 +794,7 @@ pub struct TargetConfig {
     /// the target is told what it always was, that the client takes none. The
     /// gateway decodes nothing: the access units ride in the commands it passes,
     /// and the page decodes them with the browser's `VideoDecoder` and paints them
-    /// through its compositor ([`remotex_rdp_graphics::avc`]).
+    /// through its compositor ([`alumia_rdp_graphics::avc`]).
     ///
     /// A key rather than a choice at the picker while it is experimental. Checked
     /// against one Windows 11 host without a GPU, whose stream is Main profile and
@@ -747,6 +802,36 @@ pub struct TargetConfig {
     /// from the specification and has not been seen from a host.
     #[serde(default)]
     pub egfx_h264: bool,
+    /// ALPHA. How many virtual displays the remote is asked to lay out for the
+    /// session, side by side at the session's size: `virtual_displays = 2`.
+    /// One, the default, is the single desktop every target has always opened;
+    /// at most [`MAX_VIRTUAL_DISPLAYS`].
+    ///
+    /// The browser shows one of them at a time, chosen in the session bar's
+    /// Screens sheet, and the gateway encodes only the one shown: each
+    /// display is held under the stream's ceiling on its own, and the host
+    /// renders the other for the windows left on it. The key is a count the
+    /// remote is *asked* for; the list the picker shows is what the remote laid
+    /// out, so a server that opens one desktop shows no picker.
+    ///
+    /// Shared by every target type that can create virtual displays: `rdp` and
+    /// `ard-high-performance`. A Windows host lays the displays out from the
+    /// connect-time monitor data ([MS-RDPBCGR] 2.2.1.3.6) and from each monitor
+    /// layout a resizing session sends ([MS-RDPEDISP] 2.2.2.2), as one desktop
+    /// spanning both. Passed through, that desktop is composed once in the
+    /// browser, which shows one display of it and paints the second display's
+    /// tab from the same picture ([`crate::protocol::ServerMsg::GraphicsView`]).
+    /// A Mac in High Performance mode creates each
+    /// from its `SetDisplayConfiguration` descriptor and sends each as a media
+    /// stream of its own, which is Apple's viewer's "2 Virtual Displays", passed
+    /// through or not. Refused on every other target, where it would be silently
+    /// inert.
+    ///
+    /// Alpha: checked against one Windows 11 host and one Mac, a virtual one; the
+    /// second display's density follows the first's, and nothing of it has been
+    /// measured against Microsoft's or Apple's own client.
+    #[serde(default = "one_display")]
+    pub virtual_displays: u8,
     /// Offer the remote a redirected camera: MS-RDPECAM on RDP, and on a
     /// `wlshare` target the wlshare camera extension ([`crate::vnc_camera`]),
     /// listed the way its audio extension is. Rejected on a plain `vnc`
@@ -792,26 +877,21 @@ pub struct TargetConfig {
     /// on unless the operator turned it off, like [`Self::render_adaptive`].
     ///
     /// A send that blocks means the previous packets are still unwritten, and
-    /// sustained blocking walks the bitrate down toward
-    /// [`Self::audio_adaptive_min`]; a clear stretch walks it back up to the
-    /// ceiling. While behind, wave buffers that are pure silence are shed instead
-    /// of queued — silence is the one content whose loss is free, and dropping it
-    /// is how the client catches up without a trimmed or resampled note anywhere
-    /// (see [`crate::audio`]). On a `wlshare` target the walk is the same and
-    /// the encoder is wlshare's, told each rate the walk arrives at; its packets
+    /// sustained blocking walks the bitrate down toward the floor; a clear
+    /// stretch walks it back up to the ceiling. The walk is sound-opus's
+    /// (`sound_opus::walk`), shared with wlshare, and so is its floor, fixed
+    /// there where a lower rate stops being the same sound, as the render
+    /// walk's is fixed in its encoder: there is no floor key. While behind,
+    /// wave buffers that are pure silence are shed instead of queued — silence
+    /// is the one content whose loss is free, and dropping it is how the
+    /// client catches up without a trimmed or resampled note anywhere (see
+    /// [`crate::audio`]). On a `wlshare` target the walk is the same and the
+    /// encoder is wlshare's, told each rate the walk arrives at; its packets
     /// are passed, so no silence is shed.
     ///
     /// Resolved by the accessor of the same name.
     #[serde(default)]
     pub audio_adaptive: Option<bool>,
-    /// Floor in kbit/s for [`Self::audio_adaptive`] (6–510, below the
-    /// bitrate ceiling); `None` reads as [`DEFAULT_AUDIO_ADAPTIVE_MIN_KBPS`],
-    /// or as [`Self::audio_bitrate`] where the ceiling sits below it — a default
-    /// floor never narrows a walk to nothing. Refused beside
-    /// `audio_adaptive = false`: a floor for a walk that never moves is a key
-    /// that could not do anything.
-    #[serde(default)]
-    pub audio_adaptive_min: Option<u32>,
     /// The quality (1–100) this target's VP9 stream holds on a link that can carry
     /// it. `None` reads as [`DEFAULT_VIDEO_QUALITY`].
     ///
@@ -860,11 +940,6 @@ pub const DEFAULT_VIDEO_QUALITY: u8 = 90;
 /// starts to be audibly lossy, and the walk is what takes it down on a link that
 /// cannot carry it.
 pub const DEFAULT_AUDIO_BITRATE_KBPS: u32 = 96;
-
-/// The adaptive floor (kbit/s) when [`TargetConfig::audio_adaptive_min`] is
-/// unset. 32 kbit/s stereo Opus is degraded but continuous — and continuity is
-/// the whole point of giving bitrate up.
-pub const DEFAULT_AUDIO_ADAPTIVE_MIN_KBPS: u32 = 32;
 
 /// Read [`TargetConfig::size`]: a width by a height, as in `"1920x1080"`.
 fn size<'de, D>(deserializer: D) -> Result<Option<(u16, u16)>, D::Error>
@@ -970,28 +1045,37 @@ impl TargetConfig {
             // bitmap path keeps its opening size. MS-RDPEDISP's other answer, a
             // Deactivation-Reactivation Sequence, is left out on purpose: see
             // "Bitmap updates" in docs/rdp-client.md.
+            // The passthrough is the pipeline's, however many displays the host
+            // lays out: the browser composes the span the host draws and shows
+            // one display of it, and paints the second display's tab from the same
+            // picture (`ServerMsg::GraphicsView`).
             (Protocol::Rdp, _) => Offers {
                 resize: self.egfx(),
                 audio: true,
                 passthrough: self.egfx().then_some(Passthrough::RdpGraphics),
+                placement: self.virtual_displays > 1,
             },
             // Read as any VNC server, which carries no sound, and whose answer
             // to a size is not known until it is dialled.
-            (Protocol::Vnc, None) => Offers { resize: false, audio: false, passthrough: None },
+            (Protocol::Vnc, None) => {
+                Offers { resize: false, audio: false, passthrough: None, placement: false }
+            }
             // Its VP9 is the subtype's picture and not a choice.
             (Protocol::Vnc, Some(Subtype::Wlshare)) => {
-                Offers { resize: true, audio: true, passthrough: None }
+                Offers { resize: true, audio: true, passthrough: None, placement: false }
             }
             // Standard mode shares the Mac's physical displays, whose resolution
             // this gateway does not change, and never touches its sound.
             (Protocol::Vnc, Some(Subtype::Ard)) => {
-                Offers { resize: self.virtual_display, audio: false, passthrough: None }
+                Offers { resize: self.virtual_display, audio: false, passthrough: None, placement: false }
             }
-            // The sound comes with the picture, so it is not a choice.
+            // The sound comes with the picture, so it is not a choice, and the
+            // Mac places a second virtual display itself.
             (Protocol::Vnc, Some(Subtype::ArdHighPerformance)) => Offers {
                 resize: true,
                 audio: false,
                 passthrough: Some(Passthrough::AppleMedia),
+                placement: false,
             },
             // The same stream, of the Mac's own screens: the window drives the size
             // the gateway reduces the picture to, not the Mac's display.
@@ -999,6 +1083,7 @@ impl TargetConfig {
                 resize: true,
                 audio: false,
                 passthrough: Some(Passthrough::AppleMedia),
+                placement: false,
             },
         }
     }
@@ -1016,6 +1101,10 @@ impl TargetConfig {
             ),
             ("sound", choices.audio != Sound::Off && !offers.audio),
             ("a passthrough", choices.passthrough && offers.passthrough.is_none()),
+            (
+                "a place for the second display",
+                choices.placement != Placement::default() && !offers.placement,
+            ),
         ];
         match refused.into_iter().find(|(_, refused)| *refused) {
             Some((choice, _)) => Err(NotOffered { target: self.name.clone(), choice }),
@@ -1044,7 +1133,7 @@ impl TargetConfig {
     /// The render dial for a reader with no browser in front of it — the TUI's
     /// target card, which describes a config file rather than a session.
     ///
-    /// The chroma is where a config card and a session card part: a session has a
+    /// The chroma is where a config card and an information sheet part: a session has a
     /// browser and therefore a profile, and a file has only what the operator asked
     /// for. So this card says `chroma auto` where the browser decides — which is the
     /// default, and now most targets — and names the sampling where one was
@@ -1080,24 +1169,14 @@ impl TargetConfig {
 
     /// The audio keys collapsed to what the encoder is built from, the same way
     /// [`Self::render_plan`] collapses the render dial: defaults resolved,
-    /// kilobits turned into the bits libopus speaks, and the adaptive floor
-    /// present exactly when there is a walk — unless the operator turned it off.
-    /// Callers gate on [`Self::sound`] — a session without sound has no plan to
-    /// resolve, and neither has a Mac's passed sound, which no encoder touches.
+    /// kilobits turned into the bits libopus speaks, and whether there is a
+    /// walk. A ceiling at or under the walk's floor gets a walk of nothing
+    /// rather than a refused config, as `video_quality` does. Callers gate on
+    /// [`Self::sound`] — a session without sound has no plan to resolve, and
+    /// neither has a Mac's passed sound, which no encoder touches.
     pub fn audio_plan(&self) -> AudioPlan {
         let bitrate_kbps = self.audio_bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE_KBPS);
-        // The floor the walk will hold to, never above the ceiling it walks under.
-        // Only the *default* floor can sit there — an explicit `audio_adaptive_min`
-        // over the ceiling is refused at parse — and a low ceiling then gets a walk
-        // of nothing rather than a refused config, as `video_quality` does. Held
-        // here so a card cannot state a floor the stream never walks down to.
-        let adaptive_floor_bps = self.audio_adaptive().then(|| {
-            self.audio_adaptive_min
-                .unwrap_or(DEFAULT_AUDIO_ADAPTIVE_MIN_KBPS)
-                .min(bitrate_kbps) as i32
-                * 1000
-        });
-        AudioPlan { bitrate_bps: bitrate_kbps as i32 * 1000, adaptive_floor_bps }
+        AudioPlan { bitrate_bps: bitrate_kbps as i32 * 1000, adaptive: self.audio_adaptive() }
     }
 
     /// The one PCM format this target's sound can be in, known before the
@@ -1167,11 +1246,24 @@ impl TargetConfig {
 /// ([`crate::video::MAX_LONG_SIDE`]).
 pub const DEFAULT_SIZE: (u16, u16) = (1440, 900);
 
+/// The most virtual displays a target may ask for ([`TargetConfig::virtual_displays`]).
+///
+/// Two, while the feature is alpha: two is what the picker, the input offset and
+/// the span the host builds have been checked with, and each display is a desktop
+/// the host renders whether or not anybody is looking at it.
+pub const MAX_VIRTUAL_DISPLAYS: u8 = 2;
+
+/// Serde's default for [`TargetConfig::virtual_displays`]: the one desktop every
+/// target opens unless asked otherwise.
+fn one_display() -> u8 {
+    1
+}
+
 /// The port this project answers on when nothing says otherwise, in either
 /// shape: [`DEFAULT_LISTEN`] below, and the TUI control plane's `--port`.
 ///
 /// One number for both because they are two ways to serve, never two servers:
-/// `remotex serve` is the deployed gateway and `remotex tui` is the local
+/// `alumia serve` is the deployed gateway and `alumia tui` is the local
 /// control plane, and running them at once is the collision each refuses to
 /// start into rather than a configuration to support.
 pub const DEFAULT_PORT: u16 = 52380;
@@ -1225,12 +1317,12 @@ pub struct ServerSection {
     ///
     /// One key rather than two because it is one decision:
     /// a host without a port and a port without a host are each half an answer,
-    /// and `--listen`/`REMOTEX_LISTEN` can only override the whole of it —
+    /// and `--listen`/`ALUMIA_LISTEN` can only override the whole of it —
     /// overriding one half from the command line and taking the other from the
     /// file is how a gateway ends up on an address nobody wrote down.
     pub listen: Option<String>,
     /// Web-login credential: `username:bcrypt_hash`, generated with
-    /// `remotex gen-passwd <username>`. Required — without a login everything
+    /// `alumia gen-passwd <username>`. Required — without a login everything
     /// but the SPA shell and `/api/auth/*` refuses requests, so an empty
     /// value would lock the server to nobody.
     pub site_passwd: Option<String>,
@@ -1240,11 +1332,11 @@ pub struct ServerSection {
     // stale. `deny_unknown_fields` refuses a file that still has it here.
     /// **Development only.** A label to give this gateway its own hostname on
     /// loopback: a browser arriving at `127.0.0.1`, `::1` or `localhost` is
-    /// redirected to `<label>.remotex.localhost`, keeping the port and path.
+    /// redirected to `<label>.alumia.localhost`, keeping the port and path.
     ///
     /// It exists for one problem, which has no other clean answer: a cookie is
     /// scoped by *host* and ignores the port, so two gateways on one machine
-    /// share `remotex_session` and each login silently evicts the other. The
+    /// share `alumia_session` and each login silently evicts the other. The
     /// gateway you were not touching then answers 401 to everything, and its
     /// browser drops to the login screen the next time anything asks — which
     /// reads as a session bug in whatever you were actually testing. Testing
@@ -1252,7 +1344,7 @@ pub struct ServerSection {
     ///
     /// Under `.localhost` because every name below it resolves to loopback without
     /// DNS (RFC 6761) and is a *distinct* cookie origin, so two gateways become two
-    /// independent logins in one browser. Under `.remotex.localhost` in particular
+    /// independent logins in one browser. Under `.alumia.localhost` in particular
     /// so the names this project hands out are all one suffix, taken from nobody.
     ///
     /// Never reachable in a deployment: [`AppConfig::dev_hostname`] redirects only
@@ -1262,7 +1354,7 @@ pub struct ServerSection {
 }
 
 /// The default display name when `[branding].text` is unset.
-pub const DEFAULT_BRANDING: &str = "remotex";
+pub const DEFAULT_BRANDING: &str = "alumia";
 
 /// The `[branding]` table as written: what the deployment calls itself, and the
 /// image it puts in the browser tab.
@@ -1344,7 +1436,8 @@ fn logo_mime(path: &Path) -> anyhow::Result<&'static str> {
         Some("jpg" | "jpeg") => Ok("image/jpeg"),
         Some("gif") => Ok("image/gif"),
         Some("webp") => Ok("image/webp"),
-        _ => anyhow::bail!(
+        _ => bail_known!(
+            "AL-9501", path = path.display();
             "[branding].logo {} is not an image a browser tab can show — \
              use .png, .ico, .svg, .jpg, .gif or .webp",
             path.display()
@@ -1364,7 +1457,8 @@ fn logo_media_type(declared: &str) -> anyhow::Result<&'static str> {
         "image/jpeg" => Ok("image/jpeg"),
         "image/gif" => Ok("image/gif"),
         "image/webp" => Ok("image/webp"),
-        _ => anyhow::bail!(
+        _ => bail_known!(
+            "AL-9502", kind = declared;
             "[branding].logo declares {declared:?}, which is not an image a browser \
              tab can show — use image/png, image/x-icon, image/svg+xml, image/jpeg, \
              image/gif or image/webp"
@@ -1383,7 +1477,7 @@ fn logo_media_type(declared: &str) -> anyhow::Result<&'static str> {
 ///
 /// It exists for the configs that have nowhere to put a file: an instance
 /// directory synced between machines, a container with one mounted config, a
-/// `remotex.toml` pasted into a gist. The path form stays the better one whenever
+/// `alumia.toml` pasted into a gist. The path form stays the better one whenever
 /// there *is* somewhere — it survives an image being swapped without a restart,
 /// and it keeps the config readable.
 ///
@@ -1407,14 +1501,14 @@ fn resolve_logo(value: &str) -> anyhow::Result<Logo> {
     let (declared, payload) = uri.split_once(',').context(
         "[branding].logo is a data: URL with no comma, so it has no image after \
          its media type",
-    )?;
+    ).cause(|| Cause::new("AL-9503"))?;
     let declared = declared.trim().to_ascii_lowercase();
     let declared = declared.strip_suffix(";base64").with_context(|| {
         format!(
             "[branding].logo is a data: URL that is not base64 ({declared:?}) — \
              write it as data:image/png;base64,<the encoded image>"
         )
-    })?;
+    }).cause(|| Cause::new("AL-9504"))?;
     let mime = logo_media_type(declared)?;
 
     // A wrapped blob is the normal shape of base64 in a file, and TOML keeps the
@@ -1422,8 +1516,9 @@ fn resolve_logo(value: &str) -> anyhow::Result<Logo> {
     let payload: String = payload.chars().filter(|c| !c.is_ascii_whitespace()).collect();
     let bytes = base64::engine::general_purpose::STANDARD
         .decode(&payload)
-        .context("[branding].logo is a data: URL whose base64 does not decode")?;
-    anyhow::ensure!(!bytes.is_empty(), "[branding].logo decodes to no image at all");
+        .context("[branding].logo is a data: URL whose base64 does not decode")
+        .cause(|| Cause::new("AL-9505"))?;
+    ensure_known!("AL-9506"; !bytes.is_empty(), "[branding].logo decodes to no image at all");
     Ok(Logo { mime, source: LogoSource::Inline(Bytes::from(bytes)) })
 }
 
@@ -1441,9 +1536,9 @@ fn resolve_logo(value: &str) -> anyhow::Result<Logo> {
 ///   is a valid new instance and the picker's job is to say so.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Audience {
-    /// `remotex serve`: a browser's gateway.
+    /// `alumia serve`: a browser's gateway.
     Served,
-    /// `remotex serve-embedded`: a managed local instance.
+    /// `alumia serve-embedded`: a managed local instance.
     #[cfg(feature = "embedded-gateway")]
     Embedded,
 }
@@ -1468,7 +1563,7 @@ pub struct ConfigFile {
     /// Top-level for [`Self::branding`]'s reason — an embedded config may set it too.
     #[serde(default)]
     pub meter: Option<MeterSection>,
-    /// The `[hevc_wasm]` table: EXPERIMENTAL, where the page's software HEVC
+    /// The `[hevc_wasm]` table: BETA, where the page's software HEVC
     /// decoder is, for a gateway that keeps it outside its data directory. Absent,
     /// the decoder is served if its archive is there. Top-level for
     /// [`Self::branding`]'s reason.
@@ -1566,7 +1661,7 @@ pub struct AppConfig {
     /// The deployment's name and, when configured, the icon file behind
     /// `GET /api/logo`.
     pub branding: Branding,
-    /// `<label>.remotex.localhost` to send a loopback browser to, from
+    /// `<label>.alumia.localhost` to send a loopback browser to, from
     /// `[server].dev_subdomain`. `None` disables the redirect entirely.
     ///
     /// Stored as the whole hostname rather than the label so the one place that
@@ -1597,7 +1692,8 @@ impl ConfigFile {
     /// audiences differ only in what they may say about the *server*, and in
     /// whether having nothing to offer yet is an error or a first launch.
     pub fn parse_with(text: &str, audience: Audience) -> anyhow::Result<Self> {
-        let mut config: ConfigFile = toml::from_str(text).context("invalid TOML config")?;
+        let mut config: ConfigFile =
+            toml::from_str(text).context("invalid TOML config").cause(|| Cause::new("AL-9507"))?;
         // An omitted port deserializes as 0 (never a valid target port), which
         // resolves here to the protocol's standard port.
         for target in &mut config.targets {
@@ -1610,12 +1706,14 @@ impl ConfigFile {
             match (target.protocol, target.subtype) {
                 _ if !target.virtual_display => {}
                 (Protocol::Vnc, Some(Subtype::Ard)) => {}
-                (Protocol::Vnc, Some(Subtype::ArdHighPerformance)) => anyhow::bail!(
+                (Protocol::Vnc, Some(Subtype::ArdHighPerformance)) => bail_known!(
+                    "AL-9508", name = target.name;
                     "target {:?} sets virtual_display on an ard-high-performance target, which \
                      always opens a virtual display: the key is subtype \"ard\"'s. Remove it.",
                     target.name
                 ),
-                (Protocol::Vnc, None | Some(Subtype::Wlshare | Subtype::ArdMirror)) | (Protocol::Rdp, _) => anyhow::bail!(
+                (Protocol::Vnc, None | Some(Subtype::Wlshare | Subtype::ArdMirror)) | (Protocol::Rdp, _) => bail_known!(
+                    "AL-9509", name = target.name;
                     "target {:?} sets virtual_display, which only subtype \"ard\" takes: it \
                      opens Standard Screen Sharing on one of the Mac's virtual displays, \
                      and nothing else here has one to open. Remove the key.",
@@ -1631,14 +1729,16 @@ impl ConfigFile {
             // to and a token instead of a login. A key that is quietly overridden is
             // worse than one that is refused: it reads as configuration and behaves
             // as decoration.
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9510";
                 config.server.is_none(),
                 "an embedded instance config may not have a [server] block: \
                  the launcher decides where its gateway listens and how it \
                  authenticates. Only [branding] and [[targets]] belong here"
             );
         } else {
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9511";
                 !config.targets.is_empty(),
                 "config has no [[targets]] — at least one target profile is required"
             );
@@ -1646,21 +1746,24 @@ impl ConfigFile {
         #[cfg(not(feature = "embedded-gateway"))]
         {
             let _ = audience;
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9511";
                 !config.targets.is_empty(),
                 "config has no [[targets]] — at least one target profile is required"
             );
         }
         if let Some(meter) = &config.meter {
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9512";
                 meter.database.as_ref().is_none_or(|database| !database.as_os_str().is_empty()),
                 "[meter].database is empty — name the SQLite file, or leave the key out for \
                  meter.sqlite3 in the gateway's state directory"
             );
-            anyhow::ensure!(meter.max_records >= 1, "[meter].max_records must be at least 1");
+            ensure_known!("AL-9513"; meter.max_records >= 1, "[meter].max_records must be at least 1");
         }
         if let Some(hevc_wasm) = &config.hevc_wasm {
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9514", archive = crate::hevc_wasm::archive_name();
                 !hevc_wasm.archive.as_os_str().is_empty(),
                 "[hevc_wasm].archive is empty — name the release archive, or leave the table \
                  out for {} in the gateway's data directory",
@@ -1668,43 +1771,50 @@ impl ConfigFile {
             );
         }
         if let Some(decoders) = &config.hp_decoders {
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9515";
                 cfg!(windows),
                 "[hp_decoders] is for a gateway on Windows, which has no library folder of \
                  its own. Here the decoders are found by the system loader's search. Remove \
                  the table."
             );
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9516";
                 !cfg!(feature = "apple-hp-media-static"),
                 "[hp_decoders] names folders to load the decoders from, and this build links \
                  its own. Remove the table."
             );
             let Some(dir) = &decoders.ffmpeg_dir else {
-                anyhow::bail!(
+                bail_known!(
+                    "AL-9517";
                     "[hp_decoders] names no folder — set ffmpeg_dir, or leave the table out \
                      for the decoder found on PATH"
                 );
             };
             // Absolute, because a DLL loaded by a relative path is looked for
             // from wherever the gateway happened to be started.
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9518";
                 dir.is_absolute(),
                 "[hp_decoders].ffmpeg_dir must be the folder's whole path, drive included"
             );
         }
         for target in &config.targets {
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9519";
                 !target.name.is_empty(),
                 "a [[targets]] entry has an empty name"
             );
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9520", name = target.name;
                 !target.host.is_empty(),
                 "target {:?} has an empty host",
                 target.name
             );
         }
         for (i, target) in config.targets.iter().enumerate() {
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9521", name = target.name;
                 !config.targets[..i].iter().any(|t| t.name == target.name),
                 "duplicate target name {:?}",
                 target.name
@@ -1713,7 +1823,8 @@ impl ConfigFile {
         for target in &config.targets {
             // A size of nothing is not a size: a zero axis would ask every engine
             // for a desktop that cannot exist.
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9522", name = target.name, size = size_text(target.size);
                 target.size.is_none_or(|(w, h)| w > 0 && h > 0),
                 "target {:?} sets a {} size, but its width and height must both be \
                  greater than zero",
@@ -1726,7 +1837,9 @@ impl ConfigFile {
             // screen under it, but holding a configured size would open at one
             // the operator did not choose. (A size under the ceiling at 1x may
             // still land over it on a 2x screen; that one is held, like a screen.)
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9523", name = target.name, size = size_text(target.size),
+                long = crate::video::MAX_LONG_SIDE, short = crate::video::MAX_SHORT_SIDE;
                 target.size.is_none_or(|(w, h)| {
                     crate::video::within_ceiling((u32::from(w), u32::from(h)))
                 }),
@@ -1740,7 +1853,8 @@ impl ConfigFile {
             );
             // Standard mode shows the Mac's physical displays as they are, so a
             // size there is one no session would ever state.
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9524", name = target.name, subtype = target.subtype.map_or("", Subtype::name);
                 target.size.is_none() || target.sized(),
                 "target {:?} sets size on subtype {:?}, which shares the Mac's physical \
                  displays and never sizes them. Remove the key{}.",
@@ -1752,7 +1866,8 @@ impl ConfigFile {
             // pixels, so a size past the ceiling's points at 2x would be shrunk for
             // a Retina client after the picker had stated it.
             let (most_w, most_h) = crate::vnc_apple::POINTS_AT_ANY_DENSITY;
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9525", name = target.name, size = size_text(target.size), width = most_w, height = most_h;
                 !target.has_virtual_display()
                     || target.size.is_none_or(|(w, h)| w <= most_w && h <= most_h),
                 "target {:?} sets a {} size, but a Mac's virtual display holds at most \
@@ -1764,7 +1879,8 @@ impl ConfigFile {
             // The graphics pipeline is RDP's alone: EGFX is an RDP channel, so on a
             // VNC target the key could only be a belief about the wrong protocol,
             // and either value would be silently inert.
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9526", name = target.name, protocol = target.protocol.name();
                 target.egfx.is_none() || target.protocol == Protocol::Rdp,
                 "target {:?} sets egfx on a {} target, and only rdp has a graphics pipeline \
                  to switch. Remove the key.",
@@ -1772,19 +1888,43 @@ impl ConfigFile {
                 target.protocol.name()
             );
             // H.264 rides the pipeline, so it needs one: an RDP target's, left on.
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9527", name = target.name;
                 !target.egfx_h264 || (target.protocol == Protocol::Rdp && target.egfx()),
                 "target {:?} sets egfx_h264, which only an rdp target with its graphics pipeline \
                  on can take: H.264 is drawn on that pipeline. Remove the key{}.",
                 target.name,
                 if target.protocol == Protocol::Rdp { ", or egfx = false" } else { "" }
             );
+            // A count of virtual displays is a count the engine asks the remote
+            // for, and two remotes create them: a Windows host and a Mac in High
+            // Performance mode. On any other target the key would be read and
+            // change nothing.
+            ensure_known!(
+                "AL-9563", name = target.name, count = target.virtual_displays, most = MAX_VIRTUAL_DISPLAYS;
+                (1..=MAX_VIRTUAL_DISPLAYS).contains(&target.virtual_displays),
+                "target {:?} sets virtual_displays = {}, which must be 1 to {MAX_VIRTUAL_DISPLAYS}",
+                target.name,
+                target.virtual_displays
+            );
+            ensure_known!(
+                "AL-9564", name = target.name, count = target.virtual_displays;
+                target.virtual_displays == 1
+                    || target.protocol == Protocol::Rdp
+                    || target.subtype == Some(Subtype::ArdHighPerformance),
+                "target {:?} sets virtual_displays = {}, and only an rdp target or one with \
+                 subtype = \"ard-high-performance\" lays out more than one virtual display. \
+                 Remove the key.",
+                target.name,
+                target.virtual_displays
+            );
             // The camera rides MS-RDPECAM on RDP and wlshare's camera extension on a
             // `wlshare` target. Neither Apple's Screen Sharing nor a VNC server read
             // as a plain one speaks such an extension.
             let carries_devices = target.protocol == Protocol::Rdp || target.wlshare();
             let kind = target.subtype.map_or("plain vnc", Subtype::name);
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9528", name = target.name, kind = kind;
                 !target.camera || carries_devices,
                 "target {:?} is {kind} and sets camera, which has nowhere to go there: the \
                  camera rides MS-RDPECAM on rdp and wlshare's camera extension on a vnc target \
@@ -1793,7 +1933,8 @@ impl ConfigFile {
             );
             // The microphone likewise: MS-RDPEAI on RDP, wlshare's microphone extension on
             // a `wlshare` target, and nothing anywhere else.
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9529", name = target.name, kind = kind;
                 !target.microphone || carries_devices,
                 "target {:?} is {kind} and sets microphone, which has nowhere to go there: \
                  the microphone rides MS-RDPEAI on rdp and wlshare's microphone extension on a \
@@ -1808,7 +1949,8 @@ impl ConfigFile {
             // own AAC-ELD ([`crate::vnc_apple_media`]), so the keys could not do
             // anything there.
             let sound = target.offers().audio;
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9530", name = target.name, kind = kind;
                 target.audio_bitrate.is_none() || sound,
                 "target {:?} is {kind} and sets audio_bitrate — it is the encoder's rate, \
                  and no session there has sound to encode. Remove the key.",
@@ -1816,40 +1958,19 @@ impl ConfigFile {
             );
             // Either way: `false` without sound is as unreadable as `true`, and a key
             // nothing reads is a mistake to report, not a preference to keep.
-            anyhow::ensure!(
+            ensure_known!(
+                "AL-9531", name = target.name, kind = kind;
                 target.audio_adaptive.is_none() || sound,
                 "target {:?} is {kind} and sets audio_adaptive — adapting means moving the \
                  encoder's bitrate, and no session there has sound to encode. Remove the key.",
                 target.name
             );
-            anyhow::ensure!(
-                target.audio_adaptive_min.is_none() || (sound && target.audio_adaptive()),
-                "target {:?} sets audio_adaptive_min beside audio_adaptive = false or on a \
-                 target without sound to encode — the floor belongs to the adaptive walk, and without \
-                 the walk nothing would read it",
-                target.name
-            );
-            let bitrate = target.audio_bitrate.unwrap_or(DEFAULT_AUDIO_BITRATE_KBPS);
             if let Some(kbps) = target.audio_bitrate {
-                anyhow::ensure!(
+                ensure_known!(
+                    "AL-9533", name = target.name, kbps = kbps;
                     (6..=510).contains(&kbps),
                     "target {:?} sets audio_bitrate = {kbps}, which is out of range — it is \
                      in kbit/s and must be 6–510",
-                    target.name
-                );
-            }
-            if let Some(kbps) = target.audio_adaptive_min {
-                anyhow::ensure!(
-                    (6..=510).contains(&kbps),
-                    "target {:?} sets audio_adaptive_min = {kbps}, which is out of range — \
-                     it is in kbit/s and must be 6–510",
-                    target.name
-                );
-                anyhow::ensure!(
-                    kbps < bitrate,
-                    "target {:?} sets audio_adaptive_min = {kbps} at or above the bitrate \
-                     ceiling of {bitrate} kbit/s, which leaves the adaptive walk nowhere \
-                     to go",
                     target.name
                 );
             }
@@ -1862,13 +1983,15 @@ impl ConfigFile {
             match (target.protocol, target.subtype) {
                 (Protocol::Vnc, Some(subtype @ (Subtype::Ard | Subtype::ArdHighPerformance | Subtype::ArdMirror))) => {
                     let name = subtype.name();
-                    anyhow::ensure!(
+                    ensure_known!(
+                        "AL-9536", name = target.name, subtype = name;
                         !target.username.is_empty() && !target.password.is_empty(),
                         "target {:?} is subtype {name:?} but has no username and password — \
                          both are needed, and on a Mac they are an account's there",
                         target.name
                     );
-                    anyhow::ensure!(
+                    ensure_known!(
+                        "AL-9537", name = target.name, subtype = name;
                         target.vnc_password.is_empty(),
                         "target {:?} is subtype {name:?} but sets vnc_password, which only a \
                          plain \"vnc\" target uses — Apple's authentication carries the \
@@ -1877,7 +2000,8 @@ impl ConfigFile {
                     );
                 }
                 (Protocol::Vnc, None | Some(Subtype::Wlshare)) => {
-                    anyhow::ensure!(
+                    ensure_known!(
+                        "AL-9538", name = target.name;
                         target.username.is_empty() || !target.password.is_empty(),
                         "target {:?} is protocol \"vnc\" and sets username without password — \
                          RSA-AES carries the two together; a VNC server's own password goes \
@@ -1889,7 +2013,8 @@ impl ConfigFile {
                 // catch-all, so that a second VNC subtype cannot land here and
                 // be told it belongs to another protocol. Adding one stops the
                 // build until this match says what it means.
-                (Protocol::Rdp, Some(subtype)) => anyhow::bail!(
+                (Protocol::Rdp, Some(subtype)) => bail_known!(
+                    "AL-9539", name = target.name, subtype = subtype.name();
                     "target {:?} is protocol \"rdp\" and sets subtype {:?}, which only \"vnc\" \
                      targets have",
                     target.name,
@@ -1898,7 +2023,8 @@ impl ConfigFile {
                 // The client offers only NLA, and CredSSP has nothing to log on
                 // with unless both are set.
                 (Protocol::Rdp, None) => {
-                    anyhow::ensure!(
+                    ensure_known!(
+                        "AL-9540", name = target.name;
                         !target.username.is_empty() && !target.password.is_empty(),
                         "target {:?} is protocol \"rdp\" and needs both username and password — \
                          this client logs on only through NLA, which carries the two together",
@@ -1907,7 +2033,8 @@ impl ConfigFile {
                 }
             }
             if target.protocol != Protocol::Vnc {
-                anyhow::ensure!(
+                ensure_known!(
+                    "AL-9541", name = target.name, protocol = target.protocol.name();
                     target.vnc_password.is_empty(),
                     "target {:?} is protocol {:?} but sets vnc_password, which only \"vnc\" \
                      targets use",
@@ -1916,7 +2043,8 @@ impl ConfigFile {
                 );
             }
             if target.protocol != Protocol::Rdp {
-                anyhow::ensure!(
+                ensure_known!(
+                    "AL-9542", name = target.name, protocol = target.protocol.name();
                     target.domain.is_none(),
                     "target {:?} is protocol {:?} but sets domain, which only \"rdp\" targets use",
                     target.name,
@@ -1924,7 +2052,8 @@ impl ConfigFile {
                 );
             }
             if let Some(q) = target.video_quality {
-                anyhow::ensure!(
+                ensure_known!(
+                    "AL-9543", name = target.name, quality = q;
                     (1..=100).contains(&q),
                     "target {:?} sets video_quality = {q}, which is out of range — it \
                      must be 1–100",
@@ -2032,7 +2161,7 @@ impl ConfigFile {
     /// Resolve the runtime configuration: validate the web-login credential and
     /// carry over every target profile (the browser picks one after login).
     ///
-    /// `listen` is `--listen`/`REMOTEX_LISTEN` when either was given, and it wins
+    /// `listen` is `--listen`/`ALUMIA_LISTEN` when either was given, and it wins
     /// over `[server].listen`. That is the whole precedence: one address, from the
     /// command line if it is there and from the file otherwise.
     ///
@@ -2046,8 +2175,12 @@ impl ConfigFile {
     ) -> anyhow::Result<AppConfig> {
         let server = self.server.unwrap_or_default();
         let listen = match (listen, server.listen.as_deref()) {
-            (Some(value), _) => parse_listen(value).context("invalid --listen address")?,
-            (None, Some(value)) => parse_listen(value).context("invalid [server].listen")?,
+            (Some(value), _) => {
+                parse_listen(value).context("invalid --listen address").cause(|| Cause::new("AL-9544"))?
+            }
+            (None, Some(value)) => {
+                parse_listen(value).context("invalid [server].listen").cause(|| Cause::new("AL-9545"))?
+            }
             (None, None) => ListenAddr::Tcp(DEFAULT_LISTEN.to_owned()),
         };
         let site_passwd = server
@@ -2057,10 +2190,12 @@ impl ConfigFile {
             .filter(|s| !s.is_empty())
             .context(
                 "[server].site_passwd is required — generate one with \
-                 `remotex gen-passwd <username>`",
-            )?;
-        let site_passwd =
-            SitePasswd::parse(site_passwd).context("invalid [server].site_passwd")?;
+                 `alumia gen-passwd <username>`",
+            )
+            .cause(|| Cause::new("AL-9546"))?;
+        let site_passwd = SitePasswd::parse(site_passwd)
+            .context("invalid [server].site_passwd")
+            .cause(|| Cause::new("AL-9547"))?;
         let branding = Self::resolve_branding(self.branding.as_ref())?;
         Ok(AppConfig {
             listen,
@@ -2075,7 +2210,8 @@ impl ConfigFile {
                 .filter(|s| !s.is_empty())
                 .map(dev_hostname)
                 .transpose()
-                .context("invalid [server].dev_subdomain")?,
+                .context("invalid [server].dev_subdomain")
+                .cause(|| Cause::new("AL-9548"))?,
             meter: Self::resolve_meter(self.meter, state_dir),
             hevc_wasm: Self::resolve_hevc_wasm(self.hevc_wasm, data_dir),
             hp_decoders: self.hp_decoders.unwrap_or_default(),
@@ -2102,16 +2238,18 @@ impl ConfigFile {
 fn parse_listen(value: &str) -> anyhow::Result<ListenAddr> {
     let value = value.trim();
     if let Some(path) = value.strip_prefix(UNIX_LISTEN_PREFIX) {
-        anyhow::ensure!(
+        ensure_known!(
+            "AL-9549";
             !path.is_empty(),
             "{UNIX_LISTEN_PREFIX} names no socket — write the path out, as in \
-             \"{UNIX_LISTEN_PREFIX}/run/remotex/gateway.sock\""
+             \"{UNIX_LISTEN_PREFIX}/run/alumia/gateway.sock\""
         );
         // Refused here, at the one place the address is read, rather than at the
         // bind: `std::os::unix::net` does not exist on Windows, so a gateway there
         // has no socket to offer and should say so before it reports a listener.
         #[cfg(not(unix))]
-        anyhow::bail!(
+        bail_known!(
+            "AL-9550", path = path;
             "{UNIX_LISTEN_PREFIX}{path} — Unix sockets are not supported on Windows; \
              listen on host:port, as in \"{DEFAULT_LISTEN}\""
         );
@@ -2120,14 +2258,17 @@ fn parse_listen(value: &str) -> anyhow::Result<ListenAddr> {
     }
     let (host, port) = value.rsplit_once(':').with_context(|| {
         format!("{value:?} is not host:port — the port is required, as in \"{DEFAULT_LISTEN}\"")
-    })?;
-    anyhow::ensure!(
+    })
+    .cause(|| Cause::new("AL-9551").with("value", value))?;
+    ensure_known!(
+        "AL-9552", value = value, port = port;
         !host.is_empty(),
         "{value:?} names no host — write the interface out, as in \"0.0.0.0:{port}\""
     );
     let port: u16 = port
         .parse()
-        .with_context(|| format!("{port:?} is not a port number (0-65535)"))?;
+        .with_context(|| format!("{port:?} is not a port number (0-65535)"))
+        .cause(|| Cause::new("AL-9553").with("port", port))?;
     // Brackets as well as colons: `[localhost]:52380` has no colon in its host and
     // would otherwise pass here, to fail at `lookup_host` on the way up instead —
     // which is a config mistake reported as a resolver one. A bracket is only ever
@@ -2141,15 +2282,17 @@ fn parse_listen(value: &str) -> anyhow::Result<ListenAddr> {
                     "a host with a colon or brackets must be a bracketed IPv6 \
                      address, as in \"[::1]:{port}\""
                 )
-            })?;
+            })
+            .cause(|| Cause::new("AL-9554").with("port", port))?;
         literal
             .parse::<std::net::Ipv6Addr>()
-            .with_context(|| format!("{literal:?} is not an IPv6 address"))?;
+            .with_context(|| format!("{literal:?} is not an IPv6 address"))
+            .cause(|| Cause::new("AL-9555").with("literal", literal))?;
     }
     Ok(ListenAddr::Tcp(format!("{host}:{port}")))
 }
 
-/// `<label>.remotex.localhost`, refusing anything that is not a single DNS label.
+/// `<label>.alumia.localhost`, refusing anything that is not a single DNS label.
 ///
 /// The check is what makes the redirect target unforgeable: a `Location` built
 /// from an unvalidated string could name any host at all, and this one is
@@ -2157,32 +2300,35 @@ fn parse_listen(value: &str) -> anyhow::Result<ListenAddr> {
 /// colon and no credentials. So the target is always some name under
 /// `.localhost`, which by RFC 6761 can only be loopback.
 ///
-/// The `remotex` label in the middle is what keeps a development gateway from
+/// The `alumia` label in the middle is what keeps a development gateway from
 /// claiming a name somebody else's tooling may already answer to: `gw-a.localhost`
 /// is a name anything on this machine may have taken, while everything under
-/// `.remotex.localhost` is this project's by construction. It is one name to
+/// `.alumia.localhost` is this project's by construction. It is one name to
 /// recognise in a browser's history and one suffix to clear cookies for.
 ///
 /// Length is bounded at 63, the DNS label limit, for the same reason the shape is
 /// checked rather than trusted: a name nothing can resolve is a redirect loop
 /// waiting to happen, and a config file is where it should be caught.
 fn dev_hostname(label: &str) -> anyhow::Result<String> {
-    anyhow::ensure!(
+    ensure_known!(
+        "AL-9556", label = label;
         label.len() <= 63,
         "{label:?} is longer than a DNS label may be (63 characters)"
     );
-    anyhow::ensure!(
+    ensure_known!(
+        "AL-9557", label = label;
         label
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '-'),
         "{label:?} must be one DNS label — ASCII letters, digits and hyphens only, \
-         and no dots (it is used as <label>.remotex.localhost)"
+         and no dots (it is used as <label>.alumia.localhost)"
     );
-    anyhow::ensure!(
+    ensure_known!(
+        "AL-9558", label = label;
         !label.starts_with('-') && !label.ends_with('-'),
         "{label:?} may not start or end with a hyphen"
     );
-    Ok(format!("{label}.remotex.localhost"))
+    Ok(format!("{label}.alumia.localhost"))
 }
 
 /// Load the config file: the explicit `--config` path, or the global path of the
@@ -2190,9 +2336,11 @@ fn dev_hostname(label: &str) -> anyhow::Result<String> {
 pub fn load(explicit: Option<&Path>) -> anyhow::Result<(ConfigFile, PathBuf)> {
     let path = config_path(explicit)?;
     let text = std::fs::read_to_string(&path)
-        .with_context(|| format!("failed to read config file {}", path.display()))?;
-    let config =
-        ConfigFile::parse(&text).with_context(|| format!("in config file {}", path.display()))?;
+        .with_context(|| format!("failed to read config file {}", path.display()))
+        .cause(|| Cause::new("AL-9559").with("path", path.display()))?;
+    let config = ConfigFile::parse(&text)
+        .with_context(|| format!("in config file {}", path.display()))
+        .cause(|| Cause::new("AL-9560").with("path", path.display()))?;
     Ok((config, path))
 }
 
@@ -2211,12 +2359,14 @@ pub fn check(text: &str) -> anyhow::Result<()> {
 pub fn read_candidate(path: Option<&Path>) -> anyhow::Result<String> {
     match path {
         Some(path) => std::fs::read_to_string(path)
-            .with_context(|| format!("failed to read {}", path.display())),
+            .with_context(|| format!("failed to read {}", path.display()))
+            .cause(|| Cause::new("AL-9559").with("path", path.display())),
         None => {
             let mut text = String::new();
             std::io::stdin()
                 .read_to_string(&mut text)
-                .context("failed to read the config from stdin")?;
+                .context("failed to read the config from stdin")
+                .cause(|| Cause::new("AL-9561"))?;
             Ok(text)
         }
     }
@@ -2230,7 +2380,8 @@ fn config_path(explicit: Option<&Path>) -> anyhow::Result<PathBuf> {
         None => installed_config_path().context(
             "no --config given and not running from an installed layout — \
              pass --config <path>",
-        ),
+        )
+        .cause(|| Cause::new("AL-9562")),
     }
 }
 
@@ -2261,11 +2412,11 @@ pub fn state_dir(config: &Path) -> PathBuf {
 }
 
 /// Where the gateway finds the files that come with its version but no build
-/// holds — the software HEVC decoder's archive: `share/remotex` in its release
-/// tree, beside the `share/doc/remotex` every release target installs. That is
-/// `/usr/share/remotex` for the `.deb` and `.rpm`, `/usr/local/share/remotex` for
-/// the macOS `.pkg`, `share\remotex` under the `.msi`'s install directory,
-/// and `/opt/remotex/versions/<version>/share/remotex` in the container image.
+/// holds — the software HEVC decoder's archive: `share/alumia` in its release
+/// tree, beside the `share/doc/alumia` every release target installs. That is
+/// `/usr/share/alumia` for the `.deb` and `.rpm`, `/usr/local/share/alumia` for
+/// the macOS `.pkg`, `share\alumia` under the `.msi`'s install directory,
+/// and `/opt/alumia/versions/<version>/share/alumia` in the container image.
 /// They follow the binary, not the config, and are
 /// replaced with it: they are pinned to its version, unlike the state directory.
 ///
@@ -2283,11 +2434,11 @@ fn data_dir_for_exe(exe: &Path) -> Option<PathBuf> {
     if !bin_dir.file_name()?.eq_ignore_ascii_case("bin") {
         return None;
     }
-    Some(bin_dir.parent()?.join("share").join("remotex"))
+    Some(bin_dir.parent()?.join("share").join("alumia"))
 }
 
 /// The executable that is actually running, through any link to it: the
-/// container's `/opt/remotex/current` is one.
+/// container's `/opt/alumia/current` is one.
 fn running_exe() -> Option<PathBuf> {
     let exe = std::env::current_exe().ok()?;
     Some(exe.canonicalize().unwrap_or(exe))
@@ -2307,8 +2458,8 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     // delete a file containing credentials.
     if bin_dir == Path::new("/usr/bin") {
         return Some(InstalledLayout {
-            config: "/etc/remotex/remotex.toml".into(),
-            state_dir: "/var/lib/remotex".into(),
+            config: "/etc/alumia/alumia.toml".into(),
+            state_dir: "/var/lib/alumia".into(),
         });
     }
 
@@ -2316,29 +2467,29 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     // prefix. Its configuration follows that prefix as well.
     if bin_dir == Path::new("/usr/local/bin") {
         return Some(InstalledLayout {
-            config: "/usr/local/etc/remotex/remotex.toml".into(),
-            state_dir: "/usr/local/var/remotex".into(),
+            config: "/usr/local/etc/alumia/alumia.toml".into(),
+            state_dir: "/usr/local/var/alumia".into(),
         });
     }
 
-    // By default the Windows package installs the same tree under %ProgramFiles%\remotex:
-    // <root>\bin\remotex.exe, and the tree is relocatable. Its configuration lives
+    // By default the Windows package installs the same tree under %ProgramFiles%\alumia:
+    // <root>\bin\alumia.exe, and the tree is relocatable. Its configuration lives
     // outside that tree, under %ProgramData%, for the same reason as /etc above —
     // replacing the unpacked release must not touch a file holding credentials.
     #[cfg(windows)]
     if bin_dir.file_name().is_some_and(|name| name.eq_ignore_ascii_case("bin"))
         && let Some(program_data) = std::env::var_os("ProgramData")
     {
-        let program_data = PathBuf::from(program_data).join("remotex");
+        let program_data = PathBuf::from(program_data).join("alumia");
         return Some(InstalledLayout {
-            config: program_data.join("remotex.toml"),
+            config: program_data.join("alumia.toml"),
             state_dir: program_data,
         });
     }
 
     // The container image (packaging/Dockerfile) puts the binary at
-    // <prefix>/versions/<version>/bin/remotex, while configuration and state live
-    // outside the version, under /opt/remotex/etc and /opt/remotex/var.
+    // <prefix>/versions/<version>/bin/alumia, while configuration and state live
+    // outside the version, under /opt/alumia/etc and /opt/alumia/var.
     let version_root = bin_dir.parent()?;
     let versions_dir = version_root.parent()?;
     if versions_dir.file_name()? != "versions" {
@@ -2346,7 +2497,7 @@ fn installed_layout_for_exe(exe: &Path) -> Option<InstalledLayout> {
     }
     let prefix = versions_dir.parent()?;
     Some(InstalledLayout {
-        config: prefix.join("etc/remotex.toml"),
+        config: prefix.join("etc/alumia.toml"),
         state_dir: prefix.join("var"),
     })
 }
@@ -2357,67 +2508,67 @@ mod tests {
 
     #[test]
     fn installed_paths_follow_each_install_layout() {
-        let linux = installed_layout_for_exe(Path::new("/usr/bin/remotex")).unwrap();
-        assert_eq!(linux.config, Path::new("/etc/remotex/remotex.toml"));
-        assert_eq!(linux.state_dir, Path::new("/var/lib/remotex"));
+        let linux = installed_layout_for_exe(Path::new("/usr/bin/alumia")).unwrap();
+        assert_eq!(linux.config, Path::new("/etc/alumia/alumia.toml"));
+        assert_eq!(linux.state_dir, Path::new("/var/lib/alumia"));
 
-        let mac = installed_layout_for_exe(Path::new("/usr/local/bin/remotex")).unwrap();
-        assert_eq!(mac.config, Path::new("/usr/local/etc/remotex/remotex.toml"));
-        assert_eq!(mac.state_dir, Path::new("/usr/local/var/remotex"));
+        let mac = installed_layout_for_exe(Path::new("/usr/local/bin/alumia")).unwrap();
+        assert_eq!(mac.config, Path::new("/usr/local/etc/alumia/alumia.toml"));
+        assert_eq!(mac.state_dir, Path::new("/usr/local/var/alumia"));
 
         // The container's tree is a Unix one; on Windows any `bin` directory is
         // the package's tree, which is the arm below.
         #[cfg(unix)]
         {
             let quick = installed_layout_for_exe(Path::new(
-                "/srv/remotex/versions/0.0.144/bin/remotex",
+                "/srv/alumia/versions/0.0.144/bin/alumia",
             ))
             .unwrap();
-            assert_eq!(quick.config, Path::new("/srv/remotex/etc/remotex.toml"));
-            assert_eq!(quick.state_dir, Path::new("/srv/remotex/var"));
+            assert_eq!(quick.config, Path::new("/srv/alumia/etc/alumia.toml"));
+            assert_eq!(quick.state_dir, Path::new("/srv/alumia/var"));
         }
 
         #[cfg(windows)]
         {
             let installed = installed_layout_for_exe(Path::new(
-                r"C:\Program Files\remotex\bin\remotex.exe",
+                r"C:\Program Files\alumia\bin\alumia.exe",
             ))
             .unwrap();
             let program_data = PathBuf::from(std::env::var_os("ProgramData").unwrap());
-            assert_eq!(installed.config, program_data.join("remotex").join("remotex.toml"));
-            assert_eq!(installed.state_dir, program_data.join("remotex"));
+            assert_eq!(installed.config, program_data.join("alumia").join("alumia.toml"));
+            assert_eq!(installed.state_dir, program_data.join("alumia"));
         }
 
-        assert!(installed_layout_for_exe(Path::new("/checkout/target/debug/remotex")).is_none());
+        assert!(installed_layout_for_exe(Path::new("/checkout/target/debug/alumia")).is_none());
     }
 
     #[test]
-    fn the_data_directory_is_share_remotex_in_each_release_tree() {
+    fn the_data_directory_is_share_alumia_in_each_release_tree() {
         let data = |exe: &str| data_dir_for_exe(Path::new(exe));
-        assert_eq!(data("/usr/bin/remotex"), Some("/usr/share/remotex".into()), ".deb and .rpm");
-        assert_eq!(data("/usr/local/bin/remotex"), Some("/usr/local/share/remotex".into()), ".pkg");
+        assert_eq!(data("/usr/bin/alumia"), Some("/usr/share/alumia".into()), ".deb and .rpm");
+        assert_eq!(data("/usr/local/bin/alumia"), Some("/usr/local/share/alumia".into()), ".pkg");
         assert_eq!(
-            data("/opt/remotex/versions/0.0.294/bin/remotex"),
-            Some("/opt/remotex/versions/0.0.294/share/remotex".into()),
+            data("/opt/alumia/versions/0.0.294/bin/alumia"),
+            Some("/opt/alumia/versions/0.0.294/share/alumia".into()),
             "the container image"
         );
         assert_eq!(
-            data("/home/me/remotex-0.0.294-linux-x86_64/bin/remotex"),
-            Some("/home/me/remotex-0.0.294-linux-x86_64/share/remotex".into()),
+            data("/home/me/alumia-0.0.294-linux-x86_64/bin/alumia"),
+            Some("/home/me/alumia-0.0.294-linux-x86_64/share/alumia".into()),
             "any other release tree"
         );
         #[cfg(windows)]
         assert_eq!(
-            data(r"C:\Program Files\remotex\bin\remotex.exe"),
-            Some(PathBuf::from(r"C:\Program Files\remotex\share\remotex")),
+            data(r"C:\Program Files\alumia\bin\alumia.exe"),
+            Some(PathBuf::from(r"C:\Program Files\alumia\share\alumia")),
             ".msi"
         );
-        assert_eq!(data("/checkout/target/debug/remotex"), None, "a Cargo build");
+        assert_eq!(data("/checkout/target/debug/alumia"), None, "a Cargo build");
     }
 
     #[test]
     fn a_config_outside_an_installation_keeps_state_in_its_own_directory() {
-        assert_eq!(state_dir(Path::new("/home/me/remotex/uat.toml")), Path::new("/home/me/remotex"));
+        assert_eq!(state_dir(Path::new("/home/me/alumia/uat.toml")), Path::new("/home/me/alumia"));
         assert_eq!(state_dir(Path::new("uat.toml")), Path::new(""), "the working directory");
     }
 
@@ -2525,8 +2676,8 @@ mod tests {
     #[test]
     fn a_unix_socket_is_a_listen_address_too() {
         assert_eq!(
-            resolved(r#"listen = "unix:/run/remotex/gateway.sock""#).listen,
-            ListenAddr::Unix(PathBuf::from("/run/remotex/gateway.sock"))
+            resolved(r#"listen = "unix:/run/alumia/gateway.sock""#).listen,
+            ListenAddr::Unix(PathBuf::from("/run/alumia/gateway.sock"))
         );
         // Everything after the prefix is the path — a file name is not parsed for
         // a port, however much of one it looks like.
@@ -2600,7 +2751,7 @@ mod tests {
         }
     }
 
-    /// `--listen`/`REMOTEX_LISTEN` replaces the file's address whole, and is held
+    /// `--listen`/`ALUMIA_LISTEN` replaces the file's address whole, and is held
     /// to the same shape — an override nobody validated is the one that turns a
     /// typo into a gateway on an address nothing reaches.
     #[test]
@@ -2638,10 +2789,10 @@ mod tests {
     // carrying a dot, a slash, a colon or credentials would point somewhere that is
     // not loopback at all.
     #[test]
-    fn a_dev_subdomain_becomes_one_label_under_remotex_localhost() {
+    fn a_dev_subdomain_becomes_one_label_under_alumia_localhost() {
         assert_eq!(
             resolved(r#"dev_subdomain = "a""#).dev_hostname.as_deref(),
-            Some("a.remotex.localhost")
+            Some("a.alumia.localhost")
         );
         // Unset, and whitespace-only, both disable it — as `branding` does.
         assert_eq!(resolved("").dev_hostname, None);
@@ -2649,19 +2800,19 @@ mod tests {
         // Trimmed, so a stray space cannot become part of a hostname.
         assert_eq!(
             resolved(r#"dev_subdomain = "  b  ""#).dev_hostname.as_deref(),
-            Some("b.remotex.localhost")
+            Some("b.alumia.localhost")
         );
         // Digits and inner hyphens are legal in a DNS label.
         assert_eq!(
             resolved(r#"dev_subdomain = "gw-2""#).dev_hostname.as_deref(),
-            Some("gw-2.remotex.localhost")
+            Some("gw-2.alumia.localhost")
         );
     }
 
     #[test]
     fn a_dev_subdomain_that_is_not_one_label_is_refused() {
         for bad in [
-            // A dot would move the name out from under `.remotex.localhost`
+            // A dot would move the name out from under `.alumia.localhost`
             // entirely, which is the whole of what keeps the target on loopback.
             "a.b",
             "evil.example.com",
@@ -2688,7 +2839,7 @@ mod tests {
             resolved(&format!("dev_subdomain = {:?}", "a".repeat(63)))
                 .dev_hostname
                 .as_deref(),
-            Some(&*format!("{}.remotex.localhost", "a".repeat(63)))
+            Some(&*format!("{}.alumia.localhost", "a".repeat(63)))
         );
     }
 
@@ -2705,7 +2856,7 @@ mod tests {
             r#"
             [branding]
             text = "  Acme Remote  "
-            logo = "/etc/remotex/acme.png"
+            logo = "/etc/alumia/acme.png"
 
             [server]
             {}
@@ -2725,7 +2876,7 @@ mod tests {
         let LogoSource::File(path) = &logo.source else {
             panic!("a plain string is a path");
         };
-        assert_eq!(path, &PathBuf::from("/etc/remotex/acme.png"));
+        assert_eq!(path, &PathBuf::from("/etc/alumia/acme.png"));
         assert_eq!(logo.mime, "image/png");
 
         // Whitespace-only → falls back to the default.
@@ -2738,7 +2889,7 @@ mod tests {
     /// a string, so the file fails to parse rather than quietly naming nothing.
     #[test]
     fn the_old_branding_string_is_refused() {
-        let toml = format!("branding = \"remotex\"\n{}", minimal());
+        let toml = format!("branding = \"alumia\"\n{}", minimal());
         let err = ConfigFile::parse(&toml).expect_err("a string is not a [branding] table");
         assert!(format!("{err:#}").contains("branding"), "{err:#}");
     }
@@ -2747,7 +2898,7 @@ mod tests {
     /// and may leave the rest to the defaults.
     #[test]
     fn meter_is_recorded_in_the_state_directory_unless_a_database_is_named() {
-        let state = Path::new("/var/lib/remotex");
+        let state = Path::new("/var/lib/alumia");
         let meter = |table: &str| {
             let toml = format!("{table}\n{}", minimal());
             ConfigFile::parse(&toml).unwrap().resolve_with(None, state, Path::new("")).unwrap().meter
@@ -2761,19 +2912,19 @@ mod tests {
         assert_eq!(
             meter("[meter]\nenabled = true"),
             Some(MeterConfig {
-                database: PathBuf::from("/var/lib/remotex/meter.sqlite3"),
+                database: PathBuf::from("/var/lib/alumia/meter.sqlite3"),
                 max_records: 10_080,
             })
         );
         assert_eq!(
-            meter("[meter]\nenabled = true\ndatabase = \"/srv/meter/remotex.sqlite3\"")
+            meter("[meter]\nenabled = true\ndatabase = \"/srv/meter/alumia.sqlite3\"")
                 .unwrap()
                 .database,
-            Path::new("/srv/meter/remotex.sqlite3")
+            Path::new("/srv/meter/alumia.sqlite3")
         );
         assert_eq!(
             meter("[meter]\nenabled = true\ndatabase = \"meter/uat.sqlite3\"").unwrap().database,
-            Path::new("/var/lib/remotex/meter/uat.sqlite3"),
+            Path::new("/var/lib/alumia/meter/uat.sqlite3"),
             "a relative database is taken from the state directory"
         );
 
@@ -2800,7 +2951,7 @@ mod tests {
             let toml = format!("{table}\n{}", minimal());
             ConfigFile::parse(&toml)
                 .unwrap()
-                .resolve_with(None, Path::new("/var/lib/remotex"), data)
+                .resolve_with(None, Path::new("/var/lib/alumia"), data)
                 .unwrap()
                 .hevc_wasm
         };
@@ -2888,7 +3039,7 @@ mod tests {
     /// including by `check-config`, which resolves on the way through.
     #[test]
     fn a_logo_that_is_not_an_image_is_refused() {
-        for bad in ["logo = \"/etc/remotex/logo.pdf\"", "logo = \"/etc/remotex/logo\""] {
+        for bad in ["logo = \"/etc/alumia/logo.pdf\"", "logo = \"/etc/alumia/logo\""] {
             let toml = format!("[branding]\n{bad}\n{}", minimal());
             let err = ConfigFile::parse(&toml)
                 .and_then(ConfigFile::resolve)
@@ -3216,7 +3367,7 @@ mod tests {
         assert_eq!(summary("render_adaptive = false"), "video q60 chroma auto");
     }
 
-    /// The session card names the resolved plan: the dial, the chroma on the wire,
+    /// The information sheet names the resolved plan: the dial, the chroma on the wire,
     /// and the floor where the walk runs.
     #[test]
     fn a_session_card_describes_the_resolved_stream() {
@@ -3388,7 +3539,7 @@ mod tests {
         // Standard mode exposes physical displays, which this gateway never resizes,
         // and never touches the Mac's sound: the picker has nothing to offer there.
         let standard = &ard("username = \"andrew\"\npassword = \"h\"").unwrap().targets[0];
-        assert_eq!(standard.offers(), Offers { resize: false, audio: false, passthrough: None });
+        assert_eq!(standard.offers(), Offers { resize: false, audio: false, passthrough: None, placement: false });
 
         // And it is a VNC subtype only.
         let err = ConfigFile::parse(&format!(
@@ -3434,7 +3585,7 @@ mod tests {
         assert!(target.has_virtual_display());
         assert_eq!(
             target.offers(),
-            Offers { resize: true, audio: false, passthrough: None },
+            Offers { resize: true, audio: false, passthrough: None, placement: false },
             "a display to resize, and no sound on Standard's virtual display either"
         );
         assert!(!target.media_stream());
@@ -3509,7 +3660,7 @@ mod tests {
         assert!(!target.sized());
         assert_eq!(
             target.offers(),
-            Offers { resize: true, audio: false, passthrough: Some(Passthrough::AppleMedia) }
+            Offers { resize: true, audio: false, passthrough: Some(Passthrough::AppleMedia), placement: false }
         );
         assert!(target.sound(Choices::default()), "the sound comes with the picture");
         let window = Choices { size: Sizing::Window, ..Choices::default() };
@@ -3656,6 +3807,54 @@ mod tests {
                 .unwrap()
                 .targets[0];
         assert!(virtual_display.sized());
+    }
+
+    /// A count of virtual displays is one unless asked, at most two, and a key
+    /// only an rdp target and a High Performance Mac take: everywhere else it
+    /// would change nothing. The pipeline's passthrough keeps its row beside two:
+    /// the browser composes the span once and shows a display of it.
+    #[test]
+    fn virtual_displays_are_one_unless_asked_and_only_where_they_are_created() {
+        let one = ConfigFile::parse(&rdp_toml("")).unwrap().targets.remove(0);
+        assert_eq!(one.virtual_displays, 1);
+        assert_eq!(one.offers().passthrough, Some(Passthrough::RdpGraphics));
+
+        let two = ConfigFile::parse(&rdp_toml("virtual_displays = 2")).unwrap().targets.remove(0);
+        assert_eq!(two.virtual_displays, 2);
+        assert_eq!(two.offers().passthrough, Some(Passthrough::RdpGraphics), "the passthrough shows one display of the span");
+        assert!(two.offers().resize, "the window still drives each display's size");
+        assert_eq!(two.accepts(Choices { passthrough: true, ..Choices::default() }), Ok(()));
+        // Where the second sits is chosen only where there is a second, on a host
+        // that is told where: the Mac places its own.
+        let below = Choices { placement: Placement::Bottom, ..Choices::default() };
+        assert_eq!(two.accepts(below), Ok(()));
+        assert_eq!(one.accepts(below).unwrap_err().choice, "a place for the second display");
+
+        for bad in ["virtual_displays = 0", "virtual_displays = 3"] {
+            let err = ConfigFile::parse(&rdp_toml(bad)).unwrap_err();
+            assert!(format!("{err:#}").contains("must be 1 to 2"), "{bad}: {err:#}");
+        }
+        let err = ConfigFile::parse(&vnc_toml("virtual_displays = 2
+vnc_password = \"x\"")).unwrap_err();
+        assert!(format!("{err:#}").contains("lays out more than one virtual display"), "{err:#}");
+        // Standard mode's unofficial virtual display is one.
+        let err = ConfigFile::parse(&vnc_toml(
+            "subtype = \"ard\"\nusername = \"andrew\"\npassword = \"h\"\nvirtual_display = true\nvirtual_displays = 2",
+        ))
+        .unwrap_err();
+        assert!(format!("{err:#}").contains("lays out more than one virtual display"), "{err:#}");
+        let mac = ConfigFile::parse(&vnc_toml(
+            "subtype = \"ard-high-performance\"\nusername = \"andrew\"\npassword = \"h\"\nvirtual_displays = 2",
+        ))
+        .unwrap()
+        .targets
+        .remove(0);
+        assert_eq!(mac.virtual_displays, 2);
+        assert!(mac.accepts(below).is_err());
+        assert_eq!(mac.offers().passthrough, Some(Passthrough::AppleMedia), "each display is a stream of its own");
+        // One is every target's default and so is accepted anywhere.
+        ConfigFile::parse(&vnc_toml("virtual_displays = 1
+vnc_password = \"x\"")).unwrap();
     }
 
     /// Which sizings a target takes: following a window where the window can drive
@@ -4060,7 +4259,7 @@ mod tests {
         let win = rdp("");
         assert_eq!(
             win.offers(),
-            Offers { resize: true, audio: true, passthrough: Some(Passthrough::RdpGraphics) }
+            Offers { resize: true, audio: true, passthrough: Some(Passthrough::RdpGraphics), placement: false }
         );
         for chroma in [Chroma::Subsampled, Chroma::Full] {
             let composes = Decoders { chroma, apple_media: false, rdp_graphics: true, rdp_h264: false };
@@ -4090,7 +4289,7 @@ mod tests {
         assert!(!win.render_plan(passed, decodes).rdp_h264, "nor a target without the key");
 
         let bitmap = rdp("egfx = false");
-        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: None });
+        assert_eq!(bitmap.offers(), Offers { resize: false, audio: true, passthrough: None, placement: false });
         assert_eq!(
             bitmap.accepts(passed),
             Err(NotOffered { target: "win".to_owned(), choice: "a passthrough" })
@@ -4114,7 +4313,7 @@ mod tests {
         assert!(!config.targets[0].offers().audio);
         assert!(!config.targets[0].sound(Choices { audio: Sound::Opus, ..Choices::default() }));
 
-        for key in ["audio_bitrate = 96", "audio_adaptive = false", "audio_adaptive_min = 24"] {
+        for key in ["audio_bitrate = 96", "audio_adaptive = false"] {
             let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
                 .unwrap_err();
             let rendered = format!("{err:#}");
@@ -4140,7 +4339,7 @@ mod tests {
 
         // The sound is the Mac's own AAC-ELD, so the Opus encoder's keys have
         // nothing to tune.
-        for key in ["audio_bitrate = 128", "audio_adaptive = false", "audio_adaptive_min = 24"] {
+        for key in ["audio_bitrate = 128", "audio_adaptive = false"] {
             let err = ConfigFile::parse(&format!("[server]\n{}\n{target}{key}\n", site_passwd_line()))
                 .unwrap_err();
             let rendered = format!("{err:#}");
@@ -4288,62 +4487,48 @@ mod tests {
     /// filled, kilobits become bits, and the walk is on unless it was turned
     /// off — a target that names none of them already adapts.
     #[test]
-    fn the_audio_plan_resolves_defaults_and_the_adaptive_floor() {
+    fn the_audio_plan_resolves_defaults_and_the_walk() {
         let cfg = parse_audio_target("").expect("bare audio");
         assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::default());
         assert_eq!(
             cfg.targets[0].audio_plan(),
-            AudioPlan {
-                bitrate_bps: 96_000,
-                adaptive_floor_bps: Some(32_000)
-            },
-            "adaptive by default, between the default ceiling and floor"
+            AudioPlan { bitrate_bps: 96_000, adaptive: true },
+            "adaptive by default, from the default ceiling"
         );
 
         let cfg = parse_audio_target("audio_bitrate = 128").expect("a rate");
         assert_eq!(
             cfg.targets[0].audio_plan(),
-            AudioPlan {
-                bitrate_bps: 128_000,
-                adaptive_floor_bps: Some(32_000)
-            },
+            AudioPlan { bitrate_bps: 128_000, adaptive: true },
             "a ceiling alone moves the ceiling and keeps the walk"
         );
 
         let cfg = parse_audio_target("audio_adaptive = false").expect("fixed");
-        assert_eq!(
-            cfg.targets[0].audio_plan(),
-            AudioPlan::fixed(),
-            "turned off, the plan has no floor"
-        );
-        assert_eq!(cfg.targets[0].audio_plan().adaptive_floor_bps, None);
+        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan::fixed(), "turned off, the plan has no walk");
+        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan { bitrate_bps: 96_000, adaptive: false });
 
-        let cfg = parse_audio_target(
-            "audio_bitrate = 64\naudio_adaptive = true\naudio_adaptive_min = 24",
-        )
-        .expect("adaptive with both rates");
-        assert_eq!(
-            cfg.targets[0].audio_plan(),
-            AudioPlan {
-                bitrate_bps: 64_000,
-                adaptive_floor_bps: Some(24_000)
-            }
-        );
+        let cfg = parse_audio_target("audio_bitrate = 64\naudio_adaptive = true").expect("adaptive at a rate");
+        assert_eq!(cfg.targets[0].audio_plan(), AudioPlan { bitrate_bps: 64_000, adaptive: true });
     }
 
-    /// A ceiling under the default floor is no contradiction — the operator never
-    /// wrote the floor — so the plan holds the floor to the ceiling instead of
-    /// refusing, the way the render dial does.
+    /// A ceiling under the walk's floor is no contradiction: the plan keeps
+    /// the walk, which then has nothing to give up, the way the render dial
+    /// does under its encoder's floor.
     #[test]
-    fn a_ceiling_below_the_default_floor_is_the_floor() {
+    fn a_ceiling_below_the_floor_keeps_a_walk_of_nothing() {
         let cfg = parse_audio_target("audio_bitrate = 24").expect("a low ceiling");
-        assert_eq!(
-            cfg.targets[0].audio_plan(),
-            AudioPlan {
-                bitrate_bps: 24_000,
-                adaptive_floor_bps: Some(24_000)
-            }
-        );
+        let plan = cfg.targets[0].audio_plan();
+        assert_eq!(plan, AudioPlan { bitrate_bps: 24_000, adaptive: true });
+        assert!(plan.bitrate_bps < sound_opus::walk::BITRATE_FLOOR as i32);
+    }
+
+    /// The floor key is gone: the walk's floor is sound-opus's, fixed where a
+    /// lower rate stops being the same sound, and a file that still writes it
+    /// is refused as any unknown key is.
+    #[test]
+    fn an_audio_floor_is_no_longer_a_key() {
+        let err = parse_audio_target("audio_adaptive_min = 24").unwrap_err();
+        assert!(format!("{err:#}").contains("audio_adaptive_min"), "{err:#}");
     }
 
     /// Every key that tunes the encoder is refused on a target none of whose
@@ -4358,34 +4543,16 @@ mod tests {
             let err = plain(&format!("audio_adaptive = {switch}"));
             assert!(format!("{err:#}").contains("sets audio_adaptive"), "{err:#}");
         }
-        let err = plain("audio_adaptive_min = 24");
-        assert!(format!("{err:#}").contains("audio_adaptive_min"), "{err:#}");
     }
 
-    /// The floor needs the walk, has a range, and must sit under the ceiling.
+    /// The bitrate has a range: libopus's, in kbit/s.
     #[test]
-    fn the_audio_floor_is_validated_against_the_walk_and_the_ceiling() {
-        // The walk is on by default, so a bare floor is fine …
-        parse_audio_target("audio_adaptive_min = 24").expect("a floor for the default walk");
-        // … and refused only beside a walk turned off.
-        let err = parse_audio_target("audio_adaptive = false\naudio_adaptive_min = 24")
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("audio_adaptive_min"));
-
-        let err = parse_audio_target("audio_adaptive_min = 4").unwrap_err();
-        assert!(format!("{err:#}").contains("6–510"));
-
-        let err = parse_audio_target("audio_bitrate = 48\naudio_adaptive_min = 48")
-            .unwrap_err();
-        assert!(format!("{err:#}").contains("nowhere to go"));
-
-        // The *default* floor above a low ceiling is no contradiction — the
-        // operator never wrote it. It parses, and the plan clamps it to the
-        // ceiling instead ([`a_ceiling_below_the_default_floor_is_the_floor`]).
-        parse_audio_target("audio_bitrate = 8")
-            .expect("a default floor clamps instead of refusing");
-
-        let err = parse_audio_target("audio_bitrate = 999").unwrap_err();
-        assert!(format!("{err:#}").contains("6–510"));
+    fn the_audio_bitrate_is_validated_against_libopus() {
+        parse_audio_target("audio_bitrate = 6").expect("the bottom of the range");
+        parse_audio_target("audio_bitrate = 510").expect("the top of the range");
+        for off in ["audio_bitrate = 5", "audio_bitrate = 999"] {
+            let err = parse_audio_target(off).unwrap_err();
+            assert!(format!("{err:#}").contains("6–510"), "{err:#}");
+        }
     }
 }

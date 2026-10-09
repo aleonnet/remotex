@@ -1,38 +1,17 @@
-// Drawing one direction of the throughput meter: the points of a range on a
-// canvas, an area under a line, a dot on the newest second, four grid lines with
-// their rate at the right edge, an unlabelled dashed line across the range's average
-// rate, and a gap where a point was not read. The rendering is the panel's
-// (ThroughputPanel.tsx); this is the geometry and the strokes.
+// The geometry of one direction of the meter: the points of a range as the paths
+// of an SVG, an area under a line, four grid lines, a dashed line across the
+// range's average rate, and a gap where a point was not read. What they are drawn
+// with — the colours of the tokens, the area in lit cells — is the stylesheet's
+// and the panel's (ThroughputPanel.tsx, alumia.css); this is where things are.
+//
+// The drawing is in a box of its own units, stretched to whatever room the page
+// gives it, so nothing here asks the page how wide it is.
 
-import { formatRate } from "./throughput.ts";
+/** The box the trace is drawn in, in its own units. */
+export const VIEW = { width: 640, height: 150 };
 
-/// Room at the right edge for the scale's labels, in CSS pixels.
-export const SCALE_WIDTH = 68;
-
-const PAD_TOP = 6;
-const PAD_BOTTOM = 4;
-const LABEL_FONT = "11px ui-monospace, SFMono-Regular, Menlo, monospace";
-/// The mean line's dash, in CSS pixels: on, then off.
-const MEAN_DASH = [4, 4];
-
-export interface ChartInk {
-  line: string;
-  fill: string;
-  grid: string;
-  label: string;
-  surface: string;
-}
-
-export interface ChartLayout {
-  width: number;
-  height: number;
-  /** A rate per point, oldest first; `null` for one no sample covers. */
-  points: readonly (number | null)[];
-  /** The rate at the top of the plot. */
-  top: number;
-  /** The rate the mean line marks; `0` draws none. */
-  mean: number;
-}
+/** Room kept above the highest point and under the lowest, in the same units. */
+const PAD = 6;
 
 /** The runs of read seconds in `points`, each as `[from, to)`. */
 export function runs(points: readonly (number | null)[]): [number, number][] {
@@ -50,177 +29,90 @@ export function runs(points: readonly (number | null)[]): [number, number][] {
   return found;
 }
 
-/** The plot's x for the point at `index`, over `width` less the scale. */
-export function plotX(index: number, count: number, width: number): number {
-  return count > 1 ? (index / (count - 1)) * (width - SCALE_WIDTH) : 0;
+/** The x of the point at `index` of `count`, across the box. */
+export function chartX(index: number, count: number): number {
+  return count > 1 ? (index / (count - 1)) * VIEW.width : 0;
 }
 
-function plotY(value: number, layout: ChartLayout): number {
-  const plotHeight = layout.height - PAD_TOP - PAD_BOTTOM;
-  return PAD_TOP + plotHeight - (value / layout.top) * plotHeight;
+/** The y of `value` on a scale that tops out at `top`. */
+export function chartY(value: number, top: number): number {
+  const room = VIEW.height - PAD * 2;
+  return VIEW.height - PAD - (top > 0 ? value / top : 0) * room;
 }
 
-/// The y a one-pixel horizontal line at `value` is stroked on, on the pixel grid.
-function lineY(value: number, layout: ChartLayout): number {
-  return Math.round(plotY(value, layout)) + 0.5;
+/** What is drawn of one direction, as path data and positions in the box. */
+export interface ChartShape {
+  /** The four grid lines' y, lowest first. */
+  grid: number[];
+  /** One closed area per run of read points. */
+  areas: string[];
+  /** One line per run, over its area. */
+  lines: string[];
+  /**
+   * The y of the range's average rate, or null where nothing moved: a line at
+   * zero would only trace the axis. It is the average and not the peak so that
+   * one busy second marks the graph as the outlier it is rather than setting its
+   * line; the peak is said in words beside the graph.
+   */
+  mean: number | null;
 }
 
-function drawGrid(
-  ctx: CanvasRenderingContext2D,
-  layout: ChartLayout,
-  ink: ChartInk,
-) {
-  const plotWidth = layout.width - SCALE_WIDTH;
-  ctx.strokeStyle = ink.grid;
-  ctx.lineWidth = 1;
-  ctx.fillStyle = ink.label;
-  ctx.font = LABEL_FONT;
-  ctx.textAlign = "left";
-  ctx.textBaseline = "middle";
-  for (let g = 0; g <= 4; g++) {
-    const value = (layout.top * g) / 4;
-    const y = lineY(value, layout);
-    ctx.beginPath();
-    ctx.moveTo(0, y);
-    ctx.lineTo(plotWidth, y);
-    ctx.stroke();
-    if (g > 0) {
-      ctx.fillText(formatRate(value), plotWidth + 6, y);
+const at = (x: number, y: number) => `${x.toFixed(1)} ${y.toFixed(1)}`;
+
+/**
+ * The shape of `points`, oldest first, on a scale that tops out at `top`, with
+ * the average `mean`. A point that was not read is a gap, not a zero.
+ */
+export function chartShape(
+  points: readonly (number | null)[],
+  top: number,
+  mean: number,
+): ChartShape {
+  const floor = chartY(0, top);
+  const areas: string[] = [];
+  const lines: string[] = [];
+  for (const [from, to] of runs(points)) {
+    const trace = [];
+    for (let i = from; i < to; i++) {
+      trace.push(
+        at(chartX(i, points.length), chartY(points[i] as number, top)),
+      );
     }
+    const first = chartX(from, points.length).toFixed(1);
+    const last = chartX(to - 1, points.length).toFixed(1);
+    areas.push(
+      `M${first} ${floor.toFixed(1)} L${trace.join(" L")} L${last} ${floor.toFixed(1)} Z`,
+    );
+    lines.push(`M${trace.join(" L")}`);
   }
+  return {
+    grid: [0.25, 0.5, 0.75, 1].map((share) => chartY(top * share, top)),
+    areas,
+    lines,
+    mean: mean > 0 ? chartY(mean, top) : null,
+  };
 }
 
-/// The range's average rate: one dashed line across the plot in the direction's own
-/// ink, drawn over the area so the fill does not swallow it, and dashed so it reads as
-/// a mark on the graph rather than as data. It carries no rate of its own — the tile
-/// beside the graph names the same average. It is the average and not the peak so
-/// that one busy second marks the graph as the outlier it is rather than setting its
-/// line; the peak is the tile's text.
-function drawMean(
-  ctx: CanvasRenderingContext2D,
-  layout: ChartLayout,
-  ink: ChartInk,
-) {
-  const y = lineY(layout.mean, layout);
-  ctx.strokeStyle = ink.line;
-  ctx.lineWidth = 1;
-  ctx.setLineDash(MEAN_DASH);
-  ctx.beginPath();
-  ctx.moveTo(0, y);
-  ctx.lineTo(layout.width - SCALE_WIDTH, y);
-  ctx.stroke();
-  // Nothing else on the canvas dashes.
-  ctx.setLineDash([]);
-}
-
-/// The line through the read seconds `from` up to `to`, as the current path.
-function trace(
-  ctx: CanvasRenderingContext2D,
-  layout: ChartLayout,
-  from: number,
-  to: number,
-) {
-  ctx.beginPath();
-  for (let i = from; i < to; i++) {
-    const x = plotX(i, layout.points.length, layout.width);
-    const y = plotY(layout.points[i] as number, layout);
-    if (i === from) {
-      ctx.moveTo(x, y);
-    } else {
-      ctx.lineTo(x, y);
-    }
+/** The point under a pointer `px` from the plot's left edge: the nearest, never beside it. */
+export function pointedIndex(px: number, count: number, width: number): number {
+  if (count < 2 || width <= 0) {
+    return 0;
   }
-}
-
-/// One run of read seconds: its area, then its line over it.
-function drawRun(
-  ctx: CanvasRenderingContext2D,
-  layout: ChartLayout,
-  ink: ChartInk,
-  from: number,
-  to: number,
-) {
-  const count = layout.points.length;
-  trace(ctx, layout, from, to);
-  ctx.lineTo(plotX(to - 1, count, layout.width), plotY(0, layout));
-  ctx.lineTo(plotX(from, count, layout.width), plotY(0, layout));
-  ctx.closePath();
-  ctx.fillStyle = ink.fill;
-  ctx.fill();
-  trace(ctx, layout, from, to);
-  ctx.strokeStyle = ink.line;
-  ctx.lineWidth = 2;
-  ctx.lineJoin = "round";
-  ctx.stroke();
-}
-
-/// The newest second, when it was read: a dot ringed in the surface.
-function drawNewest(
-  ctx: CanvasRenderingContext2D,
-  layout: ChartLayout,
-  ink: ChartInk,
-) {
-  const count = layout.points.length;
-  const last = layout.points[count - 1];
-  if (last === null || last === undefined) {
-    return;
-  }
-  ctx.beginPath();
-  ctx.arc(
-    plotX(count - 1, count, layout.width),
-    plotY(last, layout),
-    4,
-    0,
-    Math.PI * 2,
-  );
-  ctx.fillStyle = ink.line;
-  ctx.fill();
-  ctx.lineWidth = 2;
-  ctx.strokeStyle = ink.surface;
-  ctx.stroke();
-}
-
-/** Draws the chart over a cleared `ctx` scaled to CSS pixels. */
-export function drawChart(
-  ctx: CanvasRenderingContext2D,
-  layout: ChartLayout,
-  ink: ChartInk,
-) {
-  ctx.clearRect(0, 0, layout.width, layout.height);
-  drawGrid(ctx, layout, ink);
-  for (const [from, to] of runs(layout.points)) {
-    drawRun(ctx, layout, ink, from, to);
-  }
-  // A range that moved nothing gets no line: one at zero only traces the axis.
-  if (layout.mean > 0) {
-    drawMean(ctx, layout, ink);
-  }
-  drawNewest(ctx, layout, ink);
-}
-
-/** The point under a pointer `px` from the plot's left, or `null` beside it. */
-export function pointedIndex(
-  px: number,
-  count: number,
-  width: number,
-): number | null {
-  const plotWidth = width - SCALE_WIDTH;
-  if (px < 0 || px > plotWidth) {
-    return null;
-  }
-  return Math.round((px / plotWidth) * (count - 1));
+  const index = Math.round((px / width) * (count - 1));
+  return Math.max(0, Math.min(count - 1, index));
 }
 
 /**
- * Where the tooltip for the point at `index` sits: over it, kept inside the plot,
- * `half` being the room each side of its middle its text takes.
+ * Where the tooltip for the point at `index` sits, in pixels from the plot's
+ * left: over it, kept inside the plot, `half` being the room each side of its
+ * middle its text takes.
  */
 export function tipLeft(
   index: number,
   count: number,
   width: number,
-  half = 60,
+  half = 34,
 ): number {
-  const plotWidth = width - SCALE_WIDTH;
-  return Math.min(Math.max(plotX(index, count, width), half), plotWidth - half);
+  const over = count > 1 ? (index / (count - 1)) * width : 0;
+  return Math.max(half, Math.min(width - half, over));
 }

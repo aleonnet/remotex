@@ -1,9 +1,28 @@
 import { useCallback, useEffect, useState } from "react";
+import { standAlone } from "./displayTab.ts";
 import { gatewayFetch, gatewayUrl } from "./gateway.ts";
 import { gatewayConfig } from "./gatewayConfig.ts";
 import Login from "./Login.tsx";
 import RemoteDesktop from "./RemoteDesktop.tsx";
-import { SESSION_KEY } from "./useRemoteDesktop.ts";
+import { MUTED_KEY, SESSION_KEY } from "./useRemoteDesktop.ts";
+
+// The display a page at `/display/2` shows in a tab of its own, beside the session
+// another tab of this browser holds; null for every other path, which is the page
+// that holds the session. Two is the only one: a session lays out two displays at
+// most, and the first is the one on the session's own page.
+function tabDisplayOf(path: string): number | null {
+  return /^\/display\/2\/?$/.test(path) ? 2 : null;
+}
+
+const TAB_DISPLAY = tabDisplayOf(globalThis.location?.pathname ?? "/");
+
+// A display's tab opened from the session's page starts with a copy of that
+// page's storage (displayTab.ts). What is the session's goes before anything
+// here reads it: the claim, which this page never makes, and the choice of
+// sound, which is that page's.
+if (TAB_DISPLAY !== null) {
+  standAlone([SESSION_KEY, MUTED_KEY]);
+}
 
 // Gate the desktop behind the web login. The desktop is only mounted
 // once authenticated — mounting it claims the session slot, which must not
@@ -13,9 +32,9 @@ type AuthState = "checking" | "unauthenticated" | "authenticated";
 export default function App() {
   const [authState, setAuthState] = useState<AuthState>("checking");
   // Deployment branding (login screen, interstitials, tab title). Defaults to
-  // "remotex" and stays there until GET /api/config answers — a public route,
+  // "alumia" and stays there until GET /api/config answers — a public route,
   // so it resolves before login.
-  const [branding, setBranding] = useState("remotex");
+  const [branding, setBranding] = useState("alumia");
 
   useEffect(() => {
     let cancelled = false;
@@ -27,14 +46,14 @@ export default function App() {
         setBranding(branding);
         document.title = branding;
       }
-      // The tab's icon. There is no <link rel="icon"> in index.html to fight
-      // with — a gateway without a logo keeps no icon at all — so this only ever
-      // adds one, and never needs removing: the config is fetched once per page.
+      // The tab's icon. index.html gives every page the mark; a gateway with a
+      // logo of its own has that put in its place, on the same <link>, so there
+      // is never a second icon for a browser to choose between. It never needs
+      // putting back: the config is fetched once per page.
       if (logo) {
-        const link = document.createElement("link");
-        link.rel = "icon";
-        link.href = gatewayUrl("/api/logo");
-        document.head.appendChild(link);
+        document
+          .querySelector<HTMLLinkElement>('link[rel="icon"]')
+          ?.setAttribute("href", gatewayUrl("/api/logo"));
       }
     });
     return () => {
@@ -86,6 +105,7 @@ export default function App() {
   return (
     <RemoteDesktop
       branding={branding}
+      tabDisplay={TAB_DISPLAY}
       onLogout={logout}
       onUnauthorized={unauthorized}
     />

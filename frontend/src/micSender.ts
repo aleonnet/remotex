@@ -10,14 +10,15 @@
 // the remote records in. Nothing is encoded until an application over there
 // starts recording (`micOpen`), and nothing after it stops (`micClose`).
 
+import { type Fault, FaultError, faultOf } from "./fault.ts";
 import { encodeMicFrame } from "./protocol";
 
 export interface MicSenderCallbacks {
   // The socket closed or the sender failed, and the sender has already
-  // stopped: the capture is released. `reason` is non-null for a failure worth
-  // showing (no permission, no Opus encoder, the target refusing the socket)
-  // and null for an ordinary close.
-  onStopped: (reason: string | null) => void;
+  // stopped: the capture is released. `fault` is non-null for a failure worth
+  // showing (no Opus encoder, the target refusing the socket, a capture that
+  // ended) and null for an ordinary close.
+  onStopped: (fault: Fault | null) => void;
   // The remote started or stopped recording. UI feedback only.
   onStreaming: (streaming: boolean) => void;
 }
@@ -103,15 +104,13 @@ export async function startMicSender(
   callbacks: MicSenderCallbacks,
 ): Promise<MicSender> {
   if (typeof AudioEncoder === "undefined") {
-    throw new Error("this browser has no AudioEncoder");
+    throw new FaultError({ code: "AL-5501" });
   }
   if (typeof MediaStreamTrackProcessor === "undefined") {
-    throw new Error(
-      "this browser cannot read microphone audio (no MediaStreamTrackProcessor)",
-    );
+    throw new FaultError({ code: "AL-5502" });
   }
   if (!navigator.mediaDevices?.getUserMedia) {
-    throw new Error("this browser offers no microphone capture");
+    throw new FaultError({ code: "AL-5503" });
   }
 
   // The browser's own speech processing, all of it: a remote call hears this
@@ -133,7 +132,7 @@ export async function startMicSender(
   const track = stream.getAudioTracks()[0];
   if (!track) {
     release();
-    throw new Error("the microphone produced no audio track");
+    throw new FaultError({ code: "AL-5504" });
   }
   const rate = track.getSettings().sampleRate ?? 48_000;
   const support = await AudioEncoder.isConfigSupported(opusConfig(rate)).catch(
@@ -141,7 +140,7 @@ export async function startMicSender(
   );
   if (!support.supported) {
     release();
-    throw new Error("this browser cannot encode Opus from the microphone");
+    throw new FaultError({ code: "AL-5505" });
   }
 
   let stopped = false;
@@ -169,13 +168,18 @@ export async function startMicSender(
         socket.send(frame);
       }
     },
-    error: (e) => stop(e.message || "the Opus encoder failed"),
+    error: (e) =>
+      stop(
+        e.message
+          ? { code: "AL-5506", detail: e.message }
+          : { code: "AL-5506" },
+      ),
   });
 
   const processor = new MediaStreamTrackProcessor<AudioData>({ track });
   const reader = processor.readable.getReader();
 
-  const stop = (reason: string | null = null) => {
+  const stop = (fault: Fault | null = null) => {
     if (stopped) {
       return;
     }
@@ -191,7 +195,7 @@ export async function startMicSender(
     ) {
       socket.close();
     }
-    callbacks.onStopped(reason);
+    callbacks.onStopped(fault);
   };
 
   socket.onmessage = (ev) => {
@@ -217,7 +221,7 @@ export async function startMicSender(
 
   socket.onclose = (ev) => {
     // 4002 is the gateway saying the target carries no microphone.
-    stop(ev.code === 4002 ? "this target carries no microphone" : null);
+    stop(ev.code === 4002 ? { code: "AL-5507" } : null);
   };
 
   const encode = (data: AudioData) => {
@@ -247,9 +251,7 @@ export async function startMicSender(
     try {
       encode(data);
     } catch (e) {
-      stop(
-        e instanceof Error ? e.message : "the microphone could not be encoded",
-      );
+      stop(faultOf(e, "AL-5508"));
     } finally {
       data.close();
     }
@@ -266,12 +268,12 @@ export async function startMicSender(
       try {
         result = await reader.read();
       } catch (e) {
-        stop(e instanceof Error ? e.message : "the microphone capture failed");
+        stop(faultOf(e, "AL-5509"));
         break;
       }
       if (result.done || stopped) {
         result.value?.close();
-        stop("the microphone stopped");
+        stop({ code: "AL-5510" });
         break;
       }
       take(result.value);

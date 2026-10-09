@@ -1,0 +1,43 @@
+# The gateway the public page is harvested and photographed from (tools/site/build.sh):
+# three computers of example at documentation addresses (RFC 5737, 192.0.2.0/24), which
+# reach nothing, and one login, admin / medir (the hash made with `alumia gen-passwd admin`
+# on 2026-10-09). The MacBook Pro is listed in both of a Mac's modes, at one address and
+# port, so it is one line with the key that switches between them, under the first name. build.sh runs this
+# file from tmp/, where the gateway writes its kept logins beside it, and for the page in
+# English says the one Portuguese name, "PC do escritório", in English (words.json,
+# sample.office).
+
+[server]
+listen = "127.0.0.1:52383"
+site_passwd = "admin:$2b$12$FIs2mmJxkXxafCXn8E8yXOvxX9IR1Zi70w9OgizsucXU.lj0FGeb."
+
+[[targets]]
+name = "MacBook Pro"
+protocol = "vnc"
+subtype = "ard-high-performance"
+host = "192.0.2.10"
+username = "alessandro"
+password = "x"
+
+[[targets]]
+name = "MacBook Pro espelho"
+protocol = "vnc"
+subtype = "ard-mirror"
+host = "192.0.2.10"
+username = "alessandro"
+password = "x"
+
+[[targets]]
+name = "Mac mini"
+protocol = "vnc"
+subtype = "ard-high-performance"
+host = "192.0.2.11"
+username = "alessandro"
+password = "x"
+
+[[targets]]
+name = "PC do escritório"
+protocol = "rdp"
+host = "192.0.2.20"
+username = "alessandro"
+password = "x"

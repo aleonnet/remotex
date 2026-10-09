@@ -18,6 +18,7 @@ use std::time::Duration;
 use log::warn;
 use tokio::net::TcpStream;
 
+use crate::cause::{self, Cause};
 use crate::encode::VideoSink;
 use crate::protocol::ServerMsg;
 
@@ -117,12 +118,19 @@ async fn connect(dest: &str, apart: bool) -> anyhow::Result<TcpStream> {
     let stream = tokio::time::timeout(TCP_CONNECT_TIMEOUT, dial)
         .await
         .map_err(|_| {
-            anyhow::anyhow!(
-                "TCP connect to {dest}: no answer after {}s",
-                TCP_CONNECT_TIMEOUT.as_secs()
-            )
+            let seconds = TCP_CONNECT_TIMEOUT.as_secs();
+            Cause::new("AL-7004")
+                .with("host", dest)
+                .with("seconds", seconds)
+                .of(anyhow::anyhow!("TCP connect to {dest}: no answer after {seconds}s"))
         })?
-        .map_err(|e| anyhow::anyhow!("TCP connect to {dest}: {e}{}", local_network_hint(&e)))?;
+        .map_err(|e| {
+            // The refusal a missing Local Network permission produces is its own
+            // cause, so the page can say what to check in the person's language.
+            let hint = local_network_hint(&e);
+            let code = if hint.is_empty() { "AL-7001" } else { "AL-7003" };
+            Cause::new(code).with("host", dest).of(anyhow::anyhow!("TCP connect to {dest}: {e}{hint}"))
+        })?;
     // Input events are tiny and latency-critical; never coalesce them.
     stream.set_nodelay(true).ok();
     if let Err(e) = arm_liveness_probes(&stream) {
@@ -204,6 +212,70 @@ pub fn is_this_host(dest: &str) -> bool {
     })
 }
 
+/// What this computer calls itself, as its owner named it: a Mac's Computer Name,
+/// from Sharing in its settings. Asked of the system once. `None` where the
+/// system does not say, and on a system this build does not ask.
+#[cfg(target_os = "macos")]
+pub fn computer_name() -> Option<&'static str> {
+    static NAME: std::sync::OnceLock<Option<String>> = std::sync::OnceLock::new();
+    NAME.get_or_init(|| {
+        let said = std::process::Command::new("/usr/sbin/scutil").args(["--get", "ComputerName"]).output().ok()?;
+        let name = String::from_utf8(said.stdout).ok()?.trim().to_owned();
+        (said.status.success() && !name.is_empty()).then_some(name)
+    })
+    .as_deref()
+}
+
+/// The name of this computer where the target at `host` and `port` is this very
+/// computer, and `None` for a target anywhere else: what the list calls such a
+/// target, and a session on it, instead of the name its config entry was given.
+///
+/// Whether an address is this host's is asked once for each destination and
+/// remembered, because the answer resolves a name on the calling thread: the list
+/// asks from a thread that may block, and a session asks for a destination the list
+/// has already asked about.
+#[cfg(target_os = "macos")]
+pub fn this_computer(host: &str, port: u16) -> Option<String> {
+    use std::collections::HashMap;
+    use std::sync::Mutex;
+    static HERE: Mutex<Option<HashMap<String, bool>>> = Mutex::new(None);
+    let dest = host_port(host, port);
+    let known = HERE.lock().unwrap().as_ref().and_then(|known| known.get(&dest).copied());
+    let here = known.unwrap_or_else(|| {
+        let here = is_this_host(&dest);
+        HERE.lock().unwrap().get_or_insert_with(HashMap::new).insert(dest, here);
+        here
+    });
+    if here { computer_name().map(str::to_owned) } else { None }
+}
+
+/// No target is told to be this computer on a system where that is not asked.
+#[cfg(not(target_os = "macos"))]
+pub fn this_computer(_host: &str, _port: u16) -> Option<String> {
+    None
+}
+
+/// The port a Mac shares its screen on.
+const SCREEN_SHARING_PORT: u16 = 5900;
+
+/// The name of this computer where `target` is this computer's own Screen
+/// Sharing: a Mac target, at the port a Mac shares its screen on, at one of this
+/// host's addresses. Nothing else at one of this host's addresses is taken for
+/// this computer: another port of it, or another kind of server there, is as
+/// likely a forwarded port, which leads to another computer.
+pub fn own_computer(target: &crate::config::TargetConfig) -> Option<String> {
+    use crate::config::Subtype;
+    let mac = matches!(
+        target.subtype,
+        Some(Subtype::Ard | Subtype::ArdHighPerformance | Subtype::ArdMirror)
+    );
+    if mac && target.port == SCREEN_SHARING_PORT {
+        this_computer(&target.host, target.port)
+    } else {
+        None
+    }
+}
+
 /// The address a connection to `to` leaves from so that its two ends differ, where
 /// `to` is this host's own: the loopback is reached from the address this host
 /// routes the network from, and any other address of this host from the loopback.
@@ -237,6 +309,18 @@ fn source_apart(to: std::net::IpAddr) -> Option<std::net::IpAddr> {
     })
 }
 
+/// The cause a connection that failed is told by: its own, or, where a read or a
+/// write failed with nobody saying why, the encrypted transport's for a record that
+/// failed its check and the network's for any other, or the place's.
+fn connect_cause(e: &anyhow::Error) -> Cause {
+    let general = match cause::io_kind(e) {
+        Some(std::io::ErrorKind::InvalidData) => "AL-7028",
+        Some(_) => "AL-7027",
+        None => "AL-7000",
+    };
+    cause::or_general(e, general)
+}
+
 /// Connect to a remote and run its handshake, reporting any failure to the client.
 ///
 /// The two engines that need this had the same fifteen lines each: bound the
@@ -265,14 +349,18 @@ where
     F: FnOnce(TcpStream) -> Fut,
     Fut: Future<Output = anyhow::Result<T>>,
 {
-    let report = async |message: String| {
-        let _ = sink.msg(ServerMsg::Error { message }).await;
+    let report = async |message: String, cause: Option<Cause>| {
+        let _ = sink.msg(ServerMsg::Error { message, cause }).await;
+    };
+    let failed = |e: &anyhow::Error| {
+        (format!("{} connect failed: {e}", protocol.to_uppercase()), Some(connect_cause(e)))
     };
     let stream = match connect(dest, apart).await {
         Ok(stream) => stream,
         Err(e) => {
             warn!("{protocol}: connect failed: {e:#}");
-            report(format!("{} connect failed: {e}", protocol.to_uppercase())).await;
+            let (message, cause) = failed(&e);
+            report(message, cause).await;
             return None;
         }
     };
@@ -280,16 +368,20 @@ where
         Ok(Ok(value)) => Some(value),
         Ok(Err(e)) => {
             warn!("{protocol}: connect failed: {e:#}");
-            report(format!("{} connect failed: {e}", protocol.to_uppercase())).await;
+            let (message, cause) = failed(&e);
+            report(message, cause).await;
             None
         }
         Err(_) => {
             warn!("{protocol}: handshake with {dest} timed out");
-            report(format!(
-                "{} connect failed: {dest} did not finish the handshake within {}s",
-                protocol.to_uppercase(),
-                budget.as_secs()
-            ))
+            report(
+                format!(
+                    "{} connect failed: {dest} did not finish the handshake within {}s",
+                    protocol.to_uppercase(),
+                    budget.as_secs()
+                ),
+                Some(Cause::new("AL-7002").with("host", dest).with("seconds", budget.as_secs())),
+            )
             .await;
             None
         }
@@ -312,7 +404,7 @@ where
 ///
 /// Empty everywhere else, where an unreachable address is simply unreachable.
 #[cfg(target_os = "macos")]
-const LOCAL_NETWORK_HINT: &str = ". If this is the app's own gateway, check that remotex is \
+const LOCAL_NETWORK_HINT: &str = ". If this is the app's own gateway, check that alumia is \
      allowed under System Settings > Privacy & Security > Local Network — until it is, every \
      connection off this Mac fails exactly like this";
 
@@ -369,11 +461,89 @@ pub fn clamp_u16(v: i32) -> u16 {
     v.clamp(0, i32::from(u16::MAX)) as u16
 }
 
+/// One display of a remote's arrangement, in the space its pointer positions are
+/// addressed in: where it starts, and its size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DisplayRect {
+    pub x: i32,
+    pub y: i32,
+    pub w: i32,
+    pub h: i32,
+}
+
+/// `point`, made on display `from` of `displays` and already offset into their
+/// arrangement, held on a display: as it is where it lies on one, and otherwise
+/// at the nearest point of the nearest, `from` where two are as near.
+///
+/// The union of displays of different sizes is not its bounding rectangle, so a
+/// position held only inside that rectangle can lie on no display: below the
+/// shorter of two side by side, or beside the narrower of two stacked. The page
+/// lets a held drag's positions through past any edge while another display is
+/// shown beside it (`frontend/src/remotePoint.ts`), so which of them are on a
+/// display is decided here.
+pub fn hold_on_display(point: (i32, i32), displays: &[DisplayRect], from: usize) -> (i32, i32) {
+    let held = |display: &DisplayRect| {
+        let last = |start: i32, length: i32| start.saturating_add(length.max(1) - 1);
+        (
+            point.0.clamp(display.x, last(display.x, display.w)),
+            point.1.clamp(display.y, last(display.y, display.h)),
+        )
+    };
+    let away = |at: (i32, i32)| {
+        let (dx, dy) = (i64::from(at.0) - i64::from(point.0), i64::from(at.1) - i64::from(point.1));
+        dx * dx + dy * dy
+    };
+    displays
+        .iter()
+        .enumerate()
+        .map(|(index, display)| (held(display), index != from))
+        .min_by_key(|&(at, other)| (away(at), other))
+        .map_or(point, |(at, _)| at)
+}
+
 #[cfg(test)]
 mod tests {
     use tokio::sync::mpsc;
 
     use super::*;
+
+    /// A connection that drops while it is being opened, on a read or a write
+    /// nobody gave a cause, is told as the network's; a cause of its own is kept,
+    /// and what is nobody's read is the place's.
+    #[test]
+    fn a_connection_that_drops_while_opening_is_told_as_the_networks() {
+        let dropped = anyhow::Error::new(std::io::Error::new(std::io::ErrorKind::ConnectionReset, "reset by peer"));
+        assert_eq!(connect_cause(&dropped.context("reading the server's greeting")).code, "AL-7027");
+        let forged = anyhow::Error::new(std::io::Error::new(std::io::ErrorKind::InvalidData, "a frame failed its tag"));
+        assert_eq!(connect_cause(&forged.context("reading the security result")).code, "AL-7028");
+        assert_eq!(connect_cause(&anyhow::anyhow!("not an RFB server")).code, "AL-7000");
+        let refused = Cause::new("AL-7012").of(anyhow::anyhow!("VNC authentication failed"));
+        assert_eq!(connect_cause(&refused).code, "AL-7012");
+    }
+
+    /// A position past the edge between two displays lands on the other, and one
+    /// that would lie on neither is held on the nearest.
+    #[test]
+    fn a_position_is_held_on_a_display_and_not_only_inside_their_bounding_rectangle() {
+        let beside = [DisplayRect { x: 0, y: 0, w: 1600, h: 900 }, DisplayRect { x: 1600, y: 0, w: 1024, h: 1200 }];
+        assert_eq!(hold_on_display((800, 450), &beside, 0), (800, 450));
+        assert_eq!(hold_on_display((1700, 1100), &beside, 0), (1700, 1100), "onto the second");
+        // Below the first, which is shorter than the second: on neither.
+        assert_eq!(hold_on_display((800, 1100), &beside, 0), (800, 899));
+        assert_eq!(hold_on_display((1500, 1100), &beside, 1), (1600, 1100), "nearer the second");
+        // Past the arrangement's own edge, at it.
+        assert_eq!(hold_on_display((9000, -5), &beside, 0), (2623, 0));
+        assert_eq!(hold_on_display((-5, -5), &beside, 1), (0, 0));
+        // Stacked, the second narrower: beside it is on neither.
+        let stacked = [DisplayRect { x: 0, y: 700, w: 1600, h: 900 }, DisplayRect { x: 0, y: 0, w: 1024, h: 700 }];
+        assert_eq!(hold_on_display((1300, 650), &stacked, 0), (1300, 700));
+        assert_eq!(hold_on_display((1300, 300), &stacked, 1), (1023, 300));
+        // As near to both: the one it was made on.
+        let equal = [DisplayRect { x: 0, y: 0, w: 100, h: 100 }, DisplayRect { x: 201, y: 0, w: 100, h: 100 }];
+        assert_eq!(hold_on_display((150, 50), &equal, 0), (99, 50));
+        assert_eq!(hold_on_display((150, 50), &equal, 1), (201, 50));
+        assert_eq!(hold_on_display((7, 7), &[], 0), (7, 7));
+    }
 
     /// A sink and the channel behind it. `VideoSink` forwards through a task of its
     /// own, so a test reads the channel only after [`VideoSink::flush`].
@@ -484,6 +654,20 @@ mod tests {
         assert!(APART_TIMEOUT < TCP_CONNECT_TIMEOUT / 2, "the plain connect keeps most of the budget");
     }
 
+    /// A target on this computer is called by the computer's own name, and a
+    /// target anywhere else by none.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn a_target_on_this_computer_is_called_by_the_computers_name() {
+        let name = computer_name().expect("a Mac has a Computer Name");
+        assert!(!name.is_empty() && !name.contains('\n'), "{name:?}");
+        assert_eq!(this_computer("127.0.0.1", 5900).as_deref(), Some(name));
+        assert_eq!(this_computer("localhost", 5901).as_deref(), Some(name));
+        assert_eq!(this_computer("192.0.2.1", 5900), None, "TEST-NET-1 is no host's own address");
+        // Asked again, the answer is the remembered one.
+        assert_eq!(this_computer("127.0.0.1", 5900).as_deref(), Some(name));
+    }
+
     /// A destination is this host when it resolves to an address this host holds.
     #[cfg(target_os = "macos")]
     #[test]
@@ -568,12 +752,14 @@ mod tests {
 
         assert!(value.is_none());
         sink.flush().await;
-        let ServerMsg::Error { message } = frame_rx.try_recv().unwrap() else {
+        let ServerMsg::Error { message, cause } = frame_rx.try_recv().unwrap() else {
             panic!("expected an error for the picker");
         };
         assert!(message.contains("did not finish the handshake"), "{message}");
         // Uppercased for the client, as both engines already spelled it.
         assert!(message.starts_with("TEST connect failed:"), "{message}");
+        // And the cause the page says in the person's language, with who and how long.
+        assert_eq!(cause, Some(Cause::new("AL-7002").with("host", &dest).with("seconds", 0)));
         accept.abort();
     }
 
@@ -598,7 +784,7 @@ mod tests {
 
         assert!(value.is_none());
         sink.flush().await;
-        let ServerMsg::Error { message } = frame_rx.try_recv().unwrap() else {
+        let ServerMsg::Error { message, cause } = frame_rx.try_recv().unwrap() else {
             panic!("expected an error for the picker");
         };
         assert!(message.contains("TCP connect to"), "{message}");
@@ -606,6 +792,9 @@ mod tests {
             !message.contains("handshake"),
             "a connect failure must not read as a handshake one: {message}"
         );
+        // A refused connect is the remote not reachable, named, and never the
+        // handshake's cause.
+        assert_eq!(cause, Some(Cause::new("AL-7001").with("host", &dest)));
     }
 
     /// The hint is mentioned, never concluded — so it must appear for the refusal

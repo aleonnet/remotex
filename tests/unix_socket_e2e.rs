@@ -24,7 +24,7 @@ const READY_TIMEOUT: Duration = Duration::from_secs(20);
 
 /// A gateway config with a login and one target it never dials.
 fn config_text() -> String {
-    let site_passwd = remotex::auth::generate("admin", "hunter2", 4).unwrap();
+    let site_passwd = alumia::auth::generate("admin", "hunter2", 4).unwrap();
     format!(
         r#"
 [server]
@@ -52,7 +52,7 @@ impl Drop for Gateway {
 
 fn start(config: &Path, socket: &Path) -> Gateway {
     Gateway(
-        Command::new(env!("CARGO_BIN_EXE_remotex"))
+        Command::new(env!("CARGO_BIN_EXE_alumia"))
             .arg("serve")
             .arg("-c")
             .arg(config)
@@ -109,7 +109,7 @@ fn a_gateway_on_a_unix_socket_answers_and_cleans_up_after_itself() {
     use std::os::unix::fs::PermissionsExt as _;
 
     let dir = common::ScratchDir::new("unix-listen");
-    let config = dir.write("remotex.toml", &config_text());
+    let config = dir.write("alumia.toml", &config_text());
     let socket = dir.path().join("gateway.sock");
 
     let mut gateway = start(&config, &socket);
@@ -159,7 +159,7 @@ fn a_gateway_on_a_unix_socket_answers_and_cleans_up_after_itself() {
 #[test]
 fn a_leftover_socket_does_not_stop_the_next_start() {
     let dir = common::ScratchDir::new("unix-leftover");
-    let config = dir.write("remotex.toml", &config_text());
+    let config = dir.write("alumia.toml", &config_text());
     let socket = dir.path().join("gateway.sock");
 
     // What a killed process leaves: the file, with nothing serving it.

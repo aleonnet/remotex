@@ -23,12 +23,10 @@ import {
   type ThroughputLive,
   type ThroughputRecord,
   type ThroughputReport,
-  targetLabel,
   throughputBounds,
   throughputQuery,
   throughputRangeIsLive,
   throughputRangeKey,
-  throughputRangeLabel,
   throughputTargets,
 } from "./throughput.ts";
 
@@ -63,14 +61,22 @@ const record = (
 });
 
 test("a rate in bytes per second is shown in decimal bits per second", () => {
-  assert.equal(formatRate(0), "0 bps");
-  assert.equal(formatRate(50), "400 bps");
-  assert.equal(formatRate(124.9), "999 bps");
-  assert.equal(formatRate(125), "1.0 kbps");
-  assert.equal(formatRate(1000), "8.0 kbps");
-  assert.equal(formatRate(12_500), "100 kbps");
-  assert.equal(formatRate(2_500_000), "20 Mbps");
-  assert.equal(formatRate(1.5e9), "12 Gbps");
+  const rate = (bytes: number) => formatRate(bytes, "en-US");
+  assert.equal(rate(0), "0 b/s");
+  assert.equal(rate(50), "400 b/s");
+  assert.equal(rate(124.9), "999 b/s");
+  assert.equal(rate(125), "1.0 kb/s");
+  assert.equal(rate(1000), "8.0 kb/s");
+  assert.equal(rate(12_500), "100 kb/s");
+  assert.equal(rate(2_500_000), "20 Mb/s");
+  assert.equal(rate(1.5e9), "12 Gb/s");
+});
+
+test("the number of a rate is written as the page's language writes one", () => {
+  assert.equal(formatRate(2_200_000, "pt-BR"), "18 Mb/s");
+  assert.equal(formatRate(220_000, "pt-BR"), "1,8 Mb/s");
+  assert.equal(formatRate(1000, "pt-BR"), "8,0 kb/s");
+  assert.equal(formatRate(1000, "en-US"), "8.0 kb/s");
 });
 
 test("the rate right now is summed over what moved", () => {
@@ -218,19 +224,16 @@ test("the clock is the last sample's second plus the whole seconds since it was 
 });
 
 test("a scale tops out at a round number of bits per second above the peak", () => {
-  assert.equal(formatRate(rateScale(0)), "1.0 kbps");
-  assert.equal(
-    formatRate(rateScale(100)),
-    "1.0 kbps",
-    "800 bps is under the floor",
-  );
-  assert.equal(formatRate(rateScale(125)), "2.0 kbps", "1 kbps needs headroom");
-  assert.equal(formatRate(rateScale(100_000)), "1.0 Mbps");
-  assert.equal(formatRate(rateScale(110_000)), "1.0 Mbps", "968 kbps fits");
-  assert.equal(formatRate(rateScale(120_000)), "2.0 Mbps");
-  assert.equal(formatRate(rateScale(280_000)), "2.5 Mbps");
-  assert.equal(formatRate(rateScale(500_000)), "5.0 Mbps");
-  assert.equal(formatRate(rateScale(1_000_000)), "10 Mbps");
+  const top = (peak: number) => formatRate(rateScale(peak), "en-US");
+  assert.equal(top(0), "1.0 kb/s");
+  assert.equal(top(100), "1.0 kb/s", "800 b/s is under the floor");
+  assert.equal(top(125), "2.0 kb/s", "1 kb/s needs headroom");
+  assert.equal(top(100_000), "1.0 Mb/s");
+  assert.equal(top(110_000), "1.0 Mb/s", "968 kb/s fits");
+  assert.equal(top(120_000), "2.0 Mb/s");
+  assert.equal(top(280_000), "2.5 Mb/s");
+  assert.equal(top(500_000), "5.0 Mb/s");
+  assert.equal(top(1_000_000), "10 Mb/s");
   for (const peak of [0, 125, 999, 123_456, 9.9e6]) {
     assert.ok(rateScale(peak) >= peak * 1.1, `${peak} has a tenth of headroom`);
   }
@@ -437,7 +440,7 @@ test("a range of one step is that step twice, and one not yet begun is nothing r
   assert.equal(ahead.end, 1800);
 });
 
-test("the targets are those any sample or row saw, by label", () => {
+test("the targets are those any sample or row saw: the list first, then the computers by name", () => {
   assert.deepEqual(
     throughputTargets(
       [
@@ -446,19 +449,18 @@ test("the targets are those any sample or row saw, by label", () => {
       ],
       [record("linux", "session", 1, 1), record("win", "audio", 1, 1)],
     ),
-    ["linux", "mac", null, "win"],
+    [null, "linux", "mac", "win"],
   );
   assert.deepEqual(throughputTargets([], []), []);
-  assert.equal(targetLabel(null), "No target (picker)");
-  assert.equal(targetLabel("mac"), "mac");
 });
 
 test("a length of time is named in its largest unit", () => {
-  assert.equal(spanLabel(45), "45 s");
-  assert.equal(spanLabel(60), "1 min");
-  assert.equal(spanLabel(300), "5 min");
-  assert.equal(spanLabel(5400), "1.5 h");
-  assert.equal(spanLabel(86_400 * 7), "7 d");
+  assert.equal(spanLabel(45, "en-US"), "45 s");
+  assert.equal(spanLabel(60, "en-US"), "1 min");
+  assert.equal(spanLabel(300, "en-US"), "5 min");
+  assert.equal(spanLabel(5400, "en-US"), "1.5 h");
+  assert.equal(spanLabel(5400, "pt-BR"), "1,5 h");
+  assert.equal(spanLabel(86_400 * 7, "en-US"), "7 d");
 });
 
 test("a range no longer than the seconds kept is drawn from them", () => {
@@ -492,15 +494,6 @@ test("the presets step up without a jump, each spelled by one key", () => {
   );
   assert.equal(throughputRangeKey({ amount: 24, unit: "hours" }), "24:hours");
   assert.equal(throughputRangeKey("all"), "all");
-  assert.equal(
-    throughputRangeLabel({ amount: 1, unit: "hours" }),
-    "Last 1 hour",
-  );
-  assert.equal(
-    throughputRangeLabel({ amount: 30, unit: "minutes" }),
-    "Last 30 minutes",
-  );
-  assert.equal(throughputRangeLabel("all"), "Everything kept");
 });
 
 test("a window is a range between two times, read back from the recorded rows", () => {
@@ -517,14 +510,6 @@ test("a window is a range between two times, read back from the recorded rows", 
     "the seconds kept are this view's, not the clock's, however short the window",
   );
   assert.equal(throughputRangeKey(range), "window:1700000000:1700003600");
-  const day = new Date(2026, 8, 17, 12, 0).getTime() / 1000;
-  const inside = throughputRangeLabel({ from: day, to: day + 3600 });
-  assert.ok(inside.includes(" – "));
-  assert.ok(
-    throughputRangeLabel({ from: day, to: day + 86_400 }).length >
-      inside.length,
-    "a window that crosses a day names the day at both ends",
-  );
 });
 
 test("a read asks by length while the range ends now, and by both ends when it does not", () => {

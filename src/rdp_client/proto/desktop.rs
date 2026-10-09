@@ -32,6 +32,7 @@
 
 use super::share;
 use super::wire::{Malformed, Reader, Writer};
+use crate::cause::Cause;
 
 /// `PDUTYPE2_REFRESH_RECT`.
 const REFRESH_RECT: u8 = 0x21;
@@ -110,6 +111,40 @@ pub fn error_info(body: &[u8]) -> Result<(), Malformed> {
         0 => Ok(()),
         code => Err(r.report(describe(code), code)),
     }
+}
+
+/// `reported`, the error [`error_info`] gave for `body`, knowing the cause a page
+/// says it by ([`crate::cause`]). Both callers have the PDU's body in hand where
+/// they turn the error into the session's end.
+pub fn caused(body: &[u8], reported: Malformed) -> anyhow::Error {
+    match body.first_chunk::<4>().map(|code| u32::from_le_bytes(*code)) {
+        Some(code) if code != 0 => cause(code).of(reported),
+        _ => reported.into(),
+    }
+}
+
+/// The cause a page says a Set Error Info code by, in the person's own language:
+/// one for each code [`describe`] names, in its order, and one for every other
+/// that carries the number.
+fn cause(code: u32) -> Cause {
+    let named = match code {
+        0x0000_0001 => "AL-7110",
+        0x0000_0002 => "AL-7111",
+        0x0000_0003 => "AL-7112",
+        0x0000_0004 => "AL-7113",
+        0x0000_0005 => "AL-7114",
+        0x0000_0006 => "AL-7115",
+        0x0000_0007 => "AL-7116",
+        0x0000_0009 => "AL-7117",
+        0x0000_000A => "AL-7118",
+        0x0000_000B => "AL-7119",
+        0x0000_000C => "AL-7120",
+        0x0000_0010 => "AL-7121",
+        0x0000_0017 => "AL-7122",
+        0x0000_0018 => "AL-7123",
+        _ => return Cause::new("AL-7124").with("code", format_args!("{code:#010x}")),
+    };
+    Cause::new(named)
 }
 
 /// What a Set Error Info code means, for the codes that do not depend on which
@@ -195,5 +230,34 @@ mod tests {
             err.to_string(),
             "the server ended the session: for a reason this client has no name for (0x000010ca)"
         );
+    }
+
+    /// Each reason the host can name is a cause of its own for the page, and a
+    /// code with no name still says which it was.
+    #[test]
+    fn an_error_info_names_the_cause_a_page_says_it_by() {
+        let cause = |code: u32| {
+            let body = code.to_le_bytes();
+            let err = caused(&body, error_info(&body).unwrap_err());
+            crate::cause::find(&err).cloned()
+        };
+        // The sentence is the one the host's code always became.
+        let body = 0x0000_0009_u32.to_le_bytes();
+        assert_eq!(
+            caused(&body, error_info(&body).unwrap_err()).to_string(),
+            "the server ended the session: the account is not allowed to log on to this host \
+             (0x00000009)"
+        );
+        assert_eq!(cause(0x1), Some(Cause::new("AL-7110")));
+        assert_eq!(cause(0x3), Some(Cause::new("AL-7112")));
+        assert_eq!(cause(0x5), Some(Cause::new("AL-7114")));
+        assert_eq!(cause(0x9), Some(Cause::new("AL-7117")));
+        assert_eq!(cause(0x18), Some(Cause::new("AL-7123")));
+        assert_eq!(cause(0x10CA), Some(Cause::new("AL-7124").with("code", "0x000010ca")));
+        // Every code with a name has a cause that is not the unnamed one's.
+        for code in [1u32, 2, 3, 4, 5, 6, 7, 9, 0xA, 0xB, 0xC, 0x10, 0x17, 0x18] {
+            assert_ne!(describe(code), describe(0xFFFF), "{code:#x} has a name");
+            assert_ne!(cause(code).map(|c| c.code), Some("AL-7124"), "{code:#x} has a cause");
+        }
     }
 }

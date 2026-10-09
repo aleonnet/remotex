@@ -35,7 +35,7 @@
 //! decoder takes, so it goes to the bridge as it came ([`PASSED_OPUS`]), made by
 //! the encoder this gateway codes an RDP host's sound with (`sound-opus`), at
 //! the rate the target's audio keys and their walk arrive at. A FLAC frame goes
-//! the same way in a session started with lossless sound (EXPERIMENTAL), for
+//! the same way in a session started with lossless sound, for
 //! the page's own decoder ([`PASSED_FLAC`]). Neither stream's header is sent by
 //! wlshare: everything in one follows from the format this client set and the
 //! extension's one rule, that every frame is [`BLOCK_FRAMES`] frames of it.
@@ -196,7 +196,7 @@ pub enum ServerAudio {
 /// includes QEMU's data operation, raw samples, which a server that announced
 /// this extension never sends.
 pub fn parse_server(header: [u8; 3]) -> anyhow::Result<ServerAudio> {
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7719"; 
         header[0] == SUBMESSAGE_AUDIO,
         "the server sent QEMU submessage {}, and audio ({SUBMESSAGE_AUDIO}) is the only one \
          this client advertised or can measure",
@@ -206,7 +206,7 @@ pub fn parse_server(header: [u8; 3]) -> anyhow::Result<ServerAudio> {
     match operation {
         SERVER_BEGIN => Ok(ServerAudio::Begin),
         SERVER_END => Ok(ServerAudio::End),
-        other => anyhow::bail!(
+        other => crate::bail_known!("AL-7719"; 
             "the server sent audio operation {other}; wlshare's extension carries sound as FLAC \
              frames or Opus packets and sends only begin and end under this type"
         ),

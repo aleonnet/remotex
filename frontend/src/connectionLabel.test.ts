@@ -1,6 +1,6 @@
-// What the "This session" card says about the connection.
+// What the information sheet says about the connection.
 //
-// The case that matters is the one where `protocol` alone is not an answer: four
+// The case that matters is the one where `protocol` alone is not an answer: several
 // targets say `vnc`, and what a person notices about them — a display list, a
 // target that follows its window or keeps a fixed display, a path that is reverse
 // engineered — differs by subtype and by nothing else on the wire.
@@ -8,50 +8,41 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 
-import { connectionLabel, connectionShortLabel } from "./connectionLabel.ts";
+import { connectionLabel, connectionMode } from "./connectionLabel.ts";
+
+const vnc = (subtype: string | null) => ({ protocol: "vnc", subtype });
 
 test("a target with no subtype is just its protocol", () => {
-  assert.equal(connectionLabel("rdp", null), "RDP");
-  assert.equal(connectionLabel("vnc", null), "VNC");
+  assert.equal(connectionLabel({ protocol: "rdp", subtype: null }), "RDP");
+  assert.equal(connectionLabel(vnc(null)), "VNC");
 });
 
-test("the two Apple modes say which one they are, in the config's own spelling", () => {
-  // The spelling is kept so the line can be found in `remotex.toml`, and the
-  // description because "ard" says nothing to anybody who did not write it.
-  assert.equal(
-    connectionLabel("vnc", "ard"),
-    "VNC · Apple Screen Sharing, Standard mode (ard)",
-  );
-  assert.equal(
-    connectionLabel("vnc", "ard-high-performance"),
-    "VNC · Apple Screen Sharing, High Performance (ard-high-performance)",
-  );
+test("a subtype is said in the config's own spelling, so the line can be found", () => {
+  assert.equal(connectionLabel(vnc("ard")), "VNC · ard");
+  assert.equal(connectionLabel(vnc("ard-mirror")), "VNC · ard-mirror");
+  assert.equal(connectionLabel(vnc("wlshare")), "VNC · wlshare");
 });
 
-test("a wlshare target says so in the config's spelling, which is its name", () => {
-  // No prose beside it: unlike `ard`, the key is the server's own name.
-  assert.equal(connectionLabel("vnc", "wlshare"), "VNC · wlshare");
-  assert.equal(connectionShortLabel("vnc", "wlshare"), "VNC · wlshare");
-});
-
-test("the picker's row keeps the spelling and drops the prose", () => {
-  // That row also carries a host and a port, and it is read while choosing rather
-  // than while diagnosing: the config key is the whole of what distinguishes two
-  // Macs in the list, and the sentence would wrap.
-  assert.equal(connectionShortLabel("rdp", null), "RDP");
-  assert.equal(connectionShortLabel("vnc", "ard"), "VNC · ard");
-  assert.equal(
-    connectionShortLabel("vnc", "ard-high-performance"),
-    "VNC · ard-high-performance",
-  );
+test("each mode is named in plain words, a Mac's two as the list calls them", () => {
+  const named = (subtype: string | null, virtual = false) =>
+    connectionMode(vnc(subtype), virtual);
+  assert.deepEqual(connectionMode({ protocol: "rdp", subtype: null }, false), {
+    key: "type.rdp",
+  });
+  assert.deepEqual(named(null), { key: "type.vnc" });
+  assert.deepEqual(named("wlshare"), { key: "type.wlshare" });
+  assert.deepEqual(named("ard-high-performance"), { key: "mode.virtual" });
+  assert.deepEqual(named("ard-mirror"), { key: "mode.mirrored" });
+  assert.deepEqual(named("ard"), { key: "mode.compatible" });
+  // Standard mode on a display of its own: the remote reported a virtual display.
+  assert.deepEqual(named("ard", true), { key: "mode.compatibleOwn" });
 });
 
 test("a subtype this build has never heard of still names itself", () => {
   // The gateway and this client ship together, so this is a build mismatch rather
-  // than a new feature — and a row that silently dropped the value would describe
-  // the session wrongly rather than incompletely.
-  assert.equal(
-    connectionLabel("vnc", "ard-something-new"),
-    "VNC · ard-something-new",
-  );
+  // than a new feature — and a line that dropped the value would describe the
+  // session wrongly rather than incompletely.
+  assert.deepEqual(connectionMode(vnc("ard-something-new"), false), {
+    data: "VNC · ard-something-new",
+  });
 });

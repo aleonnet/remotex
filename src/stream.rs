@@ -111,6 +111,11 @@ impl DesktopStream {
         }
     }
 
+    /// The desktop the stream encodes, once the engine has announced one.
+    pub fn size(&self) -> Option<(u16, u16)> {
+        self.size
+    }
+
     /// Whether the stream holds pixels no access unit has carried yet.
     ///
     /// The question `VideoSink::due_at` answers for the engines, and the reason a
@@ -134,7 +139,7 @@ impl DesktopStream {
         if self.mirror.is_none() {
             let (w, h) = self
                 .size
-                .ok_or_else(|| anyhow::anyhow!("the video mirror was asked for pixels before a desktop size"))?;
+                .ok_or_else(|| crate::cause::Cause::new("AL-7722").of(anyhow::anyhow!("the video mirror was asked for pixels before a desktop size")))?;
             let mirror = Mirror::new(w, h)?;
             // Refused here rather than when the encoder is built, so a desktop the
             // stream will not take fails the blit that first asked for it.
@@ -324,6 +329,14 @@ impl DesktopStream {
         }
     }
 
+    /// Make the live encoder fail its next `count` encodes.
+    #[cfg(test)]
+    pub fn fail_encodes(&mut self, count: u32) {
+        if let Some(live) = &mut self.live {
+            live.stream.fail_encodes(count);
+        }
+    }
+
     /// Arm a keyframe. Its callers are exactly the moments a client's decoder has to
     /// be able to start over.
     pub fn force_keyframe(&mut self) {
@@ -450,9 +463,9 @@ const PASSED_FPS: u64 = 60;
 /// it is the one the frame needs.
 pub fn pass(w: u16, h: u16, frame: &[u8], chroma: Chroma) -> anyhow::Result<Passed> {
     let header = crate::vp9::frame_header(frame)
-        .ok_or_else(|| anyhow::anyhow!("the server's VP9 frame does not start with a VP9 header"))?;
+        .ok_or_else(|| crate::cause::Cause::new("AL-7719").of(anyhow::anyhow!("the server's VP9 frame does not start with a VP9 header")))?;
     let asked = screen_vp9::Chroma::from(chroma);
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7719"; 
         header.profile == asked.profile(),
         "the server's VP9 frame is profile {}, not the {} profile {} this session asked for",
         header.profile,
@@ -461,7 +474,7 @@ pub fn pass(w: u16, h: u16, frame: &[u8], chroma: Chroma) -> anyhow::Result<Pass
     );
     crate::video::check_picture((w, h))?;
     let decode = crate::vp9::codec_string(w, h, chroma, PASSED_FPS)
-        .ok_or_else(|| anyhow::anyhow!("no VP9 level covers a {w}x{h} picture"))?;
+        .ok_or_else(|| crate::cause::Cause::new("AL-7719").of(anyhow::anyhow!("no VP9 level covers a {w}x{h} picture")))?;
     Ok(Passed { decode, keyframe: header.keyframe })
 }
 

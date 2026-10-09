@@ -1,0 +1,31 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The app's Info.plist, as packaging/build-mac-app.sh writes it: each @NAME@ is
+  filled there, and the two lines marked for a copy made for testing are kept only
+  in one.
+-->
+<plist version="1.0">
+<dict>
+    <key>CFBundleDevelopmentRegion</key><string>en</string>
+    <key>CFBundleExecutable</key><string>Alumia</string>
+    <key>CFBundleIdentifier</key><string>@IDENTIFIER@</string>
+    <key>CFBundleName</key><string>@NAME@</string>
+    <key>CFBundleDisplayName</key><string>@NAME@</string>
+    <key>CFBundlePackageType</key><string>APPL</string>
+    <key>CFBundleInfoDictionaryVersion</key><string>6.0</string>
+    <key>CFBundleShortVersionString</key><string>@VERSION@</string>
+    <key>CFBundleVersion</key><string>@VERSION@</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
+    <key>LSMinimumSystemVersion</key><string>14.0</string>
+    <key>LSApplicationCategoryType</key><string>public.app-category.utilities</string>
+    <!-- An agent app: no icon in the Dock while it has no window. -->
+    <key>LSUIElement</key><true/>
+    <key>NSHighResolutionCapable</key><true/>
+    <!-- The gateway reaches the other computers of the list. Said in each
+         language by InfoPlist.strings. -->
+    <key>NSLocalNetworkUsageDescription</key><string>Alumia reaches the other computers on your network to open their screens.</string>
+    <key>AlumiaAppDir</key><string>@TEST_DIR@</string><!-- test copy -->
+    <key>AlumiaPagePort</key><integer>@TEST_PORT@</integer><!-- test copy -->
+</dict>
+</plist>

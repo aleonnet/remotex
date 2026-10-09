@@ -1,5 +1,19 @@
-name: Release remotex
+name: Release alumia
 
+# The native packages and the container images of one version. In the public repository,
+# aleonnet/alumia, it is the release: dispatched on the version's commit, after
+# tools/publish-public.sh (in aleonnet/alumia-app, where the work is) has pushed that commit
+# with its tag and created the release with the Mac app's disk image, it asks that the tag
+# name the commit it runs on and that the release exist, builds the packages, and attaches
+# them to that release.
+#
+# Anywhere else it is the rehearsal of that: aleonnet/alumia-app above all, dispatched on the
+# branch a version is being made on, before the version is tagged. The same jobs build, install
+# and test every package and both images, and the steps that publish do not run: no tag and
+# no release are asked for, nothing is attached, nothing is pushed to the registry. There is
+# no input to choose with: a release belongs to the public repository and nowhere else, and
+# a version's packages are that version's commit's, so what does not build has to be found
+# before the commit is published (docs/release.md).
 on:
   workflow_dispatch:
 
@@ -8,7 +22,7 @@ permissions:
   packages: write
 
 env:
-  GHCR_IMAGE: ghcr.io/andrewtheguy/remotex
+  GHCR_IMAGE: ghcr.io/aleonnet/alumia
 
 jobs:
   prepare:
@@ -17,8 +31,19 @@ jobs:
       version: ${{ steps.version.outputs.version }}
       tag: ${{ steps.version.outputs.tag }}
       is_prerelease: ${{ steps.version.outputs.is_prerelease }}
+      rehearsal: ${{ steps.where.outputs.rehearsal }}
     steps:
       - uses: actions/checkout@v4
+
+      - name: The release, or its rehearsal
+        id: where
+        run: |
+          if [ "$GITHUB_REPOSITORY" = "aleonnet/alumia" ]; then
+            echo "rehearsal=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "rehearsal=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::A rehearsal: every package and image is built and tested, and nothing is published. The release is made in aleonnet/alumia alone."
+          fi
 
       - name: Determine and validate version
         id: version
@@ -43,32 +68,35 @@ jobs:
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
           echo "is_prerelease=${IS_PRERELEASE}" >> "$GITHUB_OUTPUT"
 
-      - name: Abort if tag already exists
+      # The version's tag is made by tools/publish-public.sh on the version's commit, which
+      # is the one this has to be dispatched on: the packages built here are that commit's.
+      - name: The tag names this commit
+        if: steps.where.outputs.rehearsal == 'false'
         run: |
-          if git ls-remote --tags origin "refs/tags/${{ steps.version.outputs.tag }}" | grep -q .; then
-            echo "::error::Tag ${{ steps.version.outputs.tag }} already exists on remote. Bump the version in Cargo.toml first."
+          # The tag as an explicit refspec: `tag <name>` would be two arguments, and a
+          # quoted "tag v0.1.3" is one, which git refuses as an invalid refspec.
+          git fetch --no-tags origin "refs/tags/${{ steps.version.outputs.tag }}:refs/tags/${{ steps.version.outputs.tag }}" \
+            || { echo "::error::there is no tag ${{ steps.version.outputs.tag }}: tools/publish-public.sh makes it when it publishes the version."; exit 1; }
+          tagged=$(git rev-parse "${{ steps.version.outputs.tag }}^{commit}")
+          if [ "$tagged" != "$GITHUB_SHA" ]; then
+            echo "::error::${{ steps.version.outputs.tag }} names $tagged, and this runs on $GITHUB_SHA: dispatch it on the version's commit."
             exit 1
           fi
 
-      - name: Create draft release
+      # The release exists before this runs, made by tools/publish-public.sh with the Mac
+      # app's disk image attached; the packages built here are added to it.
+      - name: The release exists
+        if: steps.where.outputs.rehearsal == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
         run: |
-          # Clean up any leftover draft from a previous failed run with the same
-          # version. A draft release doesn't create the git tag on the remote, so
-          # a stale draft is the only thing that can collide here (real published
-          # tags are caught by the step above).
-          if gh release view "${{ steps.version.outputs.tag }}" --json isDraft --jq '.isDraft' 2>/dev/null | grep -qx true; then
-            echo "Deleting stale draft release ${{ steps.version.outputs.tag }}"
-            gh release delete "${{ steps.version.outputs.tag }}" --yes
+          draft=$(gh release view "${{ steps.version.outputs.tag }}" --json isDraft --jq '.isDraft') \
+            || { echo "::error::there is no release ${{ steps.version.outputs.tag }}: tools/publish-public.sh creates it, with the disk image."; exit 1; }
+          if [ "$draft" != "false" ]; then
+            echo "::error::the release ${{ steps.version.outputs.tag }} is a draft."
+            exit 1
           fi
-          gh release create "${{ steps.version.outputs.tag }}" \
-            --draft \
-            --target "${{ github.sha }}" \
-            --title "${{ steps.version.outputs.tag }}" \
-            --generate-notes \
-            ${{ steps.version.outputs.is_prerelease == 'true' && '--prerelease' || '' }}
 
   # The frontend bundle is platform-agnostic — built once, by the workflow that
   # builds it on every push to the frontend as well, and handed to every matrix
@@ -82,7 +110,7 @@ jobs:
   build:
     needs: [prepare, frontend]
     env:
-      REMOTEX_PREBUILT_FRONTEND: frontend/dist
+      ALUMIA_PREBUILT_FRONTEND: frontend/dist
     strategy:
       fail-fast: false
       matrix:
@@ -91,14 +119,14 @@ jobs:
           # both the tarballs and the container images (packaging/Dockerfile runs
           # them on debian:trixie-slim, glibc 2.41), so the builder must not drift
           # under us into something newer than what can run them.
-          - runner: ubuntu-24.04
+          - runner: ubuntu-26.04
             target-note: linux-x86_64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             target-note: linux-arm64
           - runner: macos-latest
             target-note: macos-arm64
-          # The Windows native package is an MSI: the same tree under %ProgramFiles%\remotex,
-          # reading %ProgramData%\remotex\remotex.toml. No container image.
+          # The Windows native package is an MSI: the same tree under %ProgramFiles%\alumia,
+          # reading %ProgramData%\alumia\alumia.toml. No container image.
           - runner: windows-latest
             target-note: windows-x86_64
     runs-on: ${{ matrix.runner }}
@@ -133,6 +161,13 @@ jobs:
           bash packaging/build-tarball.sh
           bash packaging/build-native-packages.sh
 
+      # The packages ask for the glibc docs/install.md promises, and the binary for the
+      # newest one it was linked against: this runner's Ubuntu is newer than the oldest of
+      # the promise, so the binary is read and started there before anything is uploaded.
+      - name: Check the binary against the glibc floor (${{ matrix.target-note }})
+        if: runner.os == 'Linux'
+        run: bash tools/check-linux-floor.sh --binary target/release/alumia
+
       - name: Install WiX
         if: runner.os == 'Windows'
         shell: pwsh
@@ -150,12 +185,12 @@ jobs:
 
       - name: Build feature-minimal container gateway (${{ matrix.target-note }})
         if: runner.os == 'Linux'
-        run: bash packaging/build-container-binary.sh "tmp/container-bin/remotex-container-${{ matrix.target-note }}"
+        run: bash packaging/build-container-binary.sh "tmp/container-bin/alumia-container-${{ matrix.target-note }}"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: remotex-${{ matrix.target-note }}
+          name: alumia-${{ matrix.target-note }}
           path: dist/*
           if-no-files-found: error
 
@@ -163,8 +198,8 @@ jobs:
         if: runner.os == 'Linux'
         uses: actions/upload-artifact@v4
         with:
-          name: remotex-container-${{ matrix.target-note }}
-          path: tmp/container-bin/remotex-container-${{ matrix.target-note }}
+          name: alumia-container-${{ matrix.target-note }}
+          path: tmp/container-bin/alumia-container-${{ matrix.target-note }}
           if-no-files-found: error
 
   release:
@@ -180,7 +215,13 @@ jobs:
       - name: List artifacts
         run: ls -la artifacts/
 
-      - name: Upload artifacts to draft release
+      # The same globs the upload below names, in a rehearsal too: one that matches nothing
+      # is found here and not at a release.
+      - name: The packages the release gets
+        run: ls -la artifacts/*.deb artifacts/*.rpm artifacts/*.pkg artifacts/*.msi
+
+      - name: Upload artifacts to the release
+        if: needs.prepare.outputs.rehearsal == 'false'
         env:
           GH_TOKEN: ${{ github.token }}
           GH_REPO: ${{ github.repository }}
@@ -188,17 +229,11 @@ jobs:
         # frontend-dist artifact's files in here, and those are build input, not
         # release assets, as the tarballs are: the container job takes those from the
         # workflow's artifacts. The .pkg is the native macOS gateway package, the
-        # .msi the Windows one.
+        # .msi the Windows one. The release already holds the Mac app's disk image.
         run: |
           gh release upload "${{ needs.prepare.outputs.tag }}" \
             artifacts/*.deb artifacts/*.rpm artifacts/*.pkg \
             artifacts/*.msi --clobber
-
-      - name: Publish release (remove draft, creates the tag)
-        env:
-          GH_TOKEN: ${{ github.token }}
-          GH_REPO: ${{ github.repository }}
-        run: gh release edit "${{ needs.prepare.outputs.tag }}" --draft=false
 
   # Container images, built only once the release is published so a pushed image
   # tag always corresponds to a real release. Nothing is compiled here: each
@@ -223,7 +258,7 @@ jobs:
           - runner: ubuntu-latest
             arch: amd64
             target-note: linux-x86_64
-          - runner: ubuntu-24.04-arm
+          - runner: ubuntu-26.04-arm
             arch: arm64
             target-note: linux-arm64
     runs-on: ${{ matrix.runner }}
@@ -235,28 +270,29 @@ jobs:
       - name: Download the release tarball (${{ matrix.target-note }})
         uses: actions/download-artifact@v4
         with:
-          name: remotex-${{ matrix.target-note }}
+          name: alumia-${{ matrix.target-note }}
           path: tmp/tarball
 
       - name: Download the feature-minimal gateway (${{ matrix.target-note }})
         uses: actions/download-artifact@v4
         with:
-          name: remotex-container-${{ matrix.target-note }}
+          name: alumia-container-${{ matrix.target-note }}
           path: tmp/container-bin
 
       - name: Unpack the tarball into the build context
         run: |
           mkdir -p tmp/docker-context
-          # --strip-components=1 drops the remotex-<version>/ wrapper so the
+          # --strip-components=1 drops the alumia-<version>/ wrapper so the
           # context root holds bin/ and share/ as packaging/Dockerfile expects.
-          tar -xzf "tmp/tarball/remotex-${{ needs.prepare.outputs.version }}-${{ matrix.target-note }}.tar.gz" \
+          tar -xzf "tmp/tarball/alumia-${{ needs.prepare.outputs.version }}-${{ matrix.target-note }}.tar.gz" \
             -C tmp/docker-context --strip-components=1
-          cp "tmp/container-bin/remotex-container-${{ matrix.target-note }}" \
-            tmp/docker-context/bin/remotex
-          chmod +x tmp/docker-context/bin/remotex
+          cp "tmp/container-bin/alumia-container-${{ matrix.target-note }}" \
+            tmp/docker-context/bin/alumia
+          chmod +x tmp/docker-context/bin/alumia
           ls -la tmp/docker-context tmp/docker-context/bin
 
       - uses: docker/login-action@v3
+        if: needs.prepare.outputs.rehearsal == 'false'
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
@@ -277,8 +313,8 @@ jobs:
           # match the release being published.
           got=$(docker run --rm "${GHCR_IMAGE}:${IMAGE_TAG}" --version)
           echo "image reports: ${got}"
-          [ "$got" = "remotex ${{ needs.prepare.outputs.version }}" ] || {
-            echo "::error::expected 'remotex ${{ needs.prepare.outputs.version }}'"
+          [ "$got" = "alumia ${{ needs.prepare.outputs.version }}" ] || {
+            echo "::error::expected 'alumia ${{ needs.prepare.outputs.version }}'"
             exit 1
           }
           help=$(docker run --rm "${GHCR_IMAGE}:${IMAGE_TAG}" --help)
@@ -301,11 +337,13 @@ jobs:
           esac
 
       - name: Push image
+        if: needs.prepare.outputs.rehearsal == 'false'
         run: docker push "${GHCR_IMAGE}:${IMAGE_TAG}"
 
   # The per-arch tags above are plumbing; this is the tag users pull.
   docker-manifest:
     needs: [prepare, docker]
+    if: needs.prepare.outputs.rehearsal == 'false'
     runs-on: ubuntu-latest
     steps:
       - uses: docker/login-action@v3
@@ -318,10 +356,13 @@ jobs:
         env:
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          docker manifest create "${GHCR_IMAGE}:${TAG}" \
+          # imagetools rather than `docker manifest create`, which refuses a
+          # source that is itself an index: a runner whose docker keeps images
+          # in containerd's store pushes one, the image beside its build
+          # attestation, as the ubuntu-26.04 runners do.
+          docker buildx imagetools create --tag "${GHCR_IMAGE}:${TAG}" \
             "${GHCR_IMAGE}:${TAG}-amd64" \
             "${GHCR_IMAGE}:${TAG}-arm64"
-          docker manifest push "${GHCR_IMAGE}:${TAG}"
 
       # A prerelease is never `latest` — it is built off a non-main branch.
       - name: Point latest at this release
@@ -329,7 +370,6 @@ jobs:
         env:
           TAG: ${{ needs.prepare.outputs.tag }}
         run: |
-          docker manifest create "${GHCR_IMAGE}:latest" \
+          docker buildx imagetools create --tag "${GHCR_IMAGE}:latest" \
             "${GHCR_IMAGE}:${TAG}-amd64" \
             "${GHCR_IMAGE}:${TAG}-arm64"
-          docker manifest push "${GHCR_IMAGE}:latest"

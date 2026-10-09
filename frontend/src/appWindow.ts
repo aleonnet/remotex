@@ -151,7 +151,7 @@ const NO_WINDOW: AppWindowStore = {
  * The one store this page has, built on first use rather than at import.
  *
  * Lazily, because a module's import order is not the client's to arrange: this file is
- * pulled in by the floating menu, and building a store at import would bind it to
+ * pulled in by the session's bar, and building a store at import would bind it to
  * whichever `window` existed at that moment. In a
  * browser there is exactly one and it is already there; under a test runner sharing one
  * module registry, first *use* is the honest moment.

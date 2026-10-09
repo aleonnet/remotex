@@ -2,7 +2,7 @@
 //! which lists wlshare's extensions, and as a plain `vnc` one, which lists none.
 //!
 //! Builds wlshare from its checkout — `../wlshare` beside this repository, or
-//! wherever `REMOTEX_TEST_WLSHARE_DIR` names — and starts it on a headless sway
+//! wherever `ALUMIA_TEST_WLSHARE_DIR` names — and starts it on a headless sway
 //! (`tests/wlshare-dummy/`) with two outputs, HEADLESS-1 at 1024x768 and scale 1
 //! and HEADLESS-2 at 1280x800 and scale 2, then drives a session through the
 //! gateway as a 2x browser would. Every step is
@@ -21,8 +21,8 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use futures_util::{SinkExt as _, StreamExt as _};
-use remotex::config::{AppConfig, Protocol, Subtype, TargetConfig};
-use remotex::server;
+use alumia::config::{AppConfig, Protocol, Subtype, TargetConfig};
+use alumia::server;
 use tokio::net::{TcpListener, TcpStream};
 use tokio_tungstenite::tungstenite::Message;
 
@@ -33,7 +33,7 @@ const TARGET: &str = "wlshare-dummy";
 const PLAIN_TARGET: &str = "wlshare-dummy-plain";
 
 /// Where the wlshare checkout to build is, when not beside this repository.
-const WLSHARE_DIR_ENV: &str = "REMOTEX_TEST_WLSHARE_DIR";
+const WLSHARE_DIR_ENV: &str = "ALUMIA_TEST_WLSHARE_DIR";
 
 /// Wait until wlshare answers RFB on the published port: rootless podman's
 /// forwarder accepts a connection before anything listens inside.
@@ -72,9 +72,9 @@ async fn spawn_app(vnc_port: u16) -> SocketAddr {
         ..wlshare.clone()
     };
     let config = AppConfig {
-        listen: remotex::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
+        listen: alumia::config::ListenAddr::Tcp("127.0.0.1:0".to_owned()),
         auth: common::test_auth(),
-        branding: remotex::config::Branding { text: "remotex".to_owned(), logo: None },
+        branding: alumia::config::Branding { text: "alumia".to_owned(), logo: None },
         dev_hostname: None,
         meter: None,
         hevc_wasm: None,
@@ -105,6 +105,7 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         size: None,
         egfx: None,
         egfx_h264: false,
+        virtual_displays: 1,
         camera: true,
         microphone: true,
         video_quality: None,
@@ -113,7 +114,6 @@ fn wlshare_target(vnc_port: u16) -> TargetConfig {
         virtual_display: false,
         audio_bitrate: None,
         audio_adaptive: None,
-        audio_adaptive_min: None,
     }
 }
 
@@ -295,7 +295,12 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
     );
     let first = view.output("HEADLESS-1");
     let second = view.output("HEADLESS-2");
-    assert_eq!(view.active(), Some(first), "the configured output is shared first");
+    assert_eq!(view.active(), Some(ALL_DISPLAYS), "two outputs start shown beside each other");
+    assert_eq!(
+        view.displays.as_ref().map(|(_, entries)| entries[0].0),
+        Some(first),
+        "the configured output is the canvas's, listed first"
+    );
     assert_eq!(sway_output(&container, "HEADLESS-1"), (2048, 1536, 2.0));
 
     // The window's points are asked for in the output's pixels.
@@ -340,6 +345,81 @@ async fn wlshare_follows_the_browsers_density_size_and_output() {
     assert_eq!(view.passed, Some(true), "the stream is wlshare's own");
 }
 
+/// The entry that shows both outputs, as the gateway lists it.
+const ALL_DISPLAYS: u64 = 0xffff_ffff;
+
+/// *All Displays* over wlshare's two outputs: the first stays on the session's
+/// canvas and the second is shown on display 2's socket, from a second connection
+/// wlshare shows the other output to. That socket's window sizes the second
+/// output, at the browser's density, and leaves the first alone; choosing one
+/// display again takes the tab away.
+#[tokio::test]
+#[ignore = "requires Docker or Podman"]
+async fn all_displays_shows_the_second_output_in_a_tab_of_its_own() {
+    common::init_logging();
+    let (container, vnc_port) = start_wlshare().await;
+
+    let addr = spawn_app(vnc_port).await;
+    let cookie = common::login(addr).await;
+    let token = common::claim_session(addr, &cookie).await;
+    let mut ws = common::connect_ws(addr, &token, &cookie).await;
+    let mut view = View::new();
+    ws.send(Message::text(format!(
+        r#"{{"type":"connect","target":"{TARGET}","display":{{"w":1728,"h":1117,"scale":200}},"choices":{{"size":"window"}}}}"#
+    )))
+    .await
+    .unwrap();
+    let doubled = Size { w: 2048, h: 1536, scale: 2.0 };
+    view.until(&mut ws, "HEADLESS-1 at 2x", |v| v.size == Some(doubled) && v.displays.is_some()).await;
+    let first = view.output("HEADLESS-1");
+    assert_eq!(view.output("All Displays"), ALL_DISPLAYS, "two outputs are listed with the entry for both");
+    // A desk of two starts on it, with nothing chosen.
+    view.until(&mut ws, "All Displays", |v| v.active() == Some(ALL_DISPLAYS)).await;
+
+    // The tab: its window is the second output's size, in the browser's pixels.
+    let mut tab = common::connect_display_ws(addr, &cookie, 2).await;
+    tab.send(Message::text(r#"{"type":"viewport","w":640,"h":480}"#)).await.unwrap();
+    let mut shown = View::new();
+    let window = Size { w: 1280, h: 960, scale: 2.0 };
+    tokio::time::timeout(Duration::from_secs(60), async {
+        while !(shown.size == Some(window) && shown.painted) {
+            match tab.next().await.expect("display 2's socket closed").expect("websocket receive") {
+                Message::Text(text) => shown.control(&text),
+                Message::Binary(frame) => {
+                    shown.units(&frame);
+                    tab.send(Message::text(common::paint_ack(&frame))).await.expect("acknowledge a batch");
+                }
+                _ => {}
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("timed out waiting for HEADLESS-2 in the tab: sizes {:?}", shown.sizes));
+    assert_eq!(sway_output(&container, "HEADLESS-2"), (1280, 960, 2.0));
+    assert_eq!(sway_output(&container, "HEADLESS-1"), (2048, 1536, 2.0), "the first output is the canvas's still");
+    assert!(shown.displays.is_none(), "the tab has no picker to list for");
+    assert!(
+        container.logs().contains("showing output HEADLESS-2 beside"),
+        "wlshare showed no output beside:\n{}",
+        container.logs()
+    );
+
+    // One display again: the session closes the tab's socket.
+    ws.send(Message::text(format!(r#"{{"type":"selectDisplay","id":{first}}}"#)))
+        .await
+        .unwrap();
+    view.until(&mut ws, "HEADLESS-1 alone", |v| v.active() == Some(first)).await;
+    tokio::time::timeout(Duration::from_secs(30), async {
+        while let Some(Ok(msg)) = tab.next().await {
+            if matches!(msg, Message::Close(_)) {
+                break;
+            }
+        }
+    })
+    .await
+    .expect("display 2's socket stayed open after a single display was chosen");
+}
+
 /// The same server behind a plain `vnc` target is read as any VNC server is: the
 /// gateway lists nothing of wlshare's, so wlshare is never asked for its VP9 and
 /// sends ZRLE, which is encoded here; the 2x browser is shown the output at the
@@ -362,7 +442,7 @@ async fn a_plain_target_reads_wlshare_as_any_vnc_server() {
     )))
     .await
     .unwrap();
-    let (w, h) = remotex::config::DEFAULT_SIZE;
+    let (w, h) = alumia::config::DEFAULT_SIZE;
     view.until(&mut ws, "the desktop at the size the target keeps", |v| {
         v.decode.is_some() && v.sizes.last().is_some_and(|size| (size.w, size.h) == (w.into(), h.into()))
     })
@@ -431,7 +511,7 @@ async fn start_wlshare() -> (Arc<common::Container>, u16) {
     );
     let (container, vnc_port) = common::start_server_image(
         runtime,
-        "remotex-e2e-wlshare",
+        "alumia-e2e-wlshare",
         &manifest.join("tests/wlshare-dummy"),
         &wlshare,
         5900,
@@ -478,7 +558,7 @@ async fn until_node(container: &Arc<common::Container>, prefix: &str, present: b
 
 /// The next control message on an uplink socket, whose only text is the remote's
 /// decisions.
-async fn uplink_signal(ws: &mut common::Ws) -> serde_json::Value {
+async fn uplink_signal(ws: &mut common::Socket) -> serde_json::Value {
     loop {
         match ws.next().await {
             Some(Ok(Message::Text(text))) => return serde_json::from_str(&text).expect("uplink signal is JSON"),
@@ -517,7 +597,7 @@ fn tone_frames(count: usize) -> Vec<Vec<u8>> {
                     ((t * TONE_HZ * std::f64::consts::TAU).sin() * 0.5) as f32
                 })
                 .collect();
-            let mut frame = vec![remotex::protocol::mic::FRAME_KIND];
+            let mut frame = vec![alumia::protocol::mic::FRAME_KIND];
             frame.extend(encoder.encode_vec_float(&pcm, 4000).unwrap());
             frame
         })
@@ -754,7 +834,7 @@ async fn wlshare_lends_the_desktop_the_browsers_camera() {
             tokio::select! {
                 _ = tick.tick(), if streaming => {
                     let unit = &units[next % units.len()];
-                    let mut frame = vec![remotex::protocol::camera::FRAME_KIND, u8::from(unit.keyframe)];
+                    let mut frame = vec![alumia::protocol::camera::FRAME_KIND, u8::from(unit.keyframe)];
                     frame.extend_from_slice(&unit.data);
                     camera.send(Message::binary(frame)).await.unwrap();
                     next += 1;

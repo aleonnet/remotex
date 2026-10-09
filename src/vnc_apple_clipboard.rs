@@ -9,6 +9,7 @@
 //! inside encrypted records. This module owns the byte formats; session state and
 //! browser messages remain in [`crate::vnc`].
 
+use crate::cause::Caused as _;
 use anyhow::Context as _;
 use flate2::{Compress, Compression, Decompress, FlushCompress, FlushDecompress, Status};
 
@@ -65,7 +66,7 @@ pub fn header(raw: &[u8; 15]) -> Header {
 
 /// Put UTF-8 text on the Mac's pasteboard immediately.
 pub fn send(session_id: u32, text: &str) -> anyhow::Result<Vec<u8>> {
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7721"; 
         clipboard_fits(text),
         "clipboard is {} bytes, over the {MAX_CLIPBOARD_BYTES} byte limit",
         text.len()
@@ -354,28 +355,28 @@ fn deflate(input: &[u8]) -> anyhow::Result<Vec<u8>> {
         let consumed = encoder.total_in() as usize;
         let status = encoder
             .compress_vec(&input[consumed..], &mut out, FlushCompress::Sync)
-            .context("deflating the Apple pasteboard")?;
+            .context("deflating the Apple pasteboard").cause(|| crate::cause::Cause::new("AL-7721"))?;
         let read = encoder.total_in() - before_in;
         let written = encoder.total_out() - before_out;
-        anyhow::ensure!(
+        crate::ensure_known!("AL-7721"; 
             status != Status::StreamEnd,
             "Apple pasteboard compressor ended a Sync-flushed stream"
         );
         if encoder.total_in() == input.len() as u64 && written < available as u64 {
             break status;
         }
-        anyhow::ensure!(
+        crate::ensure_known!("AL-7721"; 
             read != 0 || written != 0,
             "Apple pasteboard compressor made no progress before completing its Sync flush"
         );
     };
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7721"; 
         encoder.total_in() == input.len() as u64,
         "Apple pasteboard compressor consumed {} of {} bytes",
         encoder.total_in(),
         input.len()
     );
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7721"; 
         matches!(flush_status, Status::Ok | Status::BufError),
         "Apple pasteboard compressor did not complete its Sync flush"
     );

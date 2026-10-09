@@ -42,6 +42,9 @@ use serde::Serialize;
 use tokio::sync::Notify;
 use tokio::time::{MissedTickBehavior, interval_at};
 
+use crate::cause::{Cause, Caused as _};
+use crate::ensure_known;
+
 /// The resolved `[meter]` table.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct MeterConfig {
@@ -611,7 +614,8 @@ impl ThroughputStore {
         let path = &config.database;
         if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
             std::fs::create_dir_all(dir)
-                .with_context(|| format!("cannot create {}", dir.display()))?;
+                .with_context(|| format!("cannot create {}", dir.display()))
+                .cause(|| Cause::new("AL-9421").with("path", dir.display()))?;
         }
         // Only a file this call creates gets a schema. SQLite shows an existing empty file,
         // or another program's empty database, just like a new one, and neither is ours.
@@ -624,10 +628,15 @@ impl ThroughputStore {
         let created = match options.open(path) {
             Ok(_) => true,
             Err(e) if e.kind() == std::io::ErrorKind::AlreadyExists => false,
-            Err(e) => return Err(e).with_context(|| format!("cannot create {}", path.display())),
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("cannot create {}", path.display()))
+                    .cause(|| Cause::new("AL-9421").with("path", path.display()));
+            }
         };
         let adopted = Connection::open(path)
             .with_context(|| format!("cannot open {}", path.display()))
+            .cause(|| Cause::new("AL-9422").with("path", path.display()))
             .and_then(|mut connection| {
                 connection.busy_timeout(Duration::from_secs(5)).context("cannot set the busy timeout")?;
                 Self::adopt(&mut connection, path, created)?;
@@ -661,15 +670,20 @@ impl ThroughputStore {
     /// Check the database is this module's, creating the schema when `created` says the
     /// file is the one [`Self::open`] just made.
     fn adopt(connection: &mut Connection, path: &Path, created: bool) -> anyhow::Result<()> {
-        let not_ours = || format!("{} is not a remotex throughput database", path.display());
+        let not_ours = || format!("{} is not a alumia throughput database", path.display());
+        let another = || Cause::new("AL-9420").with("path", path.display());
         let transaction = connection
             .transaction_with_behavior(TransactionBehavior::Immediate)
-            .with_context(not_ours)?;
+            .with_context(not_ours)
+            .cause(another)?;
         let objects: i64 = transaction
             .query_row("SELECT count(*) FROM sqlite_schema", [], |row| row.get(0))
-            .with_context(not_ours)?;
-        let application_id: i64 =
-            transaction.query_row("PRAGMA application_id", [], |row| row.get(0)).with_context(not_ours)?;
+            .with_context(not_ours)
+            .cause(another)?;
+        let application_id: i64 = transaction
+            .query_row("PRAGMA application_id", [], |row| row.get(0))
+            .with_context(not_ours)
+            .cause(another)?;
         if created && objects == 0 && application_id == 0 {
             transaction
                 .execute_batch(SCHEMA)
@@ -679,10 +693,13 @@ impl ThroughputStore {
                 .with_context(|| format!("cannot create the throughput schema in {}", path.display()))?;
             return Ok(());
         }
-        anyhow::ensure!(application_id == APPLICATION_ID, "{}", not_ours());
-        let version: i64 =
-            transaction.query_row("PRAGMA user_version", [], |row| row.get(0)).with_context(not_ours)?;
-        anyhow::ensure!(
+        ensure_known!("AL-9420", path = path.display(); application_id == APPLICATION_ID, "{}", not_ours());
+        let version: i64 = transaction
+            .query_row("PRAGMA user_version", [], |row| row.get(0))
+            .with_context(not_ours)
+            .cause(another)?;
+        ensure_known!(
+            "AL-9423", path = path.display(), version = version, reads = SCHEMA_VERSION;
             version == SCHEMA_VERSION,
             "{} holds throughput schema {version}, and this gateway reads only {SCHEMA_VERSION} — \
              move the file away to start a new one",
@@ -690,8 +707,14 @@ impl ThroughputStore {
         );
         let check: String = transaction
             .query_row("PRAGMA quick_check", [], |row| row.get(0))
-            .with_context(|| format!("cannot check {}", path.display()))?;
-        anyhow::ensure!(check == "ok", "{} failed its integrity check: {check}", path.display());
+            .with_context(|| format!("cannot check {}", path.display()))
+            .cause(|| Cause::new("AL-9424").with("path", path.display()))?;
+        ensure_known!(
+            "AL-9424", path = path.display();
+            check == "ok",
+            "{} failed its integrity check: {check}",
+            path.display()
+        );
         Ok(())
     }
 
@@ -1166,20 +1189,20 @@ mod tests {
         let text = dir.path().join("notes.txt");
         std::fs::write(&text, b"not a database, but somebody's").unwrap();
         let error = ThroughputStore::open(&config(text.clone(), 1)).expect_err("not SQLite");
-        assert!(format!("{error:#}").contains("is not a remotex throughput database"), "{error:#}");
+        assert!(format!("{error:#}").contains("is not a alumia throughput database"), "{error:#}");
         assert_eq!(std::fs::read(&text).unwrap(), b"not a database, but somebody's");
 
         let empty = dir.path().join("empty.sqlite3");
         std::fs::write(&empty, b"").unwrap();
         let error = ThroughputStore::open(&config(empty.clone(), 1)).expect_err("an existing empty file");
-        assert!(format!("{error:#}").contains("is not a remotex throughput database"), "{error:#}");
+        assert!(format!("{error:#}").contains("is not a alumia throughput database"), "{error:#}");
         assert_eq!(std::fs::read(&empty).unwrap(), b"");
 
         let other = dir.path().join("other.sqlite3");
         Connection::open(&other).unwrap().execute_batch("CREATE TABLE throughput (x INTEGER)").unwrap();
         let before = std::fs::read(&other).unwrap();
         let error = ThroughputStore::open(&config(other.clone(), 1)).expect_err("another program's SQLite");
-        assert!(format!("{error:#}").contains("is not a remotex throughput database"), "{error:#}");
+        assert!(format!("{error:#}").contains("is not a alumia throughput database"), "{error:#}");
         assert_eq!(std::fs::read(&other).unwrap(), before);
 
         let older = dir.path().join("older.sqlite3");

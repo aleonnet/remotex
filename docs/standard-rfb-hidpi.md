@@ -15,7 +15,7 @@ pixel width and height and nothing else, so a sway output at `scale 2` renders a
 framebuffer its VNC server cannot describe as anything but pixels, and a client
 cannot ask about.
 
-Density over VNC is therefore an extension outside RFB, and remotex lists
+Density over VNC is therefore an extension outside RFB, and alumia lists
 extensions for one server on one kind of target: wlshare, on a target with
 `subtype = "wlshare"`. That subtype is closer to `ard-high-performance` than to
 standard VNC: it names the server, and its picture, density, display list and
@@ -24,18 +24,18 @@ target below, has what RFB defines and nothing more, whatever server it reaches.
 It lists none of wlshare's extensions, so it never asks for a density and is
 never told one, and that holds when the server it reaches is wlshare itself. The
 engine reports `UNSCALED` (`src/vnc.rs`), the browser shows every pixel
-one-to-one, and the Help card reads `1728×883 at 1x` under a browser at 2x.
+one-to-one, and the session's information reads `1728 × 883` at `1x` under a browser at 2x.
 
-Every other kind of target has a wire that carries density, and remotex reads it
+Every other kind of target has a wire that carries density, and alumia reads it
 from there:
 
-- **RDP** — the client *declares* it. remotex puts the browser screen's density,
+- **RDP** — the client *declares* it. alumia puts the browser screen's density,
   quantized to 100% or 200%, in the monitor layout's `DesktopScaleFactor`
   (`src/rdp.rs`), asks for the desktop in pixels at that density, and the host is
   bound to honour it. This is why xrdp shows 2x with nothing to configure.
 - **Apple Screen Sharing** — the server *reports* it. Apple's display layout
   message carries each screen's logical size, backing size and scale factor as a
-  double (`src/vnc_apple.rs`), and remotex reads it off every layout.
+  double (`src/vnc_apple.rs`), and alumia reads it off every layout.
 - **wlshare** — the server *reports* it and takes the client's. A `wlshare`
   target lists wlshare's density extension: the server reports its output's
   scale, and in a session started with resize the browser's density is declared
@@ -92,7 +92,7 @@ desktop simply stays its size. The bytes on the wire are identical; only the
 order of arrival differs. The fix is to disconnect the other client, not to debug
 the gateway.
 
-neatvnc's status codes, as `remotex serve` names them on stderr:
+neatvnc's status codes, as `alumia serve` names them on stderr:
 
 | Status | Meaning | On stderr |
 |---|---|---|
@@ -104,7 +104,7 @@ neatvnc's status codes, as `remotex serve` names them on stderr:
 
 A granted resize therefore looks like a status 4 reply immediately followed by a
 `reason=0` rect at the new size; that is success, not a refusal followed by a
-coincidence. Run with `RUST_LOG=remotex=debug` to see the `ExtendedDesktopSize`
+coincidence. Run with `RUST_LOG=alumia=debug` to see the `ExtendedDesktopSize`
 rects and the *holding … until the server declares SetDesktopSize support* line
 that precedes the first request on every connection — wayvnc declares support with
 its first framebuffer update, about a second after connect, and the size the

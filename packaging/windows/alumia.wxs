@@ -1,0 +1,80 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  The Windows package: an MSI installing the tree the .deb, .rpm and .pkg install, by default under
+  %ProgramFiles%\alumia, and like them nothing else. No service, no shortcut, no config: the
+  live config is %ProgramData%\alumia\alumia.toml, created by the operator (docs/install.md)
+  and never touched by the package, for the reason the Unix packages leave /etc/alumia alone.
+  It holds credentials, and an upgrade or a removal must stay away from it.
+
+  Built by packaging/build-windows-msi.ps1 with WiX 5 (`wix build`), which defines
+    Version: Cargo's version with any pre-release suffix removed (an MSI version is x.y.z)
+    Stage:   the assembled release tree (bin\, share\, VERSION)
+  The UpgradeCode is what makes a newer MSI replace an installed older one instead of sitting
+  beside it; it must never change. Component GUIDs derive from the install paths, which do not
+  change either.
+
+  The UI is WiX's stock InstallDir wizard (WixToolset.UI.wixext): welcome, folder, confirm,
+  progress, and the finish page that says the install succeeded — without it an MSI run by
+  double-click shows a progress bar and simply closes, which reads as "did it work?". Its
+  licence page is skipped, below: the MIT licence asks nothing of whoever installs it, and it
+  is installed under share\doc\alumia.
+  `msiexec /qn` never shows any of it, so the unattended install and the CI smoke test are
+  unchanged.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs"
+     xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui">
+  <Package Name="alumia" Manufacturer="Alessandro Barbosa" Version="$(var.Version)"
+           UpgradeCode="911ebdb6-b5e7-45d1-9b71-8fa7eba87056" Scope="perMachine">
+    <SummaryInformation Description="Single-user browser remote desktop gateway" />
+    <MajorUpgrade DowngradeErrorMessage="A newer version of alumia is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/aleonnet/alumia" />
+
+    <!-- The dialog set also sets ARPNOMODIFY: no Change button in Apps & features. -->
+    <ui:WixUI Id="WixUI_InstallDir" InstallDirectory="INSTALLFOLDER" />
+    <UI>
+      <!-- Straight from the welcome page to the folder page: no licence dialog. Order 99 puts
+           these after the dialog set's own transitions, so they are the ones that take. -->
+      <Publish Dialog="WelcomeDlg" Control="Next" Event="NewDialog" Value="InstallDirDlg" Order="99" Condition="NOT Installed" />
+      <Publish Dialog="InstallDirDlg" Control="Back" Event="NewDialog" Value="WelcomeDlg" Order="99" />
+    </UI>
+    <!-- The finish page's one line of what to do next: the PATH change reaches only shells
+         opened after the install, and the config is the operator's to create. -->
+    <Property Id="WIXUI_EXITDIALOGOPTIONALTEXT"
+              Value="alumia is on the PATH of every shell opened from now on. Create %ProgramData%\alumia\alumia.toml from the example under share\doc\alumia, then run alumia serve." />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="alumia">
+        <Directory Id="BinDir" Name="bin" />
+        <Directory Id="ShareDir" Name="share">
+          <Directory Id="ShareDocDir" Name="doc">
+            <Directory Id="DocDir" Name="alumia" />
+          </Directory>
+        </Directory>
+      </Directory>
+    </StandardDirectory>
+
+    <ComponentGroup Id="Gateway">
+      <Component Directory="BinDir">
+        <File Source="$(var.Stage)\bin\alumia.exe" />
+        <!-- On every account's PATH, as /usr/bin/alumia is; removed with the package. -->
+        <Environment Id="PathEntry" Name="PATH" Value="[BinDir]" Part="last" Action="set" System="yes" />
+      </Component>
+      <Component Directory="DocDir">
+        <File Source="$(var.Stage)\share\doc\alumia\alumia.example.toml" />
+      </Component>
+      <Component Directory="DocDir">
+        <File Source="$(var.Stage)\share\doc\alumia\LICENSE" />
+      </Component>
+      <Component Directory="INSTALLFOLDER">
+        <File Source="$(var.Stage)\VERSION" />
+      </Component>
+      <!-- No web directory: the web client is compiled into alumia.exe. -->
+    </ComponentGroup>
+
+    <Feature Id="Main">
+      <ComponentGroupRef Id="Gateway" />
+    </Feature>
+  </Package>
+</Wix>

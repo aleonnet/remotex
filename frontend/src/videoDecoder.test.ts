@@ -10,6 +10,7 @@
 // Run with `bun test src/videoDecoder.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { afterEach, beforeEach, test } from "node:test";
+import type { Fault } from "./fault.ts";
 import type {
   VideoDecoderLike,
   VideoDecoderLikeInit,
@@ -25,10 +26,15 @@ interface FakeFrame {
 /** Every decoder built, newest last, so a test can drive one directly. */
 let built: FakeDecoder[] = [];
 
+/** What the next decoder throws when it is handed a chunk, where a test stages one that refuses. */
+let refuses: Error | null = null;
+
 // Silent by default: emitting nothing for a chunk is the failure being reproduced,
 // so it is this fake's normal behaviour and `emit` is the explicit opposite.
 class FakeDecoder {
   readonly output: (frame: unknown) => void;
+  /** The decoder's own report that it failed, as the browser would make it. */
+  readonly error: (error: Error) => void;
   readonly chunks: { type: string }[] = [];
   state = "unconfigured";
   configures = 0;
@@ -39,6 +45,7 @@ class FakeDecoder {
     error: (error: Error) => void;
   }) {
     this.output = init.output;
+    this.error = init.error;
     built.push(this);
   }
 
@@ -48,6 +55,9 @@ class FakeDecoder {
   }
 
   decode(chunk: { type: string }) {
+    if (refuses) {
+      throw refuses;
+    }
     this.chunks.push(chunk);
   }
 
@@ -78,6 +88,7 @@ const globals = globalThis as unknown as {
 
 beforeEach(() => {
   built = [];
+  refuses = null;
   globals.VideoDecoder = FakeDecoder;
   globals.EncodedVideoChunk = class {
     type: string;
@@ -103,7 +114,7 @@ const STALL_MS = 10;
 const afterStall = () => new Promise((resolve) => setTimeout(resolve, 30));
 
 function streams() {
-  const errors: string[] = [];
+  const errors: Fault[] = [];
   const stalls: string[] = [];
   const table = createDesktopVideo(
     {
@@ -241,4 +252,95 @@ test("a new picture size replaces the decoder", async () => {
   assert.equal(decoder.closes, 1);
   s.decoder().emit(0xb2);
   assert.equal(tagOf(await resized), 0xb2);
+});
+
+// Each point where the decoder fails says its cause by its code in the catalogue
+// (docs/design/errors.json), with what the browser said of it, and whether a
+// keyframe can repair it.
+
+/** An error as a browser names one. */
+function named(name: string, message: string): Error {
+  const error = new Error(message);
+  error.name = name;
+  return error;
+}
+
+test("a configuration the decoder does not support is said as that, and no keyframe is asked for", async () => {
+  const s = streams();
+  const frame = s.table.decode(size, unit(1), true);
+  s.decoder().error(named("NotSupportedError", "unsupported"));
+  assert.equal(await frame, null);
+  assert.deepEqual(s.errors, [
+    { code: "AL-4601", fill: { format: "vp09.00.40.08" } },
+  ]);
+  assert.deepEqual(s.stalls, [], "no keyframe repairs a format");
+});
+
+test("a decoder that fails says what the browser said, and asks for the keyframe a fresh one needs", async () => {
+  const s = streams();
+  const frame = s.table.decode(size, unit(1), true);
+  s.decoder().error(named("EncodingError", "bad bytes"));
+  assert.equal(await frame, null);
+  assert.deepEqual(s.errors, [
+    { code: "AL-4602", detail: "EncodingError: bad bytes" },
+  ]);
+  assert.equal(s.stalls.length, 1);
+});
+
+test("a decoder that reports a failure after it was closed says nothing and asks for nothing", async () => {
+  // The stream it decoded is done with: said then, its failure would be the next
+  // stream's notice, and a keyframe asked for on the next stream's account.
+  const s = streams();
+  const frame = s.table.decode(size, unit(1), true);
+  const old = s.decoder();
+  s.table.close();
+  assert.equal(await frame, null);
+  old.error(named("EncodingError", "bad bytes"));
+  assert.deepEqual(s.errors, []);
+  assert.deepEqual(s.stalls, []);
+});
+
+test("the software decoder's failure keeps its words for the console, and none for the screen", async () => {
+  // Its words are this page's own, written in its code and in English: only a
+  // browser's go behind a notice's Details.
+  const errors: Fault[] = [];
+  const stalls: string[] = [];
+  const table = createDesktopVideo(
+    {
+      onError: (reason) => errors.push(reason),
+      onNeedsKeyframe: (reason) => stalls.push(reason),
+    },
+    STALL_MS,
+    true,
+    (init) => new FakeDecoder(init as never) as unknown as VideoDecoderLike,
+  );
+  table.setFormat({ decode: "hev1.4.10.L150.BE.8" });
+  const frame = table.decode(size, unit(1), true);
+  built[built.length - 1].error(
+    named("EncodingError", "the HEVC decoder failed (-5)"),
+  );
+  assert.equal(await frame, null);
+  assert.deepEqual(errors, [{ code: "AL-4602" }]);
+  assert.deepEqual(stalls, [
+    "AL-4602 (EncodingError: the HEVC decoder failed (-5))",
+  ]);
+});
+
+test("a frame the decoder refuses outright is said as refused, and asks for a keyframe", async () => {
+  const s = streams();
+  refuses = named("DataError", "a key frame is required");
+  assert.equal(await s.table.decode(size, unit(1), true), null);
+  assert.deepEqual(s.errors, [
+    { code: "AL-4603", detail: "DataError: a key frame is required" },
+  ]);
+  assert.equal(s.stalls.length, 1);
+});
+
+test("a browser with no video decoder at all is said as that, and no keyframe is asked for", async () => {
+  const s = streams();
+  globals.VideoDecoder = undefined;
+  assert.equal(await s.table.decode(size, unit(1), true), null);
+  assert.equal(s.errors.length, 1);
+  assert.equal(s.errors[0].code, "AL-4604");
+  assert.deepEqual(s.stalls, []);
 });

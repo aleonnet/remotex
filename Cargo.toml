@@ -7,7 +7,7 @@
 # line matching `^version = "…"` out of this manifest to stamp the login screen,
 # so the package's `version` must stay the first such line.
 #
-# `crates/remotex-rdp-graphics` is the graphics half of the RDP client — the codecs,
+# `crates/alumia-rdp-graphics` is the graphics half of the RDP client — the codecs,
 # the graphics pipeline's compositor and the framebuffer — as a crate of its own,
 # because the page runs it too: frontend/wasm/egfx is the WebAssembly binding around
 # it. It is a default member beside the gateway, so a plain `cargo clippy` and
@@ -17,13 +17,13 @@
 # lossless target's sound, which shares no crate with the gateway.
 [workspace]
 resolver = "3"
-members = ["crates/remotex-rdp-graphics"]
-default-members = [".", "crates/remotex-rdp-graphics"]
+members = ["crates/alumia-rdp-graphics"]
+default-members = [".", "crates/alumia-rdp-graphics"]
 exclude = ["frontend/wasm/egfx", "frontend/wasm/flac"]
 
 [package]
-name = "remotex"
-version = "0.0.325"
+name = "alumia"
+version = "0.1.3"
 license = "MIT"
 edition = "2024"
 
@@ -57,7 +57,9 @@ rust-embed = { version = "8", features = ["debug-embed", "interpolate-folder-pat
 # `ServiceExt::oneshot` in the router tests, which drive the router without a
 # socket.
 tower = { version = "0.5", features = ["util"] }
-clap = { version = "4", features = ["derive", "env"] }
+# `string`: a command's help is said from the terminal's dictionary, in the
+# language of whoever runs it (src/cli.rs), so its texts are not `'static`.
+clap = { version = "4", features = ["derive", "env", "string"] }
 crossterm = { version = "0.29", features = ["event-stream"], optional = true }
 anyhow = "1"
 thiserror = "2"
@@ -90,7 +92,7 @@ rusqlite = { version = "0.40", features = ["bundled"] }
 # a thing no check of this gateway should have to have. Do not restore a source build,
 # a vcpkg dependency, or bindgen. libvpx asserts nothing — it returns error codes —
 # which is why the encoder is a plain `?` path under `panic = "abort"`.
-screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.6" }
+screen-vp9 = { git = "https://github.com/andrewtheguy/screen-vp9", tag = "v0.0.7" }
 # YUV→RGB for the HEVC pictures High Performance's media stream decodes to
 # (src/vnc_apple_media.rs). Pure Rust with AVX2 and NEON paths chosen at run time —
 # no C, no assembler, the same bargain as above.
@@ -114,7 +116,7 @@ avcodec-hevc-sys = { package = "libavcodec-hevc-prebuilt-sys", git = "https://gi
 # for this gateway and for wlshare, its own repository pinned at a release tag by
 # both, so a passed wlshare packet and one encoded here are the same stream by
 # construction and an encoder setting changes in one place.
-sound-opus = { git = "https://github.com/andrewtheguy/sound-opus", tag = "v0.0.2" }
+sound-opus = { git = "https://github.com/andrewtheguy/sound-opus", tag = "v0.0.4" }
 # libopus itself, for the microphone's decoder (src/mic.rs) and for the tests
 # that read the encoder's packets back; sound-opus links the same crate at the
 # same tag, so there is one libopus in the binary.
@@ -200,11 +202,11 @@ socket2 = { version = "0.6", features = ["all"] }
 # Server-side RDP engine (see docs/architecture.md): the gateway's own headless
 # client in src/rdp_client/, protocol and all — every PDU is encoded and decoded in
 # src/rdp_client/proto/ against [MS-RDPBCGR], so nothing below is an RDP library.
-# What the host draws with is decoded by crates/remotex-rdp-graphics, the client's
+# What the host draws with is decoded by crates/alumia-rdp-graphics, the client's
 # graphics, which the page runs as well.
 # Pure Rust apart from `ring` and zlib, so the build needs no cmake, pkg-config,
 # OpenSSL or libclang.
-remotex-rdp-graphics = { path = "crates/remotex-rdp-graphics" }
+alumia-rdp-graphics = { path = "crates/alumia-rdp-graphics" }
 #
 # TLS is rustls with `ring`, and rustls needs that provider installed as the process
 # default before the first handshake: `tokio-rustls` is a direct dependency both for
@@ -266,6 +268,7 @@ libc = { version = "0.2", optional = true }
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", optional = true, features = [
     "Win32_Foundation",
+    "Win32_Globalization",
     "Win32_Security",
     "Win32_Security_Authorization",
     "Win32_System_Threading",
@@ -277,6 +280,12 @@ required-features = ["embedded-gateway"]
 
 [[test]]
 name = "tui_control_plane_e2e"
+required-features = ["embedded-gateway"]
+
+# The gateway a Mac app hosts (`serve --app`): its tests are macOS's alone, and say
+# so themselves.
+[[test]]
+name = "app_mode_e2e"
 required-features = ["embedded-gateway"]
 
 [dev-dependencies]

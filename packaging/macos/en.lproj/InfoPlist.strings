@@ -1,0 +1,2 @@
+/* What macOS shows when the gateway first reaches another computer of the network. */
+"NSLocalNetworkUsageDescription" = "Alumia reaches the other computers on your network to open their screens.";

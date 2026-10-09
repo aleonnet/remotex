@@ -4,18 +4,18 @@
 # elevated PowerShell 7 (msiexec /qn installs per machine), on a machine whose Program Files
 # is theirs to install into.
 #Requires -Version 7
-param([string] $Msi = 'dist\remotex-windows-x86_64.msi')
+param([string] $Msi = 'dist\alumia-windows-x86_64.msi')
 $ErrorActionPreference = 'Stop'
 $Msi = (Resolve-Path $Msi).Path
-$root = Join-Path $env:ProgramFiles 'remotex'
+$root = Join-Path $env:ProgramFiles 'alumia'
 $binDir = Join-Path $root 'bin'
-$exe = Join-Path $binDir 'remotex.exe'
+$exe = Join-Path $binDir 'alumia.exe'
 # The package must never create, change or remove the operator's config directory.
-$config = Join-Path $env:ProgramData 'remotex'
+$config = Join-Path $env:ProgramData 'alumia'
 $configBefore = Test-Path $config
 
 function Invoke-Msiexec([string[]] $Arguments, [string] $What) {
-    $log = Join-Path $env:TEMP "remotex-msi-$What.log"
+    $log = Join-Path $env:TEMP "alumia-msi-$What.log"
     $p = Start-Process msiexec -ArgumentList ($Arguments + @('/qn', '/norestart', '/l*v', $log)) -Wait -PassThru
     if ($p.ExitCode -ne 0) {
         Get-Content $log | Select-Object -Last 40
@@ -27,7 +27,7 @@ function Test-OnMachinePath([string] $Dir) {
     [bool]($entries | Where-Object { $_.TrimEnd('\') -ieq $Dir })
 }
 
-if (Test-Path $root) { throw "$root exists before the install — remove the previous remotex first" }
+if (Test-Path $root) { throw "$root exists before the install — remove the previous alumia first" }
 
 # The install below is silent, so the wizard is checked in the package itself: an MSI with no
 # UI shows a progress bar and closes, and the finish page is what tells the operator it
@@ -53,19 +53,19 @@ foreach ($dialog in 'WelcomeDlg', 'InstallDirDlg', 'VerifyReadyDlg', 'ProgressDl
 }
 # The licence page stays in the table — the dialog set defines it — but the welcome page's Next
 # must lead past it: of the NewDialog events on that button the highest-ordered one fires last
-# and wins, and it has to be the one remotex.wxs adds.
+# and wins, and it has to be the one alumia.wxs adds.
 $next = Read-MsiRows "SELECT ``Argument``, ``Ordering`` FROM ``ControlEvent`` WHERE ``Dialog_``='WelcomeDlg' AND ``Control_``='Next' AND ``Event``='NewDialog'" @('Argument', 'Ordering') |
     Sort-Object { [int]$_.Ordering } | Select-Object -Last 1
 if ($next.Argument -ne 'InstallDirDlg') { throw "the welcome page's Next leads to '$($next.Argument)', not the folder page" }
 Write-Host "   the wizard has its $($dialogs.Count) pages, finish page included, and skips the licence page"
 Write-Host ">> installing $Msi"
 Invoke-Msiexec @('/i', $Msi) 'install'
-foreach ($file in 'bin\remotex.exe', 'VERSION', 'share\doc\remotex\remotex.example.toml', 'share\doc\remotex\LICENSE') {
+foreach ($file in 'bin\alumia.exe', 'VERSION', 'share\doc\alumia\alumia.example.toml', 'share\doc\alumia\LICENSE') {
     if (-not (Test-Path (Join-Path $root $file))) { throw "the installed tree lacks $file" }
 }
 $version = (Get-Content (Join-Path $root 'VERSION') -Raw).Trim()
 $reported = (& $exe --version) -join ' '
-if ($LASTEXITCODE -ne 0) { throw "remotex.exe --version exited $LASTEXITCODE" }
+if ($LASTEXITCODE -ne 0) { throw "alumia.exe --version exited $LASTEXITCODE" }
 if ($reported -notmatch [regex]::Escape($version)) { throw "--version says '$reported', VERSION says $version" }
 Write-Host "   $reported"
 # The control plane is in the package. Asked of the binary without starting it: a started

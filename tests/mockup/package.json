@@ -1,0 +1,16 @@
+{
+  "name": "alumia-mockup-check",
+  "private": true,
+  "scripts": {
+    "deps": "test -x node_modules/.bin/tsc || bun install --frozen-lockfile",
+    "pretest": "bun run deps",
+    "test": "playwright test",
+    "pretypecheck": "bun run deps",
+    "typecheck": "tsc --noEmit"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.62.0",
+    "@types/node": "^26.1.1",
+    "typescript": "~5.9"
+  }
+}

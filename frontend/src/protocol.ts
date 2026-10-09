@@ -70,7 +70,7 @@ export type ClientMsg =
   // that follows the window opens at its full resolution — by the time a
   // hostDisplay message could arrive, the opening size has already been
   // asked of the remote. `choices` is what was chosen under the target before
-  // Start, held for the life of the session (targetChoices.ts).
+  // Open, held for the life of the session (targetChoices.ts).
   | {
       type: "connect";
       target: string;
@@ -81,7 +81,7 @@ export type ClientMsg =
   // Clipboard bridge. The backend owns the clipboard data: "clipboard" puts
   // text on the remote's clipboard, "clipboardRequest" asks for the remote's
   // current text and is answered with a `clipboard` control message. Both are
-  // sent either by the floating menu's Clipboard panel or by the automatic
+  // sent either by the clipboard sheet (ClipboardPanel.tsx) or by the automatic
   // sync in useRemoteDesktop, which pushes the local OS clipboard on focus
   // where the browser permits reading it. Nothing is retained here.
   | { type: "clipboard"; text: string }
@@ -99,6 +99,23 @@ export type ClientMsg =
   // a canvas that has gone wrong; the
   // browser has no button for it, since there is a reload right there.
   | { type: "refresh" }
+  // The width this client shows the picture at, in its own CSS pixels: the
+  // window's width times the pinch zoom. Only the client that fits the picture
+  // to its width (CAN_PINCH_ZOOM) sends it, on its display socket: on connect,
+  // when the device is turned, and once a pinch has come to rest. A session the
+  // gateway reduces the picture of encodes it no wider than this, in the
+  // device's pixels, so a phone is sent what it shows and asks for more by
+  // zooming. Nothing else reads it.
+  | { type: "shown"; w: number }
+  // Whether this page is in sight, said as it is hidden and as it comes back
+  // (visibilitychange), on the session socket. Hidden, the gateway keeps the
+  // picture and sends nothing; back, it sends a keyframe, which the decoder this
+  // page builds afresh then starts from.
+  | { type: "sight"; visible: boolean }
+  // What this page's laboratory saw (lab.ts), one line each, for the gateway's
+  // log and nothing else. Sent only while the laboratory is on, and held by the
+  // gateway to four messages a second, twenty lines each, 240 characters a line.
+  | { type: "lab"; lines: string[] }
   // There is no audio message. Subscribing is opening `/ws/audio`, and stopping is
   // closing it — see useRemoteDesktop's `setAudio`. The UI click that does it also
   // authorizes playback, which is why it has to be a click either way.
@@ -131,7 +148,7 @@ export const MAX_CLIPBOARD_BYTES = 524_288;
 
 export interface ClipboardSnapshot {
   text: string;
-  // Unix epoch milliseconds when remotex observed the remote clipboard
+  // Unix epoch milliseconds when alumia observed the remote clipboard
   // change. Null is honest for clipboard content that predates this session.
   changedAtMs: number | null;
   // Set when the remote's clipboard was refused for exceeding
@@ -152,8 +169,9 @@ export interface RemoteClipboard extends ClipboardSnapshot {
 }
 
 // One of the remote's displays, as the picker lists it. The strings are built
-// by the remote end and shown verbatim: the Mac knows how its own displays are
-// named and numbered, and saying it once keeps every part of the panel consistent.
+// by the remote end: the Mac knows how its own displays are named and numbered.
+// The page says the ones it knows in the person's language, in one place
+// (serverWords.ts), and any other as it came.
 export interface DisplayInfo {
   // Opaque here — whatever goes back in a "selectDisplay".
   id: number;
@@ -164,6 +182,12 @@ export interface DisplayInfo {
   main: boolean;
   // A display the remote made for this purpose rather than one of its screens.
   virtual: boolean;
+  // Where this display is shown in a browser tab of its own, beside the one on
+  // the canvas: the number its page (`/display/N`) and its display socket name
+  // it by. Null for a display the picker switches the canvas to. Set by *All
+  // Displays* on an RDP target or a High Performance Mac with two virtual
+  // displays (alpha), for the second of them.
+  tab: number | null;
 }
 
 // A rectangle in whole pixels or points, origin at the top left.
@@ -213,13 +237,20 @@ export type ControlMsg =
       hy: number;
       pointSized: boolean;
     }
-  | { type: "error"; message: string }
+  // `message` is the gateway's own sentence, in English. `cause` is why, as the
+  // catalogue names it (docs/design/errors.json), with what fills its text; null
+  // for an error nobody named a cause for.
+  | {
+      type: "error";
+      message: string;
+      cause: { code: string; fill: Record<string, string> } | null;
+    }
   | { type: "picker" }
   // `resize` means this window drives the remote's size, continuously and on
   // every engine alike — what the session was started with, with no client-side
   // mode. True is auto-follow (and the mobile one-shot); false is a session
   // whose size was settled at open.
-  // `protocol` ("rdp"/"vnc") is carried for the status line. `audio` says the
+  // `protocol` ("rdp"/"vnc") is carried for the session's information. `audio` says the
   // session carries the remote's sound, not that any is arriving.
   | {
       type: "connected";
@@ -228,7 +259,7 @@ export type ControlMsg =
       // The target's `subtype` where it has one — `wlshare`, `ard` or
       // `ard-high-performance` — and null for plain RDP and plain VNC. Four
       // targets say `vnc` and only this tells them apart, which is what the
-      // session card's Connection row is for: whether there is a display list,
+      // information sheet's Connection row is for: whether there is a display list,
       // whether resize is offered, and whether the path under it is the
       // reverse-engineered one. See connectionLabel.ts.
       subtype: string | null;
@@ -258,7 +289,7 @@ export type ControlMsg =
   // 48 kHz the gateway resampled to. `packetFrames` is the samples in one packet
   // at `sampleRate` — 960 — and is the one thing a client cannot derive for itself.
   // `passthrough` says the packets are the remote's own rather than coded by the
-  // gateway, for the session card.
+  // gateway, for the session's information.
   | {
       type: "audioFormat";
       codec: string;
@@ -286,6 +317,14 @@ export type ControlMsg =
   // records after it are the picture: this page composes them. Whatever it held of
   // a pipeline or a video stream before is done with.
   | { type: "graphicsStart" }
+  // The part of a passed pipeline's picture this display is, in the picture's
+  // pixels: the host draws its virtual displays as one span, and this names one
+  // display's column of it, `w` by `h` from `x`, `y`. Only a session started with
+  // the pipeline passed sends it, on a display socket next to each `resize`. The
+  // page that composes the pipeline shows that part of its picture; the tab
+  // showing the second display composes nothing, and is painted that part of the
+  // session page's picture instead (displayRelay.ts).
+  | { type: "graphicsView"; x: number; y: number; w: number; h: number }
   // Whether the remote runs macOS, discovered by the engine as it connects.
   // The browser uses it to decide whether selected local Command shortcuts stay
   // Command or become remote Control.
@@ -303,13 +342,27 @@ export type ControlMsg =
   // Pushed by the gateway, which alone knows when the Mac has settled; the
   // page never infers it.
   | { type: "resizing"; active: boolean }
+  // A High Performance Mac's media stream has sent no picture of the display
+  // shown: true from connect, from every display change and from a stream the
+  // Mac restarts, false behind the stream's first picture of the display. The
+  // page says the screen is not available meanwhile and sends no input, as
+  // under `resizing`: nobody can see what it would do. Pushed by the gateway
+  // and again on reattach while it holds; the page never infers it.
+  | { type: "screenUnavailable"; active: boolean }
+  // Told to a display shown in a tab of its own: whether the session's page is
+  // attached. Without it the tab's picture has no painter and nobody is at the
+  // session, so the tab says so and sends nothing until the page is back.
+  | { type: "sessionPage"; attached: boolean }
+  // The host laid out fewer displays than the computer is set up with: one, where
+  // two were asked for. There is no list to say it by, so the gateway says it.
+  | { type: "secondDisplay"; missing: boolean }
   // Why the desktop the `resize` before this describes has no picture, or null
-  // when it has one: past what a video stream encodes, or a Mac's All Displays
+  // when it has one: past what a video stream encodes, or a Mac's Combined Display
   // over more than two screens. No picture follows until a `resize` without a
   // cause. Sent after every `resize` of a source that holds the session open for
   // that, and never by one that ends the session instead. The page says so over
   // the desktop and offers the remote's displays, since choosing one is how a
-  // Mac on All Displays gets back.
+  // Mac on Combined Display gets back.
   | { type: "oversize"; cause: HoldCause | null }
   // The remote's displays and which one is being shared, pushed whenever either
   // changes. The browser holds no display state of its own: the checkmark

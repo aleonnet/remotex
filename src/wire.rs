@@ -45,6 +45,12 @@ impl Default for Wire {
 }
 
 impl Wire {
+    /// An attachment with no sequence number left, for the tests of what closes it.
+    #[cfg(test)]
+    pub(crate) fn exhausted() -> Self {
+        Self { next_sequence: u32::MAX, ..Self::default() }
+    }
+
     /// Encode a run of messages, in order, into the frames to write.
     ///
     /// "Run" means everything the caller had available at once. Whatever is

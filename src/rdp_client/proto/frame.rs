@@ -18,11 +18,12 @@
 //! read that consumes nothing when it is cancelled — so a caller that gives up on a
 //! half-arrived frame loses nothing but the wait.
 
-use anyhow::{Context as _, Result, bail};
+use anyhow::{Context as _, Result};
 use tokio::io::{AsyncRead, AsyncReadExt as _};
 
 use super::wire::Malformed;
 use super::{fastpath, x224};
+use crate::cause::Cause;
 
 /// How much room to have free before asking the socket for more. Large enough that a
 /// full-screen bitmap update is a handful of reads rather than a hundred.
@@ -62,7 +63,7 @@ impl<S: AsyncRead + Unpin> Frames<S> {
                 .await
                 .context("reading from the host")?;
             if read == 0 {
-                bail!("the host closed the connection");
+                return Err(Cause::new("AL-7102").of(anyhow::anyhow!("the host closed the connection")));
             }
         }
     }
@@ -146,6 +147,8 @@ mod tests {
         let mut frame = Vec::new();
         let err = reader.next(&mut frame).await.unwrap_err();
         assert_eq!(err.to_string(), "the host closed the connection");
+        // With the cause a page says it by.
+        assert_eq!(crate::cause::find(&err), Some(&Cause::new("AL-7102")));
     }
 
     /// A header this client cannot read is an error rather than a wait for bytes

@@ -5,6 +5,14 @@
 // Driven through a stand-in element and document, since the decision is
 // arithmetic on touch coordinates and needs no layout.
 //
+// At the end, the layer's word for a cursor it cannot take any further: when a
+// one-finger drag pushes the cursor past the edge of what is on screen and the
+// view, asked to pan, does not move, the layer says so (`onEdge`), once a
+// second at most. That is the geometry a phone's browser is asked for when the
+// cursor stops short of the picture's bottom (plan 6, decision 4); the Chromium
+// of the browser tests reaches the bottom every time, so this is the one place
+// the rule is proved.
+//
 // Run with `bun test src/touchGestures.test.ts` from frontend/.
 import assert from "node:assert/strict";
 import { beforeEach, test } from "node:test";
@@ -196,4 +204,150 @@ test("a scroll releases without clicking anything", () => {
     sent.filter((msg) => msg.type === "mouseButton"),
     [],
   );
+});
+
+// ---- the cursor held at an edge ----
+
+interface FakeTouch {
+  identifier: number;
+  clientX: number;
+  clientY: number;
+  force?: number;
+}
+
+/** An element with listeners the test fires itself, and a rect at the origin. */
+function surface() {
+  const listeners = new Map<string, (event: unknown) => void>();
+  const el = {
+    addEventListener: (type: string, listener: (event: unknown) => void) => {
+      listeners.set(type, listener);
+    },
+    removeEventListener: () => {},
+    getBoundingClientRect: () => ({ left: 0, top: 0 }),
+  } as unknown as HTMLElement;
+  const fire = (type: string, touches: FakeTouch[], changed = touches) => {
+    const event = {
+      touches,
+      changedTouches: changed,
+      preventDefault() {},
+      stopImmediatePropagation() {},
+    };
+    listeners.get(type)?.(event);
+  };
+  return { el, fire };
+}
+
+/**
+ * A view of a 640×480 remote shown at 1:1 on a window 390 points tall, panned
+ * to its limit: the picture's bottom sits at the window's bottom, as far as the
+ * view's own clamp knows (`vh`). The gesture layer measures the window itself,
+ * through `document`, which the test sets apart from the clamp's: that is the
+ * disagreement a browser's own zoom leaves behind, and what `onEdge` reports.
+ */
+function viewOf(vh: number) {
+  const size = { w: 640, h: 480, scale: 1 };
+  const view: GestureView = { fit: 1, zoom: 1, pan: { x: 0, y: vh - size.h } };
+  return {
+    size,
+    view,
+    applyView(zoom: number, pan: { x: number; y: number }) {
+      view.zoom = zoom;
+      view.pan = {
+        x: Math.min(Math.max(pan.x, Math.min(0, 844 - size.w * zoom)), 0),
+        y: Math.min(Math.max(pan.y, Math.min(0, vh - size.h * zoom)), 0),
+      };
+    },
+  };
+}
+
+function withDocument(clientHeight: number, run: () => void) {
+  const had = (globalThis as { document?: unknown }).document;
+  (globalThis as { document?: unknown }).document = {
+    documentElement: { clientWidth: 844, clientHeight },
+  };
+  try {
+    run();
+  } finally {
+    (globalThis as { document?: unknown }).document = had;
+  }
+}
+
+test("a cursor pushed past the bottom of what is on screen, with the view at its limit, is said once a second", () => {
+  const { el, fire } = surface();
+  const v = viewOf(390);
+  const edges: {
+    side: string;
+    cursor: number;
+    remote: number;
+    pan: number;
+    zoom: number;
+  }[] = [];
+  let now = 10_000;
+  // The window the layer measures is shorter than the clamp's: 300 of 390.
+  withDocument(300, () => {
+    attachTouchGestures(el, {
+      send() {},
+      remoteSize: () => v.size,
+      view: () => v.view,
+      applyView: (zoom, pan) => v.applyView(zoom, pan),
+      onEdge: (edge) => edges.push(edge),
+      now: () => now,
+    });
+    // One finger, down far enough to be a drag of the cursor, then on past
+    // the edge: the cursor starts at the centre and is pushed down 600 points.
+    fire("touchstart", [{ identifier: 1, clientX: 200, clientY: 100 }]);
+    for (let y = 120; y <= 700; y += 20) {
+      fire("touchmove", [{ identifier: 1, clientX: 200, clientY: y }]);
+    }
+    assert.equal(
+      edges.length,
+      1,
+      "said once, however many moves held it there",
+    );
+    assert.deepEqual(edges[0], {
+      side: "bottom",
+      cursor: 389,
+      remote: 480,
+      pan: -90,
+      zoom: 1,
+    });
+    // A second later, still held there: said again.
+    now += 1_000;
+    fire("touchmove", [{ identifier: 1, clientX: 200, clientY: 720 }]);
+    assert.equal(edges.length, 2);
+    fire("touchend", [], [{ identifier: 1, clientX: 200, clientY: 720 }]);
+  });
+});
+
+test("while the view can still move, the cursor at the edge pans it and nothing is said", () => {
+  const { el, fire } = surface();
+  const v = viewOf(390);
+  // Not at the limit yet: the picture can still slide up by 60.
+  v.view.pan.y = -30;
+  const edges: unknown[] = [];
+  withDocument(390, () => {
+    attachTouchGestures(el, {
+      send() {},
+      remoteSize: () => v.size,
+      view: () => v.view,
+      applyView: (zoom, pan) => v.applyView(zoom, pan),
+      onEdge: (edge) => edges.push(edge),
+      now: () => 0,
+    });
+    fire("touchstart", [{ identifier: 1, clientX: 200, clientY: 100 }]);
+    for (let y = 120; y <= 400; y += 20) {
+      fire("touchmove", [{ identifier: 1, clientX: 200, clientY: y }]);
+    }
+    assert.equal(
+      v.view.pan.y,
+      -90,
+      "the view slid to its limit under the cursor",
+    );
+    assert.equal(
+      edges.length,
+      0,
+      "and the cursor reached the picture's bottom: no edge",
+    );
+    fire("touchend", [], [{ identifier: 1, clientX: 200, clientY: 400 }]);
+  });
 });

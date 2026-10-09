@@ -1,234 +1,454 @@
-import { useCallback, useEffect, useRef } from "react";
-import FloatingMenu from "./FloatingMenu.tsx";
-import type { DisplayInfo, HoldCause } from "./protocol.ts";
-import TargetPicker from "./TargetPicker.tsx";
+import {
+  useCallback,
+  useEffect,
+  useLayoutEffect,
+  useRef,
+  useState,
+} from "react";
+import { Covers } from "./Covers.tsx";
+import { isFullscreen, toggleFullscreen } from "./fullscreen.ts";
+import { gatewayFetch } from "./gateway.ts";
+import { mountGlass } from "./glass.ts";
+import { Ignite, SessionMoment } from "./Ignite.tsx";
+import { usePreferences } from "./preferences.tsx";
+import { SessionBar, type SessionBarProps } from "./SessionBar.tsx";
+import {
+  coverOf,
+  momentOf,
+  type Played,
+  type View,
+  viewOf,
+} from "./sessionState.ts";
+import TargetPicker, { type Opened } from "./TargetPicker.tsx";
+import { lineNameOf, type TargetInfo } from "./targetChoices.ts";
 import {
   CAN_PINCH_ZOOM,
-  type ConnectionStatus,
-  type RemoteSize,
+  sizeFollows,
   useRemoteDesktop,
 } from "./useRemoteDesktop.ts";
 
-const STATUS_LABEL: Record<ConnectionStatus, string> = {
-  connecting: "Connecting…",
-  connected: "Connected",
-  reconnecting: "Reconnecting…",
-  busy: "Session in use",
-  takenOver: "Session taken over",
-  failed: "Cannot open the session",
-  stale: "Page out of date",
-};
+// How long the screen lights before its words settle (glass.ts lights for as long).
+const SETTLES_AFTER_MS = 5000;
 
-// The notice over a desktop with no picture, offering every display but the one
-// being sent, which is the one held: past what video carries, or All Displays over
-// more than two screens. A click sends a `selectDisplay` and nothing else: the
-// notice comes down when the gateway says the desktop has a picture again.
-function OversizeNotice({
-  cause,
-  size,
-  displays,
-  activeDisplayId,
-  onSelectDisplay,
-}: {
-  cause: HoldCause;
-  size: RemoteSize;
-  displays: DisplayInfo[];
-  activeDisplayId: number | null;
-  onSelectDisplay: (id: number) => void;
-}) {
-  const others = displays.filter((display) => display.id !== activeDisplayId);
-  return (
-    <div className="oversize-overlay" role="alert">
-      {cause === "screens" ? (
-        <>
-          <span className="status">Too many screens to show</span>
-          <span className="status-hint">
-            All Displays spans more than two screens, which is more than one
-            view shows.
-          </span>
-        </>
-      ) : (
-        <>
-          <span className="status">Too large to show</span>
-          <span className="status-hint">
-            The remote desktop is {size.w}×{size.h} pixels, past the largest
-            picture a video stream carries.
-          </span>
-        </>
-      )}
-      {others.length > 0 ? (
-        <>
-          <span className="status-hint">
-            Choose one display to show on its own:
-          </span>
-          <div className="oversize-displays">
-            {others.map((display) => (
-              <button
-                type="button"
-                key={display.id}
-                className="status-action"
-                onClick={() => onSelectDisplay(display.id)}
-              >
-                {display.label}
-              </button>
-            ))}
-          </div>
-        </>
-      ) : (
-        <span className="status-hint">
-          Nothing can be shown until the remote's desktop is smaller.
-        </span>
-      )}
-    </div>
-  );
+type Session = ReturnType<typeof useRemoteDesktop>;
+
+/** What the bar is told of the session, from what the engine holds. */
+function barOf(
+  session: Session,
+): Pick<
+  SessionBarProps,
+  | "kind"
+  | "size"
+  | "hostScale"
+  | "renderPlan"
+  | "oversize"
+  | "displays"
+  | "activeDisplayId"
+  | "onSelectDisplay"
+  | "sound"
+  | "videoStream"
+  | "camera"
+  | "microphone"
+  | "macKeys"
+  | "touch"
+  | "remoteClipboard"
+  | "onFetchClipboard"
+  | "onSendClipboard"
+  | "sendKeyCombo"
+  | "onKeyboardInset"
+  | "onLocalShortcut"
+  | "onViewOnlyChange"
+> {
+  return {
+    kind: session.connection,
+    size: session.size,
+    hostScale: session.hostScale,
+    renderPlan: session.renderPlan,
+    oversize: session.oversize,
+    displays: session.displays,
+    activeDisplayId: session.activeDisplayId,
+    onSelectDisplay: session.selectDisplay,
+    sound: {
+      available: session.canAudio,
+      enabled: session.audioEnabled,
+      fault: session.audioError,
+      stream: session.audioStream,
+      onChange: session.setAudio,
+    },
+    videoStream: session.videoStream,
+    camera: {
+      available: session.canCamera,
+      enabled: session.cameraEnabled,
+      streaming: session.cameraStreaming,
+      fault: session.cameraError,
+      onChange: session.setCamera,
+    },
+    microphone: {
+      available: session.canMic,
+      enabled: session.micEnabled,
+      streaming: session.micStreaming,
+      fault: session.micError,
+      onChange: session.setMic,
+    },
+    macKeys: {
+      host: session.isMacHost,
+      remoteIsMac: session.remoteIsMac,
+      enabled: session.macKeyOverridesEnabled,
+      onChange: session.setMacKeyOverridesEnabled,
+    },
+    touch: {
+      offered: session.touchOffered,
+      enabled: session.touchEnabled,
+      active: session.touchActive,
+      onChange: session.setTouchEnabled,
+    },
+    remoteClipboard: session.remoteClipboard,
+    onFetchClipboard: session.requestClipboard,
+    onSendClipboard: session.sendClipboard,
+    sendKeyCombo: session.sendKeyCombo,
+    onKeyboardInset: session.setBottomInset,
+    onLocalShortcut: session.onLocalShortcut,
+    onViewOnlyChange: session.setViewOnly,
+  };
 }
 
-// What can lie over a live session's desktop, under the menu, which stays the way
-// to another target from all three.
-function SessionCovers({
-  resizing,
-  oversize,
-  size,
-  displays,
-  activeDisplayId,
-  onSelectDisplay,
-}: {
-  resizing: boolean;
-  oversize: HoldCause | null;
-  size: RemoteSize | null;
-  displays: DisplayInfo[];
-  activeDisplayId: number | null;
-  onSelectDisplay: (id: number) => void;
-}) {
-  return (
-    <>
-      {/* A High Performance resize that has not settled: the Mac's intermediate
-          modes and repaints stay behind this, as they do behind Apple's own
-          client's. It takes no input and sits below the menu, so the menu stays
-          reachable; the gateway says when it comes down. */}
-      {resizing && (
-        <output className="resize-overlay">
-          <span className="status">Resizing…</span>
-        </output>
-      )}
-
-      {/* A desktop past what video carries: no picture comes, and the session stays
-          up for the one way out, a smaller desktop from the remote. Choosing one of
-          its displays is that way for a Mac on All Displays, so they are offered
-          here and not only in the menu. It takes the pointer, since the remote
-          under it is not on screen. */}
-      {oversize && size && (
-        <OversizeNotice
-          cause={oversize}
-          size={size}
-          displays={displays}
-          activeDisplayId={activeDisplayId}
-          onSelectDisplay={onSelectDisplay}
-        />
-      )}
-    </>
+/**
+ * The last Open pressed on this page: what to open again, where the screen
+ * that lights grows from, whether the session on screen is one this page opened, as against
+ * one it found open, and whether five seconds have passed since. A session stops
+ * being this page's own opening when the connection drops: what comes back
+ * after it is a session found.
+ */
+function useOpening(session: Session) {
+  const { status, connect } = session;
+  const [opened, setOpened] = useState<Opened | null>(null);
+  const [here, setHere] = useState(false);
+  const [settled, setSettled] = useState(false);
+  const open = useCallback(
+    (next: Opened) => {
+      // A press of its own each time, Retry included: the five seconds are
+      // counted from this one.
+      setOpened({ ...next });
+      setHere(true);
+      setSettled(false);
+      connect(next.name, next.choices, next.sound);
+    },
+    [connect],
   );
+  useEffect(() => {
+    if (status !== "connected") {
+      setHere(false);
+    }
+  }, [status]);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `opened` is the press the five seconds are counted from
+  useEffect(() => {
+    if (!here) {
+      return;
+    }
+    const timer = setTimeout(() => setSettled(true), SETTLES_AFTER_MS);
+    return () => clearTimeout(timer);
+  }, [opened, here]);
+  return { opened, here, settled, open };
 }
 
-export default function RemoteDesktop({
-  branding,
-  onLogout,
-  onUnauthorized,
-}: {
-  /** Deployment display name shown on the interstitials. */
-  branding: string;
-  onLogout: () => void;
-  onUnauthorized: () => void;
-}) {
-  const canvasRef = useRef<HTMLCanvasElement>(null);
-  const graphicsRef = useRef<HTMLCanvasElement>(null);
-  const overlayRef = useRef<HTMLDivElement>(null);
-  const pointerRef = useRef<HTMLImageElement>(null);
-  // The keyboard belongs to the overlay, whose key listeners are scoped to it
-  // rather than the window; the menu calls this when a control of its own has
-  // taken focus and is done with it. See FloatingMenu and useRemoteDesktop.
-  const focusDesktop = useCallback(
-    () => overlayRef.current?.focus({ preventScroll: true }),
-    [],
-  );
-  const {
-    status,
-    mode,
-    connectError,
-    pendingTarget,
-    size,
-    hostScale,
-    renderPlan,
-    oversize,
-    connection,
-    canAudio,
-    audioEnabled,
-    audioError,
-    videoError,
-    audioStream,
-    videoStream,
-    canCamera,
-    cameraEnabled,
-    cameraError,
-    cameraStreaming,
-    canMic,
-    micEnabled,
-    micError,
-    micStreaming,
-    displays,
-    activeDisplayId,
-    remoteClipboard,
-    macKeyOverridesEnabled,
-    macKeyOverridesActive,
-    isMacHost,
-    remoteIsMac,
-    setMacKeyOverridesEnabled,
-    touchOffered,
-    touchEnabled,
-    touchActive,
-    setTouchEnabled,
-    remoteResizing,
-    setViewOnly,
-    onLocalShortcut,
-    takeOver,
-    retry,
-    connect,
-    switchTarget,
-    selectDisplay,
-    setAudio,
-    setCamera,
-    setMic,
-    sendKeyCombo,
-    requestClipboard,
-    sendClipboard,
-    setBottomInset,
-  } = useRemoteDesktop(
-    canvasRef,
-    graphicsRef,
-    overlayRef,
-    pointerRef,
-    onUnauthorized,
-  );
+/**
+ * What the screen that lights is titled while a computer is waited for: the name
+ * its line had, where the Open is this page's own, and the target's otherwise.
+ */
+function titleOf(pending: string | null, opened: Opened | null): string | null {
+  return pending !== null && pending === opened?.name ? opened.title : pending;
+}
 
-  // A speaker on the tab title while sound is playing, and a camera and a
-  // microphone while each is offered — the one place the desktop has room to
-  // say so, since the toggles live in the drawer, and for the camera and the
-  // microphone it is also the honest little recording light. At the *front*,
-  // not the end: a tab title is truncated from the right, so a suffix is the
-  // first thing to vanish. Desktop only, so the picker's tab stays the plain
-  // branding.
+/**
+ * What a session is called: the name its line has in the list. The page that
+ * opened it has that name from the line. One that found it open asks the gateway
+ * for the list, and calls the session by its target's name until the answer
+ * comes, and for good where no answer does.
+ */
+function useSessionTitle(
+  name: string | null,
+  opened: Opened | null,
+): string | null {
+  const here = name !== null && name === opened?.name;
+  const [found, setFound] = useState<{ of: string; title: string } | null>(
+    null,
+  );
+  useEffect(() => {
+    if (name === null || here) {
+      return;
+    }
+    let cancelled = false;
+    gatewayFetch("/api/targets")
+      .then((res) => (res.ok ? (res.json() as Promise<TargetInfo[]>) : null))
+      .then((list) => {
+        const title = list && lineNameOf(list, name);
+        if (!cancelled && title) {
+          setFound({ of: name, title });
+        }
+      })
+      .catch(() => {
+        // The target's name stands.
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [name, here]);
+  if (here) {
+    return titleOf(name, opened);
+  }
+  return found?.of === name ? found.title : name;
+}
+
+/**
+ * A speaker on the tab title while sound is playing, and a camera and a
+ * microphone while each is offered — the one place the desktop has room to say
+ * so with the bar closed, and for the camera and the microphone it is also the
+ * honest little recording light. At the *front*, not the end: a tab title is
+ * truncated from the right, so a suffix is the first thing to vanish. Desktop
+ * only, so the list's tab stays the plain branding. A display's tab is titled
+ * with its display ahead of the branding, to be told from the session's.
+ */
+function useTitleMarks(
+  session: Session,
+  branding: string,
+  display: string | null,
+) {
+  const { mode, audioEnabled, cameraEnabled, micEnabled } = session;
   useEffect(() => {
     const marks =
       mode === "desktop"
         ? `${cameraEnabled ? "🎥 " : ""}${micEnabled ? "🎤 " : ""}${audioEnabled ? "🔊 " : ""}`
         : "";
-    document.title = `${marks}${branding}`;
-  }, [mode, audioEnabled, cameraEnabled, micEnabled, branding]);
+    const shown = display === null ? "" : `${display} · `;
+    document.title = `${marks}${shown}${branding}`;
+  }, [mode, audioEnabled, cameraEnabled, micEnabled, branding, display]);
+}
 
-  // The status overlay covers the connection lifecycle (connecting/reconnecting)
-  // and the claim conflicts (busy/takenOver); in the desktop it also covers the
-  // gap before the first frame. The picker owns the screen once connected.
-  const showStatus = status !== "connected" || (mode === "desktop" && !size);
+/** Hand back the whole screen a phone was given by its Open (TargetPicker.tsx). */
+function handBack() {
+  if (sizeFollows() === null && isFullscreen()) {
+    void toggleFullscreen().catch(() => {});
+  }
+}
+
+/**
+ * A phone keeps the whole screen for as long as there is a session to show on
+ * it, and no longer: it is handed back wherever the session is left, not by End
+ * alone. Back at the list, by whichever way (End, Cancel, an Open that failed, a
+ * session that fell); at a session that is somebody else's; and when the page's
+ * session goes with the page, as signing out takes it.
+ */
+function useScreenHandedBack(kind: View["kind"]) {
+  useEffect(() => {
+    if (kind === "list" || kind === "owner") {
+      handBack();
+    }
+  }, [kind]);
+  useEffect(() => handBack, []);
+}
+
+/** Whether a session's picture is waited for on the lit screen (Waiting.tsx). */
+function coveredOf(session: Session): boolean {
+  return session.screenUnavailable || session.remoteResizing;
+}
+
+/**
+ * The displays a desktop held with no picture offers as ways out: none on a
+ * Mirrored session, whose stream carries the Mac's main screen whatever is
+ * asked for (the gateway drops the choice; see DisplayPanel.tsx).
+ */
+function waysOutOf(session: Session): number[] {
+  return session.connection?.subtype === "ard-mirror"
+    ? []
+    : session.displays.map((display) => display.id);
+}
+
+/**
+ * The two moments played over a session (glass.ts): the lit grid leaving as the
+ * picture arrives behind it, and the picture going off when it is ended, after
+ * which `leave` is called. The first is decided as the view changes, in the
+ * same render, so the picture is never shown bare for a frame before the grid
+ * that is about to leave it; not for a session that starts `covered`, whose
+ * picture is still waited for on the lit screen (Waiting.tsx), which plays the
+ * grid's leaving itself when the picture comes. A screen that was seen going
+ * off stays off until the list the gateway answers with: the picture is not
+ * shown again meanwhile.
+ */
+function useMoments(
+  kind: View["kind"],
+  covered: boolean,
+  leave: (seen: boolean) => void,
+) {
+  const [moment, setMoment] = useState<Played | null>(null);
+  const [shown, setShown] = useState(kind);
+  if (shown !== kind) {
+    setShown(kind);
+    setMoment(momentOf(moment, shown, kind, covered));
+  }
+  const playing = useRef(moment);
+  playing.current = moment;
+  const done = useCallback(
+    (played: boolean) => {
+      if (playing.current !== "off") {
+        setMoment(null);
+        return;
+      }
+      leave(played);
+      if (!played) {
+        setMoment(null);
+      }
+    },
+    [leave],
+  );
+  const end = useCallback(() => setMoment("off"), []);
+  return { moment, done, end };
+}
+
+/**
+ * Leaving for the list, and what is seen of it. End puts the picture out and
+ * then asks (`ended`). Cancel asks at once (`cancelled`), and the screen that
+ * lights is kept until it has gone off (`out`), though the list may be this
+ * page's to show before that. Either way, a screen that was seen going off
+ * leaves its afterglow over the list that comes back.
+ */
+function useLeaving(view: View, switchTarget: () => void) {
+  const { kind } = view;
+  // What the view is, state and all: a change of it that is not the list is a
+  // screen the one that went off has nothing to do with.
+  const stage = "state" in view ? `${kind} ${view.state}` : kind;
+  // The screen that lights is going off after a Cancel.
+  const [cancelling, setCancelling] = useState(false);
+  // How many screens have gone off, which is which afterglow is on screen.
+  const [glow, setGlow] = useState<number | null>(null);
+  const owed = useRef(false);
+  const ended = useCallback(
+    (seen: boolean) => {
+      owed.current = seen;
+      switchTarget();
+    },
+    [switchTarget],
+  );
+  const cancelled = useCallback(
+    (seen: boolean) => {
+      owed.current = seen;
+      setCancelling(seen);
+      switchTarget();
+    },
+    [switchTarget],
+  );
+  const out = useCallback(() => setCancelling(false), []);
+  // biome-ignore lint/correctness/useExhaustiveDependencies: `stage` is what changed
+  useEffect(() => {
+    if (kind !== "list") {
+      owed.current = false;
+    }
+  }, [stage]);
+  useEffect(() => {
+    if (kind === "list" && !cancelling && owed.current) {
+      owed.current = false;
+      setGlow((last) => (last ?? 0) + 1);
+    }
+  }, [kind, cancelling]);
+  const gone = useCallback(() => setGlow(null), []);
+  return { cancelling, glow, ended, cancelled, out, gone };
+}
+
+/**
+ * What a screen that went off leaves for a moment over the list that came back:
+ * the glass as going off left it, not lit and with the spot at its centre, and
+ * going (alumia.css, `.al-afterglow`). Decoration: out of a screen reader's
+ * way, and nothing a press lands on.
+ */
+function Afterglow({ onGone }: { onGone: () => void }) {
+  const canvas = useRef<HTMLCanvasElement>(null);
+  // Before the list is painted, so that it is never seen bare first.
+  useLayoutEffect(() => {
+    const element = canvas.current;
+    const scene = element?.parentElement;
+    const glass = element && scene ? mountGlass(element, scene, "out") : null;
+    if (!glass) {
+      onGone();
+      return;
+    }
+    glass.draw();
+    return () => glass.release();
+  }, [onGone]);
+  return (
+    <div className="al-afterglow" aria-hidden="true" onAnimationEnd={onGone}>
+      <canvas ref={canvas} />
+    </div>
+  );
+}
+
+export default function RemoteDesktop({
+  branding,
+  tabDisplay,
+  onLogout,
+  onUnauthorized,
+}: {
+  /** The name the deployment gives itself, said before any computer is opened. */
+  branding: string;
+  /**
+   * The display this page shows in a tab of its own (`/display/N`), beside the
+   * session another tab of this browser holds: its picture and the input made
+   * over it, a bar with what is this tab's, and no list. Null on the page that
+   * holds the session.
+   */
+  tabDisplay: number | null;
+  onLogout: () => void;
+  onUnauthorized: () => void;
+}) {
+  const { t } = usePreferences();
+  const canvasRef = useRef<HTMLCanvasElement>(null);
+  const graphicsRef = useRef<HTMLCanvasElement>(null);
+  const overlayRef = useRef<HTMLDivElement>(null);
+  const pointerRef = useRef<HTMLImageElement>(null);
+  // The keyboard belongs to the overlay, whose key listeners are scoped to it
+  // rather than the window; the bar calls this when a control of its own has
+  // taken focus and is done with it. See SessionBar and useRemoteDesktop.
+  const focusDesktop = useCallback(
+    () => overlayRef.current?.focus({ preventScroll: true }),
+    [],
+  );
+  const session = useRemoteDesktop(
+    canvasRef,
+    graphicsRef,
+    overlayRef,
+    pointerRef,
+    onUnauthorized,
+    tabDisplay,
+  );
+  const { pendingTarget, switchTarget } = session;
+  const opening = useOpening(session);
+  const sessionTitle = useSessionTitle(session.sessionName, opening.opened);
+  // What a display's tab is called, on its plate, its bar and the browser's tab.
+  const displayTitle =
+    tabDisplay === null ? null : t("displays.numbered", { n: tabDisplay });
+  useTitleMarks(session, branding, displayTitle);
+
+  // What is on screen (sessionState.ts): the list, the screen lighting, whose
+  // the session is, or the session.
+  const view = viewOf({
+    status: session.status,
+    mode: session.mode,
+    pendingTarget,
+    pictured: session.size !== null,
+    openedHere: opening.here,
+    settled: opening.settled,
+    tab: tabDisplay,
+  });
+
+  // Leaving for the list by End or by Cancel, with the afterglow over the list
+  // that comes back.
+  const leaving = useLeaving(view, switchTarget);
+  const { moment, done, end } = useMoments(
+    view.kind,
+    coveredOf(session),
+    leaving.ended,
+  );
+  useScreenHandedBack(view.kind);
+  // What the session is called on the bar and on the wait's plate.
+  const sessionCalled = displayTitle ?? sessionTitle ?? branding;
 
   return (
     /* screen-touch swaps native scrolling for the gesture transform
@@ -270,148 +490,94 @@ export default function RemoteDesktop({
         <img ref={pointerRef} className="remote-pointer" alt="" />
       </div>
 
-      {/* The floating menu is desktop-only; its End session button returns to
-          the picker (see FloatingMenu.tsx), and Log out ends the login. */}
-      {mode === "desktop" && (
-        <FloatingMenu
-          onLogout={onLogout}
-          onUnauthorized={onUnauthorized}
-          onSwitchTarget={switchTarget}
-          sendKeyCombo={sendKeyCombo}
-          onKeyboardInset={setBottomInset}
-          remoteClipboard={remoteClipboard}
-          onFetchClipboard={requestClipboard}
-          onSendClipboard={sendClipboard}
-          displays={displays}
-          activeDisplayId={activeDisplayId}
-          onSelectDisplay={selectDisplay}
-          size={size}
-          hostScale={hostScale}
-          connection={connection}
-          renderPlan={renderPlan}
-          oversize={oversize}
-          canAudio={canAudio}
-          audioEnabled={audioEnabled}
-          audioError={audioError}
-          audioStream={audioStream}
-          videoStream={videoStream}
-          onAudioChange={setAudio}
-          canCamera={canCamera}
-          cameraEnabled={cameraEnabled}
-          cameraError={cameraError}
-          cameraStreaming={cameraStreaming}
-          onCameraChange={setCamera}
-          canMic={canMic}
-          micEnabled={micEnabled}
-          micError={micError}
-          micStreaming={micStreaming}
-          onMicChange={setMic}
-          macKeyOverridesEnabled={macKeyOverridesEnabled}
-          macKeyOverridesActive={macKeyOverridesActive}
-          isMacHost={isMacHost}
-          remoteIsMac={remoteIsMac}
-          onMacKeyOverridesChange={setMacKeyOverridesEnabled}
-          touchOffered={touchOffered}
-          touchEnabled={touchEnabled}
-          touchActive={touchActive}
-          onTouchChange={setTouchEnabled}
-          onLocalShortcut={onLocalShortcut}
-          onFocusDesktop={focusDesktop}
-          onViewOnlyChange={setViewOnly}
-        />
-      )}
-
-      {/* The post-login target picker: shown once the slot is held and no
-          target is connected. */}
-      {status === "connected" && mode === "picker" && (
+      {/* The list of computers: shown once the session is this page's and no
+          computer is open or being opened, after a screen that Cancel put out
+          has gone off. */}
+      {view.kind === "list" && !leaving.cancelling && (
         <TargetPicker
-          branding={branding}
-          connect={connect}
+          open={opening.open}
           pendingTarget={pendingTarget}
-          connectError={connectError}
+          connectError={session.connectError}
+          sessionFell={session.sessionFell}
+          // Tried again from the notice, not from a line: no monitor to grow from.
+          onRetry={
+            opening.opened
+              ? () =>
+                  opening.open({ ...(opening.opened as Opened), from: null })
+              : null
+          }
+          onDismissError={session.dismissConnectError}
           onLogout={onLogout}
           onUnauthorized={onUnauthorized}
         />
       )}
 
-      {/* A video target this browser cannot decode. Its own banner rather than a
-          line in the status overlay, because the overlay hides itself the moment the
-          session is up — and this is a session that *is* up, showing nothing. It is
-          also not `connectError`: nothing is wrong with the session or the gateway,
-          it is this browser that cannot decode what is arriving. */}
-      {videoError && mode === "desktop" && (
-        <div className="video-banner" role="alert">
-          {videoError}
-        </div>
-      )}
-
-      {mode === "desktop" && !showStatus && (
-        <SessionCovers
-          resizing={remoteResizing}
-          oversize={oversize}
-          size={size}
-          displays={displays}
-          activeDisplayId={activeDisplayId}
-          onSelectDisplay={selectDisplay}
+      {/* Between the list and a picture, and where the session is not this
+          page's to show: the screen that lights (Ignite.tsx). */}
+      {(view.kind === "opening" ||
+        view.kind === "owner" ||
+        leaving.cancelling) && (
+        <Ignite
+          title={
+            displayTitle ??
+            titleOf(pendingTarget, opening.opened) ??
+            sessionTitle ??
+            branding
+          }
+          display={tabDisplay}
+          opening={view.kind === "opening" ? view.state : null}
+          owner={view.kind === "owner" ? view.state : null}
+          cancel={view.kind === "opening" && view.cancel}
+          told={session.connectError}
+          here={opening.here}
+          from={opening.opened?.from ?? null}
+          onCancel={leaving.cancelled}
+          onOut={leaving.out}
+          onTakeOver={session.takeOver}
+          onRetry={session.retry}
+          onSignOut={onLogout}
         />
       )}
 
-      {showStatus && (
-        <div className="status-overlay">
-          <span className="status-brand">{branding}</span>
-          <span className={`status status-${status}`}>
-            {STATUS_LABEL[status]}
-          </span>
-          {/* Why the session is not up, when the reason is known. "Reconnecting…"
-              is true and unhelpful next to "the server answered 502", and the
-              picker is not on screen to carry it while the overlay is. */}
-          {connectError && <span className="status-hint">{connectError}</span>}
-          {status === "connected" && mode === "desktop" && !size && (
-            <span className="status-hint">Waiting for the remote desktop…</span>
+      {/* The session: glass over the remote screen (SessionBar.tsx). Not over a
+          screen that Cancel is putting out, should a picture arrive meanwhile. */}
+      {view.kind === "session" && !leaving.cancelling && (
+        <SessionBar
+          {...barOf(session)}
+          name={sessionCalled}
+          onFocusDesktop={focusDesktop}
+          onEnd={end}
+          onSignOut={onLogout}
+          onUnauthorized={onUnauthorized}
+          tab={tabDisplay}
+          onDisconnect={session.releaseTab}
+        >
+          <Covers
+            cover={coverOf({
+              left: session.pageGone,
+              resizing: session.remoteResizing,
+              unavailable: session.screenUnavailable,
+              held: session.oversize,
+              displays: waysOutOf(session),
+              active: session.activeDisplayId,
+            })}
+            name={sessionCalled}
+            size={session.size}
+            displays={session.displays}
+            onSelectDisplay={session.selectDisplay}
+            videoFault={session.videoError}
+            secondMissing={session.secondMissing}
+          />
+          {/* A canvas of its own to each moment: an End pressed while the grid
+              is still leaving is played on a glass that was not given back. */}
+          {moment && (
+            <SessionMoment key={moment} moment={moment} onDone={done} />
           )}
-          {status === "busy" && (
-            <>
-              <span className="status-hint">
-                This desktop is open in another browser.
-              </span>
-              <button
-                type="button"
-                className="status-action"
-                onClick={takeOver}
-              >
-                Take over
-              </button>
-            </>
-          )}
-          {status === "failed" && (
-            <button type="button" className="status-action" onClick={retry}>
-              Retry
-            </button>
-          )}
-          {status === "stale" && (
-            <button
-              type="button"
-              className="status-action"
-              onClick={() => location.reload()}
-            >
-              Reload
-            </button>
-          )}
-          {status === "takenOver" && (
-            <>
-              <span className="status-hint">
-                Another browser took over this session.
-              </span>
-              <button
-                type="button"
-                className="status-action"
-                onClick={takeOver}
-              >
-                Take it back
-              </button>
-            </>
-          )}
-        </div>
+        </SessionBar>
+      )}
+
+      {leaving.glow !== null && (
+        <Afterglow key={leaving.glow} onGone={leaving.gone} />
       )}
     </div>
   );

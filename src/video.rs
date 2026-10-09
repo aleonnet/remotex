@@ -19,6 +19,7 @@
 //! because every attach injects a repaint, which is one of the moments the stream's
 //! keyframe is forced.
 
+use crate::cause::Cause;
 use crate::shadow::Rect;
 
 /// The 1–100 quality dial, coarsest first.
@@ -114,6 +115,34 @@ pub fn fit_within(source: (u16, u16), window: Option<(u32, u32)>) -> (u16, u16) 
     (fit_w as u16, fit_h as u16)
 }
 
+/// `source` held to at most `pixels` pixels, keeping its shape, on even sides,
+/// and never grown: the encoder's budget for a picture reduced here
+/// ([`crate::overuse`]), applied after the width the viewer shows and the ceiling
+/// ([`fit_within`]). Even sides because the encoder is held to them
+/// ([`check_picture`]), and two at the least, so a budget of nothing is still a
+/// picture. Rounded to the nearest even side and then held under the budget, so
+/// the floor's own shape lands on the floor exactly.
+pub fn fit_pixels(source: (u16, u16), pixels: u32) -> (u16, u16) {
+    let (w, h) = (f64::from(source.0), f64::from(source.1));
+    if w <= 0.0 || h <= 0.0 || w * h <= f64::from(pixels) {
+        return source;
+    }
+    let scale = (f64::from(pixels) / (w * h)).sqrt();
+    let even = |side: f64| -> u32 {
+        let side = (side * scale).round() as u32;
+        (side - side % 2).max(2)
+    };
+    let (mut fit_w, mut fit_h) = (even(w), even(h));
+    while fit_w * fit_h > pixels && fit_w.max(fit_h) > 2 {
+        if fit_w >= fit_h {
+            fit_w -= 2;
+        } else {
+            fit_h -= 2;
+        }
+    }
+    (fit_w as u16, fit_h as u16)
+}
+
 /// The filter a picture is reduced with: Catmull-Rom, the bicubic that keeps text
 /// sharp without the ringing a Lanczos kernel leaves beside a glyph.
 ///
@@ -140,14 +169,14 @@ impl Reducer {
         use fast_image_resize::images::{Image, ImageRef};
         use fast_image_resize::{PixelType, ResizeAlg, ResizeOptions};
 
-        anyhow::ensure!(to.0 > 0 && to.1 > 0, "a picture cannot be reduced to {}x{}", to.0, to.1);
+        crate::ensure_known!("AL-7722"; to.0 > 0 && to.1 > 0, "a picture cannot be reduced to {}x{}", to.0, to.1);
         let source = ImageRef::new(u32::from(from.0), u32::from(from.1), rgb, PixelType::U8x3)
-            .map_err(|e| anyhow::anyhow!("a {}x{} picture of {} bytes: {e}", from.0, from.1, rgb.len()))?;
+            .map_err(|e| crate::cause::Cause::new("AL-7722").of(anyhow::anyhow!("a {}x{} picture of {} bytes: {e}", from.0, from.1, rgb.len())))?;
         let mut reduced = Image::new(u32::from(to.0), u32::from(to.1), PixelType::U8x3);
         let options = ResizeOptions::new().resize_alg(ResizeAlg::Convolution(REDUCTION));
         self.resizer
             .resize(&source, &mut reduced, &options)
-            .map_err(|e| anyhow::anyhow!("reducing a {}x{} picture to {}x{}: {e}", from.0, from.1, to.0, to.1))?;
+            .map_err(|e| crate::cause::Cause::new("AL-7722").of(anyhow::anyhow!("reducing a {}x{} picture to {}x{}: {e}", from.0, from.1, to.0, to.1)))?;
         Ok(reduced.into_vec())
     }
 }
@@ -177,7 +206,7 @@ pub struct Mirror {
 impl Mirror {
     /// A mirror for a `w`×`h` desktop. ~6 MB at 1080p.
     pub fn new(w: u16, h: u16) -> anyhow::Result<Self> {
-        anyhow::ensure!(w > 0 && h > 0, "a video mirror cannot hold a {w}x{h} desktop");
+        crate::ensure_known!("AL-7722"; w > 0 && h > 0, "a video mirror cannot hold a {w}x{h} desktop");
         // Saturating rather than wrapping: a 65535-wide desktop is not real, but
         // wrapping to 0 here would hand an encoder a zero-sized picture, and the point
         // of this constructor is that nothing invalid gets that far.
@@ -204,13 +233,13 @@ impl Mirror {
     /// of the update would put that disagreement on the screen instead of in the log.
     pub fn blit(&mut self, rect: Rect, rgb: &[u8]) -> anyhow::Result<()> {
         let (w, h) = (usize::from(rect.w()), usize::from(rect.h()));
-        anyhow::ensure!(
+        crate::ensure_known!("AL-7722"; 
             rgb.len() == w * h * 3,
             "a video blit is {} bytes, expected {} for {w}x{h} RGB",
             rgb.len(),
             w * h * 3
         );
-        anyhow::ensure!(
+        crate::ensure_known!("AL-7722"; 
             rect.right < self.size.0 && rect.bottom < self.size.1,
             "a video blit of {w}x{h} at ({},{}) falls outside a {}x{} desktop",
             rect.left,
@@ -232,7 +261,7 @@ impl Mirror {
     /// the padding too.
     #[cfg(test)]
     pub fn crop_into(&self, rect: Rect, out: &mut Vec<u8>) -> anyhow::Result<()> {
-        anyhow::ensure!(
+        crate::ensure_known!("AL-7722"; 
             rect.right < self.coded.0 && rect.bottom < self.coded.1,
             "a video crop of {}x{} at ({},{}) falls outside a {}x{} mirror",
             rect.w(),
@@ -311,14 +340,16 @@ impl Mirror {
 /// may change mid-session — so the message has to carry the whole explanation to
 /// wherever it surfaces.
 pub fn check_picture((w, h): (u16, u16)) -> anyhow::Result<()> {
-    anyhow::ensure!(
-        within_ceiling((u32::from(w), u32::from(h))),
-        "a video stream will not encode a {w}x{h} picture: one is refused with a long \
-         side over {MAX_LONG_SIDE} or a short side over {MAX_SHORT_SIDE}. Only the \
-         remote knows its own size, so check-config cannot catch this — give this \
-         target a remote that can be asked for a smaller desktop: in a session started \
-         with resize the gateway holds every size it asks for under this ceiling"
-    );
+    if !within_ceiling((u32::from(w), u32::from(h))) {
+        // With the cause a page says it by: the size, and nothing of the config.
+        return Err(Cause::new("AL-7101").with("width", w).with("height", h).of(anyhow::anyhow!(
+            "a video stream will not encode a {w}x{h} picture: one is refused with a long \
+             side over {MAX_LONG_SIDE} or a short side over {MAX_SHORT_SIDE}. Only the \
+             remote knows its own size, so check-config cannot catch this — give this \
+             target a remote that can be asked for a smaller desktop: in a session started \
+             with resize the gateway holds every size it asks for under this ceiling"
+        )));
+    }
     Ok(())
 }
 
@@ -373,6 +404,20 @@ mod tests {
     /// A rectangle from a position and a size, which is what most of these want.
     fn rect(x: u16, y: u16, w: u16, h: u16) -> Rect {
         Rect::from_size(x, y, w, h).expect("a rectangle with a size")
+    }
+
+    /// A picture held to a budget of pixels keeps its shape, lands under the budget
+    /// on even sides, and is never grown: one within the budget is left as it is.
+    #[test]
+    fn a_picture_is_held_to_a_pixel_budget_keeping_its_shape() {
+        // Three fifths of a phone's 2532×1424: the libwebrtc step down.
+        let held = fit_pixels((2532, 1424), 2_163_340);
+        assert_eq!(held, (1960, 1102));
+        assert!(u32::from(held.0) * u32::from(held.1) <= 2_163_340);
+        assert!((f64::from(held.0) / f64::from(held.1) - 2532.0 / 1424.0).abs() < 0.01, "the shape is kept");
+        assert_eq!(fit_pixels((1170, 658), 1_000_000), (1170, 658), "within the budget it is left alone");
+        assert_eq!(fit_pixels((1170, 658), 57_600), (320, 180), "the floor's own shape at the floor");
+        assert_eq!(fit_pixels((640, 480), 0), (2, 2), "never nothing");
     }
 
     /// Every core but one, both cores of a two-core machine, the one core of a
@@ -623,6 +668,11 @@ mod tests {
         assert!(message.contains("5120x2880"), "the message does not say what was asked for");
         assert!(message.contains("3840"), "the message does not say what the limit is");
         assert!(message.contains("resize"), "the message does not say what to do instead");
+        // And the cause a page says, with the size that was refused.
+        assert_eq!(
+            crate::cause::find(&refused),
+            Some(&Cause::new("AL-7101").with("width", 5120).with("height", 2880))
+        );
         // Both 4K panels are pictures: the 16:9 one and the 16:10 one a 1920×1200 laptop
         // is at 2x.
         assert!(check_picture((3840, 2160)).is_ok(), "16:9 4K was refused");
@@ -664,6 +714,8 @@ mod tests {
         assert_eq!(fit_within((5120, 2880), None), (3840, 2160));
         assert_eq!(fit_within((2880, 5120), None), (2160, 3840));
         assert_eq!(fit_within((1600, 900), None), (1600, 900), "already within");
+        // A bound on the width alone, as a client that fits the picture to its width has.
+        assert_eq!(fit_within((5120, 2880), Some((2532, u32::MAX))), (2532, 1424));
         // A window: whichever is smaller, the window or the ceiling.
         assert_eq!(fit_within((5120, 2880), Some((3840, 2400))), (3840, 2160));
         assert_eq!(fit_within((5120, 2880), Some((2560, 1440))), (2560, 1440));

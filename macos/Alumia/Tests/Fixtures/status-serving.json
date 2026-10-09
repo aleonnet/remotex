@@ -1,0 +1,10 @@
+{
+  "version": "0.0.325",
+  "serving": true,
+  "stopped": false,
+  "listen": "127.0.0.1:52380",
+  "session": "Mac da Ana virtual",
+  "ffmpeg": true,
+  "cause": null,
+  "binary": "16777234-48213"
+}

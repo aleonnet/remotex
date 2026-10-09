@@ -15,7 +15,7 @@
 //! next frame, because the paint that caused it is already on its way.
 //!
 //! ```sh
-//! REMOTEX_UAT_TARGET=<rdp target in tmp/test_uat.toml> \
+//! ALUMIA_UAT_TARGET=<rdp target in tmp/test_uat.toml> \
 //!   cargo test --release --test rdp_damage_probe -- --ignored --nocapture
 //! ```
 //!
@@ -26,12 +26,12 @@ mod common;
 
 use std::time::{Duration, Instant};
 
-use remotex::rdp_client::{AudioSink, Connect, Event, MouseButton, Session};
+use alumia::rdp_client::{AudioSink, Connect, Event, MouseButton, Session};
 use tokio::sync::mpsc::Receiver;
 
-const TARGET_ENV: &str = "REMOTEX_UAT_TARGET";
-const RUN_ENV: &str = "REMOTEX_DAMAGE_RUN_SECS";
-const DUMP_ENV: &str = "REMOTEX_DAMAGE_DUMP";
+const TARGET_ENV: &str = "ALUMIA_UAT_TARGET";
+const RUN_ENV: &str = "ALUMIA_DAMAGE_RUN_SECS";
+const DUMP_ENV: &str = "ALUMIA_DAMAGE_DUMP";
 
 /// The size the operator's QA runs at.
 const SIZE: (u32, u32) = (1920, 980);
@@ -73,6 +73,8 @@ fn connect() -> (Session, Receiver<Event>) {
         width: SIZE.0,
         height: SIZE.1,
         scale_percent: 0,
+        monitors: 1,
+        placement: alumia::config::Placement::Right,
         resize: offers.resize,
         egfx: target.egfx(),
         pass_graphics: false,
@@ -90,7 +92,7 @@ fn connect() -> (Session, Receiver<Event>) {
 struct Silence;
 
 impl AudioSink for Silence {
-    fn negotiated(&self, _: remotex::rdp_client::proto::rdpsnd::Format) {}
+    fn negotiated(&self, _: alumia::rdp_client::proto::rdpsnd::Format) {}
     fn wave(&self, _: Vec<u8>) {}
     fn closed(&self) {}
 }
@@ -121,7 +123,7 @@ impl Shadow {
 
     /// Take the framebuffer's pixels inside one reported rectangle, as the engine
     /// does when it sends them.
-    fn accept(&mut self, frame: &[u8], rect: remotex::rdp_client::Rect) {
+    fn accept(&mut self, frame: &[u8], rect: alumia::rdp_client::Rect) {
         let right = rect.x.saturating_add(rect.width).min(self.width);
         let bottom = rect.y.saturating_add(rect.height).min(self.height);
         if rect.x >= right || rect.y >= bottom {
@@ -199,7 +201,7 @@ fn dump(name: &str, width: u32, height: u32, pixels: &[u8]) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a real Windows host, named by REMOTEX_UAT_TARGET"]
+#[ignore = "needs a real Windows host, named by ALUMIA_UAT_TARGET"]
 async fn a_real_host_reports_every_pixel_it_paints() {
     let (session, mut events) = connect();
     let deadline = Instant::now() + Duration::from_secs(30);
@@ -252,7 +254,7 @@ async fn a_real_host_reports_every_pixel_it_paints() {
                 });
                 rects.clear();
             }
-            Event::Resize { width, height } => {
+            Event::Resize { width, height, .. } => {
                 let (w, h, pixels) = snapshot(&session);
                 println!("  resized to {width}x{height}; mirror restarted at {w}x{h}");
                 shadow = Shadow::new(w, h, pixels);
@@ -304,11 +306,11 @@ async fn a_real_host_reports_every_pixel_it_paints() {
 }
 
 /// `x,y` to wheel at while the decode probe runs; unset leaves the remote's input alone.
-const SCROLL_ENV: &str = "REMOTEX_DAMAGE_SCROLL";
+const SCROLL_ENV: &str = "ALUMIA_DAMAGE_SCROLL";
 
 /// `x,y` of a window's title bar to drag and cycle through maximize, restore and
 /// minimize while the decode probe runs.
-const DRAG_ENV: &str = "REMOTEX_DAMAGE_DRAG";
+const DRAG_ENV: &str = "ALUMIA_DAMAGE_DRAG";
 
 /// RDP scancodes, with their E0 flag.
 const WIN: (u8, bool) = (0x5B, true);
@@ -380,11 +382,11 @@ fn differing_cells(width: u32, height: u32, a: &[u8], b: &[u8]) -> Vec<(u32, u32
 /// agrees with itself — the second redraw is what rules out a clock or an animation.
 ///
 /// ```sh
-/// REMOTEX_UAT_TARGET=<rdp target> REMOTEX_DAMAGE_SCROLL=960,500 REMOTEX_DAMAGE_DUMP=tmp/qa/decode \
+/// ALUMIA_UAT_TARGET=<rdp target> ALUMIA_DAMAGE_SCROLL=960,500 ALUMIA_DAMAGE_DUMP=tmp/qa/decode \
 ///   cargo test --release --test rdp_damage_probe a_host_redraw -- --ignored --nocapture
 /// ```
 #[tokio::test(flavor = "multi_thread")]
-#[ignore = "needs a real Windows host, named by REMOTEX_UAT_TARGET"]
+#[ignore = "needs a real Windows host, named by ALUMIA_UAT_TARGET"]
 async fn a_host_redraw_matches_what_was_decoded() {
     common::init_logging();
     let (session, mut events) = connect();
@@ -393,10 +395,10 @@ async fn a_host_redraw_matches_what_was_decoded() {
 
     let until = Instant::now() + Duration::from_secs(run_secs());
     if let Ok(at) = std::env::var(SCROLL_ENV) {
-        let (x, y) = at.split_once(',').expect("REMOTEX_DAMAGE_SCROLL is x,y");
+        let (x, y) = at.split_once(',').expect("ALUMIA_DAMAGE_SCROLL is x,y");
         let (x, y): (u16, u16) = (x.parse().expect("scroll x"), y.parse().expect("scroll y"));
         session.input().mouse_move(x, y);
-        if std::env::var("REMOTEX_DAMAGE_HOME").is_ok() {
+        if std::env::var("ALUMIA_DAMAGE_HOME").is_ok() {
             // Home, so every run scrolls the same stretch of the page: a wheel cycle
             // does not land back where it started, and runs drift down the page.
             session.input().key(0x47, true, true);
@@ -421,7 +423,7 @@ async fn a_host_redraw_matches_what_was_decoded() {
         // tooltip, which a redraw may leave out, and that would read as a decoder fault.
         session.input().mouse_move(1900, 600);
     } else if let Ok(at) = std::env::var(DRAG_ENV) {
-        let (x, y) = at.split_once(',').expect("REMOTEX_DAMAGE_DRAG is x,y");
+        let (x, y) = at.split_once(',').expect("ALUMIA_DAMAGE_DRAG is x,y");
         let (x, y): (i32, i32) = (x.parse().expect("drag x"), y.parse().expect("drag y"));
         let point = |px: i32, py: i32| {
             (px.clamp(0, SIZE.0 as i32 - 1) as u16, py.clamp(0, SIZE.1 as i32 - 1) as u16)

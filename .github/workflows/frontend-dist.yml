@@ -6,19 +6,23 @@ name: Frontend bundle
 # directory pins, and the lossless sound's decoder (frontend/wasm/flac) with
 # stable.
 # The release workflow calls this for the bundle every platform build stages
-# through REMOTEX_PREBUILT_FRONTEND, and a push that touches what the bundle is
+# through ALUMIA_PREBUILT_FRONTEND, and a push that touches what the bundle is
 # built from builds it here on its own, so the module's toolchain and its build
-# are tried on a fresh runner before a release is.
+# are tried on a fresh runner before a release is. That push is the work's, in
+# aleonnet/alumia-app: in the public repository, aleonnet/alumia, every version
+# arrives as one push that touches the frontend, and nothing new is tried by
+# building it again there, so the job runs there only when the release calls it.
 on:
   workflow_call:
   push:
     paths:
       - frontend/**
-      - crates/remotex-rdp-graphics/**
+      - crates/alumia-rdp-graphics/**
       - .github/workflows/frontend-dist.yml
 
 jobs:
   frontend:
+    if: github.event_name != 'push' || github.repository != 'aleonnet/alumia'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4

@@ -1,0 +1,596 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>alumia</title>
+<meta name="description" content="alumia">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="/*GLASS*/">
+<link rel="icon" href="/*ICON*/">
+<!--
+  The public page of alumia (site/index.html), written by tools/site/build.py from this
+  file and from the product itself: the page the gateway serves, harvested whole (its
+  document and its stylesheet, tools/site/dom/) and shown live inside the page; the
+  shaders of frontend/src/glass.ts, letter for letter; the glyphs of frontend/src/Glyph.tsx;
+  the font of frontend/src/design/; the colours of docs/design/alumia.tokens.json; and the
+  Mac app's screens, drawn from what its code lays out and says
+  (macos/Alumia/Sources/, Words.generated.swift). The sheet it was approved from is
+  docs/mockups/2026-10-09-0600-folha-cara-publica.html. Do not edit site/index.html:
+  change the template or the words (tools/site/words.json) and run tools/site/build.sh.
+-->
+<script>
+  // The theme before the first paint, so a dark preference never flashes light: what was
+  // chosen on this page, or the system's.
+  (() => {
+    let kept = null;
+    try { kept = localStorage.getItem("alumia-site.theme"); } catch {}
+    const dark = kept ? kept === "dark" : matchMedia("(prefers-color-scheme: dark)").matches;
+    document.documentElement.dataset.theme = dark ? "dark" : "light";
+  })();
+</script>
+<style>
+/*FONT*/
+:root {
+  --glass: /*GLASS*/; --red: /*RED*/; --green: /*GREEN*/; --blue: /*BLUE*/;
+  --ease: cubic-bezier(.2, 0, 0, 1); --fast: 120ms; --base: 200ms; --off: 400ms;
+  --r-control: 8px; --r-card: 14px; --r-sheet: 20px;
+  --al-base: /*LIGHT.BASE*/; --al-raised: /*LIGHT.RAISED*/; --al-sunken: /*LIGHT.SUNKEN*/; --al-text: /*LIGHT.TEXT*/; --al-text-2: /*LIGHT.TEXT2*/; --al-action: /*LIGHT.ACTION*/; --al-border: /*LIGHT.BORDER*/;
+  --al-shadow: 0 8px 24px rgba(0,0,0,.18);
+}
+:root[data-theme="dark"] {
+  --al-base: /*DARK.BASE*/; --al-raised: /*DARK.RAISED*/; --al-sunken: /*DARK.SUNKEN*/; --al-text: /*DARK.TEXT*/; --al-text-2: /*DARK.TEXT2*/; --al-action: /*DARK.ACTION*/; --al-border: /*DARK.BORDER*/;
+  --al-shadow: 0 8px 24px rgba(0,0,0,.5);
+}
+* { box-sizing: border-box; }
+html { color-scheme: light dark; scroll-behavior: smooth; }
+body { margin: 0; background: var(--al-base); color: var(--al-text); overflow-x: hidden; }
+button { font: inherit; }
+:focus-visible { outline: 2px solid var(--al-action); outline-offset: 2px; }
+
+/* ---- the page ---- */
+.al { container-type: inline-size; font-family: "Instrument Sans", system-ui, sans-serif; font-size: 17px; line-height: 1.5; }
+.al a { color: inherit; text-decoration: none; }
+.al code { font: 15px/1.5 ui-monospace, SFMono-Regular, Menlo, monospace; }
+.al .ic { width: 18px; height: 18px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+.al .ic.solid { fill: currentColor; stroke: none; }
+
+/* the bar: the product's own, the tile of glass with the mark and the name */
+.al-nav { position: sticky; top: 0; z-index: 6; display: flex; align-items: center; justify-content: space-between; height: 64px; padding: 0 32px; color: var(--al-text); background: transparent; transition: background var(--base) var(--ease), color var(--base) var(--ease); margin-bottom: -64px; }
+.al-nav[data-glass] { background: color-mix(in srgb, var(--al-base) 86%, transparent); -webkit-backdrop-filter: blur(18px); backdrop-filter: blur(18px); }
+.al[data-lit] .al-nav:not([data-glass]) { color: /*DARK.TEXT*/; }
+.al-nav .brand { display: inline-flex; align-items: center; gap: 12px; font-stretch: 75%; font-weight: 600; font-size: 22px; letter-spacing: -.01em; }
+.al-nav .brand .tile { display: inline-grid; place-items: center; width: 32px; height: 32px; border-radius: 9px; background: rgba(21,23,26,.86); border: 1px solid rgba(232,234,237,.14); }
+.al-nav .brand .tile svg { width: 20px; height: 20px; }
+.al-nav .links { display: flex; align-items: center; gap: 4px; }
+.al-nav .links a, .al-nav .links button { display: inline-flex; align-items: center; gap: 6px; height: 36px; padding: 0 12px; border-radius: var(--r-control); border: 0; background: transparent; color: inherit; font-size: 15px; cursor: pointer; transition: background var(--fast) var(--ease); }
+.al-nav .links a:hover, .al-nav .links button:hover { background: rgba(127,135,145,.18); }
+.al-nav .sep { width: 1px; height: 20px; background: currentColor; opacity: .25; margin: 0 6px; }
+
+/* the hero: the glass, and the screen that lights as the page scrolls */
+.al-track { position: relative; height: 320vh; height: 320svh; }
+.al-stick { position: sticky; top: 0; height: 100vh; height: 100svh; overflow: hidden; background: var(--al-base); color: var(--al-text); }
+.al[data-lit] .al-stick { background: var(--glass); color: /*DARK.TEXT*/; }
+.al-stick .picture { position: absolute; inset: 0; background: var(--glass); transform-origin: 50% 50%; overflow: hidden; }
+.al-stick .picture iframe { position: absolute; inset: 0; width: 100%; height: 100%; border: 0; display: block; }
+.al-stick canvas { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+.al-stick .name { position: absolute; left: 32px; right: 32px; top: 50%; transform: translateY(-50%); pointer-events: none; }
+.al-stick .name h1 { margin: 0 0 6px -0.04em; font-stretch: 75%; font-weight: 600; font-size: 17cqw; line-height: .86; letter-spacing: -.03em; }
+.al-stick .name p { margin: 0; max-width: 36ch; font-size: 24px; }
+.al-stick .acts { display: flex; gap: 12px; margin-top: 28px; pointer-events: auto; }
+.al-stick .cue { position: absolute; left: 32px; bottom: 22px; font-size: 13px; color: var(--al-text-2); }
+.al[data-lit] .al-stick .cue { color: /*DARK.TEXT2*/; }
+.al-btn { display: inline-flex; align-items: center; gap: 8px; height: 44px; padding: 0 18px; border-radius: var(--r-control); font-size: 15px; font-weight: 500; border: 1px solid var(--al-border); color: var(--al-text); background: var(--al-raised); cursor: pointer; transition: background var(--fast) var(--ease), transform var(--fast) var(--ease); }
+.al-btn:hover { background: var(--al-sunken); }
+.al-btn:active { transform: translateY(1px); }
+.al-btn--primary, .al-btn--primary:hover { background: var(--blue); border-color: var(--blue); color: #fff; }
+.al-btn--primary:hover { background: #4B7FFF; }
+.al-btn svg { width: 18px; height: 18px; }
+.al[data-lit] .al-stick .al-btn:not(.al-btn--primary) { border-color: rgba(232,234,237,.35); color: /*LIGHT.BASE*/; background: rgba(21,23,26,.5); }
+
+/* the sections */
+.al-main { max-width: 1120px; margin: 0 auto; padding: 0 32px; }
+.al-sec { padding: 96px 0 24px; }
+.al-sec h2 { margin: 0 0 14px; font-stretch: 75%; font-weight: 600; font-size: 56px; line-height: .95; letter-spacing: -.025em; max-width: 14ch; }
+.al-sec .lead { margin: 0; max-width: 54ch; font-size: 20px; }
+.al-sec .note { margin: 10px 0 0; max-width: 54ch; font-size: 15px; color: var(--al-text-2); }
+.al-sec .head { display: grid; grid-template-columns: 1fr 1.2fr; gap: 32px; align-items: end; margin-bottom: 36px; }
+.frame { position: relative; border-radius: var(--r-sheet); overflow: hidden; background: var(--al-raised); border: 1px solid var(--al-border); box-shadow: var(--al-shadow); }
+.frame img { display: block; width: 100%; height: auto; }
+.frame + .frame { margin-top: 24px; }
+.phones { display: grid; grid-template-columns: repeat(3, 1fr); gap: 24px; align-items: start; }
+.phones figure { margin: 0; display: grid; justify-items: center; }
+.phones .frame { border-radius: 28px; width: 100%; max-width: 268px; }
+.phones figure:nth-child(2) { margin-top: 56px; }
+.phones figure:nth-child(3) { margin-top: 20px; }
+.phones figcaption { margin: 14px 0 0; max-width: 268px; font-size: 15px; color: var(--al-text-2); }
+.places { position: relative; display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 32px; }
+.places svg.wire { position: absolute; left: 0; right: 0; top: 46px; width: 100%; height: 8px; overflow: visible; pointer-events: none; }
+.places .wire path { fill: none; stroke: var(--al-border); stroke-width: 2; }
+.places .wire .light { fill: none; stroke: var(--blue); stroke-width: 3; stroke-linecap: round; stroke-dasharray: 60 2000; stroke-dashoffset: 60; }
+@keyframes travel { from { stroke-dashoffset: 60; } to { stroke-dashoffset: -2000; } }
+.place { position: relative; padding: 28px 24px 24px; border-radius: var(--r-sheet); background: var(--al-raised); border: 1px solid var(--al-border); min-height: 190px; }
+.place b { display: block; font-stretch: 75%; font-size: 30px; font-weight: 600; margin-bottom: 8px; line-height: 1; }
+.place span { color: var(--al-text-2); font-size: 15px; }
+.place .mark { position: absolute; top: 22px; right: 22px; width: 28px; height: 28px; }
+.place.glass { background: var(--glass); color: /*DARK.TEXT*/; border-color: #2A2F35; background-image: repeating-linear-gradient(90deg, rgba(255,69,54,.18) 0 1px, transparent 1px 2px, rgba(47,209,88,.18) 2px 3px, transparent 3px 4px, rgba(46,107,255,.18) 4px 5px, transparent 5px 6px); }
+.place.glass span { color: #C9CFD6; }
+.ledger { border-top: 1px solid var(--al-border); }
+.ledger .row:has(+ .row.cont) { border-bottom: 0; }
+.ledger .row { display: grid; grid-template-columns: 1.1fr 2fr .8fr; gap: 24px; align-items: baseline; padding: 20px 0; border-bottom: 1px solid var(--al-border); }
+.ledger .os { font-stretch: 75%; font-weight: 600; font-size: 34px; line-height: 1; letter-spacing: -.02em; }
+.ledger .os small { display: block; font-stretch: 100%; font-weight: 400; font-size: 15px; letter-spacing: 0; color: var(--al-text-2); margin-top: 6px; }
+.ledger .row.cont { border-top: 0; padding-top: 0; margin-top: -8px; }
+.ledger .row.cont .os small { margin-top: 0; }
+.ledger .snd { display: inline-flex; align-items: center; gap: 8px; color: var(--al-text-2); font-size: 15px; justify-self: end; }
+.install { display: grid; grid-template-columns: 1fr 1fr; gap: 32px; align-items: start; }
+.install > div { min-width: 0; }
+.code { position: relative; margin-top: 16px; border-radius: var(--r-card); background: var(--glass); color: /*DARK.TEXT*/; padding: 18px 20px; font: 14px/1.6 ui-monospace, SFMono-Regular, Menlo, monospace; overflow: auto; border: 1px solid #2A2F35; }
+.code .copy { position: absolute; top: 10px; right: 10px; display: inline-flex; align-items: center; gap: 6px; height: 32px; padding: 0 10px; border-radius: var(--r-control); border: 1px solid rgba(232,234,237,.25); background: transparent; color: /*DARK.TEXT*/; font: 13px "Instrument Sans", system-ui, sans-serif; cursor: pointer; }
+.code .copy:hover { background: rgba(232,234,237,.12); }
+.said { display: block; margin-top: 8px; font-size: 14px; color: var(--al-text-2); min-height: 20px; }
+.al-foot { margin-top: 96px; border-top: 1px solid var(--al-border); padding: 28px 32px 48px; color: var(--al-text-2); font-size: 14px; }
+.al-foot .in { max-width: 1120px; margin: 0 auto; display: flex; justify-content: space-between; gap: 24px; flex-wrap: wrap; }
+.al-foot a { color: var(--al-action); }
+
+/* the product's page, shown live */
+.frame.live { background: var(--glass); }
+.frame.live iframe { display: block; width: 100%; border: 0; }
+.frame.live.bar { height: 150px; }
+.frame.live.bar iframe { width: 1280px; height: 160px; transform: scale(1.8); transform-origin: 50% 0; margin-left: calc((100% - 1280px) / 2); }
+.phones .frame.live { height: 560px; }
+.phones .frame.live iframe { width: 412px; height: 860px; transform: scale(0.6505); transform-origin: 0 0; }
+
+/* the first run, WizardView.swift: 820 by 540, the brand's glass on the left (Brand.glass) */
+.mac-first { display: flex; width: 820px; max-width: 100%; height: 540px; margin: 0 auto; border-radius: 12px; overflow: hidden; font: 13px/1.35 -apple-system, "SF Pro Text", system-ui, sans-serif; color: #fff; background: rgba(36,36,42,.86); -webkit-backdrop-filter: blur(30px); backdrop-filter: blur(30px); border: 1px solid rgba(255,255,255,.12); box-shadow: 0 24px 60px rgba(0,0,0,.5); }
+[data-theme="light"] .mac-first { background: rgba(240,240,245,.88); color: #000; border-color: rgba(0,0,0,.1); }
+.mac-first .pane { display: flex; flex-direction: column; justify-content: center; flex: none; width: 250px; padding: 30px 26px 26px; background: var(--glass); color: #fff; }
+.mac-first .bars { display: flex; justify-content: center; gap: 14px; margin: auto 0; }
+.mac-first .bar { position: relative; display: block; width: 36px; height: 200px; border-radius: 7px; overflow: hidden; }
+.mac-first .bar b { position: absolute; left: 0; right: 0; bottom: 0; display: block; }
+.mac-first .b0 { background: rgba(255,69,54,.16); } .mac-first .b0 b { background: var(--red); }
+.mac-first .b1 { background: rgba(47,209,88,.16); } .mac-first .b1 b { background: var(--green); }
+.mac-first .b2 { background: rgba(46,107,255,.16); } .mac-first .b2 b { background: var(--blue); }
+.mac-first .names { display: grid; gap: 6px; margin-top: auto; }
+.mac-first .nm { display: flex; align-items: center; gap: 9px; font-size: 13px; }
+.mac-first .sw { width: 10px; height: 14px; border-radius: 2px; }
+.mac-first .sw.b0 { background: var(--red); } .mac-first .sw.b1 { background: var(--green); } .mac-first .sw.b2 { background: var(--blue); }
+.mac-first .step { display: flex; flex-direction: column; gap: 12px; flex: 1; min-width: 0; padding: 36px 32px 18px; }
+.mac-first h3 { margin: 0; font: 700 24px/1.2 -apple-system, "SF Pro Display", system-ui, sans-serif; letter-spacing: 0; }
+.mac-first p { margin: 0; }
+.mac-first .rows { display: flex; align-items: center; gap: 12px; padding: 12px; border-radius: 10px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.08); }
+[data-theme="light"] .mac-first .rows { background: rgba(255,255,255,.7); border-color: rgba(0,0,0,.08); }
+.mac-first .what { display: grid; gap: 1px; flex: 1; }
+.mac-first .what b { font-weight: 600; }
+.mac-first .what small { font-size: 11px; color: rgba(255,255,255,.6); }
+[data-theme="light"] .mac-first .what small { color: rgba(0,0,0,.55); }
+.mac-first .mark { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
+.mac-first .mark i { width: 8px; height: 8px; border-radius: 50%; border: 1.5px solid rgba(255,255,255,.55); }
+[data-theme="light"] .mac-first .mark i { border-color: rgba(0,0,0,.45); }
+.mac-first .cap-note { font-size: 11px; color: rgba(255,255,255,.6); }
+[data-theme="light"] .mac-first .cap-note { color: rgba(0,0,0,.55); }
+.mac-first .cap { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 12px; border-radius: 999px; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.1); color: inherit; font: 12px -apple-system, system-ui, sans-serif; cursor: default; }
+.mac-first .cap:hover { background: rgba(255,255,255,.18); }
+[data-theme="light"] .mac-first .cap { background: #fff; border-color: rgba(0,0,0,.14); box-shadow: 0 1px 1px rgba(0,0,0,.06); }
+.mac-first .cap.dis { opacity: .45; }
+.mac-first .foot { display: flex; align-items: center; gap: 10px; min-height: 28px; margin-top: auto; }
+.mac-first .foot .n { font-size: 11px; color: rgba(255,255,255,.6); }
+[data-theme="light"] .mac-first .foot .n { color: rgba(0,0,0,.55); }
+.mac-first .foot .cap:last-child { margin-left: auto; }
+
+/* the menu bar and the menu, StatusItem.swift and Menu.swift: the system's font, as Apple asks */
+.mac-desk { position: relative; height: 420px; border-radius: var(--r-sheet); overflow: hidden; font: 13px/1.3 -apple-system, "SF Pro Text", system-ui, sans-serif; color: #fff;
+  background: radial-gradient(120% 90% at 20% 0%, #3b3651 0%, #23222d 45%, #141318 100%); }
+[data-theme="light"] .mac-desk { background: radial-gradient(120% 90% at 20% 0%, #cfd8ea 0%, #9fb0d6 45%, #6a7fb8 100%); }
+.mac-bar { display: flex; align-items: center; justify-content: flex-end; gap: 14px; height: 30px; padding: 0 16px; background: rgba(28,28,34,.72); -webkit-backdrop-filter: blur(20px); backdrop-filter: blur(20px); color: #fff; font-size: 13px; }
+[data-theme="light"] .mac-bar { background: rgba(240,242,248,.72); color: #000; }
+.mac-item { display: inline-grid; place-items: center; width: 38px; height: 22px; border-radius: 6px; }
+.mac-item.on { background: rgba(255,255,255,.22); }
+[data-theme="light"] .mac-item.on { background: rgba(0,0,0,.14); }
+.mac-bars { width: 18px; height: 16px; fill: none; stroke: currentColor; stroke-width: 1.4; }
+.mac-bars.filled { fill: currentColor; }
+.mac-menu { position: absolute; top: 34px; right: 58px; width: 300px; padding: 5px; border-radius: 12px; background: rgba(44,44,50,.86); -webkit-backdrop-filter: blur(30px) saturate(1.4); backdrop-filter: blur(30px) saturate(1.4); border: 1px solid rgba(255,255,255,.14); box-shadow: 0 18px 50px rgba(0,0,0,.45); }
+[data-theme="light"] .mac-menu { background: rgba(246,246,250,.88); color: #000; border-color: rgba(0,0,0,.1); }
+.mac-menu .mi { display: flex; align-items: center; gap: 8px; height: 26px; padding: 0 10px; border-radius: 6px; font-size: 13px; }
+.mac-menu .mi.dim { color: rgba(255,255,255,.5); }
+[data-theme="light"] .mac-menu .mi.dim { color: rgba(0,0,0,.45); }
+.mac-menu .mi:not(.said):hover { background: var(--blue); color: #fff; }
+.mac-menu .mi kbd { margin-left: auto; font: inherit; color: rgba(255,255,255,.5); letter-spacing: .05em; }
+[data-theme="light"] .mac-menu .mi kbd { color: rgba(0,0,0,.45); }
+.mac-menu .mi:hover kbd { color: rgba(255,255,255,.8); }
+.mac-menu .light { width: 10px; height: 10px; border-radius: 50%; flex: none; }
+.mac-menu .light.green { background: #30d158; }
+.mac-menu hr { border: 0; height: 1px; margin: 5px 10px; background: rgba(255,255,255,.14); }
+[data-theme="light"] .mac-menu hr { background: rgba(0,0,0,.1); }
+
+/* the settings window, SettingsView.swift: the panes as a capsule of glass */
+.mac-win { width: 700px; max-width: 100%; margin: 0 auto; border-radius: 12px; overflow: hidden; font: 13px/1.3 -apple-system, "SF Pro Text", system-ui, sans-serif; color: #fff; background: rgba(36,36,42,.86); -webkit-backdrop-filter: blur(30px); backdrop-filter: blur(30px); border: 1px solid rgba(255,255,255,.12); box-shadow: 0 24px 60px rgba(0,0,0,.5); }
+[data-theme="light"] .mac-win { background: rgba(240,240,245,.88); color: #000; border-color: rgba(0,0,0,.1); }
+.mac-title { position: relative; height: 52px; display: grid; place-items: center; font-weight: 600; }
+.mac-title .lights { position: absolute; left: 12px; top: 12px; display: flex; gap: 8px; }
+.mac-title .lights i { width: 12px; height: 12px; border-radius: 50%; background: #ff5f57; }
+.mac-title .lights i:nth-child(2) { background: #febc2e; } .mac-title .lights i:nth-child(3) { background: #28c840; }
+.mac-tabs { display: flex; gap: 2px; width: max-content; margin: 0 auto 8px; padding: 4px; border-radius: 999px; background: rgba(255,255,255,.08); border: 1px solid rgba(255,255,255,.1); }
+[data-theme="light"] .mac-tabs { background: rgba(0,0,0,.05); border-color: rgba(0,0,0,.08); }
+.mac-tabs .tab { display: grid; justify-items: center; gap: 3px; width: 104px; padding: 6px 0; border: 0; border-radius: 999px; background: transparent; color: rgba(255,255,255,.6); font: 11px -apple-system, system-ui, sans-serif; cursor: default; }
+[data-theme="light"] .mac-tabs .tab { color: rgba(0,0,0,.55); }
+.mac-tabs .tab .ic { width: 18px; height: 18px; stroke-width: 1.8; }
+.mac-tabs .tab.on { background: rgba(255,255,255,.14); color: #fff; font-weight: 600; }
+[data-theme="light"] .mac-tabs .tab.on { background: rgba(0,0,0,.12); color: #000; }
+.mac-form { padding: 10px 20px 24px; }
+.mac-form .hd { margin: 6px 4px 8px; font-size: 12px; color: rgba(255,255,255,.6); max-width: 64ch; }
+[data-theme="light"] .mac-form .hd { color: rgba(0,0,0,.55); }
+.mac-form .group { border-radius: 10px; background: rgba(255,255,255,.06); border: 1px solid rgba(255,255,255,.08); margin-bottom: 14px; }
+[data-theme="light"] .mac-form .group { background: rgba(255,255,255,.7); border-color: rgba(0,0,0,.08); }
+.mac-form .row { display: flex; align-items: center; gap: 12px; min-height: 52px; padding: 8px 14px; border-bottom: 1px solid rgba(255,255,255,.08); }
+[data-theme="light"] .mac-form .row { border-color: rgba(0,0,0,.07); }
+.mac-form .row:last-child { border-bottom: 0; }
+.mac-form .what { display: grid; gap: 1px; flex: 1; }
+.mac-form .what b { font-weight: 600; }
+.mac-form .what small { font-size: 11px; color: rgba(255,255,255,.6); }
+[data-theme="light"] .mac-form .what small { color: rgba(0,0,0,.55); }
+.mac-form .row > span:first-child { flex: 1; }
+.mac-form .kind { color: rgba(255,255,255,.6); }
+[data-theme="light"] .mac-form .kind { color: rgba(0,0,0,.55); }
+.mac-form .cap { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 12px; border-radius: 999px; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.1); color: inherit; font: 12px -apple-system, system-ui, sans-serif; cursor: default; }
+.mac-form .cap:hover { background: rgba(255,255,255,.18); }
+[data-theme="light"] .mac-form .cap { background: #fff; border-color: rgba(0,0,0,.14); box-shadow: 0 1px 1px rgba(0,0,0,.06); }
+.mac-form .cap .ic { width: 13px; height: 13px; }
+.mac-form .ft { display: grid; gap: 10px; padding: 0 4px; font-size: 12px; color: rgba(255,255,255,.6); }
+[data-theme="light"] .mac-form .ft { color: rgba(0,0,0,.55); }
+.mac-form .ft p { margin: 0; max-width: 64ch; }
+.mac-form .switch { position: relative; width: 38px; height: 22px; border-radius: 999px; background: rgba(255,255,255,.2); flex: none; }
+.mac-form .switch.on { background: var(--blue); }
+.mac-form .switch i { position: absolute; top: 2px; left: 2px; width: 18px; height: 18px; border-radius: 50%; background: #fff; box-shadow: 0 1px 2px rgba(0,0,0,.3); }
+.mac-form .switch.on i { left: 18px; }
+.mac-form .pop { display: inline-flex; align-items: center; gap: 6px; height: 24px; padding: 0 8px 0 12px; border-radius: 6px; border: 1px solid rgba(255,255,255,.18); background: rgba(255,255,255,.1); }
+[data-theme="light"] .mac-form .pop { background: #fff; border-color: rgba(0,0,0,.14); }
+.mac-form .pop .ic { width: 12px; height: 12px; }
+.mac-form .mark { display: inline-flex; align-items: center; gap: 6px; font-weight: 500; }
+.mac-form .mark i { width: 8px; height: 8px; border-radius: 50%; background: #30d158; }
+.mac-scene + .mac-scene { margin-top: 24px; }
+
+/* a phone */
+@media (max-width: 640px) {
+  .al { font-size: 16px; }
+  .al-nav { padding: 0 16px; height: 56px; margin-bottom: -56px; }
+  .al-nav .links a.text { display: none; }
+  .al-stick .name { left: 20px; right: 20px; }
+  .al-stick .name h1 { font-size: 30cqw; }
+  .al-stick .name p { font-size: 18px; }
+  .al-stick .acts { flex-direction: column; align-items: flex-start; }
+  .al-stick .cue { left: 20px; }
+  .al-main { padding: 0 16px; }
+  .al-sec { padding: 64px 0 8px; }
+  .al-sec h2 { font-size: 40px; }
+  .al-sec .lead { font-size: 17px; }
+  .al-sec .head { grid-template-columns: 1fr; gap: 12px; margin-bottom: 24px; }
+  .phones { grid-template-columns: 1fr; }
+  .phones figure { margin: 0 0 16px !important; }
+  .install, .places { grid-template-columns: 1fr; }
+  .places svg.wire { display: none; }
+  .ledger .row { grid-template-columns: 1fr; gap: 6px; }
+  .ledger .snd { justify-self: start; }
+  .al-foot { padding: 24px 16px 40px; }
+  .frame.live.bar iframe { transform: scale(1.2); }
+  .mac-first { height: auto; flex-direction: column; }
+  .mac-first .pane { width: 100%; padding: 20px; }
+  .mac-first .bar { height: 120px; } .mac-first .bars { margin: 0 0 16px; }
+  .mac-first .rows { flex-wrap: wrap; }
+  .mac-desk { height: 360px; }
+  .mac-menu { right: 12px; width: 260px; }
+  .mac-tabs .tab { width: 64px; }
+  .mac-tabs .tab span { display: none; }
+}
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } .places .wire .light { animation: none !important; } }
+</style>
+</head>
+<body>
+<svg width="0" height="0" style="position:absolute" aria-hidden="true"><defs>
+<!--SYMBOLS-->
+<!-- Four glyphs of this page alone, which the product's page has no use for (two are the
+     Mac app's, drawn there with the system's symbols): Lucide's, under the ISC licence kept
+     in docs/design/icons/lucide-ISC.txt. -->
+<symbol id="i-languages" viewBox="0 0 24 24"><path d="m5 8 6 6"/><path d="m4 14 6-6 2-3"/><path d="M2 5h12"/><path d="M7 2h1"/><path d="m22 22-5-10-5 10"/><path d="M14 18h6"/></symbol>
+<symbol id="i-plus" viewBox="0 0 24 24"><path d="M5 12h14"/><path d="M12 5v14"/></symbol>
+<symbol id="i-sliders-horizontal" viewBox="0 0 24 24"><line x1="21" x2="14" y1="4" y2="4"/><line x1="10" x2="3" y1="4" y2="4"/><line x1="21" x2="12" y1="12" y2="12"/><line x1="8" x2="3" y1="12" y2="12"/><line x1="21" x2="16" y1="20" y2="20"/><line x1="12" x2="3" y1="20" y2="20"/><line x1="14" x2="14" y1="2" y2="6"/><line x1="8" x2="8" y1="10" y2="14"/><line x1="16" x2="16" y1="18" y2="22"/></symbol>
+<symbol id="i-sun-moon" viewBox="0 0 24 24"><path d="M12 2v2"/><path d="M14.837 16.385a6 6 0 1 1-7.223-7.222c.624-.147.97.66.715 1.248a4 4 0 0 0 5.26 5.259c.589-.255 1.396.09 1.248.715"/><path d="M16 12a4 4 0 0 0-4-4"/><path d="m19 5-1.256 1.256"/><path d="M20 12h2"/></symbol>
+<!-- The mark, as frontend/src/design/favicon.svg draws it, and two signs of this page. -->
+<symbol id="i-mark" viewBox="0 0 16 16"><rect x="2" y="3" width="4" height="10" rx="1" fill="/*RED*/"/><rect x="6" y="3" width="4" height="10" rx="1" fill="/*GREEN*/"/><rect x="10" y="3" width="4" height="10" rx="1" fill="/*BLUE*/"/></symbol>
+<symbol id="i-download" viewBox="0 0 24 24"><path d="M12 3v12"/><path d="m7 10 5 5 5-5"/><path d="M5 21h14"/></symbol>
+<symbol id="i-github" viewBox="0 0 24 24"><path d="M12 .5C5.7.5.5 5.7.5 12c0 5.1 3.3 9.4 7.9 10.9.6.1.8-.3.8-.6v-2.1c-3.2.7-3.9-1.4-3.9-1.4-.5-1.3-1.3-1.7-1.3-1.7-1-.7.1-.7.1-.7 1.2.1 1.8 1.2 1.8 1.2 1 1.8 2.7 1.3 3.4 1 .1-.8.4-1.3.7-1.6-2.6-.3-5.3-1.3-5.3-5.7 0-1.3.4-2.3 1.2-3.1-.1-.3-.5-1.5.1-3.1 0 0 1-.3 3.2 1.2a11 11 0 0 1 5.8 0c2.2-1.5 3.2-1.2 3.2-1.2.6 1.6.2 2.8.1 3.1.8.8 1.2 1.8 1.2 3.1 0 4.4-2.7 5.4-5.3 5.7.4.4.8 1.1.8 2.2v3.2c0 .3.2.7.8.6 4.6-1.5 7.9-5.8 7.9-10.9C23.5 5.7 18.3.5 12 .5Z"/></symbol>
+</defs></svg>
+
+<div class="al" id="al-page">
+  <nav class="al-nav" id="al-nav">
+    <a class="brand" href="#top"><span class="tile"><svg><use href="#i-mark"/></svg></span>alumia</a>
+    <span class="links">
+      <a class="text" href="#mac" data-t="nav.mac"></a>
+      <a class="text" href="#open" data-t="nav.open"></a>
+      <a class="text" href="#install" data-t="nav.install"></a>
+      <a href="/*REPO*/" aria-label="GitHub"><svg class="ic solid"><use href="#i-github"/></svg><span class="text">GitHub</span></a>
+      <span class="sep"></span>
+      <button type="button" id="al-lang" data-t-aria="nav.lang.aria"><svg class="ic"><use href="#i-languages"/></svg><span data-t="nav.lang"></span></button>
+      <button type="button" id="al-theme" data-t-aria="nav.theme.aria"><svg class="ic"><use href="#i-sun-moon"/></svg></button>
+    </span>
+  </nav>
+
+  <div class="al-track" id="al-track">
+    <div class="al-stick" id="top">
+      <div class="picture" id="al-picture"><iframe id="al-hero-frame" title="alumia" tabindex="-1"></iframe></div>
+      <canvas id="al-fx" aria-hidden="true"></canvas>
+      <div class="name" id="al-name">
+        <h1>alumia</h1>
+        <p data-t="hero.line"></p>
+        <div class="acts" id="al-acts">
+          <a class="al-btn al-btn--primary" href="/*DOWNLOAD*/"><svg><use href="#i-download"/></svg><span data-t="hero.mac"></span></a>
+          <a class="al-btn" href="#install" data-t="hero.any"></a>
+        </div>
+      </div>
+      <p class="cue" id="al-cue" data-t="hero.cue"></p>
+    </div>
+  </div>
+
+  <main class="al-main">
+    <section class="al-sec" id="list">
+      <div class="head">
+        <h2 data-t="list.h"></h2>
+        <div><p class="lead" data-t="list.p"></p><p class="note" data-t="list.n"></p></div>
+      </div>
+    </section>
+
+    <section class="al-sec" id="session">
+      <div class="head">
+        <h2 data-t="session.h"></h2>
+        <div><p class="lead" data-t="session.p"></p><p class="note" data-t="session.n"></p></div>
+      </div>
+      <div class="frame live bar"><iframe data-doc="session" title="alumia" tabindex="-1"></iframe></div>
+      <div class="frame"><img data-pic="ignite" alt=""></div>
+    </section>
+
+    <section class="al-sec" id="phone">
+      <div class="head">
+        <h2 data-t="phone.h"></h2>
+        <div><p class="lead" data-t="phone.p"></p></div>
+      </div>
+      <div class="phones">
+        <figure><div class="frame live"><iframe data-doc="signin" title="alumia" tabindex="-1"></iframe></div><figcaption data-t="phone.c1"></figcaption></figure>
+        <figure><div class="frame live"><iframe data-doc="list" title="alumia" tabindex="-1"></iframe></div><figcaption data-t="phone.c2"></figcaption></figure>
+        <figure><div class="frame"><img data-pic="ignite-phone" alt=""></div><figcaption data-t="phone.c3"></figcaption></figure>
+      </div>
+    </section>
+
+    <section class="al-sec" id="mac">
+      <div class="head">
+        <h2 data-t="mac.h"></h2>
+        <div><p class="lead" data-t="mac.p"></p><p class="note" data-t="mac.n"></p></div>
+      </div>
+      <div class="mac-scene" data-mac="menu"></div>
+      <div class="mac-scene" data-mac="first"></div>
+      <div class="mac-scene" data-mac="settings-computers"></div>
+    </section>
+
+    <section class="al-sec" id="how">
+      <div class="head">
+        <h2 data-t="how.h"></h2>
+        <div><p class="lead" data-t="how.p"></p></div>
+      </div>
+      <div class="places">
+        <svg class="wire" viewBox="0 0 1000 8" preserveAspectRatio="none"><path d="M0 4 H1000"/><path class="light" id="al-light" d="M0 4 H1000"/></svg>
+        <div class="place"><svg class="mark ic"><use href="#i-monitor"/></svg><b data-t="how.a"></b><span data-t="how.a2"></span></div>
+        <div class="place glass"><svg class="mark"><use href="#i-mark"/></svg><b>alumia</b><span data-t="how.b2"></span></div>
+        <div class="place"><svg class="mark ic"><use href="#i-app-window"/></svg><b data-t="how.c"></b><span data-t="how.c2"></span></div>
+      </div>
+    </section>
+
+    <section class="al-sec" id="open">
+      <div class="head">
+        <h2 data-t="open.h"></h2>
+        <div><p class="lead" data-t="open.p"></p></div>
+      </div>
+      <div class="ledger">
+        <div class="row"><div class="os">Mac <small data-t="open.mac.v"></small></div><div data-t="open.mac.vh"></div><div class="snd"><svg class="ic"><use href="#i-volume-2"/></svg><span data-t="snd.always"></span></div></div>
+        <div class="row cont"><div class="os"><small data-t="open.mac.m"></small></div><div data-t="open.mac.mh"></div><div class="snd"><svg class="ic"><use href="#i-volume-2"/></svg><span data-t="snd.always"></span></div></div>
+        <div class="row"><div class="os">Windows <small data-t="open.win"></small></div><div data-t="open.winh"></div><div class="snd"><svg class="ic"><use href="#i-volume-2"/></svg><span data-t="snd.choice"></span></div></div>
+        <div class="row"><div class="os">Linux <small data-t="open.lin"></small></div><div data-t="open.linh"></div><div class="snd"><svg class="ic"><use href="#i-volume-2"/></svg><span data-t="snd.choice"></span></div></div>
+        <div class="row"><div class="os">VNC <small data-t="open.vnc"></small></div><div data-t="open.vnch"></div><div class="snd"><span data-t="snd.none"></span></div></div>
+      </div>
+    </section>
+
+    <section class="al-sec" id="install">
+      <div class="head">
+        <h2 data-t="install.h"></h2>
+        <div><p class="lead" data-t="install.p"></p></div>
+      </div>
+      <div class="install">
+        <div>
+          <div class="mac-scene" data-mac="menu-idle"></div>
+          <p class="note" style="margin-top:14px" data-t="install.mac"></p>
+          <p style="margin:14px 0 0"><a class="al-btn al-btn--primary" href="/*DOWNLOAD*/"><svg><use href="#i-download"/></svg><span data-t="hero.mac"></span></a></p>
+        </div>
+        <div>
+          <p class="lead" style="font-size:17px" data-t="install.any"></p>
+          <pre class="code" id="al-code"><button type="button" class="copy" id="al-copy"><svg class="ic"><use href="#i-copy"/></svg><span data-t="code.copy"></span></button>bun install --cwd frontend
+cargo build --release
+cp alumia.example.toml alumia.toml
+./target/release/alumia gen-passwd admin
+./target/release/alumia serve -c alumia.toml</pre>
+          <output class="said" id="al-said"></output>
+          <p class="note" data-t="install.any2"></p>
+        </div>
+      </div>
+    </section>
+  </main>
+  <footer class="al-foot"><div class="in">
+    <span data-t="foot.origin"></span>
+    <span><a href="/*REPO*/">GitHub</a> · <a href="/*REPO*//blob/main/docs/README.md" data-t="foot.docs"></a> · <a id="al-changes" href="/*REPO*//blob/main/CHANGELOG.md" data-t="foot.changes"></a></span>
+  </div></footer>
+</div>
+
+<!--SHADERS-->
+<!--DATA-->
+<script>
+(() => {
+  "use strict";
+  const $ = (id) => document.getElementById(id);
+  const WORDS = JSON.parse($("al-words").textContent);
+  const embed = JSON.parse($("al-embed").textContent);
+  const macs = JSON.parse($("al-macs").textContent);
+  const root = document.documentElement, page = $("al-page"), nav = $("al-nav");
+  const state = { lang: "pt-BR", theme: root.dataset.theme === "dark" ? "dark" : "light" };
+  try { state.lang = localStorage.getItem("alumia-site.lang") || state.lang; } catch {}
+  if (!["pt-BR", "en-US"].includes(state.lang)) state.lang = (navigator.language || "").toLowerCase().startsWith("pt") ? "pt-BR" : "en-US";
+  const reducedSystem = matchMedia("(prefers-reduced-motion: reduce)");
+  const reduced = () => reducedSystem.matches;
+  const keep = (key, value) => { try { localStorage.setItem(key, value); } catch {} };
+
+  function words() {
+    const w = WORDS[state.lang];
+    for (const el of document.querySelectorAll("[data-t]")) el.textContent = w[el.dataset.t];
+    for (const el of document.querySelectorAll("[data-t-aria]")) el.setAttribute("aria-label", w[el.dataset.tAria]);
+    root.lang = state.lang;
+    document.title = w.title;
+    document.querySelector('meta[name="description"]').content = w["hero.line"];
+    $("al-changes").href = embed.repo + (state.lang === "pt-BR" ? "/blob/main/CHANGELOG.pt-BR.md" : "/blob/main/CHANGELOG.md");
+  }
+  // The product's page, live: its document and stylesheet as the gateway served them, in
+  // the theme and the language chosen here, with the glass and its lens drawn by the
+  // product's own shader.
+  const doc = (kind, theme, lang) => {
+    const l = lang === "pt-BR" ? "pt" : "en";
+    const head = embed.head.replace("__CSS__", embed.css).replace("{lang}", lang).replace("{theme}", theme).replace("{shader}", embed.shader);
+    return head + embed.docs[`${kind}-${l}`] + embed.runner + "</body></html>";
+  };
+  function pictures() {
+    const l = state.lang === "pt-BR" ? "pt" : "en", t = state.theme;
+    $("al-hero-frame").srcdoc = doc("list", t, state.lang);
+    for (const f of document.querySelectorAll("iframe[data-doc]")) f.srcdoc = doc(f.dataset.doc, t, state.lang);
+    for (const m of document.querySelectorAll("[data-mac]")) m.innerHTML = macs[state.lang][m.dataset.mac];
+    const map = { ignite: `real/acende-${l}.png`, "ignite-phone": `real/celular-acende-${l}.png` };
+    for (const img of document.querySelectorAll("[data-pic]")) img.src = map[img.dataset.pic];
+    document.querySelector('meta[name="theme-color"]').content = getComputedStyle(root).getPropertyValue("--al-base").trim();
+  }
+  function apply() {
+    root.dataset.theme = state.theme;
+    words(); pictures();
+    $("al-light").style.animation = reduced() ? "none" : "travel 9s linear infinite";
+    hero.start();
+  }
+  $("al-lang").addEventListener("click", () => { state.lang = state.lang === "pt-BR" ? "en-US" : "pt-BR"; keep("alumia-site.lang", state.lang); apply(); });
+  $("al-theme").addEventListener("click", () => { state.theme = state.theme === "dark" ? "light" : "dark"; keep("alumia-site.theme", state.theme); apply(); });
+  $("al-copy").addEventListener("click", async () => {
+    const text = $("al-code").innerText.replace(/^.*?\n/, "");
+    try { await navigator.clipboard.writeText(text); $("al-said").textContent = WORDS[state.lang]["code.copied"]; }
+    catch { $("al-said").textContent = WORDS[state.lang]["code.refused"]; }
+    setTimeout(() => { $("al-said").textContent = ""; }, 4000);
+  });
+
+  // ---- the hero: the glass of the theme with its lens; the screen that lights as the
+  // page scrolls (the dark glass); the grid that dissolves over the product's page ----
+  const hero = (() => {
+    const canvas = $("al-fx"), stick = $("top"), track = $("al-track"), picture = $("al-picture"), name = $("al-name"), cue = $("al-cue");
+    let gl = null, programs = {}, frame = 0, running = false;
+    let pointer = [-1000, -1000], lens = 0, lensTo = 0;
+    let shown = 0, target = 0;
+    const hex = (h) => [1, 3, 5].map((i) => parseInt(h.slice(i, i + 2), 16) / 255);
+    const BRAND = { u_red: hex(embed.colours.red), u_green: hex(embed.colours.green), u_blue: hex(embed.colours.blue) };
+    const CELL = embed.cell, GRAIN = embed.grain;
+    const SURFACE = { dark: hex(embed.colours.dark), light: hex(embed.colours.light) }, GLASS = hex(embed.colours.glass);
+    function compile(n) {
+      const make = (type, id) => { const s = gl.createShader(type); gl.shaderSource(s, $(id).textContent.trim()); gl.compileShader(s); return s; };
+      const p = gl.createProgram();
+      gl.attachShader(p, make(gl.VERTEX_SHADER, "sh-v")); gl.attachShader(p, make(gl.FRAGMENT_SHADER, `sh-${n}`)); gl.linkProgram(p);
+      const u = {}; for (const k of ["u_size", "u_pointer", "u_cell", "u_lens", "u_grain", "u_progress", "u_base", "u_red", "u_green", "u_blue"]) u[k] = gl.getUniformLocation(p, k);
+      return { p, u };
+    }
+    function init() {
+      gl = canvas.getContext("webgl2", { antialias: false, alpha: true, premultipliedAlpha: true, preserveDrawingBuffer: true });
+      if (!gl) return false;
+      const buf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, buf);
+      gl.bufferData(gl.ARRAY_BUFFER, new Float32Array([-1, -1, 1, -1, -1, 1, 1, 1]), gl.STATIC_DRAW);
+      for (const n of ["glass", "ignite", "dissolve"]) {
+        programs[n] = compile(n); gl.useProgram(programs[n].p);
+        const a = gl.getAttribLocation(programs[n].p, "a_corner"); gl.enableVertexAttribArray(a); gl.vertexAttribPointer(a, 2, gl.FLOAT, false, 0, 0);
+        for (const [k, v] of Object.entries(BRAND)) gl.uniform3fv(programs[n].u[k], v);
+        gl.uniform1f(programs[n].u.u_cell, CELL);
+      }
+      gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);
+      return true;
+    }
+    function size() {
+      const w = stick.clientWidth, h = stick.clientHeight;
+      if (canvas.width !== w || canvas.height !== h) { canvas.width = w; canvas.height = h; gl.viewport(0, 0, w, h); for (const n in programs) { gl.useProgram(programs[n].p); gl.uniform2f(programs[n].u.u_size, w, h); } }
+    }
+    // 0 to 0.02: the glass of the theme, with the lens; 0.02 to 0.42: the screen lights
+    // (the beam, the picture opening, the warmth); 0.42 to 0.8: the grid dissolves over the
+    // page; 0.8 to 1: the page settles into a frame and the bar takes the glass.
+    function paint(p) {
+      size();
+      const lit = p > 0.02;
+      page.toggleAttribute("data-lit", lit);
+      if (!lit) {
+        const g = programs.glass; gl.useProgram(g.p);
+        gl.uniform3fv(g.u.u_base, SURFACE[state.theme]);
+        gl.uniform2f(g.u.u_pointer, pointer[0], pointer[1]); gl.uniform1f(g.u.u_lens, lens); gl.uniform1f(g.u.u_grain, GRAIN[state.theme]);
+        gl.disable(gl.BLEND); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); gl.enable(gl.BLEND);
+      } else if (p < 0.42) {
+        // The beam and the picture opening (up to the shader's OPEN, 0.24) take most of
+        // the scroll; the warmth that follows, the rest.
+        const s = Math.min(1, (p - 0.02) / 0.4);
+        const q = reduced() ? 0.62 : (s < 0.65 ? (s / 0.65) * 0.24 : 0.24 + ((s - 0.65) / 0.35) * 0.76);
+        const g = programs.ignite; gl.useProgram(g.p);
+        gl.uniform3fv(g.u.u_base, GLASS); gl.uniform1f(g.u.u_progress, q);
+        gl.disable(gl.BLEND); gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4); gl.enable(gl.BLEND);
+      } else {
+        const q = Math.min(1, (p - 0.42) / 0.38);
+        gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT);
+        const g = programs.dissolve; gl.useProgram(g.p);
+        gl.uniform3fv(g.u.u_base, GLASS); gl.uniform1f(g.u.u_progress, q);
+        gl.drawArrays(gl.TRIANGLE_STRIP, 0, 4);
+      }
+      const fade = 1 - Math.min(1, Math.max(0, (p - 0.24) / 0.16));
+      name.style.opacity = fade; name.style.transform = `translateY(-50%) scale(${0.97 + 0.03 * fade})`;
+      name.style.pointerEvents = fade < 0.5 ? "none" : "";
+      cue.style.opacity = reduced() ? 0 : Math.max(0, 1 - p / 0.06);
+      const settle = Math.min(1, Math.max(0, (p - 0.8) / 0.2));
+      const ease = 1 - Math.pow(1 - settle, 3);
+      picture.style.transform = `translateY(${40 * ease}px) scale(${1 - 0.1 * ease})`; picture.style.borderRadius = `${20 * ease}px`;
+      stick.style.background = ease > 0 ? `color-mix(in srgb, var(--glass) ${100 - 100 * ease}%, var(--al-base))` : "";
+      nav.toggleAttribute("data-glass", p > 0.6);
+    }
+    function progress() {
+      const top = track.offsetTop, h = track.offsetHeight - stick.offsetHeight;
+      return Math.min(1, Math.max(0, (window.scrollY - top) / Math.max(1, h)));
+    }
+    function tick() {
+      frame = 0;
+      target = progress();
+      shown += (target - shown) * 0.16;
+      lens += (lensTo - lens) * 0.2;
+      if (Math.abs(target - shown) < 0.0005) shown = target;
+      if (Math.abs(lensTo - lens) < 0.001) lens = lensTo;
+      paint(shown);
+      if (running && (shown !== target || lens !== lensTo)) frame = requestAnimationFrame(tick);
+    }
+    const wake = () => {
+      if (!running) return;
+      if (reduced()) { shown = target = progress(); paint(shown); return; }
+      if (!frame) frame = requestAnimationFrame(tick);
+    };
+    window.addEventListener("scroll", wake, { passive: true });
+    window.addEventListener("resize", wake);
+    stick.addEventListener("pointermove", (e) => { if (e.pointerType !== "mouse") return; const r = stick.getBoundingClientRect(); pointer = [e.clientX - r.left, e.clientY - r.top]; lensTo = 1; wake(); });
+    stick.addEventListener("pointerleave", () => { lensTo = 0; wake(); });
+    return {
+      start() {
+        running = true;
+        if (!gl && !init()) { canvas.style.display = "none"; page.toggleAttribute("data-lit", progress() > 0.02); return; }
+        shown = target = progress(); lens = reduced() ? 0 : lens; paint(shown); wake();
+      },
+    };
+  })();
+  apply();
+})();
+</script>
+</body>
+</html>

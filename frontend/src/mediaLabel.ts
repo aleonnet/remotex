@@ -1,18 +1,20 @@
-// What the "This session" card says about the sound and the video, in the same
-// register as the Render row above them.
+// What the information sheet says about the sound and the picture.
 //
 // A module of its own for the reason `connectionLabel.ts` is one: these are pure
-// functions of what arrived on the wire, and a test of a string should not have to
-// stand up a fake browser to import the component that shows it.
+// functions of what arrived on the wire, and a test of them should not have to
+// stand up a fake browser to import the component that shows the answer.
 //
-// The Render row already says what the *gateway* resolved to. These two say what
+// The sheet's Picture line says what the *gateway* resolved to. These say what
 // this browser ended up doing with it, which is a different fact and the one that
-// is otherwise invisible: `render` names a motion codec but never says a stream
-// decoder was configured, and it says nothing at all about audio, whose format is
-// announced only on the audio socket. Until they existed, "why is there no sound"
-// and "which decoder is this browser running" were answerable only by reading the
-// console.
+// is otherwise invisible: the dial names a codec but never says a decoder was
+// configured, and it says nothing at all about sound, whose format is announced
+// only on the audio socket.
+//
+// Nothing here is a sentence. A state is named, and the sheet says it from the
+// dictionary or the catalogue; what is data — a codec string, a rate — is given
+// as data, the same in every language.
 
+import type { Fault } from "./fault.ts";
 import type { HoldCause } from "./protocol.ts";
 
 /**
@@ -32,68 +34,58 @@ export interface AudioStreamInfo {
   passthrough: boolean;
 }
 
-/** Everything the Audio row is derived from. See `useRemoteDesktop`. */
+/** Everything the sound's state is derived from. See `useRemoteDesktop`. */
 export interface AudioRow {
   /** The session carries sound at all (`audio` on `connected`). */
   available: boolean;
   /** This browser asked for it. Never proof that any is arriving. */
   enabled: boolean;
   /** A decoder that refused or failed, which is also why `enabled` went false. */
-  error: string | null;
+  error: Fault | null;
   /** The format the decoder was built from, or null before one arrived. */
   stream: AudioStreamInfo | null;
 }
 
+/** What the sound is doing here. */
+export type SoundState =
+  /** The session carries none. */
+  | "none"
+  /** A decoder refused or failed: the one state that is wrong rather than off. */
+  | "stopped"
+  | "muted"
+  /** Asked for, and its format not here yet. */
+  | "waiting"
+  | "playing";
+
+/**
+ * The sound's state. The failure comes ahead of everything else because it is
+ * the only state here that is *wrong* rather than merely off.
+ */
+export function soundState(row: AudioRow): SoundState {
+  if (!row.available) {
+    return "none";
+  }
+  if (row.error) {
+    return "stopped";
+  }
+  if (!row.enabled) {
+    return "muted";
+  }
+  // Enabled is a press; the format is a round trip later, and the gap is real on a
+  // remote that has to arm its audio bridge first.
+  return row.stream ? "playing" : "waiting";
+}
+
 // 48 kHz, written the way somebody comparing it to a device's rate would say it.
 // A fractional rate such as 44.1 kHz keeps its fraction.
-function rateLabel(hz: number): string {
+function rate(hz: number): string {
   const khz = hz / 1000;
   return `${Number.isInteger(khz) ? khz : khz.toFixed(1)} kHz`;
 }
 
-function channelsLabel(count: number): string {
-  if (count === 1) {
-    return "mono";
-  }
-  return count === 2 ? "stereo" : `${count} channels`;
-}
-
-/**
- * The stream itself: codec, rate, channels, and whose stream it is, as the Video
- * row says of the picture.
- */
-function streamLabel(stream: AudioStreamInfo): string {
-  const shape = `${rateLabel(stream.sampleRate)} ${channelsLabel(stream.channels)}`;
-  const whose = stream.passthrough
-    ? "passthrough from the remote"
-    : "encoded by the gateway";
-  return `${stream.codec} · ${shape} · ${whose}`;
-}
-
-/**
- * The Audio row.
- *
- * The failure is reported ahead of everything else because it is the only state
- * here that is *wrong* rather than merely off.
- */
-export function audioLabel(row: AudioRow): string {
-  if (!row.available) {
-    return "None in this session";
-  }
-  if (row.error) {
-    return `Stopped — ${row.error}`;
-  }
-  if (!row.enabled) {
-    return "Muted";
-  }
-  // Enabled is a click; the format is a round trip later, and the gap is real on a
-  // remote that has to arm its audio bridge first.
-  return row.stream ? streamLabel(row.stream) : "Waiting for the audio format";
-}
-
-/** The Render row: the dial this session resolved to. */
-export function renderLabel(plan: string): string {
-  return plan || "Waiting for the target";
+/** The stream the sound decoder was built from: codec, rate and channels. */
+export function audioDetail(stream: AudioStreamInfo): string {
+  return `${stream.codec} · ${rate(stream.sampleRate)} · ${stream.channels}`;
 }
 
 /** The wire fields of `videoFormat`, or a pipeline this browser composes. */
@@ -107,28 +99,51 @@ export interface VideoStreamInfo {
   composed?: boolean;
 }
 
-/**
- * The Video row: the exact configuration the decoder was built with and whose
- * stream it decodes, or what the row is waiting for before the stream's format has
- * arrived. While the desktop is held — past what a video stream encodes, or All
- * Displays over too many screens — there is no picture, whatever decoder was
- * built before.
- */
-export function videoLabel(
-  stream: VideoStreamInfo | null,
-  held: HoldCause | null,
-): string {
-  if (held === "size") {
-    return "Not in use: the desktop is past what video carries";
-  }
-  if (held === "screens") {
-    return "Not in use: All Displays spans more than two screens";
-  }
+/** Whose the picture is. */
+export type PictureState =
+  /** Its format is not here yet. */
+  | "waiting"
+  /** The remote's own stream, as it came. */
+  | "passed"
+  /** A stream the gateway encoded. */
+  | "encoded"
+  /** An RDP host's drawing, composed by this browser. */
+  | "composed";
+
+export function pictureState(stream: VideoStreamInfo | null): PictureState {
   if (!stream) {
-    return "Waiting for the video format";
+    return "waiting";
   }
   if (stream.composed) {
-    return "Not in use: the host's graphics pipeline is composed by this browser";
+    return "composed";
   }
-  return `${stream.decode} · ${stream.passthrough ? "passthrough from the remote" : "encoded by the gateway"}`;
+  return stream.passthrough ? "passed" : "encoded";
+}
+
+/**
+ * What the video decoder's line says: the exact configuration the decoder was
+ * built with, or why none is in use, as the catalogue's code for it. While the
+ * desktop is held — past what a video stream encodes, or All Displays over too
+ * many screens — there is no picture, whatever decoder was built before.
+ */
+export type VideoSaid =
+  /** The WebCodecs string, which is data. */
+  | { decode: string }
+  /** Waiting for the format (the place's own words), or why no video is in use. */
+  | { code: "AL-5800" | "AL-5801" | "AL-5802" | "AL-5803" };
+
+export function videoSaid(
+  stream: VideoStreamInfo | null,
+  held: HoldCause | null,
+): VideoSaid {
+  if (held === "size") {
+    return { code: "AL-5801" };
+  }
+  if (held === "screens") {
+    return { code: "AL-5802" };
+  }
+  if (!stream) {
+    return { code: "AL-5800" };
+  }
+  return stream.composed ? { code: "AL-5803" } : { decode: stream.decode };
 }

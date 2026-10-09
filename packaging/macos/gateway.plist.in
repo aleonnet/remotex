@@ -1,0 +1,33 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  The launch agent that keeps the gateway running, in the app's
+  Contents/Library/LaunchAgents, which the app registers with SMAppService. Each
+  @NAME@ is filled by packaging/build-mac-app.sh, and the lines marked for a copy
+  made for testing are kept only in one.
+
+  BundleProgram, and not a path: "This key allows apps to support a user
+  relocating the app bundle after installation." KeepAlive: a gateway that ends
+  is started again, and "The use of this key implicitly implies RunAtLoad".
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key><string>@IDENTIFIER@.gateway</string>
+    <key>BundleProgram</key><string>Contents/Helpers/alumia</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>alumia</string>
+        <string>serve</string>
+        <string>--app</string>
+    </array>
+    <key>AssociatedBundleIdentifiers</key>
+    <array>
+        <string>@IDENTIFIER@</string>
+    </array>
+    <key>KeepAlive</key><true/>
+    <key>EnvironmentVariables</key><!-- test copy -->
+    <dict><!-- test copy -->
+        <key>ALUMIA_APP_DIR</key><string>@TEST_DIR@</string><!-- test copy -->
+    </dict><!-- test copy -->
+</dict>
+</plist>

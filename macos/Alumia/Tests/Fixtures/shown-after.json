@@ -1,0 +1,49 @@
+{
+  "configured": true,
+  "listen": "127.0.0.1:52399",
+  "username": "ana",
+  "brand": "casa",
+  "meter": false,
+  "computers": [
+    {
+      "name": "Mac da Ana virtual",
+      "protocol": "vnc",
+      "subtype": "ard-high-performance",
+      "host": "127.0.0.1",
+      "port": 5900,
+      "username": "ana",
+      "virtual_displays": 2,
+      "hasPassword": true,
+      "hasVncPassword": false
+    },
+    {
+      "name": "Mac da Ana mirrored",
+      "protocol": "vnc",
+      "subtype": "ard-mirror",
+      "host": "127.0.0.1",
+      "port": 5900,
+      "username": "ana",
+      "hasPassword": true,
+      "hasVncPassword": false
+    },
+    {
+      "name": "escritorio",
+      "protocol": "rdp",
+      "host": "192.0.2.20",
+      "port": 3389,
+      "username": "ana",
+      "video_quality": 80,
+      "hasPassword": true,
+      "hasVncPassword": false
+    },
+    {
+      "name": "estacao",
+      "protocol": "vnc",
+      "subtype": "wlshare",
+      "host": "192.0.2.40",
+      "video_quality": 70,
+      "hasPassword": false,
+      "hasVncPassword": false
+    }
+  ]
+}

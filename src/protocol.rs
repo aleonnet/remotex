@@ -124,7 +124,7 @@ pub fn next_clipboard_time(previous: Option<u64>) -> u64 {
     previous.map_or(now, |last| now.max(last.saturating_add(1)))
 }
 
-/// A remote clipboard value held by an engine, plus when remotex last observed
+/// A remote clipboard value held by an engine, plus when alumia last observed
 /// that clipboard change. `None` is honest for content that predates the
 /// session: VNC and RDP do not expose an OS clipboard timestamp, so there is no
 /// reliable time to invent until a change arrives on their clipboard channel.
@@ -195,7 +195,7 @@ pub enum MouseButton {
 /// trackpad (pixels) or a notched wheel (lines), and `notch` for a wheel the
 /// browser reported in pixels and the client recognised all the same. Read by
 /// RDP, whose wheel rotation carries a magnitude, by VNC talking to an Apple
-/// subtype, the one RFB server whose scroll step has been measured, and by a
+/// subtype, which is sent every unit as the distance it stands for, and by a
 /// `wlshare` target, which is sent a distance in pixels as the distance and
 /// anything else as wheel notches; generic RFB spends any nonzero delta as a
 /// single notch.
@@ -240,7 +240,7 @@ pub enum ClientMsg {
     },
     /// Scroll wheel delta, in `unit`; a pixel is a point of the remote desktop.
     /// RDP turns the distance into proportional wheel rotation, an Apple VNC
-    /// target into as many wheel-button pulses as it is worth there, and a
+    /// target is sent it in Apple's scroll message, on both axes, and a
     /// `wlshare` target is sent pixels as they are and a wheel's units as
     /// notches; generic VNC gets one notch per event and leaves the scaling to
     /// the guest.
@@ -290,6 +290,27 @@ pub enum ClientMsg {
     /// wrong. A browser has no
     /// such command: a reload is right there, and it does more.
     Refresh,
+    /// The width a client that fits the picture to its width
+    /// ([`HostDisplay::fit`]) shows it at, in its own CSS pixels: its window's
+    /// width times its pinch zoom, said on connect, when the device is turned
+    /// and once a pinch has come to rest. A session the gateway reduces the
+    /// picture of ([`crate::vnc::DesktopState::reduces`]) encodes it no wider
+    /// than this, in the device's pixels, and nothing else reads it. Sent on the
+    /// session socket by the session's page, and on a tab's own display socket,
+    /// as the window a desk reports is.
+    Shown { w: u16 },
+    /// Whether the page is in sight: said as it is hidden and as it comes back
+    /// (`visibilitychange`). Hidden, the engine's encoder keeps the mirror and
+    /// codes nothing, and a passed stream is dropped; back, the stream starts
+    /// over at a keyframe. The page throws its own decoder away as it comes
+    /// back, since an iPhone's is no longer valid by then. Sent on the session
+    /// socket.
+    Sight { visible: bool },
+    /// What the page's laboratory saw, one line each, for the gateway's log and
+    /// nothing else: the decoder's own words, the opening's timeline, the
+    /// sound's lead. Sent only while the laboratory is on (`frontend/src/lab.ts`),
+    /// and held to a rate and a size by `ws` (`LabGate`).
+    Lab { lines: Vec<String> },
     /// The browser's paint worker finished this screen batch, including every
     /// asynchronous image or video decode ahead of its last draw.
     ///
@@ -317,7 +338,7 @@ pub enum ClientMsg {
     /// Performance Mac it has already shaped the window layout). Optional so
     /// a probe with no screen can still connect.
     ///
-    /// `choices` is what was chosen under the target before Start: how the
+    /// `choices` is what was chosen under the target before Open: how the
     /// desktop is sized, whether the remote's sound is taken, and whether the
     /// target's own stream is passed. They hold for the life of the
     /// session ([`crate::config::Choices`]). A connect without them, or without
@@ -343,12 +364,29 @@ pub enum ClientMsg {
     /// Share the display identified by the last [`ServerMsg::Displays`].
     ///
     /// Acted on by the VNC engine's Apple dialect and by wlshare, whose outputs
-    /// extension lists the compositor's outputs and takes one back. RDP delivers
-    /// one framebuffer spanning every remote screen and has no message for this,
-    /// and neither has any other generic VNC server. A client that never receives
-    /// [`ServerMsg::Displays`] never has an id to name here, which is how the
-    /// panel stays hidden on those engines.
+    /// extension lists the compositor's outputs and takes one back, and by the RDP
+    /// engine on a target that asked for virtual displays, which shows one column
+    /// of the framebuffer the host spans over them and switches columns here, asking
+    /// the host for nothing, and by the VNC engine on a High Performance Mac asked
+    /// for two, which shows one display's media stream and switches streams here.
+    /// Every other session delivers one framebuffer and no list. A client that never receives [`ServerMsg::Displays`] never has an id to
+    /// name here, which is how the panel stays hidden on those engines.
     SelectDisplay { id: u32 },
+    /// Not a wire message. The session layer's word to an engine that a display
+    /// socket other than the first ([`crate::session::SessionManager::attach_display`])
+    /// has attached for `display`, with where its picture goes, or has gone (`None`).
+    /// The first display's socket needs no such word: its frames leave on the
+    /// engine's own channel, and its attach is a [`Self::Refresh`].
+    #[serde(skip)]
+    DisplayShown {
+        display: u32,
+        feed: Option<crate::session::DisplayFeed>,
+    },
+    /// Not a wire message. `input` arrived on the socket showing `display`, a
+    /// display other than the first, so a position in it is in that display's
+    /// pixels. Input from the first display's socket arrives bare.
+    #[serde(skip)]
+    OnDisplay { display: u32, input: Box<ClientMsg> },
     /// One touch contact's transition, in framebuffer coordinates: the
     /// touchscreen mode, where fingers are forwarded as the contacts they are
     /// instead of being interpreted into a mouse. `id` names the finger from its
@@ -832,7 +870,7 @@ impl CursorShape {
         rgba: &[u8],
     ) -> anyhow::Result<Self> {
         let expected = usize::from(w) * usize::from(h) * 4;
-        anyhow::ensure!(
+        crate::ensure_known!("AL-7719"; 
             rgba.len() == expected,
             "cursor payload is {} bytes, expected {expected} for {w}x{h} RGBA",
             rgba.len()
@@ -883,8 +921,9 @@ pub struct DisplayInfo {
     /// Opaque to every client — whatever the engine wants back in
     /// [`ClientMsg::SelectDisplay`]. On the Apple dialect it is a
     /// `CGDirectDisplayID`, except for `0xffffffff`, which the engine uses for its
-    /// own "All Displays" entry (and which is Apple's own sentinel for that);
-    /// against wlshare it is the output's `wl_output` global.
+    /// own entry for every display at once (and which is Apple's own sentinel for that);
+    /// against wlshare it is the output's `wl_output` global; on RDP it is the
+    /// display's place in the row the host laid out, from zero.
     pub id: u32,
     /// Short enough for a menu item: `"Display 2"`, or `"Virtual display"`.
     pub label: String,
@@ -896,6 +935,14 @@ pub struct DisplayInfo {
     /// screens, so a client can say which is which: a Mac's High Performance
     /// virtual display, or a compositor's headless output.
     pub virtual_display: bool,
+    /// Where an engine shows this display in a tab of its own beside the first
+    /// display rather than instead of it: the number a display socket names it by
+    /// (`/ws/display?display=N`, and the page at `/display/N`). `None` for a
+    /// display the picker switches the one canvas to. Set for every virtual
+    /// display but the first while *All Displays* is chosen: by the RDP engine for
+    /// a column of its framebuffer, and by the VNC engine for a High Performance
+    /// Mac's second display.
+    pub tab: Option<u32>,
 }
 
 /// Why a desktop has no picture: see [`ServerMsg::Oversize`].
@@ -904,7 +951,7 @@ pub struct DisplayInfo {
 pub enum HoldCause {
     /// Past what a video stream encodes ([`crate::video::within_ceiling`]).
     Size,
-    /// A Mac's All Displays over more than
+    /// A Mac's Combined Display over more than
     /// [`crate::vnc_apple::MAX_COMBINED_SCREENS`] screens, whatever its size.
     Screens,
 }
@@ -967,14 +1014,20 @@ pub enum ServerMsg {
     /// The remote pointer shape changed, and with it the fact that **the
     /// browser** owns pointer rendering for this session — a server that
     /// composites the cursor into the framebuffer (a VNC server that ignores
-    /// the Cursor pseudo-encoding) never sends this, and the browser keeps its
-    /// own pointer hidden. `None` means the remote hid the pointer, or named a
-    /// shape this end will not send; the browser draws its own arrow, because a
-    /// pointer you cannot see is worse than a generic one.
+    /// the Cursor pseudo-encoding) never sends this, and the browser shows a
+    /// black X for its own pointer. `None` means the remote hid the pointer, or
+    /// named a shape this end will not send; the browser draws its own arrow,
+    /// because a pointer you cannot see is worse than a generic one.
     Cursor(Option<CursorShape>),
     /// A fatal session error the client should surface. The session then
     /// returns to the picker, so the browser shows this against the picker.
-    Error { message: String },
+    ///
+    /// `message` is the error's own sentence, in English, as the log has it.
+    /// `cause` is what a browser says in the person's language instead: the
+    /// catalogue's code for why, and what fills its text ([`crate::cause`]).
+    /// `None` is an error nobody named a cause for, which a browser says with the
+    /// general words of where it shows it, keeping the sentence for whoever asks.
+    Error { message: String, cause: Option<crate::cause::Cause> },
     /// No target is selected: show the post-login target picker. Sent on attach
     /// to an idle slot, on disconnect ("End session"), and when an engine
     /// ends (the remote hung up, or a connect failure after its `Error`).
@@ -1060,6 +1113,19 @@ pub enum ServerMsg {
     /// discovered from the connection rather than an OS name someone has to keep
     /// correct in the config file.
     RemoteOs { macos: bool },
+    /// The part of an RDP host's passed graphics pipeline this display shows, in
+    /// the pixels of the picture the page composes from it: the column of the
+    /// host's desktop the display is, `w` by `h` from `x`, `y`. Sent only in a
+    /// session started with the pipeline passed, on a display socket, next to
+    /// every [`ServerMsg::Resize`] of that display; the whole picture where the
+    /// host laid out one display.
+    ///
+    /// The page holding the session composes the whole span the host draws — one
+    /// surface a display, each mapped to its place on one output — and presents this
+    /// part of it. The second display's tab composes nothing: its picture is this
+    /// part of the session page's, handed across the browser by that page, so a
+    /// pipeline is composed once however many tabs show it (`displayRelay.ts`).
+    GraphicsView { x: u16, y: u16, w: u16, h: u16 },
     /// The host opened the touch channel (MS-RDPEI), so [`ClientMsg::Touch`]
     /// reaches it as real touch contacts from here on. Sent by the RDP engine
     /// when a Windows host creates the channel — shortly after connect — and
@@ -1076,14 +1142,31 @@ pub enum ServerMsg {
     /// Sent only by the Apple High Performance engine, and again on reattach
     /// while a resize is in progress.
     Resizing { active: bool },
+    /// A High Performance Mac's media stream has sent no picture of the display
+    /// shown: `active` is true from connect, from every display change and from a
+    /// stream the Mac restarts, and false behind the stream's first picture of
+    /// the display. Nothing else is the picture of such a session, so the browser
+    /// says the screen is not available meanwhile and sends no input, as under
+    /// [`ServerMsg::Resizing`]: nobody can see what it would do. Sent only by the
+    /// Apple High Performance engine, and again on reattach while it holds.
+    ScreenUnavailable { active: bool },
+    /// Whether the session's page is attached, told to a display shown in a tab of
+    /// its own. The tab is the session's: without that page its picture has no
+    /// painter and what it sent would reach the remote unseen, so it says so over
+    /// its desktop and sends nothing until the page is back.
+    SessionPage { attached: bool },
+    /// Whether the host laid out fewer displays than the target asks for: a Windows
+    /// host that takes one monitor where two were asked for opens one desktop and
+    /// lists nothing, and the page would show one screen with no word of the other.
+    SecondDisplay { missing: bool },
     /// Why the desktop the `Resize` before this describes has no picture, or `None`
-    /// when it has one: past what a video stream encodes, or a Mac's All Displays
+    /// when it has one: past what a video stream encodes, or a Mac's Combined Display
     /// over more screens than one view shows. No picture follows until a `Resize`
     /// without a cause. Sent after every `Resize` of a source that holds the
     /// session open for that — see [`crate::encode::Oversize`] — and never by one
     /// that refuses it. The browser says so over the desktop, and offers the
     /// remote's displays where it lists them, since choosing one is how a Mac on
-    /// All Displays gets back.
+    /// Combined Display gets back.
     Oversize { cause: Option<HoldCause> },
     /// The remote's clipboard text, either pushed when the engine observes a
     /// change or returned from its cache for [`ClientMsg::ClipboardRequest`].
@@ -1125,7 +1208,7 @@ pub enum ServerMsg {
     /// `passthrough` says the packets are the remote's own, passed as they came
     /// — the Mac's AAC-ELD, wlshare's Opus or FLAC — rather than coded here, as
     /// an RDP host's Opus and FLAC are. The audio counterpart of [`Self::VideoFormat`]'s,
-    /// and like it for the session card alone.
+    /// and like it for the information sheet alone.
     AudioFormat {
         codec: &'static str,
         sample_rate: u32,
@@ -1229,9 +1312,12 @@ enum ControlMsg<'a> {
         #[serde(rename = "pointSized")]
         point_sized: bool,
     },
-    Error { message: &'a str },
+    /// `cause` is null, never absent, for an error with none: a key that comes and
+    /// goes is one a client has to test for two ways.
+    Error { message: &'a str, cause: Option<&'a crate::cause::Cause> },
     Picker,
     GraphicsStart,
+    GraphicsView { x: u16, y: u16, w: u16, h: u16 },
     Connected {
         name: &'a str,
         protocol: &'a str,
@@ -1246,6 +1332,9 @@ enum ControlMsg<'a> {
     RemoteOs { macos: bool },
     TouchReady,
     Resizing { active: bool },
+    ScreenUnavailable { active: bool },
+    SessionPage { attached: bool },
+    SecondDisplay { missing: bool },
     Oversize { cause: Option<HoldCause> },
     Clipboard {
         text: &'a str,
@@ -1305,9 +1394,33 @@ struct WireDisplay<'a> {
     main: bool,
     #[serde(rename = "virtual")]
     virtual_display: bool,
+    tab: Option<u32>,
 }
 
 impl ServerMsg {
+    /// Whether this message is a display's — its picture, size, pointer and what
+    /// goes with them — and so travels on a display socket, rather than the
+    /// session's, which travels on the session socket ([`crate::ws`]). The
+    /// session layer routes an engine's output by this.
+    pub fn is_display(&self) -> bool {
+        matches!(
+            self,
+            ServerMsg::Video(_)
+                | ServerMsg::Graphics(_)
+                | ServerMsg::GraphicsStart
+                | ServerMsg::GraphicsView { .. }
+                | ServerMsg::VideoFormat { .. }
+                | ServerMsg::Resize { .. }
+                | ServerMsg::Cursor(_)
+                | ServerMsg::Mosaic { .. }
+                | ServerMsg::Oversize { .. }
+                | ServerMsg::Resizing { .. }
+                | ServerMsg::ScreenUnavailable { .. }
+                | ServerMsg::RemoteOs { .. }
+                | ServerMsg::TouchReady
+        )
+    }
+
     /// The JSON text frame for a control message, or `None` for a binary one.
     ///
     /// `None` rather than a panic or a placeholder because an access unit has no
@@ -1320,6 +1433,9 @@ impl ServerMsg {
                 return None;
             }
             ServerMsg::GraphicsStart => control(&ControlMsg::GraphicsStart),
+            ServerMsg::GraphicsView { x, y, w, h } => {
+                control(&ControlMsg::GraphicsView { x: *x, y: *y, w: *w, h: *h })
+            }
             ServerMsg::Resize { w, h, scale } => control(&ControlMsg::Resize {
                 w: *w,
                 h: *h,
@@ -1343,7 +1459,9 @@ impl ServerMsg {
                     point_sized: false,
                 },
             }),
-            ServerMsg::Error { message } => control(&ControlMsg::Error { message }),
+            ServerMsg::Error { message, cause } => {
+                control(&ControlMsg::Error { message, cause: cause.as_ref() })
+            }
             ServerMsg::Picker => control(&ControlMsg::Picker),
             ServerMsg::Connected {
                 name,
@@ -1387,6 +1505,9 @@ impl ServerMsg {
             ServerMsg::RemoteOs { macos } => control(&ControlMsg::RemoteOs { macos: *macos }),
             ServerMsg::TouchReady => control(&ControlMsg::TouchReady),
             ServerMsg::Resizing { active } => control(&ControlMsg::Resizing { active: *active }),
+            ServerMsg::ScreenUnavailable { active } => control(&ControlMsg::ScreenUnavailable { active: *active }),
+            ServerMsg::SessionPage { attached } => control(&ControlMsg::SessionPage { attached: *attached }),
+            ServerMsg::SecondDisplay { missing } => control(&ControlMsg::SecondDisplay { missing: *missing }),
             ServerMsg::Oversize { cause } => control(&ControlMsg::Oversize { cause: *cause }),
             ServerMsg::AudioFormat {
                 codec,
@@ -1416,6 +1537,7 @@ impl ServerMsg {
                         detail: &display.detail,
                         main: display.main,
                         virtual_display: display.virtual_display,
+                        tab: display.tab,
                     })
                     .collect(),
             }),
@@ -1515,6 +1637,21 @@ mod tests {
             serde_json::from_str::<ClientMsg>(r#"{"type":"refresh"}"#).unwrap(),
             ClientMsg::Refresh
         ));
+        // What a client that fits the picture to its width says of the width it
+        // shows it at, whether its page is in sight, and what its laboratory saw.
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"shown","w":1170}"#).unwrap(),
+            ClientMsg::Shown { w: 1170 }
+        ));
+        assert!(serde_json::from_str::<ClientMsg>(r#"{"type":"shown","w":70000}"#).is_err());
+        assert!(matches!(
+            serde_json::from_str::<ClientMsg>(r#"{"type":"sight","visible":false}"#).unwrap(),
+            ClientMsg::Sight { visible: false }
+        ));
+        match serde_json::from_str::<ClientMsg>(r#"{"type":"lab","lines":["a","b"]}"#).unwrap() {
+            ClientMsg::Lab { lines } => assert_eq!(lines, ["a", "b"]),
+            other => panic!("unexpected: {other:?}"),
+        }
         // The client's screen: the tag rides beside the struct's own fields.
         assert!(matches!(
             serde_json::from_str::<ClientMsg>(
@@ -1556,7 +1693,8 @@ mod tests {
                 crate::config::Choices {
                     size: crate::config::Sizing::Window,
                     audio: crate::config::Sound::Off,
-                    passthrough: true
+                    passthrough: true,
+                    placement: crate::config::Placement::Right,
                 }
             ),
             other => panic!("unexpected: {other:?}"),
@@ -1760,10 +1898,29 @@ mod tests {
             }
             None => panic!("resize must be a text frame"),
         }
-        match (ServerMsg::Error { message: "boom".to_owned() }).text_frame() {
-            Some(json) => assert_eq!(json, r#"{"type":"error","message":"boom"}"#),
+        // An error nobody named a cause for: the sentence, and a null where the cause
+        // would be.
+        match (ServerMsg::Error { message: "boom".to_owned(), cause: None }).text_frame() {
+            Some(json) => assert_eq!(json, r#"{"type":"error","message":"boom","cause":null}"#),
             None => panic!("error must be a text frame"),
         }
+        // And one whose cause the catalogue knows: its code and what fills its text,
+        // beside the same sentence.
+        let cause = crate::cause::Cause::new("AL-7702").with("seconds", 10);
+        match (ServerMsg::Error { message: "no picture".to_owned(), cause: Some(cause) }).text_frame() {
+            Some(json) => assert_eq!(
+                json,
+                r#"{"type":"error","message":"no picture","cause":{"code":"AL-7702","fill":{"seconds":"10"}}}"#
+            ),
+            None => panic!("error must be a text frame"),
+        }
+        // The second column of a passed pipeline's picture: a display's message.
+        let view = ServerMsg::GraphicsView { x: 1440, y: 0, w: 1440, h: 900 };
+        assert!(view.is_display());
+        assert_eq!(
+            view.text_frame().as_deref(),
+            Some(r#"{"type":"graphicsView","x":1440,"y":0,"w":1440,"h":900}"#)
+        );
         // A Mac, which is where the subtype earns its place on the wire: three
         // targets say `"protocol":"vnc"` and only this field tells them apart.
         match (ServerMsg::Connected {
@@ -1844,6 +2001,7 @@ mod tests {
                     detail: "1920×1080 at 1x".to_owned(),
                     main: true,
                     virtual_display: false,
+                    tab: None,
                 },
                 DisplayInfo {
                     id: 9,
@@ -1851,6 +2009,7 @@ mod tests {
                     detail: "3200×2000 at 2x".to_owned(),
                     main: false,
                     virtual_display: true,
+                    tab: None,
                 },
             ],
         })
@@ -1859,7 +2018,7 @@ mod tests {
             // `virtual` on the wire: reserved in Rust, ordinary in JavaScript.
             Some(json) => assert_eq!(
                 json,
-                r#"{"type":"displays","active":7,"displays":[{"id":7,"label":"Display 1","detail":"1920×1080 at 1x","main":true,"virtual":false},{"id":9,"label":"Virtual display","detail":"3200×2000 at 2x","main":false,"virtual":true}]}"#
+                r#"{"type":"displays","active":7,"displays":[{"id":7,"label":"Display 1","detail":"1920×1080 at 1x","main":true,"virtual":false,"tab":null},{"id":9,"label":"Virtual display","detail":"3200×2000 at 2x","main":false,"virtual":true,"tab":null}]}"#
             ),
             None => panic!("displays must be a text frame"),
         }
@@ -1896,6 +2055,13 @@ mod tests {
                     format!(r#"{{"type":"resizing","active":{active}}}"#)
                 ),
                 None => panic!("resizing must be a text frame"),
+            }
+            match (ServerMsg::ScreenUnavailable { active }).text_frame() {
+                Some(json) => assert_eq!(
+                    json,
+                    format!(r#"{{"type":"screenUnavailable","active":{active}}}"#)
+                ),
+                None => panic!("screenUnavailable must be a text frame"),
             }
         }
         for (cause, wire) in [(None, "null"), (Some(HoldCause::Size), r#""size""#), (Some(HoldCause::Screens), r#""screens""#)] {

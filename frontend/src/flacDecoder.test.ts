@@ -13,7 +13,7 @@ import { test } from "node:test";
 import { type FlacStream, loadFlac } from "./flacDecoder.ts";
 
 const module = readFileSync(
-  new URL("../wasm/flac/pkg/remotex_flac_bg.wasm", import.meta.url),
+  new URL("../wasm/flac/pkg/alumia_flac_bg.wasm", import.meta.url),
 );
 
 const bytes = (hex: string) =>

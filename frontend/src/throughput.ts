@@ -9,6 +9,7 @@
 // per second, the way a network meter does, and the averages are derived here: a step's
 // over the seconds it spans, and the range's over the seconds something moved in.
 
+import type { Fault } from "./fault.ts";
 import { gatewayFetch } from "./gateway.ts";
 
 export type ThroughputSocket = "session" | "audio" | "camera" | "mic";
@@ -19,13 +20,6 @@ export const THROUGHPUT_SOCKETS: readonly ThroughputSocket[] = [
   "camera",
   "mic",
 ];
-
-export const THROUGHPUT_SOCKET_LABEL: Record<ThroughputSocket, string> = {
-  session: "Session",
-  audio: "Audio",
-  camera: "Camera",
-  mic: "Microphone",
-};
 
 /**
  * What one socket moved for one target in one timeframe, and its busiest second in
@@ -164,27 +158,21 @@ export function throughputRangeKey(range: ThroughputRange): string {
     : `${range.amount}:${range.unit}`;
 }
 
-/** A Unix second as a local time, with the day before it where the range needs one. */
-export function timeLabel(unixSecs: number, withDay: boolean): string {
+/**
+ * A Unix second as a local time in `language`, with the day before it where the
+ * range needs one.
+ */
+export function timeLabel(
+  unixSecs: number,
+  withDay: boolean,
+  language: string,
+): string {
   return new Date(unixSecs * 1000).toLocaleString(
-    [],
+    language,
     withDay
       ? { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }
-      : { hour: "numeric", minute: "2-digit" },
+      : { hour: "numeric", minute: "2-digit", second: "2-digit" },
   );
-}
-
-export function throughputRangeLabel(range: ThroughputRange): string {
-  if (range === "all") {
-    return "Everything kept";
-  }
-  if (isThroughputWindow(range)) {
-    const day = (at: number) => new Date(at * 1000).toDateString();
-    const crosses = day(range.from) !== day(range.to);
-    return `${timeLabel(range.from, true)} – ${timeLabel(range.to, crosses)}`;
-  }
-  const unit = range.amount === 1 ? range.unit.slice(0, -1) : range.unit;
-  return `Last ${range.amount} ${unit}`;
 }
 
 /**
@@ -273,7 +261,8 @@ export function throughputQuery(bounds: ThroughputBounds): string {
 export type ThroughputResult =
   | { kind: "ok"; report: ThroughputReport }
   | { kind: "unauthorized" }
-  | { kind: "error"; message: string };
+  /** Why the read failed, by its code in the catalogue (docs/design/errors.json). */
+  | { kind: "error"; fault: Fault };
 
 export async function fetchThroughput(
   bounds: ThroughputBounds,
@@ -284,20 +273,17 @@ export async function fetchThroughput(
       return { kind: "unauthorized" };
     }
     if (res.status === 404) {
-      return {
-        kind: "error",
-        message: "This gateway is not recording throughput",
-      };
+      return { kind: "error", fault: { code: "AL-6601" } };
     }
     if (!res.ok) {
       return {
         kind: "error",
-        message: `Could not load throughput (HTTP ${res.status})`,
+        fault: { code: "AL-6602", fill: { status: res.status } },
       };
     }
     return { kind: "ok", report: (await res.json()) as ThroughputReport };
   } catch {
-    return { kind: "error", message: "Could not load throughput" };
+    return { kind: "error", fault: { code: "AL-6603" } };
   }
 }
 
@@ -321,23 +307,26 @@ export async function fetchThroughputLive(): Promise<ThroughputLiveResult> {
   }
 }
 
-const BIT_UNITS = ["bps", "kbps", "Mbps", "Gbps", "Tbps"];
+const BIT_UNITS = ["b/s", "kb/s", "Mb/s", "Gb/s", "Tb/s"];
 
 /**
  * A rate given in bytes per second, shown in bits per second in decimal units
- * (1 kbps = 1000 bps) the way a network meter shows it, one decimal below 10 of a unit.
+ * (1 kb/s = 1000 b/s) the way a network meter shows it, one decimal below 10 of a
+ * unit, with the number written as `language` writes one.
  */
-export function formatRate(bytesPerSecond: number): string {
+export function formatRate(bytesPerSecond: number, language: string): string {
   let value = bytesPerSecond * 8;
   let unit = 0;
   while (value >= 1000 && unit < BIT_UNITS.length - 1) {
     value /= 1000;
     unit += 1;
   }
-  if (unit === 0) {
-    return `${Math.round(value)} ${BIT_UNITS[unit]}`;
-  }
-  return `${value < 10 ? value.toFixed(1) : Math.round(value)} ${BIT_UNITS[unit]}`;
+  const digits = unit > 0 && value < 10 ? 1 : 0;
+  const number = value.toLocaleString(language, {
+    minimumFractionDigits: digits,
+    maximumFractionDigits: digits,
+  });
+  return `${number} ${BIT_UNITS[unit]}`;
 }
 
 /** The rate right now summed over `rates`, in bytes per second. */
@@ -374,18 +363,23 @@ export function throughputRangeIsLive(range: ThroughputRange): boolean {
   return within !== null && within <= LIVE_HISTORY_SECS;
 }
 
-/** A length of time in its largest unit, to one decimal: "45 s", "5 min", "1.5 h". */
-export function spanLabel(secs: number): string {
+/**
+ * A length of time in its largest unit, to one decimal, the number written as
+ * `language` writes one: "45 s", "5 min", "1.5 h".
+ */
+export function spanLabel(secs: number, language: string): string {
+  const said = (value: number, name: string) =>
+    `${value.toLocaleString(language, { maximumFractionDigits: 1 })} ${name}`;
   for (const [unit, name] of [
     [86_400, "d"],
     [3600, "h"],
     [60, "min"],
   ] as const) {
     if (secs >= unit) {
-      return `${Math.round((secs / unit) * 10) / 10} ${name}`;
+      return said(secs / unit, name);
     }
   }
-  return `${Math.round(secs)} s`;
+  return said(Math.round(secs), "s");
 }
 
 /**
@@ -802,25 +796,26 @@ export function clockNow(
     : anchor.at + Math.max(0, Math.round((wall - anchor.wall) / 1000));
 }
 
-/** Every target some kept sample or some row saw moving, by label. */
+/**
+ * Every target some kept sample or some row saw moving: the list of computers
+ * itself first, where it was seen (`null`, a browser with no computer open),
+ * and then the computers by name. The order does not depend on what the page
+ * calls the list in the language it speaks.
+ */
 export function throughputTargets(
   history: readonly ThroughputLive[],
   rows: readonly ThroughputRecord[],
 ): (string | null)[] {
-  const targets = new Map<string, string | null>();
+  const seen = new Set<string | null>();
   for (const sample of history) {
     for (const rate of sample.rates) {
-      targets.set(targetLabel(rate.target), rate.target);
+      seen.add(rate.target);
     }
   }
   for (const row of rows) {
-    targets.set(targetLabel(row.target), row.target);
+    seen.add(row.target);
   }
-  return [...targets]
-    .sort(([a], [b]) => a.localeCompare(b))
-    .map(([, target]) => target);
-}
-
-export function targetLabel(target: string | null): string {
-  return target ?? "No target (picker)";
+  const names = [...seen].filter((target) => target !== null);
+  names.sort((a, b) => a.localeCompare(b));
+  return seen.has(null) ? [null, ...names] : names;
 }

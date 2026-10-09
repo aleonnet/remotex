@@ -30,10 +30,10 @@
 //!
 //! **A virtual display in High Performance mode**:
 //! [`set_display_configuration`] asks for one virtual display at the configured
-//! mode. When the target allows resize, a viewport report sends the same message
-//! with a replacement mode. The dynamic-resolution flag is set on every message,
-//! including setup, so a new connection always restores that Mac checkbox to on.
-//! The one/two-display picker remains absent.
+//! mode, or for two with a target's `virtual_displays = 2`. When the target allows
+//! resize, a viewport report sends the same message with replacement modes. The
+//! dynamic-resolution flag is set on every message, including setup, so a new
+//! connection always restores that Mac checkbox to on.
 //!
 //! ## What is otherwise absent
 //!
@@ -94,9 +94,10 @@ pub const ENCODING_CURSOR_POS: i32 = 0x44c;
 /// also listed, the layout is what it sends.
 pub const ENCODING_DISPLAY_INFO: i32 = 0x44d;
 
-/// The most screens All Displays is shown over. Past two, the view is held with a
-/// notice offering each screen on its own, whatever its size: more than two is an
-/// edge case on Standard, and composing them is too much for a browser to draw.
+/// The most screens Combined Display is shown over, which is two. Past that the
+/// view is held with a notice offering each screen on its own, whatever its size:
+/// more than two is an edge case on Standard, and composing them is too much for a
+/// browser to draw.
 pub const MAX_COMBINED_SCREENS: usize = 2;
 
 /// What this client advertises to a Mac.
@@ -116,9 +117,9 @@ pub const MAX_COMBINED_SCREENS: usize = 2;
 /// here. That is why Apple's own private framebuffer codecs are absent — the
 /// reference leaves their payload formats unresolved, so advertising them would
 /// ask for rectangles this client could only guess at. Media-stream encoding 1010 is
-/// absent from the opening list: High Performance adds it in a second
+/// absent from the opening list: High Performance puts it first in a second
 /// `SetEncodings` once the display it offers the stream for exists
-/// ([`crate::vnc_apple_media::encodings_with_media_stream`]).
+/// ([`crate::vnc_apple_media::encodings_preferring_media_stream`]).
 pub const ENCODINGS: &[i32] = &[
     ENCODING_RAW,
     ENCODING_CURSOR_POS,
@@ -318,6 +319,48 @@ pub fn auto_framebuffer_update(interval_us: u32, (w, h): (u16, u16)) -> Vec<u8> 
     msg
 }
 
+/// A scroll, as the scroll-wheel event of Apple's second event message (`0x17`,
+/// kind 11): a distance on both axes, which the wheel bits of the pointer mask
+/// cannot say and have no horizontal axis for at all.
+///
+/// `dx` and `dy` are points of the remote desktop, positive right and down as
+/// the DOM counts them; the Mac counts a scroll up and to the left as positive,
+/// so both go out negated. The agent copies each field into the `CGEvent` it
+/// posts: the distance as the point delta, a tenth of it as the line delta an
+/// older application reads, and the continuous flag that makes the point delta
+/// the one that counts. No phase is sent, which is a scroll with no gesture
+/// around it. See docs/apple-vnc-889.md, "A Mac scrolls by a distance".
+pub fn scroll_wheel((dx, dy): (i32, i32), (x, y): (u16, u16)) -> Vec<u8> {
+    /// The points macOS counts as a line.
+    const POINTS_PER_LINE: i32 = 10;
+    /// `kCGScrollWheelEventIsContinuous`, as the message's flag for it.
+    const CONTINUOUS: u32 = 0x02;
+    let axes = [-dx, -dy, 0];
+    let mut msg = Vec::with_capacity(58);
+    msg.push(EVENT_2);
+    msg.push(0);
+    msg.extend_from_slice(&54u16.to_be_bytes()); // length of what follows
+    msg.extend_from_slice(&1u16.to_be_bytes()); // version
+    msg.extend_from_slice(&11u16.to_be_bytes()); // kind: scroll wheel
+    // Each delta is horizontal, vertical, then the third axis no device has.
+    for points in axes {
+        msg.extend_from_slice(&((points / POINTS_PER_LINE) as i16).to_be_bytes());
+    }
+    for points in axes {
+        // 16.16 fixed point.
+        msg.extend_from_slice(&((i64::from(points) * 65536 / i64::from(POINTS_PER_LINE)) as i32).to_be_bytes());
+    }
+    for points in axes {
+        msg.extend_from_slice(&points.to_be_bytes());
+    }
+    // Scroll phase, momentum phase, scroll count.
+    msg.extend_from_slice(&[0; 12]);
+    msg.extend_from_slice(&CONTINUOUS.to_be_bytes());
+    msg.extend_from_slice(&x.to_be_bytes());
+    msg.extend_from_slice(&y.to_be_bytes());
+    msg
+}
+
 /// `SetDisplayMessage`: share this one display, or all of them.
 ///
 /// Measured to work both ways on macOS 26. `combine_all` puts every screen in one
@@ -388,59 +431,74 @@ pub fn virtual_display_mode((w, h): (u16, u16), density: f32) -> VirtualMode {
 /// second ([`crate::encode`]), so a faster display only doubles the HEVC decoding.
 pub const DISPLAY_HZ: u8 = 30;
 
-/// `SetDisplayConfiguration`: request one virtual display whose only advertised
-/// mode is `mode`, refreshed [`DISPLAY_HZ`] times a second.
+/// `SetDisplayConfiguration`: request one virtual display per mode in `modes`,
+/// each advertising that one mode, refreshed [`DISPLAY_HZ`] times a second. The
+/// Mac takes one or two, and creates the second to the right of the first.
 ///
 /// This is sent while establishing a virtual-display session and again for
-/// each accepted viewport change. `display_flags` bit 0 enables dynamic resolution;
+/// each accepted viewport change, every display's descriptor each time.
+/// `display_flags` bit 0 enables dynamic resolution;
 /// it is deliberately set even for the initial configured size, so reconnecting
 /// restores the Mac's Dynamic resolution checkbox to on if it was changed there.
-/// The native one/two-virtual-display control is not implemented.
 ///
 /// The descriptor layout follows the reverse-engineered wire specification: the
 /// mode's leading dimensions are the render (pixel) resolution, the scaled pair
 /// the logical resolution, and the physical millimetres follow the logical size —
-/// a denser screen has more pixels, not more glass.
-pub fn set_display_configuration(mode: VirtualMode) -> Vec<u8> {
-    let VirtualMode { pixels, scaled } = mode;
+/// a denser screen has more pixels, not more glass. Each descriptor leads with
+/// its own length, which is how the Mac steps from one to the next.
+pub fn set_display_configuration(modes: &[VirtualMode]) -> Vec<u8> {
     let descriptor = DESCRIPTOR_HEAD + MODE_ENTRY;
-    let mut body = Vec::with_capacity(CONFIG_HEAD - 4 + descriptor);
+    let mut body = Vec::with_capacity(CONFIG_HEAD - 4 + descriptor * modes.len());
     body.extend_from_slice(&1u16.to_be_bytes()); // version
-    body.extend_from_slice(&1u16.to_be_bytes()); // display_count
+    body.extend_from_slice(
+        &u16::try_from(modes.len()).expect("one or two displays").to_be_bytes(),
+    ); // display_count
     body.extend_from_slice(&0u32.to_be_bytes()); // flags
 
-    let mut display = Vec::with_capacity(descriptor);
-    display.extend_from_slice(
-        &u16::try_from(descriptor)
-            .expect("descriptor within u16")
-            .to_be_bytes(),
-    );
-    display.resize(0x7a, 0); // opaque 120-byte region
-    display.extend_from_slice(&1u32.to_be_bytes()); // display_flags: dynamic resolution
-    display.extend_from_slice(&4u32.to_be_bytes()); // display_type: virtual
-    let mm = |px: u16| (f32::from(px) / NOMINAL_DPI * 25.4).to_be_bytes();
-    display.extend_from_slice(&mm(scaled.0));
-    display.extend_from_slice(&mm(scaled.1));
-    display.extend_from_slice(&DYNAMIC_MAX_WIDTH.to_be_bytes());
-    display.extend_from_slice(&DYNAMIC_MAX_HEIGHT.to_be_bytes());
-    display.extend_from_slice(&0u16.to_be_bytes()); // current_mode_index
-    display.extend_from_slice(&0u16.to_be_bytes()); // preferred_mode_index
-    // Native Screen Sharing's full dynamic descriptor sends 7 here. The agent hands
-    // it unchanged to macOS as the virtual display's rotations setting; matching
-    // the captured dynamic shape matters more than guessing a tidier upright-only
-    // value.
-    display.extend_from_slice(&7u32.to_be_bytes());
-    display.extend_from_slice(&1u16.to_be_bytes()); // mode_count
-    debug_assert_eq!(display.len(), DESCRIPTOR_HEAD);
-    for value in [pixels.0, pixels.1, scaled.0, scaled.1] {
-        display.extend_from_slice(&u32::from(value).to_be_bytes());
+    for (index, VirtualMode { pixels, scaled }) in modes.iter().copied().enumerate() {
+        let mut display = Vec::with_capacity(descriptor);
+        display.extend_from_slice(
+            &u16::try_from(descriptor)
+                .expect("descriptor within u16")
+                .to_be_bytes(),
+        );
+        display.extend_from_slice(display_name(index).as_bytes());
+        display.resize(0x7a, 0); // the name's 120 bytes, zero-filled
+        display.extend_from_slice(&1u32.to_be_bytes()); // display_flags: dynamic resolution
+        display.extend_from_slice(&4u32.to_be_bytes()); // display_type: virtual
+        let mm = |px: u16| (f32::from(px) / NOMINAL_DPI * 25.4).to_be_bytes();
+        display.extend_from_slice(&mm(scaled.0));
+        display.extend_from_slice(&mm(scaled.1));
+        display.extend_from_slice(&DYNAMIC_MAX_WIDTH.to_be_bytes());
+        display.extend_from_slice(&DYNAMIC_MAX_HEIGHT.to_be_bytes());
+        display.extend_from_slice(&0u16.to_be_bytes()); // current_mode_index
+        display.extend_from_slice(&0u16.to_be_bytes()); // preferred_mode_index
+        // Native Screen Sharing's full dynamic descriptor sends 7 here. The agent
+        // hands it unchanged to macOS as the virtual display's rotations setting;
+        // matching the captured dynamic shape matters more than guessing a tidier
+        // upright-only value.
+        display.extend_from_slice(&7u32.to_be_bytes());
+        display.extend_from_slice(&1u16.to_be_bytes()); // mode_count
+        debug_assert_eq!(display.len(), DESCRIPTOR_HEAD);
+        for value in [pixels.0, pixels.1, scaled.0, scaled.1] {
+            display.extend_from_slice(&u32::from(value).to_be_bytes());
+        }
+        display.extend_from_slice(&f64::from(DISPLAY_HZ).to_be_bytes()); // refresh_rate_hz
+        display.extend_from_slice(&0u32.to_be_bytes()); // mode flags
+        debug_assert_eq!(display.len(), descriptor);
+        body.extend_from_slice(&display);
     }
-    display.extend_from_slice(&f64::from(DISPLAY_HZ).to_be_bytes()); // refresh_rate_hz
-    display.extend_from_slice(&0u32.to_be_bytes()); // mode flags
-    debug_assert_eq!(display.len(), descriptor);
-
-    body.extend_from_slice(&display);
     message(SET_DISPLAY_CONFIGURATION, &body)
+}
+
+/// What the Mac calls virtual display `index`, in its Displays settings and
+/// wherever a display is named: Apple's viewer's own names. A descriptor without
+/// one makes a display with no name, which the Mac lists as " (1)" and " (2)".
+fn display_name(index: usize) -> String {
+    match index {
+        0 => "Screen Sharing Virtual Display".to_owned(),
+        _ => format!("Screen Sharing Virtual Display #{}", index + 1),
+    }
 }
 
 /// [`set_display_configuration`]'s message type.
@@ -453,6 +511,16 @@ const SET_DISPLAY_CONFIGURATION: u8 = 0x1d;
 /// See docs/apple-vnc-889.md, "ServerInit's name field is not a name".
 pub fn holds_high_performance(commands: &[u8; 16]) -> bool {
     accepts(commands, SET_DISPLAY_CONFIGURATION)
+}
+
+/// The second event message's type, which [`scroll_wheel`] is one kind of.
+const EVENT_2: u8 = 0x17;
+
+/// Whether a Mac takes [`scroll_wheel`]: the command bitmap of its enhanced
+/// ServerInit lists the second event message. Apple's viewer asks exactly this
+/// before it sends one, and scrolls a Mac that fails it by the wheel bits.
+pub fn takes_scroll(commands: &[u8; 16]) -> bool {
+    accepts(commands, EVENT_2)
 }
 
 /// Whether the command bitmap lists client message `kind`, most significant bit
@@ -564,7 +632,7 @@ impl Layout {
     /// density, without asking Apple to enlarge pixels — the factor Apple's
     /// viewer derives from its own screen's density.
     ///
-    /// A selected screen uses its own density, and All Displays over screens of
+    /// A selected screen uses its own density, and Combined Display over screens of
     /// one density uses theirs: a 2880x1800 backing for a 1440x900 Retina display
     /// arrives at 1440x900 on a 1x browser.
     pub fn server_scale_for(&self, selection: Option<u32>, host_density: f32) -> f32 {
@@ -601,26 +669,50 @@ impl Layout {
     /// points in its own arrangement. Both spaces are moved to start at zero:
     /// the framebuffer already does, and the arrangement's origin is wherever the
     /// main screen puts it.
-    /// Whether this is All Displays over more than [`MAX_COMBINED_SCREENS`], which
+    /// Whether this is Combined Display over more than [`MAX_COMBINED_SCREENS`], which
     /// has no picture ([`crate::encode::VideoSink::hold_screens`]).
     pub fn too_many_screens(&self) -> bool {
         self.current.is_none() && self.displays.len() > MAX_COMBINED_SCREENS
+    }
+
+    /// The screen the Mac's media stream carries of its physical displays, where
+    /// that is not the whole framebuffer: in the combined view of more than one
+    /// screen, the main one, at its own pixels. Measured on macOS 27, a MacBook
+    /// Pro's built-in display beside a Studio Display: for an 8448×3600
+    /// framebuffer `ScreensharingAgent` logged `displayID to capture 0` and a
+    /// 6400×3600 stream, the main display's — see docs/apple-vnc-889.md, "The
+    /// stream on the physical displays".
+    ///
+    /// `None` where the framebuffer is that screen: one display, a selected one,
+    /// or a layout that marks none as main, which is then read as it always was.
+    pub fn streamed(&self) -> Option<Streamed> {
+        if self.current.is_some() || self.displays.len() < 2 {
+            return None;
+        }
+        let main = self.displays.iter().find(|display| display.info.main)?;
+        let origin = self.least(|display| display.backing_at);
+        Some(Streamed {
+            size: main.backing,
+            scale: main.effective_density(),
+            at: (from_least(main.backing_at.0, origin.0), from_least(main.backing_at.1, origin.1)),
+        })
+    }
+
+    /// The least left and the least top among the screens' corners `at` names.
+    fn least(&self, at: fn(&Display) -> (i16, i16)) -> (i16, i16) {
+        self.displays
+            .iter()
+            .map(at)
+            .fold((i16::MAX, i16::MAX), |m, (x, y)| (m.0.min(x), m.1.min(y)))
     }
 
     pub fn mosaic(&self) -> Option<Vec<MosaicRegion>> {
         if self.current.is_some() || !self.mixed_density() {
             return None;
         }
-        let min = |at: fn(&Display) -> (i16, i16)| {
-            self.displays.iter().map(at).fold((i16::MAX, i16::MAX), |m, (x, y)| {
-                (m.0.min(x), m.1.min(y))
-            })
-        };
-        // From the least edge, so never negative, and within the u16 the edges
-        // were sent in.
-        let from = |at: i16, origin: i16| (i32::from(at) - i32::from(origin)) as u16;
-        let pixel_origin = min(|display| display.backing_at);
-        let point_origin = min(|display| display.logical_at);
+        let from = from_least;
+        let pixel_origin = self.least(|display| display.backing_at);
+        let point_origin = self.least(|display| display.logical_at);
         Some(
             self.displays
                 .iter()
@@ -684,9 +776,29 @@ impl Layout {
 }
 
 impl Display {
-    fn effective_density(&self) -> f32 {
+    /// Pixels per point as this screen is sent: its own density, after the
+    /// server's scaling.
+    pub fn effective_density(&self) -> f32 {
         self.density * self.viewer_scale
     }
+}
+
+/// An edge counted from the least one among the screens: never negative, and
+/// within the `u16` the edges were sent in.
+fn from_least(at: i16, least: i16) -> u16 {
+    (i32::from(at) - i32::from(least)) as u16
+}
+
+/// One screen of a combined framebuffer, as [`Layout::streamed`] names it.
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct Streamed {
+    /// The screen's own pixels: the size of the stream's pictures.
+    pub size: (u16, u16),
+    /// Its pixels per point, after the Mac's server scale.
+    pub scale: f32,
+    /// Where it sits in the framebuffer, left then top: what a position on it is
+    /// moved by to be the framebuffer's.
+    pub at: (u16, u16),
 }
 
 /// Parse an `AppleDisplayLayout` payload: the bytes after the rectangle's `u16`
@@ -712,7 +824,7 @@ pub fn parse_virtual_display_layout(payload: &[u8]) -> anyhow::Result<Layout> {
 }
 
 fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<Layout> {
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7718"; 
         payload.len() >= LAYOUT_HEAD,
         "a display layout carried {} bytes, too few for a header",
         payload.len()
@@ -720,11 +832,11 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
     let version = be16(payload, 0);
     let count = usize::from(be16(payload, 0x12));
     // Apple's viewer takes 1–25 displays and tolerates bytes past the last record.
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7718"; 
         (1..=LAYOUT_MAX_DISPLAYS).contains(&count),
         "a display layout lists {count} displays"
     );
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7718"; 
         payload.len() >= LAYOUT_HEAD + count * LAYOUT_RECORD,
         "a display layout lists {count} displays in {} bytes",
         payload.len()
@@ -847,7 +959,9 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         displays.push(Display {
             info: DisplayInfo {
                 id: be32(record, 0x10),
-                label: if virtual_display {
+                // One virtual display is named as what it is. Two are numbered
+                // like any screens, and flagged virtual beside it.
+                label: if virtual_display && count == 1 {
                     "Virtual display".to_owned()
                 } else {
                     format!("Display {}", index + 1)
@@ -855,6 +969,7 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
                 detail: format!("{}×{}{suffix}", logical.0, logical.1),
                 main: flags & 0x01 != 0,
                 virtual_display,
+                tab: None,
             },
             density,
             viewer_scale,
@@ -865,7 +980,7 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         });
     }
 
-    anyhow::ensure!(!displays.is_empty(), "a display layout listed no usable display");
+    crate::ensure_known!("AL-7718"; !displays.is_empty(), "a display layout listed no usable display");
     let viewer_scale = displays[0].viewer_scale;
     if displays
         .iter()
@@ -875,7 +990,7 @@ fn parse_layout_kind(payload: &[u8], virtual_display: bool) -> anyhow::Result<La
         warn!("vnc: display layout records disagree about the server scaling factor");
     }
     let backing = (be16(payload, 0x06), be16(payload, 0x08));
-    anyhow::ensure!(
+    crate::ensure_known!("AL-7718"; 
         backing.0 > 0 && backing.1 > 0,
         "a display layout gives a {}x{} framebuffer",
         backing.0,
@@ -933,7 +1048,7 @@ impl CursorCache {
                 }
             });
         }
-        // Each store is an independent zlib stream. Unlike framebuffer encoding 6,
+        // Each store is an independent zlib stream. Unlike a framebuffer encoding's,
         // Apple does not carry the deflate window from one cursor image to the next.
         // A fresh inflater also means a malformed shape can be skipped without
         // poisoning every cursor that follows it.
@@ -1095,6 +1210,18 @@ mod tests {
         assert!(!accepts(&[0xff; 16], 0x80), "past the bitmap");
     }
 
+    /// macvm's bitmap lists the second event message, and the same with only
+    /// that bit cleared does not.
+    #[test]
+    fn a_scroll_needs_the_mac_to_accept_the_second_event_message() {
+        let macvm = [0xbf, 0xf6, 0xe7, 0x2f, 0xec, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+        assert!(takes_scroll(&macvm));
+        let mut without = macvm;
+        without[2] &= !0x01;
+        assert!(!takes_scroll(&without));
+        assert!(holds_high_performance(&without), "nothing else is cleared");
+    }
+
     #[test]
     fn set_encryption_is_the_observed_bytes() {
         assert_eq!(
@@ -1109,7 +1236,7 @@ mod tests {
 
     #[test]
     fn a_virtual_display_configuration_has_one_mode_under_the_fixed_dynamic_ceiling() {
-        let msg = set_display_configuration(virtual_display_mode((1600, 1000), 1.0));
+        let msg = set_display_configuration(&[virtual_display_mode((1600, 1000), 1.0)]);
         assert_eq!(msg[0], 0x1d);
         assert_eq!(usize::from(be16(&msg, 2)), msg.len() - 4);
         assert_eq!(msg.len(), CONFIG_HEAD + DESCRIPTOR_HEAD + MODE_ENTRY);
@@ -1137,10 +1264,34 @@ mod tests {
         // its mode. If the initial 1280x800 request put 1280x800 here, the live Mac
         // would reject an otherwise valid 1281x600 steady-state configuration and
         // answer with the old layout.
-        let smaller = set_display_configuration(virtual_display_mode((1280, 800), 1.0));
+        let smaller = set_display_configuration(&[virtual_display_mode((1280, 800), 1.0)]);
         let display = &smaller[CONFIG_HEAD..];
         assert_eq!(be32(display, 0x8a), DYNAMIC_MAX_WIDTH);
         assert_eq!(be32(display, 0x8e), DYNAMIC_MAX_HEIGHT);
+    }
+
+    #[test]
+    fn two_virtual_displays_are_two_descriptors_each_led_by_its_length() {
+        let first = virtual_display_mode((1600, 1000), 2.0);
+        let second = virtual_display_mode((1280, 800), 2.0);
+        let msg = set_display_configuration(&[first, second]);
+        let descriptor = DESCRIPTOR_HEAD + MODE_ENTRY;
+        assert_eq!(usize::from(be16(&msg, 2)), msg.len() - 4);
+        assert_eq!(msg.len(), CONFIG_HEAD + 2 * descriptor);
+        assert_eq!(be16(&msg, 6), 2, "display_count");
+        // Each is the descriptor a one-display message carries for the same mode,
+        // under its own name: zero-terminated in the 120 bytes after the length.
+        let names = ["Screen Sharing Virtual Display", "Screen Sharing Virtual Display #2"];
+        for (index, mode) in [first, second].into_iter().enumerate() {
+            let at = CONFIG_HEAD + index * descriptor;
+            let alone = set_display_configuration(&[mode]);
+            assert_eq!(msg[at + 0x7a..at + descriptor], alone[CONFIG_HEAD + 0x7a..]);
+            assert_eq!(usize::from(be16(&msg, at)), descriptor);
+            let name = &msg[at + 2..at + 0x7a];
+            assert_eq!(&name[..names[index].len()], names[index].as_bytes());
+            assert!(name[names[index].len()..].iter().all(|byte| *byte == 0));
+        }
+        assert_eq!(be32(&msg[CONFIG_HEAD + descriptor..], 0x9c), 2560, "the second's render width");
     }
 
     #[test]
@@ -1148,7 +1299,7 @@ mod tests {
         let mode = virtual_display_mode((1600, 1000), 2.0);
         assert_eq!(mode, VirtualMode { pixels: (3200, 2000), scaled: (1600, 1000) });
 
-        let msg = set_display_configuration(mode);
+        let msg = set_display_configuration(&[mode]);
         let display = &msg[CONFIG_HEAD..];
         assert_eq!(be32(display, 0x9c), 3200, "render width");
         assert_eq!(be32(display, 0xa0), 2000, "render height");
@@ -1156,7 +1307,7 @@ mod tests {
         assert_eq!(be32(display, 0xa8), 1000, "scaled height");
         // The glass does not grow with the density: physical millimetres follow
         // the logical size, so 1x and 2x modes of the same points agree here.
-        let one_x = set_display_configuration(virtual_display_mode((1600, 1000), 1.0));
+        let one_x = set_display_configuration(&[virtual_display_mode((1600, 1000), 1.0)]);
         assert_eq!(display[0x82..0x8a], one_x[CONFIG_HEAD..][0x82..0x8a]);
     }
 
@@ -1341,7 +1492,7 @@ mod tests {
     fn server_scaling_matches_the_chosen_screen_to_the_browser_density() {
         let combined = parse_layout(TWO_REAL_SCREENS).unwrap();
         assert_eq!(combined.viewer_scale(), 1.0);
-        // All Displays over mixed densities is composed from the native pixels.
+        // Combined Display over mixed densities is composed from the native pixels.
         assert_eq!(combined.server_scale_for(None, 1.0), 1.0);
         assert_eq!(combined.server_scale_for(None, 2.0), 1.0);
         assert_eq!(combined.server_scale_for(Some(1), 1.0), 1.0);
@@ -1358,7 +1509,7 @@ mod tests {
         assert_eq!(scaled.viewer_scale(), 0.5);
         assert_eq!(scaled.scale(), 1.0);
 
-        // All Displays at 0.5: the Retina screen arrives at 1x and the 1x screen
+        // Combined Display at 0.5: the Retina screen arrives at 1x and the 1x screen
         // at 0.5x. The densest is what the browser was matched to.
         let mut payload = layout(
             None,
@@ -1404,7 +1555,7 @@ mod tests {
         assert_eq!(parsed.scale(), 2.0);
     }
 
-    /// All Displays is held over three screens and not over two, and a selected
+    /// Combined Display is held over three screens and not over two, and a selected
     /// screen never is, however many there are.
     #[test]
     fn all_displays_over_three_screens_is_too_many() {
@@ -1452,6 +1603,46 @@ mod tests {
         let hidpi = parse_layout(&hidpi).unwrap();
         assert_eq!(hidpi.mosaic(), None);
         assert_eq!(hidpi.server_scale_for(None, 1.0), 0.5);
+    }
+
+    /// The screens of a MacBook Pro with its lid open beside a Studio Display, as
+    /// that Mac's own log gave them on macOS 27: the built-in display at 1x to the
+    /// left, and the Studio Display, the main one, at 2x. The stream it sent for
+    /// them was the main display's alone, 6400×3600.
+    #[test]
+    fn the_stream_of_several_physical_screens_is_the_main_one() {
+        let lid_open: [TestScreen; 2] =
+            [(1, (2048, 1330), (2048, 1330), 0x00), (3, (3200, 1800), (6400, 3600), 0x01)];
+        let main = Streamed { size: (6400, 3600), scale: 2.0, at: (2048, 0) };
+        let mut payload = layout(None, &lid_open);
+        let parsed = parse_layout(&payload).unwrap();
+        assert_eq!(parsed.backing, (8448, 3600), "the framebuffer holds both");
+        assert_eq!(parsed.streamed(), Some(main));
+
+        // The same screens with their edges counted from the main one, as the
+        // Mac's arrangement has them: the built-in display's are negative.
+        let built_in = LAYOUT_HEAD;
+        payload[built_in + 0x1e..built_in + 0x20].copy_from_slice(&(-2048i16).to_be_bytes());
+        payload[built_in + 0x22..built_in + 0x24].copy_from_slice(&0i16.to_be_bytes());
+        let studio = LAYOUT_HEAD + LAYOUT_RECORD;
+        payload[studio + 0x1e..studio + 0x20].copy_from_slice(&0i16.to_be_bytes());
+        payload[studio + 0x22..studio + 0x24].copy_from_slice(&6400i16.to_be_bytes());
+        assert_eq!(parse_layout(&payload).unwrap().streamed(), Some(main));
+
+        // A main screen at 1x beside a denser one keeps its own density, where
+        // the framebuffer's is the denser screen's.
+        let plain_main =
+            parse_layout(&layout(None, &[(1, (1280, 800), (1280, 800), 0x01), (4, (1600, 900), (3200, 1800), 0x00)]))
+                .unwrap();
+        assert_eq!(plain_main.scale(), 2.0);
+        assert_eq!(plain_main.streamed(), Some(Streamed { size: (1280, 800), scale: 1.0, at: (0, 0) }));
+
+        // One screen, a selected one, and a layout with no main screen are the
+        // framebuffer itself, as they always were.
+        assert_eq!(parse_layout(&layout(None, &lid_open[1..])).unwrap().streamed(), None);
+        assert_eq!(parse_layout(&layout(Some(3), &lid_open)).unwrap().streamed(), None);
+        let unmarked = [(1, (2048, 1330), (2048, 1330), 0x00), (3, (3200, 1800), (6400, 3600), 0x00)];
+        assert_eq!(parse_layout(&layout(None, &unmarked)).unwrap().streamed(), None);
     }
 
     /// The shared builder, which lives outside this module so [`crate::vnc`]'s tests

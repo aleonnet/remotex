@@ -2,7 +2,7 @@
 
 How a wlroots-based Wayland desktop with more than one monitor tells the gateway
 what it has, and how the browser's display picker comes to name those outputs —
-so a two-screen session is a choice in the floating menu rather than a second
+so a two-screen session is a choice on the session's bar rather than a second
 target on a second port.
 
 One RFB framebuffer is one output. wlshare captures one at a time and never
@@ -74,7 +74,7 @@ gateway leans on:
 
 `src/vnc.rs` reads the list into the same `DisplayState` the Apple dialect fills,
 so everything downstream is already built: a `ServerMsg::Displays` control message
-on every change, the display panel in the floating menu, and a `selectDisplay`
+on every change, the list of screens hanging from the session's bar, and a `selectDisplay`
 coming back. The engine forwards that as a `SelectOutput` — with a non-incremental
 update request behind it, since a same-sized switch has no rectangle to repaint
 through — and moves the checkmark only when a list comes back saying the server
@@ -89,8 +89,9 @@ before the wire.
   the canvas rather than with what was clicked.
 - **Density follows the switch.** The browser's density was declared to the
   output left behind, so the gateway declares it again when a list says the
-  shared output moved — in a session started with resize, the only kind that
-  declares one at all — and wlshare answers with an `OutputScale` as it always does:
+  shared output moved — in a session started with resize, or for a pinch-zoom
+  phone or tablet at a kept size; a pointer client at a kept size declares none
+  — and wlshare answers with an `OutputScale` as it always does:
   applying it on a headless output, and reporting the output as it is on a
   monitor whose mode belongs to the person in front of it. The declaration
   carries the window in pixels, even when the scale is the one already
@@ -109,6 +110,47 @@ before the wire.
   requests are answered *prohibited* from then on; switching back to a headless
   output makes them work again. Neither is new: it is the rule wlshare already
   had, now reachable in one session.
+
+## Two outputs at once
+
+A desk with exactly two outputs is listed with a third entry, *All Displays*
+(alpha), which is what such a desk starts on, at its first list and whenever its
+outputs become two unless one output alone was picked: the first output stays on the canvas and the second opens at
+`/display/2` in a tab of its own, as an RDP target's or a High Performance Mac's
+second virtual display does. The entry is the gateway's, not wlshare's, and no
+target key asks for it: the outputs are the compositor's, two monitors on a
+desk or two headless outputs it was started with (`WLR_HEADLESS_OUTPUTS=2`, or
+sway's `create_output`).
+
+wlshare shows a connection one output, so the tab is a second connection
+([A display beside](https://github.com/andrewtheguy/wlshare/blob/main/docs/architecture.md#a-display-beside)).
+What the gateway does:
+
+- **The canvas goes to the first output.** Starting on *All Displays*, or
+  choosing it, while the canvas is on the second sends a `SelectOutput` for the first, and the entry is
+  checked, with the second marked for its tab, once the list comes back saying
+  so. With the canvas already there the list is answered from the gateway and
+  wlshare is asked nothing.
+- **The tab's socket opens the second connection**, with the target's login and
+  `0xB5` as its ClientInit byte, and wlshare shows it the output the first is
+  not on. It is a session of its own into that socket: wlshare's VP9 passed, with
+  a walk of the tab's own link, the cursor, the size and the density. On a
+  session that follows the window the tab's window sizes a headless second
+  output at the density of the screen that window is on, which the tab states
+  on its display socket as the session's page does on its own; a monitor keeps
+  its mode.
+- **It lists nothing of the session's.** No output list, no clipboard, no sound,
+  camera or microphone: those are the first connection's.
+- **Choosing one output ends it** before wlshare is asked for that output, and
+  so does a list that is no longer two outputs, or the tab closing. wlshare ends
+  it on its own side when the first connection selects its output or leaves.
+
+Checked 2026-10-04 with `tests/ws_probe.py --select 0xffffffff --tab` against a
+headless sway with `HEADLESS-1` and `HEADLESS-2`, and against one with two
+monitors, 1920×1080 and 1024×768: each tab was sent its own output's size and
+pictures while the canvas kept the first, and wlshare logged the second
+connection as `showing output … beside`. `tests/wlshare_e2e.rs` runs the same
+against a container.
 
 ## Measured
 

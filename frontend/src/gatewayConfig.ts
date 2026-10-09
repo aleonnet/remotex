@@ -15,7 +15,7 @@ export interface GatewayConfig {
 }
 
 const FALLBACK: GatewayConfig = {
-  branding: "remotex",
+  branding: "alumia",
   logo: false,
   throughput: false,
 };

@@ -1,0 +1,7 @@
+# What the publication's scan (tools/publish-public.sh) may find and let through: one line
+# each, path, the literal the line has to hold, and why it is no secret, separated by tabs.
+# Anything else that looks like a credential, a private key, a password hash, a public
+# network address or a Tailscale name stops the publication. Read from the version being
+# exported. This file itself is not scanned: it holds the literals it excepts.
+tools/site/site.toml	$2b$12$FIs2mmJxkXxafCXn8E8yXOvxX9IR1Zi70w9OgizsucXU.lj0FGeb.	the hash of "medir", the password of the example page the public page is built from, and of nothing else
+macos/Alumia/Tests/Fixtures/settings-before.toml	$2b$12$gq.1PxPNg.PsUCLGdJj0a.SQugF0z8eGfxJZiMTjBTuNYC9HYn0s6	a fixture of the Mac app's tests: the hash of the test user "ana", of no account anywhere

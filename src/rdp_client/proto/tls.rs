@@ -29,7 +29,7 @@
 
 use std::sync::Arc;
 
-use anyhow::{Context as _, Result, anyhow};
+use anyhow::{Context as _, Result};
 use tokio::net::TcpStream;
 use tokio_rustls::rustls;
 use tokio_rustls::rustls::client::danger::{
@@ -38,6 +38,7 @@ use tokio_rustls::rustls::client::danger::{
 use tokio_rustls::rustls::pki_types::{CertificateDer, ServerName, UnixTime};
 
 use super::der;
+use crate::cause::{Cause, Caused as _};
 
 /// The upgraded socket.
 pub type Stream = tokio_rustls::client::TlsStream<TcpStream>;
@@ -51,7 +52,7 @@ pub async fn upgrade(tcp: TcpStream, server_name: &str) -> Result<Stream> {
     // The provider the handshake itself will use, so that the signature it presents
     // is checked against exactly the algorithms that negotiated it.
     let provider = rustls::crypto::CryptoProvider::get_default()
-        .ok_or_else(|| anyhow!("rustls has no crypto provider to handshake with"))?
+        .ok_or_else(|| crate::cause::Cause::new("AL-7212").of(anyhow::anyhow!("rustls has no crypto provider to handshake with")))?
         .clone();
 
     let mut config = rustls::ClientConfig::builder()
@@ -63,11 +64,12 @@ pub async fn upgrade(tcp: TcpStream, server_name: &str) -> Result<Stream> {
     config.resumption = rustls::client::Resumption::disabled();
 
     let name = ServerName::try_from(server_name.to_owned())
-        .with_context(|| format!("{server_name} is not a name or address TLS can be asked for"))?;
+        .with_context(|| format!("{server_name} is not a name or address TLS can be asked for")).cause(|| crate::cause::Cause::new("AL-7212"))?;
     tokio_rustls::TlsConnector::from(Arc::new(config))
         .connect(name, tcp)
         .await
         .context("the TLS handshake failed")
+        .cause(|| Cause::new("AL-7207"))
 }
 
 /// The server's public key, for CredSSP to bind the credential exchange to.
@@ -76,8 +78,8 @@ pub fn public_key(stream: &Stream) -> Result<Vec<u8>> {
     let certificate = connection
         .peer_certificates()
         .and_then(<[CertificateDer<'_>]>::first)
-        .ok_or_else(|| anyhow!("the server presented no certificate"))?;
-    der::certificate_public_key(certificate).context("reading the server's public key")
+        .ok_or_else(|| crate::cause::Cause::new("AL-7212").of(anyhow::anyhow!("the server presented no certificate")))?;
+    der::certificate_public_key(certificate).context("reading the server's public key").cause(|| crate::cause::Cause::new("AL-7212"))
 }
 
 /// rustls needs a process-wide crypto provider before the first handshake, and `ring`

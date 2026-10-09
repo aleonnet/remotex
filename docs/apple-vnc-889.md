@@ -1,12 +1,12 @@
 # Apple RFB 003.889, as measured
 
-How a Mac's Screen Sharing behaves on the wire, as far as remotex depends on it.
+How a Mac's Screen Sharing behaves on the wire, as far as alumia depends on it.
 None of this is documented by Apple. It was measured against macOS 26.5–26.6
 Apple Virtualization guests between July and September 2026, and read from the
 binaries those guests ship where the wire could not show a server's rules. A
 macOS update is free to invalidate any of it.
 
-This document states behaviour and the rules remotex follows because of it. The
+This document states behaviour and the rules alumia follows because of it. The
 evidence behind it is archived outside the repository, in
 `apple-screensharing-audit-2026-09-28`:
 - function-level traces of Apple's viewer, `screensharingd` and
@@ -26,9 +26,9 @@ layer.
 | Subtype | Mode | Picture | Sound |
 |---|---|---|---|
 | `ard` | Standard, the physical displays | ZRLE | none; the Mac's own output is left alone |
-| `ard-high-performance` | High Performance, one virtual display | HEVC over the media stream, covered until it is up | AAC-ELD over the media stream |
+| `ard-high-performance` | High Performance, one virtual display, or two with `virtual_displays = 2` (alpha) | HEVC over the media stream alone, a leg per display; until it is up the page says the screen is not available | AAC-ELD over the media stream |
 | `ard` with `virtual_display = true` | Unofficial: Standard's picture on High Performance's one virtual display, resizes included | ZRLE | none; the Mac's own output is left alone |
-| `ard-mirror` | Unofficial: the physical displays, over High Performance's media stream | HEVC over the media stream, reduced by the gateway to the viewer's window | AAC-ELD over the media stream; the Mac's own output is muted |
+| `ard-mirror` | Unofficial: the physical displays, over High Performance's media stream | HEVC over the media stream, reduced by the gateway to the viewer's window, or to the width a phone shows it at | AAC-ELD over the media stream; the Mac's own output is muted |
 
 `ard-high-performance` is High Performance as Apple's viewer has it. Decoding its
 picture needs FFmpeg on the gateway's host; without it the gateway runs it only
@@ -39,7 +39,7 @@ always passed, for the browser to decode.
 picture and sound — ZRLE, none — and takes the display from the other: the same
 `SetDisplayConfiguration` at setup and on every resize, with no media stream
 offered. Apple's viewer never offers a virtual display without the stream, so
-nothing but remotex exercises the Mac's side of this combination. It was tested
+nothing but alumia exercises the Mac's side of this combination. It was tested
 against macOS 26 only, and a macOS update is free to break it while leaving both
 official modes alone.
 
@@ -53,12 +53,12 @@ makes it either. What the Mac does with it is under
 
 | | |
 |---|---|
-| Two subtypes | Both speak RFB 003.889 with an encrypted record layer, as Apple's viewer answers every Mac. `subtype = "ard"` is Standard mode, sharing the Mac's physical displays at a fixed size. `ard-high-performance` is High Performance mode, sharing one virtual display the Mac creates at the size the client asks for. |
+| Two subtypes | Both speak RFB 003.889 with an encrypted record layer, as Apple's viewer answers every Mac. `subtype = "ard"` is Standard mode, sharing the Mac's physical displays at a fixed size. `ard-high-performance` is High Performance mode, sharing one virtual display the Mac creates at the size the client asks for, or two. |
 | Confirmed | Type-30 authentication, the record layer and its initial rekey, zlib and ZRLE, the cursor cache, the display layout and the metadata framing. |
-| Corrected | Several published reverse-engineered descriptions are wrong on points remotex depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
-| Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density All Displays view is composed in the browser, as Apple's viewer does. |
-| Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP — and shows nothing else: the browser stays behind its resize notice until the stream is up and across display changes. |
-| Not implemented | Apple's controls for two virtual displays and fixed presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
+| Corrected | Several published reverse-engineered descriptions are wrong on points alumia depends on: the layout's length and display count, `ViewerInfo`'s body, the virtual display's maximum size, `AutoFrameBufferUpdate`, the type-30 credential cipher and group, and the byte order of the media stream's flags. So are the pointer buttons on this revision and the wheel. Each is covered below. |
+| Density | A virtual display is asked for at 1x or 2x only; a fractional ratio is not rounded and produces a zoomed desktop. Standard mode is scaled by the Mac to the browser's density, and a mixed-density Combined Display view is composed in the browser, as Apple's viewer does. |
+| Picture and sound | `ard` is ZRLE throughout, and carries no sound: Standard mode never touches the Mac's sound output. `ard-high-performance` takes both from the media stream, as Apple's viewer does — HEVC and AAC-ELD over SRTP. Its ZRLE rectangles are stepped over unread and never shown, so a session that passes the stream builds no video encoder: until the stream is up and across display changes the page says the screen is not available and sends the Mac no input. |
+| Not implemented | Apple's fixed resolution presets; its viewer's rate feedback on the media stream; authentication types other than 30. |
 
 ## Remote Management access
 
@@ -82,12 +82,12 @@ sudo /System/Library/CoreServices/RemoteManagement/ARDAgent.app/Contents/Resourc
 ```
 
 **VNC viewers may control screen with password** is for RFB security type 2.
-Remotex authenticates with type 30 and the account's own password, so it does not
+Alumia authenticates with type 30 and the account's own password, so it does not
 need that setting.
 
 A Mac also offers other login types, and Apple's viewer tries some of them before
 type 30 (see [Other login types](#other-login-types)). Only type 30 has been
-exercised, so remotex offers nothing else.
+exercised, so alumia offers nothing else.
 
 ## The two modes in Apple's viewer
 
@@ -122,9 +122,11 @@ encoder move between them. The viewer exposes no switch for it. See
   It has no fallback to RFB pixels, and `ard-high-performance` has none either (see
   [Liveness](#the-stream)).
 
-Remotex matches the split, on the same handshake: `ard` shares the physical
+Alumia matches the split, on the same handshake: `ard` shares the physical
 displays, offers no resize and never creates a virtual display, and
-`ard-high-performance` creates exactly one, the "1 Virtual Display" choice, and
+`ard-high-performance` creates one, the "1 Virtual Display" choice, or with
+`virtual_displays = 2` the "2 Virtual Displays" one
+([Two virtual displays](#two-virtual-displays)), and
 never selects a physical screen or sends `SetServerScaling`. It departs in two
 places, and a third unofficially — `ard` with `virtual_display = true` creates
 the one virtual display the way High Performance does and then runs Standard's
@@ -132,10 +134,10 @@ ZRLE session on it, a combination the viewer never offers (above):
 - **Encryption.** Apple's viewer asks for the record layer only when its
   `encryptionLevel` preference is 2. The default is 0, which leaves the whole
   session in cleartext after authentication, keystrokes and the media stream's
-  keys included. Remotex always asks, in both modes.
+  keys included. Alumia always asks, in both modes.
 - **Standard's picture.** `ard` asks for ZRLE alone, where Full quality asks for
   zlib first and Adaptive first for
-  [private codecs](#apples-own-framebuffer-encodings) remotex does not decode.
+  [private codecs](#apples-own-framebuffer-encodings) alumia does not decode.
 
 ## Connecting
 
@@ -147,7 +149,7 @@ Both modes connect the same way until the record layer is up.
    `u16` key length, the prime and its public key; macOS 26 sends RFC 5054's
    4096-bit prime with generator 5, so both keys are 512 bytes, not the 1024-bit
    group with generator 2 a published description gives. Apple's viewer takes key
-   lengths from 64 to 1024 bytes and refuses any other; remotex takes the same.
+   lengths from 64 to 1024 bytes and refuses any other; alumia takes the same.
    The viewer answers with
    the 128-byte credential block (username at 0, password at 64), then its public
    key. `MD5(shared secret)` is the AES-128 key that encrypts the block in **ECB**
@@ -155,7 +157,7 @@ Both modes connect the same way until the record layer is up.
    rekey is wrapped under. A refusal is the result word alone (see
    [Other login types](#other-login-types)).
 3. **ClientInit** `0x81`: `0x80` asks for Apple's extended ServerInit, and `0x40`,
-   never set, would ask for a session-select exchange remotex does not implement.
+   never set, would ask for a session-select exchange alumia does not implement.
 4. **ServerInit**, extended (see below). High Performance ends here, before sending
    anything, when the Mac does not list `SetDisplayConfiguration`.
 5. **A cleartext prelude:** `ViewerInfo`, `SetMode(control)`, and
@@ -170,7 +172,7 @@ Both modes connect the same way until the record layer is up.
 
 ### Other login types
 
-Remotex speaks only type 30. This is what the Mac's code does with the others;
+Alumia speaks only type 30. This is what the Mac's code does with the others;
 only the list and type 30 were measured.
 
 **The list.** To an `RFB 003.889` viewer the Mac lists, in this order:
@@ -248,8 +250,8 @@ record layer.
 
 **Apple's viewer**, logging in with a name and password, tries 33, then 36, then
 30, with Kerberos first or after them depending on its own preference. Asking
-for permission, it tries 32, then 31. Which form of 33 it sends is not
-established.
+for permission, it tries 32, then 31. Of 33 it sends the SRP form to a Mac that
+lists 36, and the plain login to one that does not.
 
 ### ServerInit's name field is not a name
 
@@ -311,15 +313,17 @@ AES-128-CBC( u16 body_len || body || filler || 20-byte integrity )
 - **Integrity.** `SHA1(u32_be(seq) || the plaintext before it)`, with an
   independent sequence counter per direction starting at 0.
 
-A server message can span records: a full-screen zlib rectangle is about 400 KB
+A message can span records: a full-screen zlib rectangle is about 400 KB
 against a record ceiling of 65,520 bytes, so records are reassembled by
-concatenation, never read one message per record.
+concatenation, never read one message per record. Alumia frames its own messages
+the same way: a pasteboard archive past one record's 65,498-byte body goes out as
+full records and then the rest.
 
 **The rekey** arrives as a one-rectangle framebuffer update with encoding `0x44f`
 and zero geometry. Its body is a `u32` generation, then a wrapped key and a
 wrapped IV, each one AES-128 block decrypted under the wrap key. The Mac rotates
 keys only when the viewer asks with `SetEncryption` command 1, and it switches
-both of its ciphers the moment it sends a rekey. Remotex asks once, during setup.
+both of its ciphers the moment it sends a rekey. Alumia asks once, during setup.
 It closes the session on any later rekey rather than follow it, because records
 it had already framed under the old key would fail the Mac's check.
 
@@ -327,10 +331,10 @@ it had already framed under the old key would fail the Mac's check.
 words:
 - **Command 1** is followed by a `u16`, a `u16` count of at most 100, and that
   many `u32` methods. One of them must be 1, and the Mac then draws a fresh random
-  key and IV and sends the rekey. Remotex sends `12 00 0001 0001 0001 00000001`.
+  key and IV and sends the rekey. Alumia sends `12 00 0001 0001 0001 00000001`.
 - **Command 2** is followed by a `u16` and a pad. A 1 makes the Mac decrypt what
   it receives from then on; any other value turns that off. It does not stop the
-  Mac encrypting what it sends. Remotex sends `12 00 0002 0001 0000`.
+  Mac encrypting what it sends. Alumia sends `12 00 0002 0001 0000`.
 
 A published description reads the two commands as start and stop.
 
@@ -352,6 +356,24 @@ and selects a stored one when it is zero. A shape is a `w·h·4` BGRA pixmap fol
 by a separate `w·h` alpha plane. Each stored shape is its own zlib stream, so a bad
 one can be skipped without disturbing the next or the framebuffer's stream.
 
+**The cursor can stay the arrow while a selection tool is up on the Mac.** A
+tool that takes over the screen to let the user pick something gives the Mac's
+own cursor a new shape, and a remote session keeps showing the shape from before
+it. The tool itself still works: clicks and moves go in as usual. Apple's own
+viewer does the same, so this is not a alumia fault and there is nothing to fix.
+
+The cause is on the Mac. Its cursor changes as soon as the tool starts, but it
+sends no cursor shape while the tool is up. The new shape goes out only when the
+tool ends, after `MiscStatus` 12, with the ordinary shape right behind it. The
+Mac re-reads its cursor when it sees the mouse move, and by all appearances such
+a tool keeps those moves to itself. Nothing a viewer sends makes the Mac send the
+shape sooner. Cursors that change on hover, such as the hand over a link, are
+unaffected.
+
+Seen so far with the camera of Shift-Command-4's window selection and of
+QuickTime's screen recording. For another tool, check Apple's viewer first: if
+the cursor stays the same there too, it is this.
+
 ## Displays
 
 ### The display layout
@@ -364,7 +386,7 @@ every login, lock and user switch — as a one-rectangle framebuffer update.
 `AutoFrameBufferUpdate` after each one, or the pointer silently stops updating
 while the desktop keeps painting.
 
-**The layout is authoritative.** Remotex moves a display selection's checkmark
+**The layout is authoritative.** Alumia moves a display selection's checkmark
 only when a layout confirms it.
 
 ### A layout's length counts what follows it
@@ -400,8 +422,8 @@ Each record is `0x38` bytes:
 | `+0x28` | 16-byte pixel format |
 
 Bounds are edges, not an origin and size: a size is a difference of edges.
-Members of a mirror set share an origin, and remotex offers the first. When the
-density field is 0.0, remotex derives the density from the two rects rather than
+Members of a mirror set share an origin, and alumia offers the first. When the
+density field is 0.0, alumia derives the density from the two rects rather than
 dropping the screen. For High Performance's single record, dropping it would end
 the session.
 
@@ -427,25 +449,25 @@ never sends a viewport size. It does honour a scale.
 before encoding it, and the answering layout reports the factor in each record's
 second `f64`.
 
-**What remotex asks for.** It asks for `min(1, browser density / screen density)`,
+**What alumia asks for.** It asks for `min(1, browser density / screen density)`,
 as Apple's viewer does. A 1440×900 Retina screen (2880×1800 native) then reaches a
 1x browser as 1440×900 at effective density 1, and a 2x browser at native
 resolution. The Mac cannot enlarge, so a 1x screen reaches a 2x browser at 1x.
 
 **Pointer positions.** The Mac still reads pointer events in the *unscaled*
-framebuffer's pixels. So remotex divides each browser position by the factor in
+framebuffer's pixels. So alumia divides each browser position by the factor in
 force; without that, the pointer lands at a fraction of its distance from the
 origin.
 
-**When remotex asks.** A browser density change or a new selection can send a new
+**When alumia asks.** A browser density change or a new selection can send a new
 factor. Only an answering layout confirms it, and a request left unanswered for
 ten seconds is given up. The Mac handles the request at once, but its answer can
 take seconds to arrive behind a display switch.
 
-### All Displays over mixed densities
+### Combined Display over mixed densities
 
 No single factor renders a 1x screen beside a 2x one. Apple's viewer does not try.
-In All Displays over mixed densities it never sends `SetServerScaling`; it takes
+In Combined Display over mixed densities it never sends `SetServerScaling`; it takes
 the native combined framebuffer and draws each screen's region at that screen's
 size in points:
 - at medium interpolation;
@@ -460,7 +482,7 @@ each window drawing one screen out of the same framebuffer.
 least one that is not. Screens that are all HiDPI, whatever their densities, are not
 mixed.
 
-Remotex matches it. For a mixed combined layout, the gateway asks for factor 1.0
+Alumia matches it. For a mixed combined layout, the gateway asks for factor 1.0
 and sends a `ServerMsg::Mosaic`, each screen's rectangle in framebuffer pixels
 and in points, ahead of the `Resize` (flagged so the browser adopts it with that
 framebuffer, not over the one on screen). The browser then:
@@ -479,14 +501,14 @@ measured 5376×2287. Standard never resizes, so the gateway
 cannot ask for less. Such a view has no picture: the session stays up, and the
 page offers the Mac's screens instead, since one screen is a smaller desktop.
 Choosing one within the ceiling returns the session to video at the next layout.
-All Displays over more than two screens is held the same way whatever its size or
+Combined Display over more than two screens is held the same way whatever its size or
 densities, since composing them is too much for a browser to draw. See
 [past the ceiling](architecture.md#past-the-ceiling).
 
 ### The High Performance virtual display
 
 High Performance hides the Mac's physical screens and moves every window to a
-virtual display. Remotex creates one at the size the session keeps, the target's
+virtual display. Alumia creates one at the size the session keeps, the target's
 `size` or the default, or in a session started with resize at the full size of
 the browser's screen, and at that screen's density either way, as Apple's client
 does. The window layout macOS produces depends on that opening size:
@@ -497,11 +519,12 @@ for the unofficial `virtual_display = true` under `ard`, which sends the same
 messages; on macOS 26 the Mac answered them the same way with no media stream
 offered, and that is the only macOS it was tried on.
 
-`SetDisplayConfiguration` (`0x1d`) carries one display descriptor and one mode:
+`SetDisplayConfiguration` (`0x1d`) carries a display count and, for each display,
+one descriptor with one mode:
 
-| Descriptor field | Value remotex sends |
+| Descriptor field | Value alumia sends |
 |---|---|
-| name | 120 bytes |
+| name | 120 bytes, UTF-8 and zero-filled: `Screen Sharing Virtual Display`, and `Screen Sharing Virtual Display #2` for the second, which are the names Apple's viewer's displays have. It is what the Mac calls the display, in its Displays settings and to its applications; left empty, the displays have no name and the Mac lists them as ` (1)` and ` (2)`. |
 | display flags | 1: dynamic resolution. Bit 1, never sent, tells the Mac to leave the refresh rate alone and ignore the mode's. |
 | display type | 4, virtual |
 | physical size | millimetres, as big-endian `f32` |
@@ -526,22 +549,90 @@ A backing size twice the logical one makes a 2x display.
   shrunk to fit.
 - **The first descriptor is always dynamic,** even in a session started without
   resize, so a reconnect re-enables the Mac's Dynamic resolution setting. Resize
-  controls only whether remotex acts on later viewport reports.
+  controls only whether alumia acts on later viewport reports.
 - **The display outlives its session briefly.** A reconnect within a few seconds
   finds it still there with the same id; after about 45 seconds the Mac is back on
   its physical display. The new session's own layout arrives either way.
 
+### Two virtual displays
+
+Apple's viewer's High Performance sheet offers "2 Virtual Displays", and a
+target's `virtual_displays = 2` (alpha) asks the Mac for the same. What that
+changes, as read from Apple's viewer and daemon and as macOS 26 answered:
+
+- **The Mac says how many it creates.** Its ServerInit flags carry the count
+  above bit 4: 2, unless a managed preference holds the Mac to 1. It holds a
+  configuration that names more to that many without saying so. Alumia refuses
+  a session that asks for more than the Mac states, before it sends one.
+- **One configuration names both.** The display count is 2 and the descriptors
+  follow back to back, each led by its own length, which is how the Mac steps
+  from one to the next. Alumia sends the one-mode descriptor above for each
+  display, in the opening configuration and in every resize. The Mac creates the
+  second display to the right of the first, top-aligned: 1440×900 beside
+  1440×900 put it at 1440 points across, and 1366×768 beside 1024×700 at 1366.
+  Nothing known in the descriptor says where; the arrangement is changed on the
+  Mac, in System Settings → Displays → Arrange, or by any program in its desktop
+  session through `CGConfigureDisplayOrigin`. A later configuration keeps an
+  arrangement made that way, and a new session sometimes opened with it and
+  sometimes with the second display on the right again.
+- **The layout lists both under the combined sentinel,** the first display
+  first, and its framebuffer is the span of the two: 2880×900 over two 1440×900
+  displays. The records stay in that order however the displays are arranged,
+  and their corners are the framebuffer's, never negative: with the second
+  display dragged above a 1440×900 first, the first's record was at 0,900 and
+  the second's at 0,0. Each record's backing rectangle is where that display sits in the
+  span, and pointer positions are addressed in the span too. A position of
+  100,200 on the second of those displays, sent as 1540,200, put the Mac's
+  pointer at 1540,200; over two 1280×800 displays at 2x, 2660,200 put it at
+  1330,100 in points. A position sent in the first second after the layout
+  moved nothing, on one display as on two.
+- **The media stream has a video leg per display.** Message 1 enables video 2,
+  on the port after video 1's; the offer carries the second display's keys and
+  offer behind the first's; the answer has a blob for each
+  ([Negotiation](#negotiation)). The legs follow the Mac's arrangement, not the
+  order the displays were asked for in: video 1 is the display that starts the
+  spanned framebuffer. With the second display where the Mac creates it, to the
+  right, that is the first: asked for 1366×768 beside 1024×700, each leg's
+  pictures were its own display's size. With the second dragged to the left of
+  the first or above it, in the Mac's Displays settings, video 1 carried the
+  second display's pictures, and alumia reads each leg as the display the
+  layout places there (`MediaStream::arrange`). A diagonal arrangement has not
+  been tried. Each leg has its own keys, SSRC, reports, rate feedback and
+  keyframe requests, and the offers carry the session's one call id, as Apple's
+  viewer's do. The legs are offered, answered, stopped by a display change and
+  offered again together, in one message each time, so the rule of one offer at
+  a time is unchanged.
+- **Alumia shows one display on a page.** The picker lists `Display 1`,
+  `Display 2` and *All Displays*, which two displays start on and which keeps the first on the session's page
+  and shows the second in a browser tab of its own, where Apple's viewer opens a
+  window for each. The choice is answered in the gateway: the Mac sends both legs
+  whatever is chosen, and the leg of a display nobody is shown is authenticated,
+  counted for liveness and dropped. A display coming into view starts at a
+  keyframe the Mac is asked for with a PLI on its leg. In a session started with
+  resize the tab's window sizes the second display, and otherwise both are the
+  size the session keeps. See
+  [Display geometry](architecture.md#display-geometry).
+- **Each display owes its first picture.** An offer for two displays ends the
+  session when either leg brings none within the 10 s, or goes silent
+  ([Liveness](#the-stream)). The first packet of a picture stands for the first
+  picture of a display nobody is shown, since none of its pictures is put
+  together.
+
+Checked on macvm only, decoded and passed, at 1x and 2x. HDR on either display,
+a physical Mac, and what Apple's viewer does beside it have not been.
+
 ### Resizing a High Performance display, as measured
 
-Three behaviours of the Mac shape how remotex resizes:
+Three behaviours of the Mac shape how alumia resizes:
 
 - **A display change stops the Mac's media stream.** The Mac restarts nothing until
-  it is offered again, so remotex keeps the browser covered until the new display's
-  stream delivers — see [Display changes](#display-changes).
+  it is offered again, so there is no picture until the new display's stream
+  delivers: alumia sends `screenUnavailable`, and the page says the screen is
+  not available — see [Display changes](#display-changes).
 - **A read racing a shrink crashes the Mac's capture agent.** Serving a pixel read
   sized for the old display after the display shrank crashes `ScreensharingAgent`.
   The session then loses its virtual display, and often its connection. The update
-  arming counts as such a read. So remotex:
+  arming counts as such a read. So alumia:
   - sends a change only at the end of an update, with no full-size request
     outstanding;
   - first re-arms updates for the single pixel at the origin, which every mode
@@ -565,14 +656,46 @@ macOS button numbers (left, right, center). So on 003.889 a by-the-book
 right-click arrives as a middle-click, which macOS does nothing visible with, in
 either mode. `Buttons` in `src/vnc.rs` swaps the two bits for both Apple subtypes.
 
-### A Mac scrolls only on a lone wheel bit
+### A Mac scrolls by a distance
 
-The Mac scrolls only for a mask of exactly `0x08` (up) or `0x10` (down). Any other
+The wheel bits of the pointer mask are a poor scroll on a Mac. It scrolls only for
+a mask of exactly `0x08` (up) or `0x10` (down), about two pixels a pulse. Any other
 combination is posted as buttons: a wheel bit with a button held becomes Back or
 Forward, and the horizontal bits `0x20`/`0x40` become clicks on buttons 5 and 6.
-Each pulse scrolls only about two pixels. Remotex sends each vertical pulse
-alone, sends no horizontal ones, and sends pulses in proportion to the scroll
-distance (`src/vnc.rs`).
+
+Apple's viewer sends a scroll in a message of its own instead, the scroll-wheel
+event of the second event message (`0x17`), and so does alumia, in both modes
+(`vnc_apple::scroll_wheel`). It is 58 bytes, numbers big-endian:
+
+| Bytes | |
+|---|---|
+| 0 | type, `0x17` |
+| 1 | flags, 0 |
+| 2–3 | `u16` size of what follows, 54 |
+| 4–5 | `u16` version, 1 |
+| 6–7 | `u16` kind, 11: a scroll-wheel event |
+| 8–13 | three `i16` line deltas |
+| 14–25 | three `i32` line deltas in 16.16 fixed point |
+| 26–37 | three `i32` point deltas |
+| 38–41 | `u32` scroll phase |
+| 42–45 | `u32` momentum phase |
+| 46–49 | `u32` scroll count |
+| 50–53 | `u32` flags: 1 instant mouser, 2 continuous, 4 inverted from the device |
+| 54–57 | `u16` x and `u16` y, the pointer's position |
+
+Each group of three is horizontal, vertical, then a third axis, and a scroll up or
+to the left is positive, the opposite of the DOM's. The agent copies every field
+into the `CGEvent` it posts, so an application receives what was sent: alumia
+sends the distance as the point delta, a tenth of it as the line delta, the
+continuous flag, and no phase, which an application reads as a precise scroll
+with no gesture around it. Checked on macOS 26.6 in both modes with a window that
+logs its scroll events: 40 points right and 25 up arrive as exactly that, at the
+pointer.
+
+Apple's viewer sends this message only to a Mac whose ServerInit lists `0x17`
+([the command bitmap](#serverinits-name-field-is-not-a-name)), and falls back to
+wheel bits otherwise. Alumia has no such fallback: an Apple subtype refuses the
+session on a Mac that does not list it.
 
 ### Keys
 
@@ -586,7 +709,7 @@ distance (`src/vnc.rs`).
 - **Modifier keysyms.** The agent maps modifiers by its own table, in both modes.
   `Meta_L`/`Meta_R` land on Option. `Alt_L`/`Alt_R`, `Super_L`/`Super_R` and
   `Hyper_L`/`Hyper_R` all land on Command. Each keeps its side. A by-the-book Alt
-  therefore arrives as Command, so remotex sends a keyboard's Alt keys as Meta
+  therefore arrives as Command, so alumia sends a keyboard's Alt keys as Meta
   (`keymap::apple_keysym`, and [VNC](architecture.md#vnc)).
 
 ### Double-click is chained by the Mac, at a login-time threshold
@@ -595,9 +718,9 @@ An RFB pointer event carries no click count, so the Mac decides which presses
 chain into a double-click. They chain when they land on the same spot within its
 double-click interval. That interval is read once at login: changing the
 preference has no effect on a live session until logout or reboot. A Mac that
-double-clicks in Apple's client but not through remotex has a stale or very short
+double-clicks in Apple's client but not through alumia has a stale or very short
 threshold. Set `defaults write -g com.apple.mouse.doubleClickThreshold -float 0.5`
-on the Mac and reboot. Remotex forwards clicks as they happened, with no
+on the Mac and reboot. Alumia forwards clicks as they happened, with no
 compensation.
 
 ## Other messages
@@ -606,7 +729,7 @@ compensation.
 Its body is a `u16` version (1), a `u32` interval in microseconds and the armed
 rectangle.
 - **A still screen gets nothing unrequested,** armed or not, so a client that stops
-  polling paints one frame and freezes. Remotex keeps polling.
+  polling paints one frame and freezes. Alumia keeps polling.
 - **A changing screen is pushed as fast as the Mac captures it** when the interval
   is 0. A YouTube video playing on a 1920×1080 virtual display drew 60–90 updates
   a second, 15–33 MB/s of zlib, for two requests. Unarmed, the same screen drew
@@ -627,7 +750,7 @@ rectangle.
   window drew 2–9 updates a second with the Mac silent for a second at a time,
   where the same scroll on a virtual display drew 20–30. With the interval at 0
   the physical display is smooth.
-- **Remotex arms with 33,333 or more.** 33,333 is one frame of its video stream:
+- **Alumia arms with 33,333 or more.** 33,333 is one frame of its video stream:
   it shows no more than a frame in that time however often the Mac pushes, and
   the gap after each update is when the Mac reads its input (below). A Standard
   session widens the gap as it falls behind. It arms again with what an update
@@ -635,9 +758,9 @@ rectangle.
   stream, the browser's link included where that holds the stream — smoothed over
   a few updates, up to 1,000,000, and comes back to 33,333 as the cost falls. It
   arms again only when the interval moves by half, and at most twice a second.
-  High Performance arms 1,000,000: its picture is the media stream and the Mac's
-  pixel updates are stepped over undecoded, so one a second is the least it can
-  be made to push before the stream is up and across a display change.
+  High Performance arms 1,000,000 and keeps it: its picture is the media stream,
+  and the Mac's pixel updates are stepped over unread, so one a second is the
+  least it can be made to push while still arming the cursor shapes.
 - **`0xffffffff` turns the pushes off.** The daemon records whether the word is
   the all-ones value and pushes nothing while it is. A published description reads
   the word as a screen id, with all-ones meaning all displays. It is not one:
@@ -652,7 +775,7 @@ for the length of the animation. On a Mac playing a video, input went unread for
 35–104 s at a time and then arrived as hundreds of queued events in one second.
 Apple's viewer never meets this in High Performance mode: it takes the picture
 from the media stream (encoding `0x3f2`), and the daemon's framebuffer sender
-skips such a viewer. Remotex does too once the stream is up, and then arms and
+skips such a viewer. Alumia does too once the stream is up, and then arms and
 polls one pixel — see [RFB while the stream runs](#rfb-while-the-stream-runs).
 
 The interval is what keeps the input moving everywhere else. With the gateway
@@ -678,7 +801,7 @@ stream carries the picture.
 **`ViewerInfo` (`0x21`) is 66 bytes of numbers.** The published description
 implies version strings; the body is two numeric version triples:
 
-| Field | Value remotex sends |
+| Field | Value alumia sends |
 |---|---|
 | application class | 1 |
 | application id | 2 |
@@ -715,7 +838,7 @@ A published description says it reads bit 20 alone.
 
 A published description has 12 as the heartbeat and 11 as the user session
 changing. The heartbeat is 4, 11 is the pointer hiding, and the session change is
-17 (`0x11`). Remotex acts on 2 and 3 and steps over the rest.
+17 (`0x11`). Alumia acts on 2 and 3 and steps over the rest.
 
 **`SetMode` (`0x0a`)** is a type, a pad byte and a `u16` mode:
 - **0:** observe;
@@ -725,7 +848,7 @@ changing. The heartbeat is 4, 11 is the pointer hiding, and the session change i
 
 The Mac refuses a mode above 2, and ignores 1 and 2 on a connection limited to
 observing. The mode also sets how the Mac's Screen Sharing menu shows the session:
-observed, assisted or controlled. Remotex sends 1.
+observed, assisted or controlled. Alumia sends 1.
 
 **The pasteboard.** `AutoPasteboard` (`0x15`) is eight bytes with a `u16` at
 byte 2: 1 starts the agent watching the Mac's pasteboard, 2 stops it, and any
@@ -738,7 +861,7 @@ display's layout. The Mac then signals with `MiscStatus`:
 
 Contents travel as a zlib archive (level 9, one sync flush, capped at 100 MB) of
 every flavor of every item. A short text selection can therefore arrive inside
-megabytes of other flavors. Remotex streams the archive, keeps only the text, and
+megabytes of other flavors. Alumia streams the archive, keeps only the text, and
 sends empty text as an item with no flavors, which clears the Mac's pasteboard.
 
 - **The fetch** (`0x0b`) is eight bytes. Bit 0 of byte 1 asks for promises only,
@@ -762,14 +885,14 @@ sends empty text as an item with no flavors, which clears the Mac's pasteboard.
   items, each holding one flavor.
 
 **Polling pauses behind a fetch.** Framebuffer and pasteboard replies share one
-ordered stream. While a pasteboard fetch is pending, remotex pauses incremental
+ordered stream. While a pasteboard fetch is pending, alumia pauses incremental
 polling, so the fetch is not stuck behind a stream of updates.
 
 **Metadata arrives only as rectangles.** The layout, keyboard source, vendor
 keysyms and device information are each a one-rectangle framebuffer update.
 Apple's viewer closes the connection on a server message type it does not know,
 so a reader that falls out of step sees "messages" that are really fragments of
-these. Remotex reads two of them only to step over them:
+these. Alumia reads two of them only to step over them:
 - **Vendor keysyms** (`0x453`) are a fixed table: `u16` 20, then a `u16` version
   (1), a `u16` count (4), and the keysyms `0x1008FD00` to `0x1008FD03`.
 - **Keyboard source** (`0x455`) is a `u16` giving the name's length plus 8, then
@@ -778,7 +901,7 @@ these. Remotex reads two of them only to step over them:
   flag is 1 while the Mac's keyboard focus is in a secure text field, such as a
   password prompt.
 
-### Messages remotex does not use
+### Messages alumia does not use
 
 Read from the daemon, for a reader of Apple's viewer's captures:
 - **`DeviceInfo` (`0x456`)** is a metadata rectangle of zero geometry. It holds,
@@ -808,7 +931,7 @@ Read from the daemon, for a reader of Apple's viewer's captures:
 
 ### Apple's own framebuffer encodings
 
-Remotex advertises none of these, but Adaptive quality lists `0x3f3` and `0x3ea`
+Alumia advertises none of these, but Adaptive quality lists `0x3f3` and `0x3ea`
 first, so a capture of Apple's viewer is full of them. This is read from the
 Mac's encoders and the viewer's decoders.
 
@@ -873,7 +996,7 @@ Both streams end with `0x6d`.
 ### The numbers, in both forms
 
 Apple writes its encodings in hex, while the wire and RFB's registry use decimal,
-so remotex logs an unexpected encoding as `1105 (0x451)`.
+so alumia logs an unexpected encoding as `1105 (0x451)`.
 
 | Encoding | Hex | Decimal | |
 |---|---|---|---|
@@ -899,7 +1022,7 @@ so remotex logs an unexpected encoding as `1105 (0x451)`.
 
 Message types: `MiscStatus` `0x14`, `AutoFrameBufferUpdate` `0x09`, `ViewerInfo`
 `0x21`, `SetDisplayConfiguration` `0x1d`, `SetDisplay` `0x0d`, `SetServerScaling`
-`0x08`, and the media-stream negotiation `0x1c`.
+`0x08`, the scroll-wheel event `0x17`, and the media-stream negotiation `0x1c`.
 
 ## The media stream: High Performance's picture and sound
 
@@ -907,21 +1030,27 @@ In High Performance mode Apple's viewer takes neither its picture nor its sound
 from RFB. RFB only negotiates a media stream: the viewer sends an offer, and
 `ScreensharingAgent` then sends the screen and the system audio through
 AVConference — the FaceTime media stack — as HEVC and AAC-ELD over UDP with SRTP,
-straight to the viewer. Remotex does the same on an `ard-high-performance` target
-(`src/vnc_apple_media.rs`). ZRLE is stepped over undecoded and never shown: the
-browser stays behind its resize notice until the stream delivers, at
-connect and across display changes. A stream that fails ends the session, as it
+straight to the viewer. Alumia does the same on an `ard-high-performance` target
+(`src/vnc_apple_media.rs`). The stream alone is the picture. The Mac's ZRLE
+rectangles are stepped over by their length, never inflated and never encoded,
+so a session that passes the stream builds no VP9 encoder, with the worker
+threads and frame buffers one holds for a session's life. Until the stream
+delivers, at connect, across display changes and across a stream the Mac
+restarts, the gateway sends `screenUnavailable` and the page says "Screen not
+available" over the canvas and sends the Mac no input, since nobody can see
+what it would do. The notice comes down behind the stream's first
+picture of the display. A stream that fails ends the session, as it
 ends Apple's viewer's: one the Mac refuses, one that brings no picture or no
 sound, and one that stops (see [Liveness](#the-stream)).
 
-Remotex decodes the picture and encodes it as VP9, unless the session was
-started with the picture passed through, which the picker offers a browser that
-decodes the Mac's HEVC: then each access unit goes to the browser as it came,
+Alumia decodes the picture and encodes it as VP9, unless the session was
+started with the picture passed through, which the page's address asks for
+(`?passthrough=1`) from a browser that decodes the Mac's HEVC: then each access unit goes to the browser as it came,
 described by the stream's own sequence parameter set, and a PLI is its repaint.
 The sound is never decoded here: in every session each sound unit goes on
 `/ws/audio` as it came, described by the AudioSpecificConfig below. Either
-way ZRLE's rectangles are stepped over undecoded and never shown: the browser
-stays behind its resize notice until the stream delivers. See
+way the stream's gaps show nothing: ZRLE's rectangles are stepped over, the
+page says the screen is not available, and the stream comes back at an IDR. See
 [Apple's media stream, passed through](architecture.md#apples-media-stream-passed-through).
 
 The one decoder is FFmpeg's HEVC decoder for the picture (libavcodec,
@@ -934,7 +1063,8 @@ dials the Mac.
 ### Negotiation
 
 After the first layout the viewer sends a second `SetEncodings`, the opening list
-with encoding 1010 (`0x3f2`) appended, then message `0x1c`
+with encoding 1010 (`0x3f2`) appended. The Mac answers it with message 1, below,
+naming its ports, and the viewer makes its offer only then: message `0x1c`
 (`RFBMediaStreamServerConfiguration`, version 3):
 
 ```text
@@ -950,7 +1080,8 @@ with encoding 1010 (`0x3f2`) appended, then message `0x1c`
 +0x14 16B  session UUID
 +0x24 46B  audio SRTP master key, viewer -> server
 +0x52 46B  audio SRTP master key, server -> viewer
-+0x80      audio offer, then the video1 keys (46B v->s, 46B s->v) and offer
++0x80      audio offer, then the video1 keys (46B v->s, 46B s->v) and offer,
+           then for a second display the video2 keys and offer, the same way
 ```
 
 The Mac answers with rectangles of encoding 1010, a `u16` size and then:
@@ -958,33 +1089,57 @@ The Mac answers with rectangles of encoding 1010, a `u16` size and then:
 - **message 1**, a 36-byte body: `u16` type, `u16` version, `u32` flags, then a
   `u16` port and `u32` flags for audio at `+8`/`+10`, video 1 at `+14`/`+16`,
   and video 2 at `+20`/`+22`, followed by ten reserved zero bytes. Bit 0 enables
-  a leg. Apple's viewer requires it on audio and video 1; remotex also requires
-  video 2 off because it offered one display. The measured ports were always
-  5900 and 5901, the RFB port and the next. The viewer receives on the same
-  numbers.
+  a leg. Apple's viewer requires it on audio and video 1, and takes video 2's as
+  the Mac having two displays to send; alumia requires video 2 on exactly when the
+  session asked for two. The measured ports were always
+  5900 and 5901, the RFB port and the next, and 5902 for a second display. The viewer receives on the same
+  numbers. The Mac sends message 1 once for the `SetEncodings` naming 1010, and
+  again after each display change, never in reply to an offer.
 - **message 2**, AVConference's answer: the common eight-byte header, `u16`
   lengths for the audio, video 1, and video 2 answer blobs, a zero `u32`, then
-  those blobs. Remotex checks that their lengths describe the whole body and
-  that video 2 is empty. The answer sometimes comes twice for one offer.
+  those blobs. Alumia checks that their lengths describe the whole body and
+  that video 2 has a blob exactly when it was offered. The answer sometimes comes twice for one offer.
+  Apple's viewer disregards an answer that comes before message 1.
 - **message 3**, a 16-byte error: the common header, then `u32` type and `u32`
-  sub-code.
+  sub-code. Type 2 answers an offer the Mac could make no configuration
+  from. Type 1 with sub-code 1 answers a `SetEncodings` naming 1010 from a
+  second viewer: the Mac gives the stream to one viewer at a time, and ignores
+  the display configurations of any other while it runs, so that viewer's
+  layouts go on showing the first one's display. Alumia ends the session on
+  either and names the other viewer for the second.
 
 Each offer is a binary property list of four keys around a deflated
-AVConference protobuf. Remotex rebuilds Apple's offers field by field and changes
+AVConference protobuf. Alumia rebuilds Apple's offers field by field and changes
 two fields:
 
-| Field | Apple's viewer | Remotex | Why |
+| Field | Apple's viewer | Alumia | Why |
 |---|---|---|---|
 | `0x1c` flags | 0 | `0x5` | Bit 2 makes the agent capture without the pointer (`send cursor with video 0`). Without it the pointer is drawn into every picture. Bit 0 is 60 fps, which the daemon sets anyway, with bit 1, for a message older than version 2; it does not bound the picture rate, the virtual display's refresh does. |
-| `tilesPerFrame` (video stream field 6) | 4 | 1 | Four tiles split a frame into strips of 256 rows. Each strip is coded as a separate picture of one bitstream, in its own sequence-number space with a DONL, and nothing in a packet names its strip. One tile is one picture of the whole display, without DONL. |
+| `tilesPerFrame` (video stream field 6) | 4 | 1 | Four tiles split a frame into strips. Each strip is coded as a separate picture and sent as an RTP stream of its own, with a DONL: its SSRC is the display's plus the strip's number, counted from 0. One tile is one picture of the whole display on the one SSRC, without DONL. |
+
+The video offer names two codecs by their RTP payload numbers, 123 for H.264
+and 100 for HEVC, each with its own feature string. Offered both, the Mac sends
+HEVC.
+
+Offered 123 alone, the Mac sends H.264 instead, as RTP payload type 123 on the
+same leg and under the same keys, with the sound unchanged. On macOS 26.6 at
+1600×1000 with one tile it was High profile, level 4.0, 8-bit 4:2:0, declaring 5
+reference frames and a 13-bit picture order count, and tagged with the HEVC
+stream's colours: Display P3 primaries, sRGB transfer, BT.709 matrix. Its
+parameter sets do not come as NAL units of their own. A keyframe's first packet
+is an MP4 `avc1` sample description holding them, and the IDR follows as FU-A
+fragments. Alumia does not ask for it. Seen in one short run on the virtual Mac
+only: no browser was given it, and a display change, a keyframe request and
+more than one tile were not tried.
 
 The flags are a big-endian `u32`, like the rest of the header: Apple's viewer
 sets its bits and then byte-swaps the word before sending it. A published
 description has the word in host order, which would move every bit to another
-byte. Two other bits exist, and remotex sets neither:
-- bit 1 asks for 60 fps on the second video stream;
+byte. Two other bits exist:
+- bit 1 is bit 0 for the second video stream, which alumia sets beside it in an
+  offer for two displays;
 - bit 3 names Apple Remote Desktop, rather than Screen Sharing, as the video
-  client.
+  client, and alumia never sets it.
 
 **The picture and the sound go together.** A configuration with an empty audio
 offer is refused (`unable to create audio config`, error type 2), and one with an
@@ -994,27 +1149,34 @@ output device muted as the stream starts, and the Mac's speakers were measured
 silent. So an `ard-high-performance` session always carries sound and the
 picker offers no choice of it. The stream takes over the Mac's sound, AirPlay included. Standard
 mode never touches the sound output, so a Mac there plays to its speakers or to
-an AirPlay receiver outside remotex as usual; in a High Performance session it
+an AirPlay receiver outside alumia as usual; in a High Performance session it
 plays nothing to one, which was confirmed on a physical Mac.
+
+**Ports first.** The Mac sends message 1 and the answer from separate paths, so
+an offer sent before message 1 can be answered before it, and the Mac names its
+ports once for the `SetEncodings` and once per display change, never again for an
+offer made in its place. Alumia therefore offers as Apple's viewer does: once
+for each message 1, and only once its display has settled.
 
 **One offer at a time.** A second `0x1c` sent while the first one's capture was
 still starting left the capture failed (`didStart: 0 error: 32000`). When the
 virtual display was deallocated at the end of that session, WindowServer aborted
 in `WSSelectiveSharingUpdateDisplayStreamSurface` and logged the console user
-out. Remotex therefore has one offer out at a time, and sends no display change
+out. Alumia therefore has one offer out at a time, and sends no display change
 while an offer is unanswered. An offer left unanswered ends the session with the
 other failures (see [Liveness](#the-stream)).
 
 ### The stream
 
 - **RTP.** Payload type 100, with a one-word header extension under profile
-  `0x9311` or `0x9301` holding the picture's packet count and a frame counter;
-  remotex ignores it. The marker bit ends a picture. RFC 7798 packetization:
+  `0x9311` or `0x9301` holding the picture's packet count and a frame counter.
+  The profile is `0x9331` on a refresh picture (below), and that bit is all
+  alumia reads of it. The marker bit ends a picture. RFC 7798 packetization:
   single NAL units, aggregation packets, fragmentation units.
 - **HEVC.** Range Extensions profile, 8-bit 4:4:4, full-range BT.709 matrix, sRGB
   transfer, Display P3 primaries, with wavefront parallel processing
   (`entropy_coding_sync_enabled_flag`) and no tiles. libavcodec (FFmpeg 9.0.2,
-  the prebuilt one configured down to the HEVC decoder) decodes it. Remotex
+  the prebuilt one configured down to the HEVC decoder) decodes it. Alumia
   gives the decoder four slice threads, which decode a picture's rows in
   parallel; frame threads would hold each picture back. On macOS the decoder
   is given a VideoToolbox device, and the archive's VideoToolbox hwaccel hands
@@ -1030,7 +1192,7 @@ other failures (see [Liveness](#the-stream)).
   about 57 pictures a second, with the `0x1c` 60 fps flag or without it, and the
   Mac logged `viewer set refreshRate 60` and `encode frame rate 60` either way.
   A 30 Hz mode sent 30.0, across resizes, and logged `viewer set refreshRate 30`.
-  Remotex asks for 30 Hz, because the browser is sent 30 frames a second and
+  Alumia asks for 30 Hz, because the browser is sent 30 frames a second and
   every picture has to be decoded whether it is shown or not. A still screen
   sends none for as long as it stays still: 75 s without a picture on macvm,
   while the Mac's sender reports went on. The receiver's debug log reports the
@@ -1041,7 +1203,7 @@ other failures (see [Liveness](#the-stream)).
   56% of a decoded one's, keyframe fragments among them, until a display never had
   its first picture and the session ended. A receiver on a thread of its own,
   apart from the RFB connection's, still lost 16–23% and ended the same way, so
-  the burst outruns the buffer however promptly it is read. Remotex asks for 4 MB
+  the burst outruns the buffer however promptly it is read. Alumia asks for 4 MB
   on the video's socket, and with it granted the same runs lost none, the receiver
   sharing the engine's thread. Linux grants no more than `net.core.rmem_max`, and
   the log warns when it grants less.
@@ -1055,19 +1217,54 @@ other failures (see [Liveness](#the-stream)).
 - **RTCP.** The viewer sends a receiver report on both legs every second. A PLI or
   FIR brings an IDR within about 30 ms. Besides sender and receiver reports, the
   Mac accepts a compound packet that starts with PT 192, 193, 204, 205 or 206.
+  - **The Mac drops a keyframe request made too soon.** It keeps the time of the
+    last keyframe it made, which starts at the stream's own start, and discards
+    a PLI or FIR that comes sooner after it than a least gap: 1 s for a stream
+    of one tile, 10 ms for one of more. It logs
+    `Request key frame too soon, discard` and sends nothing, and nothing later
+    makes up for the request.
   - **AVConference's FIR** has two forms, chosen by a per-stream setting: RFC
     5104's (PT 206, FMT 4) and its own PT 192. The PT 192 form is the sender's
     SSRC and a list of 16-bit values, not RFC 2032's FIR, which is what a
     published description calls it.
-  - **Remotex sends a PLI** after a loss, when a stream starts without an IDR
-    (the first packets can arrive before the socket is bound), and when the
-    decoder falls eight pictures behind, which it warns about; for a passed
-    stream, when the browser's link falls 15 behind and when the browser has to
-    start over. It also sends the rate reports described under
+  - **A loss can be mended without a keyframe.** The viewer acknowledges each
+    picture it has whole, with an APP packet alone in its datagram whose name
+    is the number 5 and whose four bytes are the picture's RTP timestamp, and
+    the Mac's encoder keeps the newest acknowledged picture as a long-term
+    reference. After a loss the viewer asks with payload-specific feedback of
+    format 2 (PT 206) carrying the stream's width and height as two `u16`s
+    after the two SSRCs. The Mac answers with a refresh picture: an ordinary
+    picture predicted from the acknowledged one, marked by the `0x9331`
+    profile, which a decoder that kept every acknowledged picture goes on
+    from. The pictures between the loss and it predict from what was lost.
+    Without an acknowledged picture the same request brings an IDR, as it did
+    3 s into a stream that had been acknowledged throughout; that IDR, and the
+    one a PT 192 request naming the size brings, came at about 27 KB where a
+    PLI's and an RFC 5104 FIR's came at about 110 KB, on a 1600×1000 display
+    the encoder had spent seconds refining. The request is subject to the
+    least gap above. A PLI and a FIR bring an IDR whatever was acknowledged.
+  - **Alumia acknowledges every picture it hands on,** to its decoder or to
+    the browser, and after lost packets asks for a refresh and drops pictures
+    until the marked one or an IDR. With 0.3% of the picture's packets dropped
+    on the way to a gateway decoding the stream, the Mac's encoder logged three
+    refreshes and no IDR after the stream's first, and no picture failed to
+    decode. A browser decoding a passed stream across a refresh has not been
+    watched.
+  - **Alumia sends a PLI** where whoever is shown the stream has nothing left
+    to predict from: when a stream starts without an IDR (the first packets
+    can arrive before the socket is bound), when a picture fails to decode,
+    when the decoder falls eight pictures behind, which it warns about, and
+    when a display comes back into view; for a passed stream, when the
+    browser's link falls 15 behind and when the browser has to start over. It
+    sends either request again every 500 ms until a picture it can go on from
+    arrives, since the Mac may have dropped it and a still screen sends
+    nothing else to show that. It also sends the rate reports described under
     [Rate control](#rate-control), every 50 ms on the picture's leg, as Apple's
     viewer does.
-- **Liveness.** Every offer owes its answer, its display's first picture and
-  the first sound packet within 10 s, and the running stream an authentic
+- **Liveness.** The `SetEncodings` naming 1010 owes message 1 within 10 s, and so
+  does a display that has settled without one. Every offer owes its answer, its
+  display's first picture and the first sound packet within 10 s, and the running
+  stream an authentic
   packet, SRTP or SRTCP, on each leg every 48 s, 16 of Apple's 3-second
   timeouts. Apple's viewer times each leg from the last RTCP packet it
   received, not from pictures, which a still screen stops. The Mac's
@@ -1078,7 +1275,10 @@ other failures (see [Liveness](#the-stream)).
   that cannot start or stops. A display change stops the stream and owes nothing
   until its own offer, except the answer to an offer still out. When the Mac
   names its ports and nothing arrives within 5 s, the log names the port and the
-  likely firewall or NAT.
+  likely firewall or NAT. An offer whose first picture never comes ends the
+  session saying what came instead: pictures of another size than the offered
+  display's, with both sizes; packets on the picture's leg that made no picture;
+  or nothing at all, which alone is put to a firewall or a NAT.
 
 ### Rate control
 
@@ -1137,7 +1337,7 @@ target, cap, measured bitrate, round-trip time, one-way delay and loss.
 - **Below the floor.** An offer capped under 20 Mbit/s pins the controller at
   its floor, and the encoder runs at the cap whatever is reported: an animating
   lock screen came at about 7 Mbit/s under an 8 Mbit/s cap.
-- **Remotex.** It offers Apple's entries unchanged and reports as Apple's viewer
+- **Alumia.** It offers Apple's entries unchanged and reports as Apple's viewer
   does: `RCTL` every 50 ms once a picture packet has arrived, the delay
   estimated as above from when the receiver reads each picture packet, loss 0
   and a bandwidth estimate of 60000 kbit/s, and the count and the delay starting
@@ -1146,8 +1346,8 @@ target, cap, measured bitrate, round-trip time, one-way delay and loss.
   and a passed one: what the browser's link does, the VP9 walk and the passed
   stream's queue answer, not the Mac's controller.
 - **Apple's viewer.** It offers up to 100 Mbit/s and four tiles, sends `RCTL`
-  every 50 ms, and acknowledges each decoded tile picture with a 4-byte APP
-  packet for the encoder's long-term references. On a quiet link its target sat
+  every 50 ms, and acknowledges each decoded tile picture for the encoder's
+  long-term references ([The stream](#the-stream)). On a quiet link its target sat
   at 58.4 Mbit/s with a round-trip time of about 1 ms. Its session was encrypted,
   so its reports were not read: the layout above comes from AVConference's code
   that builds and parses them, confirmed by a probe whose reports the Mac took as
@@ -1169,7 +1369,7 @@ link to a physical Mac has not been observed.
   - **The payloads.** The codec list does not choose the payload; field 4 of the
     offer's audio stream does. That field is a bitmask of the RTP payload types
     the viewer takes, one bit each. `0x1000` is 101, and the Mac's screen-sharing
-    sound prefers 101. Apple's viewer sends `0x5E7F` (24191), and so does remotex.
+    sound prefers 101. Apple's viewer sends `0x5E7F` (24191), and so does alumia.
   - **Not the rate.** The rate is the Mac's own: its screen-sharing sound
     configuration sets 320,000 bit/s whatever the offer says.
   - **A published description** reads field 4 as a bitrate the Mac picks a tier
@@ -1211,7 +1411,7 @@ link to a physical Mac has not been observed.
   on across it.
 - **The virtual Mac's sound fails on its own.** On the Apple Virtualization guest,
   a looping tone at a 2x display went distorted after about a minute and then
-  silent, and it did the same under Apple's own viewer. Remotex decoded it as it
+  silent, and it did the same under Apple's own viewer. Alumia decoded it as it
   came: 100 units a second, none concealed, the RMS falling while the peak held,
   then exact digital silence. That guest is laggy whenever it plays sound, so
   judge sound quality and performance on a physical Mac. The receiver's debug log
@@ -1223,11 +1423,33 @@ link to a physical Mac has not been observed.
 The Mac keeps answering `FramebufferUpdateRequest`s with RFB pixels for the region
 asked for, and pushes them unrequested inside the armed `AutoFrameBufferUpdate`
 region.
-Once a picture of the current size has arrived, remotex polls and arms one pixel.
+Once a picture of the current size has arrived, alumia polls and arms one pixel.
 That still brings every cursor shape and layout: 11 cursor shapes in 20 s of
 moving over a TextEdit window, with 123 bytes of zlib. A login once pushed a whole
-screen unasked, which is decoded to keep the deflate stream in step and not
-shown.
+screen unasked, which is stepped over like every rectangle of such a session.
+
+Once the first layout has arrived, a `SetEncodings` lists the media stream
+first and is held for the rest of the session, as Apple's viewer lists it for
+the whole of a High Performance session. The Mac's
+preferred codec is the first it knows in the list, and its framebuffer sender
+sends no pixels to a viewer whose preferred codec is the media stream: cursor
+shapes, layouts and message 1 still come. That keeps the Mac's two framing
+threads apart. Its sender frames updates under a lock, and the thread that reads
+the viewer's messages frames the answer to an offer without it; a record from
+each at once fails the record layer's integrity check and ends the session, the
+answer carrying the trailer of the record before it. `SetEncodings` is acted on
+under that lock, so an update being written is out before the first offer is
+read, and none follows it or any later offer, across display changes too.
+From that list on alumia asks for and arms one pixel, so the Mac is left
+holding no request for a display that may have shrunk,
+and a resize goes out as it falls due: the update a resize otherwise waits for
+never comes from a Mac that sends no pixels.
+A cursor change can still meet the answer, as it can for Apple's viewer.
+
+The Mac counts the media stream as a codec only in its Apple silicon build: the
+Intel slice of the same daemon never prefers it. A record that fails its check
+is reported with its number, its size, and whether its trailer is a neighbouring
+record's, which is what a number drawn twice leaves.
 
 This also ends the input freeze behind a playing video. With the gateway capped at
 15% of a core, the Mac's receive queue of our input was empty in 64 of 68
@@ -1239,17 +1461,22 @@ went unread for 5–19 s at a time
 
 Every display change stops both legs, so the sound drops out with the picture
 until the new stream starts. The Mac then re-sends message 1 on its own,
-with no stream behind it. A new offer after the new layout starts a new stream on
-the same ports, under a new SSRC, with an IDR at the new size. Remotex offers once
-the display has settled, and the resize's cover stays up until that IDR is on its
-way to the browser.
+with no stream behind it. The offer it allows starts a new stream on the same
+ports, under a new SSRC, with an IDR at the new size. Alumia offers once message
+1 has come and the display has settled. The resize's cover comes down when the
+display settles, and `screenUnavailable` holds the page at "Screen not
+available", with no input sent to the Mac, until that IDR is on its way to
+the browser. Any rectangle the Mac sends meanwhile is stepped over.
 
-An offer's two replies come in either order: message 1, which names the ports,
-ahead of message 2, the answer, or behind it. Remotex once read ports behind the
-answer as the unasked announcement above, took the stream down and offered
-again; the Mac answered that offer with no ports, having named them once, and
-the session ended ten seconds later. In eleven High Performance sessions opened
-right after a mirror session, the Mac sent the answer first in two.
+Alumia once sent the `SetEncodings` and the offer together, and their two
+replies then came in either order: message 1, which names the ports, ahead of
+message 2, the answer, or behind it. In eleven High Performance sessions opened
+right after a mirror session, the Mac sent the answer first in two. Ports
+behind the answer, read as the unasked announcement above, took the stream
+down, and the offer made in its place was answered with no ports, the Mac
+having named them once; the session ended ten seconds later. The offer now
+waits for message 1, so ports named while a stream is offered are always the
+announcement of a change.
 
 ### The stream on the physical displays
 
@@ -1274,21 +1501,88 @@ attached. This is what `ard-mirror` rests on.
   and the picture went on.
 - **Rate.** The MacBook's 5120×2880 screen came at 33 to 38 pictures a second.
 
-Because the Mac will not reduce it, remotex does: each decoded picture is
+Because the Mac will not reduce it, alumia does: each decoded picture is
 resampled to the viewer's window and the video ceiling before it is encoded
 (`video::fit_within`, `video::Reducer`), and the pointer is mapped back to the
 screen's pixels. Reducing one 5120×2880 picture took 10.2 ms to 3840×2160,
 5.6 ms to 2560×1440 and 5.8 ms to 1920×1080 on an M3 Max with the work spread
 over its cores, and 61 ms on one core. A passed stream is not touched.
 
+A phone reports no window, and its browser fits the picture to its width. It is
+sent the picture no wider than its screen is long, in its own pixels, which is
+all it shows across however it is held: a 5120×2880 screen reaches a phone of
+1170×2532 pixels as 2532×1424. Until 0.1.1 only the ceiling held it, at
+3840×2160, and a phone on such a session painted the picture tens of seconds
+late and lost its connection
+(what was found).
+
 A mirror session arms the Mac's pushes as a High Performance one does, at one a
 second (`PUSH_INTERVAL_MEDIA_US`): its picture is the stream's, and its pixel
 region is held to one pixel once the stream is up.
 
-Not measured: a Mac with more than one display attached. Until it is, a mirror
-session composes no mosaic for All Displays over mixed densities, whose regions
-are in the Mac's pixels and not the reduced picture's: the stream's picture is
-shown as it came.
+**With more than one display attached, the stream is the main display's.**
+Measured on 2026-10-04 against macOS 27, a MacBook Pro with its lid open beside a
+Studio Display, from the Mac's own log of three mirror sessions
+(`/usr/bin/log show`, as under [Reproducing any of this](#reproducing-any-of-this),
+with `avconferenced` added to the predicate):
+
+- **The layout** is the combined view of both, an 8448×3600 framebuffer: the
+  Studio Display, the main one, 3200×1800 points at 2x, at the origin, and the
+  built-in display, 2048×1330 at 1x, to its left (`left -2048 top 470`).
+- **The stream** is one display's, not the framebuffer's: the agent logged
+  `display1 displayID = 0`, `displayID to capture 0` and `stream 1 width 6400
+  height 3600`, and the encoder opened at 6400×3600. Display 0 is the main one.
+  With the lid closed the same Mac has one 5120×2880 display, and
+  `stream 1 width 5120 height 2880`. A High Performance session logs the virtual
+  display's id there (`displayID to capture 26`): the Mac picks the display, and
+  nothing this client sent named it.
+- **Its rate** at that size is the Mac's to bound: `stream 1 raw frame rate
+  21.6`, from an encoder throughput of 497,664,000 pixels a second.
+
+So a mirror session on a Mac whose layout is the combined view of several
+displays is its main display's (`Layout::streamed`, `DesktopState::streamed`):
+the stream is offered for that display's pixels, its pictures are the ones taken
+and reduced, and a pointer position is moved by where that display sits in the
+framebuffer, counted from the least edge of them all, as the mosaic's regions
+are. The framebuffer stays what rectangles, pixel requests and the arming are
+in. The session lists the Mac's displays with the mark on the main one, sends no
+`SetDisplay`, and composes no mosaic. Before this, the stream was offered for
+the framebuffer's 8448×3600, every 6400×3600 picture was dropped as another
+display's, and the session ended on the first-picture deadline.
+
+**A `SetDisplay` does not move the stream.** Measured on 2026-10-08 against
+macOS 27, the same MacBook Pro with its lid open beside the Studio Display, from
+three mirror sessions driven by a test gateway of this repository and read in
+the Mac's log (the predicate above with `avconferenced` added):
+
+- The Mac takes the request: `start HandleSetDisplayMessage`, `set display index
+  to 1`, `do not combine. display count 2 displayid 1`, and answers with the
+  layout of that display alone (2048×1330 at 1x, `current` set), which the
+  gateway applied as a resize.
+- The stream it has goes on carrying display 0: with the stream left running
+  across the change, 498 pictures of 6400×3600 arrived in the 18 s after the
+  request and none of 2048×1330.
+- A stream offered again for the chosen display, on the ports the Mac had
+  named, is accepted (`the Mac accepted the media-stream offer`) and restarted
+  on display 0 all the same: `display1 displayID = 0`, `stream 1 width 6400
+  height 3600`, `displayID to capture 0`, `displayIDToShare 0`, and 254
+  pictures of 6400×3600 in the 10 s the gateway gave it before ending the
+  session for pictures of the wrong size.
+- Stopping the stream and waiting for the Mac to name its ports again, as the
+  gateway does for a virtual display's change, ends the session: the Mac names
+  none within 10 s.
+
+So the picture of a mirror session is the main display's whatever is asked, the
+Mac's own answer to the layout notwithstanding. The gateway therefore lists the
+displays and drops a selection, and the page shows the other displays as the
+ones a Mirrored session cannot switch to and says why, naming the way to one of
+them: the Mac's Virtual mode.
+
+Not measured: the pointer in such a session on a real Mac, whose display left of
+the main one puts the main display's pixels off the framebuffer's corner (the
+arithmetic is the mosaic's, measured for Standard on macOS 26 with positive edges
+only); the second video leg the `0x1c` message has room for; and more than two
+displays.
 
 The first session after the gateway starts has the decoder fall eight pictures
 behind in its first second on the 5120×2880 screen, which drops a picture and
@@ -1301,7 +1595,7 @@ stayed still until the session was started again: see
 
 The media stream runs between the two addresses of the RFB connection, on one
 port number at both ends: the Mac's `avconferenced` binds its address and
-connects to the viewer's (`192.168.1.13:5901->192.168.1.171:5901` in `lsof`
+connects to the viewer's (`mac-mini.lan:5901->mac-do-gateway.lan:5901` in `lsof`
 during a session), and the gateway does the mirror image. A gateway that
 dials `127.0.0.1` on the Mac it runs on has both ends at `127.0.0.1:5901`, and
 the two ask for one and the same UDP association. Measured on macOS 27 with two
@@ -1369,9 +1663,10 @@ picture then took 12 ms.
 ### Reaching the gateway
 
 The Mac sends from its own address to the viewer's address on the TCP connection,
-so a NAT between them has to pass it. The viewer's reports go out from the same
+from each port it named to the same port number at the viewer, so a NAT between
+them has to pass it. The viewer's reports go out from the same
 ports every second, which opens a port-preserving NAT's mapping. Every Mac uses the
-same port numbers, so remotex binds them with address and port reuse and connects
+same port numbers, so alumia binds them with address and port reuse and connects
 each socket to its Mac. Several gateways on one host can then share the numbers,
 unless one of them bound without reuse, as v0.0.249 did. Nothing arriving within
 5 s of message 1 is logged, and the session ends when the offer's first picture
@@ -1382,15 +1677,19 @@ is 10 s overdue.
 - **`0x3f3`'s DCT tiles:** how their coefficients, and a partial update's
   refinements, are coded
   ([Apple's own framebuffer encodings](#apples-own-framebuffer-encodings)).
-- **Other login types:** type 35's Kerberos tokens, and which form of type 33
-  Apple's viewer sends ([Other login types](#other-login-types)).
+- **Other login types:** type 35's Kerberos tokens
+  ([Other login types](#other-login-types)).
 - **Rate control's loose ends**: the second byte of `RCTL`, whether loss lowers
   the target over longer than 30 s, and whether any offer field lowers the
   20 Mbit/s floor ([Rate control](#rate-control)).
-- **Four-tile frames**: how Apple's viewer places each strip.
+- **Four-tile frames**: how tall each strip is, and whether one strip's
+  pictures predict from another's.
 - **Cases the test Mac could not show:**
   - a non-console user;
-  - the media stream on physical displays when more than one is attached;
+  - the media stream on physical displays when more than one is attached, past
+    what [The stream on the physical displays](#the-stream-on-the-physical-displays)
+    measured: the pointer, a selected display, the second video leg, and three
+    displays or more;
   - hardware mirroring;
   - a display record whose density is 0.0.
 

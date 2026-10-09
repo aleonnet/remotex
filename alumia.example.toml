@@ -1,0 +1,684 @@
+# alumia configuration example
+#
+# Copy this tracked template before adding credentials; in a checkout:
+#
+#   cp alumia.example.toml alumia.toml
+#
+# Pass that copy explicitly, for example `cargo run -- serve --config alumia.toml`.
+# The config is global-only: --config <path> if given, else the installed global config
+# (/etc/alumia/alumia.toml from a Linux package,
+# /usr/local/etc/alumia/alumia.toml from the macOS package, or
+# %ProgramData%\alumia\alumia.toml from the Windows package; the container uses
+# /opt/alumia/etc/alumia.toml). There are no per-user or
+# working-directory files. The listen address below is the one setting that can
+# also come from outside this file (--listen, or ALUMIA_LISTEN); everything
+# else, credentials included, is configured here. Keep this file readable only
+# by the service user — it holds credentials.
+#
+#   chmod 600 alumia.toml
+#
+# This is a served gateway's file.
+
+# What this gateway calls itself, and the icon it shows. Top-level rather than
+# under [server]: it names the deployment rather than the server, and one value
+# with two spellings is one of them going stale.
+#
+# text is the login screen, the interstitials, and the browser tab title;
+# defaults to "alumia". logo is the page's tab icon; without it the page keeps
+# no icon.
+#
+#[branding]
+#text = "alumia"
+#logo = "/path/to/logo.png"
+#
+# A logo is either a path to an image file (.png, .ico, .svg, .jpg, .gif or
+# .webp), or the image itself as a data: URL, for a config with nowhere to put a
+# file beside it. Produce one with:
+#
+#   printf 'data:image/png;base64,%s\n' "$(base64 < logo.png)"
+#
+# Line breaks inside the base64 are ignored, so a wrapped blob can go straight
+# into a TOML multi-line string:
+#
+#[branding]
+#logo = """
+#data:image/png;base64,
+#iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mP8z8BQ
+#DwAEhQGAhKmMIQAAAABJRU5ErkJggg==
+#"""
+
+# Throughput of the browser's WebSockets (/ws, /ws/audio, /ws/camera, /ws/mic),
+# kept in an SQLite database and shown by the page's "Throughput" view, which
+# reads it when opened. Only the hop between the browser and this gateway is
+# counted: the bytes of every text and binary frame, WebSocket headers included,
+# written to the browser (sent) and read from it (received).
+#
+# Bytes are grouped by the target the session had selected when they moved, and
+# by "no target" while the browser sits on the picker. The meter reads the
+# counters once a second, and every minute one record is added per target and
+# socket that moved data in that minute — an idle socket adds none — in one
+# transaction, carrying the minute's bytes, its busiest second and each second of
+# it that moved. A second that moved nothing is not stored. The second is the
+# meter's resolution and the minute is only how often it reaches the disk;
+# neither is configurable. Each target's socket keeps its newest max_records
+# records, so the default is a week of minutes for a socket busy all week. Best
+# effort: the minute being counted when the gateway stops is lost.
+#
+# enabled is the switch, and a [meter] table must say it either way: the other
+# keys are the settings and are checked either way too, so a table can keep them
+# while it is off. Without a [meter] table, nothing is recorded.
+#
+# The database is meter.sqlite3 in the gateway's state directory unless database
+# names another file; a relative path is taken from that directory too. The state
+# directory is /var/lib/alumia for the Linux packages, /usr/local/var/alumia for
+# the macOS package, %ProgramData%\alumia on Windows, /opt/alumia/var in the
+# container, and the instance directory under `alumia tui`. A config named with --config keeps it in the config's own
+# directory. The directory must be writable: SQLite keeps its -wal and -shm files
+# beside the database.
+#
+#[meter]
+#enabled = true
+#database = "meter.sqlite3"
+#max_records = 10080
+
+# BETA: the page's software HEVC decoder, for a browser whose own
+# VideoDecoder refuses a High Performance Mac's 4:4:4 picture passed through
+# — Chrome on a GPU without HEVC Range Extensions, for one. It is
+# andrewtheguy/hevc-wasm's decoder compiled to WebAssembly, whose licence keeps
+# it out of every alumia build as the native decoder's keeps that out: download
+# the release this gateway pins from the private andrewtheguy/hevc-wasm-archives,
+#
+#   gh release download v0.0.3 --repo andrewtheguy/hevc-wasm-archives \
+#     --pattern hevc-wasm-v0.0.3.tar.gz
+#
+# as it is, into share/alumia in the gateway's release tree, beside the
+# share/doc/alumia that holds this file: /usr/share/alumia for the .deb and
+# .rpm, /usr/local/share/alumia for the macOS .pkg, share\alumia under the
+# .msi's install directory (C:\Program Files\alumia\share\alumia), and
+# /opt/alumia/current/share/alumia in the
+# container image. It belongs to the binary, not to the state directory: it is
+# pinned to this version, so an upgrade that pins another release wants that one
+# beside it. A gateway run from a Cargo build looks in its config's directory.
+# A gateway that finds the archive there serves the decoder, with nothing set
+# here; one that does not serves none. It reads the archive itself, at start-up,
+# and refuses to start unless it is exactly that release. This table is only for
+# an archive kept elsewhere: archive names the file, a relative path is taken
+# from that same directory, and a gateway that cannot read the file it was told
+# of refuses to start. Every page is cross-origin isolated for the graphics
+# compositor's threads; the decoder's threads require that isolation too.
+#
+#[hevc_wasm]
+#archive = "/srv/alumia/hevc-wasm-v0.0.3.tar.gz"
+
+# On Windows, the folder an `ard-high-performance` target's HEVC decoder is
+# loaded from: FFmpeg's avcodec and avutil DLLs. With nothing set here the
+# gateway looks for them when a session needs them, beside alumia.exe and on
+# PATH, which is where the recommended install puts them. This table is the override for any other install: the
+# key names a folder by its whole path, and that folder is then the only place
+# the decoder is loaded from. The gateway loads it at start-up, and refuses to
+# start if it is not there. A gateway on another platform refuses the table: its
+# system loader has a search of its own. See docs/high-performance-decoder.md.
+#
+#[hp_decoders]
+#ffmpeg_dir = 'C:\ffmpeg\bin'
+
+[server]
+# Listen address for the web UI, host:port (optional; default shown). One key,
+# because it is one decision — a host without a port is half an answer.
+#
+# --listen (or ALUMIA_LISTEN in the environment) overrides this, whole: the
+# command line cannot supply one half and leave the other to this file. Bracket
+# an IPv6 literal, as in "[::1]:52380". A container publishing this port wants
+# "0.0.0.0:52380".
+#listen = "127.0.0.1:52380"
+
+# The other form is a Unix socket, for a gateway that answers a reverse proxy on
+# this machine and nothing else. Everything after "unix:" is the path, so a file
+# name is never parsed for a port:
+#
+#listen = "unix:/run/alumia/gateway.sock"
+#
+# The socket is created 0660 — owner and group, so the proxy's user reaches it by
+# sharing the group and no other local account reaches it at all, which is the
+# only reason to prefer one to a loopback port. Arrange the directory to match.
+# A socket left behind by a gateway that was killed is taken over on the next
+# start; one that something is still serving refuses the start instead.
+#
+# A browser cannot use this form. The client addresses its gateway by URL — one
+# HTTP origin and up to four WebSockets — so whatever terminates the proxy is what it
+# talks to.
+# Web login (required): username:bcrypt_hash guarding the whole surface.
+# Generate with:  alumia gen-passwd <username>
+site_passwd = ""
+
+# DEVELOPMENT ONLY, and inert in any deployment. Gives this gateway its own
+# hostname on loopback: a browser opening the home page under *any* loopback name
+# that is not this one — 127.0.0.1, ::1, anything in 127/8, localhost, the bare
+# alumia.localhost, or another gateway's <other>.alumia.localhost — is redirected
+# to http://<label>.alumia.localhost:<port>/, keeping the port. The port decides
+# which gateway answers, and that gateway names itself, so http://127.0.0.1:52676/
+# lands on the label configured *here*.
+#
+# Redirecting a mismatched .localhost name matters as much as redirecting a bare
+# address: reaching this gateway at another one's hostname would put this session's
+# cookie under that name, which is the collision below, arrived at by editing the
+# port in the URL bar and not the label.
+#
+# Only the home page is redirected, and only when the request itself arrived on a
+# loopback name — a gateway reached under a real hostname or address ignores this
+# however it is set.
+#
+# It solves one problem: a cookie is scoped by host and ignores the port, so two
+# gateways on one machine share one session cookie and each login silently evicts
+# the other. Every name under .localhost resolves to loopback without DNS
+# (RFC 6761) and is a distinct cookie origin, so two gateways become two
+# independent logins in one browser. Running two gateways against one target is
+# the only way to test session takeover, which is why this exists at all. The
+# names hang off .alumia.localhost so they are one suffix to recognise in a
+# browser's history and to clear cookies for, and so no bare label this project
+# hands out can collide with whatever else already answers on this machine.
+#
+# One DNS label: letters, digits and inner hyphens, no dots.
+#dev_subdomain = "gw-a"
+
+# Target profiles (at least one required). Each needs a unique name. Every
+# profile is served; the browser picks one from a picker after login (there is
+# no --target selector).
+#
+# Three things about a session are not keys here. Whoever starts it chooses its
+# size and its sound at the picker, by the keys of the computer's line, and Open
+# connects with what is chosen; a passthrough is asked for by the page's address
+# (`?passthrough=1`). They hold for the life of the session — a browser
+# that takes it over gets it as it was started — and the browser remembers them
+# per target for the next time. Which a target shows is its type's to say:
+#
+#   target                           window   sound            passthrough
+#   rdp                              yes      shown            shown
+#   vnc                              —        —                —
+#   vnc, wlshare                     yes      shown            —
+#   vnc, ard                         —        —                —
+#   vnc, ard with virtual_display    yes      —                —
+#   vnc, ard-high-performance        yes      always carried   shown
+#   vnc, ard-mirror                  yes      always carried   shown
+#
+# Size is how the desktop is sized, and the picker shows it before Open. A
+# desktop either keeps one size for the session — the target's `size` below, or
+# 1440×900 where it sets none — or follows the client's window, which then
+# reports every window change. "window" above says which targets can follow one:
+#
+#   - A target that cannot keeps its size, on every client.
+#   - One that can is offered the window by a desktop browser or a tablet, and
+#     its `size` beside that where it sets one. With no `size` it follows the
+#     window. A tablet's window is its screen, asked for once in landscape.
+#   - A phone is never offered its window, which is no desktop's shape: it is
+#     offered the target's `size` and the 1440×900 default, or the default alone.
+#
+# A plain "vnc" target keeps its size: whether its server takes one is known only
+# once it is dialled, which is too late for the picker to offer the window.
+# Standard Apple `ard` shares physical displays, shown as they are, unless the
+# unofficial `virtual_display = true` below puts it on a virtual one. Apple
+# `ard-high-performance` uses Apple's dynamic-resolution feature to replace its
+# one virtual display's configuration with arbitrary viewport sizes within its
+# fixed 3840×2160 backing ceiling. The unofficial `ard-mirror` shares the
+# physical displays too and leaves them as they are: there the window sizes the
+# picture the gateway shows, not the Mac's screen. An "rdp" desktop is resized through its
+# graphics pipeline, so `egfx = false` leaves it at the size it keeps.
+#
+# Sound takes the remote's sound, as Opus or FLAC. An "rdp" target negotiates
+# sound redirection (MS-RDPEA) when it connects, as 44100 Hz 16-bit stereo PCM,
+# and a Windows host sends nothing on the channel until something plays. A
+# "wlshare" target lists wlshare's audio extension. Started with it off, neither
+# is asked, and the host keeps playing where it did.
+#
+# Opus is sent at the rates the audio keys below hold. FLAC is lossless,
+# and the page decodes it in a WebAssembly module of its own: a "wlshare"
+# target's sound is coded by wlshare in whichever format was chosen and passed to
+# the browser as it came, so the gateway codes none of it, and an "rdp" target's
+# PCM is coded here, as FLAC by libFLAC. Music is roughly a megabit a second,
+# with no adaptive walk: for a link with room.
+#
+# A plain "vnc" target carries no sound, and neither does "ard": Standard mode leaves the Mac's sound output alone, playing on the
+# Mac or to whatever AirPlay receiver it picks. An "ard-high-performance" or
+# "ard-mirror" session
+# always carries sound, which the Mac sends beside its picture, so there is
+# nothing to choose. In the session, the bar's Mute changes
+# only whether this browser is listening.
+#
+# Passthrough sends the remote's own stream to the browser as it came, for a LAN:
+# an "rdp" host's graphics pipeline for the page to compose, or an
+# "ard-high-performance" or "ard-mirror" Mac's HEVC. Each is described with its
+# target below. It is not sent where the browser cannot take the stream, which
+# the computer's line then says, and a browser that cannot take a session somebody else started with it is shown
+# why and offered End, not a different session.
+[[targets]]
+name = "example"
+protocol = "rdp"           # required: "rdp" or "vnc"
+# Which flavour of that protocol the far end is, where a protocol has more than
+# one. Only "vnc" has any: "wlshare" for a wlshare server, and "ard",
+# "ard-high-performance" and "ard-mirror" for macOS Screen Sharing (see the
+# targets below).
+#subtype = "ard"
+host = "192.0.2.10"
+# Default: the protocol's standard port (3389 rdp, 5900 vnc).
+#port = 3389
+
+# Credentials (used server-side only; never sent to the browser).
+username = "Administrator"
+password = "change-me"
+# A VNC server's own password (RFB VncAuth) — a separate key because it is a
+# separate credential: it proves knowledge of a machine secret and names nobody.
+# VNC only, rejected elsewhere. See the VNC target below.
+#vnc_password = "change-me"
+# Optional domain (leave unset for a local account). RDP only, rejected elsewhere.
+#domain = ""
+
+# Optional size the desktop is kept at, as "WIDTHxHEIGHT". Without it a kept
+# desktop is 1440×900.
+#
+# RDP connects at the size, "ard-high-performance" creates its virtual display at
+# it, and a plain or wlshare VNC server is asked for it once, as soon as it
+# declares SetDesktopSize support; a server that never does, or refuses, keeps
+# its own. Refused on `subtype = "ard"` without `virtual_display` and on
+# "ard-mirror", which show the Mac's physical displays as they are. A Mac's virtual display takes at most
+# "1920x1080", the points its 3840×2160 backing ceiling holds on a Retina client.
+#
+# A session that follows the client's window does not use it: that one opens at
+# the full resolution of the connecting client's own screen and then takes the
+# window's size. Where the window can be followed, the picker offers this size
+# beside it, and the size is what is chosen until somebody picks the window.
+#
+# These are points, not backing pixels. An RDP session at a kept size leaves the
+# host at its own scaling, as Microsoft's client on a Mac does with "Optimize for
+# Retina displays" unchecked; only one that follows the window renders at the
+# client's density, where a Retina client asks for twice the pixels. A High Performance Mac opens at the
+# connecting client's density whatever the size, as Apple's Screen Sharing does.
+#size = "1920x1080"
+
+# RDP graphics pipeline (MS-RDPEGFX), on by default. On, a Windows host draws the
+# desktop through the pipeline's surfaces and marks every frame, and each resize
+# is a graphics reset, cheap enough for the window to drive continuously. Off, the
+# host draws with bitmap updates and the desktop keeps its size — the
+# picker then offers neither the window nor the pipeline's passthrough; that is the
+# escape hatch for a host whose pipeline the decoders cannot paint. RDP only, and
+# refused on VNC even when set to false.
+#
+# With the pipeline on, the page's address can ask for it to be passed to the
+# browser (`?passthrough=1`), which composes it, rather than composing the
+# desktop here and encoding it as VP9. For
+# a LAN: what the host draws with is sent as it is, with no quality walk behind
+# it, so the video keys further down reach nothing of it. It takes the encoding
+# and the decoding off the gateway — a few percent of a core are left, whatever
+# the desktop is doing — and puts the decoding on the browser, where a desktop in
+# ordinary use is light and a full-screen video is about as much as one browser
+# thread composes. A page that reloads or reconnects is logged on to the host's
+# session again rather than resumed, since the host draws against what its client
+# already holds. The page needs WebGL 2 and to be cross-origin isolated, which
+# every gateway makes it and a proxy that drops the two headers undoes.
+# The compositor is the gateway's own and is tested as it is there,
+# and what is passed is checked against a real host, in a headless browser and by
+# hand. That is a physical Windows 11 computer, from a desktop browser and from a
+# mobile browser on iOS, with sound and the clipboard beside it; `camera` and `microphone`
+# beside it have not been tried.
+#egfx = true
+
+# EXPERIMENTAL. Let the host draw with H.264 on a pipeline that is passed to the
+# browser. A Windows host then hands the parts of the desktop that move like
+# video — a player, a scrolling page — to H.264 and draws the rest as before,
+# which is its own trade of detail for bitrate on those parts: without this key
+# everything a passed pipeline carries is lossless. The gateway decodes nothing;
+# the browser decodes the video with its own decoder and paints it through the
+# same compositor. It reaches only a session started with the passthrough, in a
+# browser that decodes H.264: any other session is as it was without the key.
+# Checked against one Windows 11 host without a GPU. RDP only, and refused beside
+# `egfx = false`.
+#egfx_h264 = true
+
+# ALPHA. Ask the host for this many virtual displays, each the session's size.
+# Where the second sits against the first is chosen on the computer's line in
+# the list, on an rdp target: right, left, above or below. The session starts on
+# the Screens sheet's All screens, the first display on the page and the second a
+# link away in a tab of its own; the sheet shows either alone, and
+# the gateway encodes only what is shown; the host renders the other for the
+# windows left on it. 1 is the one desktop every target opens; at most 2. RDP
+# and `subtype = "ard-high-performance"` — the key is shared by the target types
+# that can create virtual displays, and refused elsewhere. On RDP the pipeline's
+# passthrough is offered beside 2 as beside 1: the browser composes the whole
+# span once and shows one display of it, and the second display's tab is painted
+# from the same picture; a Mac sends each display as a stream of its own (the
+# second to UDP port 5902), passed or not. Checked against one Windows 11 host
+# and one virtual Mac; the passed span on the Windows host by a headless
+# browser's sockets only, not yet by eye. The second display's tab, which the
+# Screens sheet links to on All screens, is for a client with two physical displays: a
+# client with one leaves it unopened, and it is not supported on a phone or
+# tablet, though nothing there stops anyone opening it.
+#virtual_displays = 2
+
+# The clipboard has no key: every target shares its clipboard with the browser.
+# Copying on the remote pushes the text out, and your local clipboard is sent
+# back whenever the tab regains focus — where the browser permits it, which
+# needs HTTPS or localhost, since a plain-HTTP page has no clipboard access at
+# all. The clipboard sheet works regardless, and is the way to move text when
+# automatic sync cannot run.
+# RDP carries Unicode text over MS-RDPECLIP. Both directions of that protocol are
+# lazy — a copy announces the formats it can be had in and the bytes follow on
+# request — which the gateway hides: a copy on the remote is fetched at once, and a
+# copy here is handed over when the remote pastes.
+# VNC carries full Unicode text on servers
+# implementing the Extended Clipboard extension (TigerVNC does); on servers that
+# do not (TightVNC), RFB falls back to latin-1 and anything outside it becomes "?".
+# A plain VNC server with no clipboard at all cannot say so; the clipboard sheet
+# notes when one has shown no sign of having it.
+# Every Apple subtype uses the Mac's native UTF-8 pasteboard protocol, carrying
+# its fetches and data inside the encrypted record transport.
+
+# The remote's sound, in a session started with it as Opus, is sent in 20 ms
+# packets. The channel has to be negotiated when the connection is made, so such
+# a session asks the server to redirect from the moment it connects and throws
+# the sound away while nobody is listening. Nothing about it depends on how the
+# page is reached: the client refuses to start at all without a secure context
+# and a pair of WebCodecs decoders.
+#
+# This is its bitrate on a link that can carry it, in kbit/s, 6–510. The default
+# is 96: well clear of where stereo Opus starts to be audibly lossy. Like
+# `video_quality` it is a ceiling, not a promise — and an average, not a packet
+# size: Opus is variable-rate, so silence costs a few bytes a packet and music
+# about this. Valid on a target whose sound is Opus at a rate the gateway
+# chooses — "rdp", encoded here, and "wlshare", which encodes its own at the
+# rate the gateway tells it — and refused rather than ignored on one that has
+# none, and on "ard-high-performance", whose sound is passed as the Mac's own
+# AAC-ELD.
+#audio_bitrate = 96
+
+# Let that bitrate follow the audio socket's own backpressure — on by default,
+# like `render_adaptive`. Sustained slow sends walk the bitrate down, sustained
+# clear sends walk it back up to `audio_bitrate`, and, where the sound is
+# encoded here, silence is shed while the link is behind so old sound does not
+# accumulate; a "wlshare" target's packets are passed as they came, and only the
+# rate moves. Where the walk stops giving rate up is built into the sound
+# coding, as in every adaptive stream, so there is no floor to set: 32 kbit/s,
+# degraded but continuous, which is the point of giving bitrate up; a lower
+# `audio_bitrate` is simply held. `false` holds `audio_bitrate` whatever the
+# link does. Either value is refused on a target without such sound.
+#audio_adaptive = true
+
+# Camera redirection: offer the remote a virtual webcam whose frames are this
+# browser's, over MS-RDPECAM on "rdp" — or, on a "wlshare" target, over
+# wlshare's camera extension, which makes it a PipeWire camera on the wlroots
+# desktop (see docs/wlshare-camera.md). The rest of this note is about RDP.
+# EXPERIMENTAL. The socket's rules, its messages, and both channel wires are
+# checked, and the wlshare path has container coverage. Only a Windows host that
+# creates the camera enumeration channel has anywhere to test the RDP path: a
+# workstation, or a Windows Server carrying the Remote Desktop Session Host role.
+# `a_real_host_streams_the_camera` carries H.264 frames to such a host, but it is
+# ignored by default and does not check the pixels the host displays. The RDP
+# picture is verified by hand against such a host.
+#
+# Capability only. The device appears when a client turns the camera on from the
+# session bar's menu — explicitly, per session, never remembered — and is unplugged
+# when that client closes it, the session changes hands, or the engine ends. The
+# browser encodes H.264 and the gateway passes it through untranscoded, so there
+# is no codec key beside this one. Apple's Screen Sharing and a plain "vnc"
+# server have nowhere to put a camera, so those targets refuse the key rather
+# than ignoring it. A Windows Server without the
+# RDSH role never creates the enumeration channel, so an enabled camera against
+# one is simply never asked for a frame.
+#camera = false
+
+# Microphone redirection: offer the remote this browser's microphone over
+# MS-RDPEAI on "rdp" — or, on a "wlshare" target, over wlshare's microphone
+# extension, which makes it a PipeWire audio source on the wlroots desktop (see
+# docs/wlshare-microphone.md). EXPERIMENTAL, like `camera`. Capability only: the recording
+# device is fed when a client turns the microphone on from the session bar's menu —
+# per session, never remembered. The browser sends mono speech Opus at a fixed
+# low bitrate and the gateway decodes it to the PCM the host records in, so there
+# is no codec or quality key beside this one. The host starts recording only
+# once an application on it does. An Apple target and a plain "vnc" target
+# refuse the key.
+#microphone = false
+
+# A plain VNC target needs host and, usually, one of the two passwords; domain is
+# refused, and it is asked once for `size`, or 1440×900, as above.
+# `vnc_password` is the server's own password and is all a server without user
+# accounts takes. It is the RFB baseline: the picture comes as ZRLE and is encoded
+# here, shown at 1x, with no sound, camera or microphone.
+# [[targets]]
+# name = "workstation-vnc"
+# protocol = "vnc"
+# host = "10.0.0.2"
+# vnc_password = "change-me"
+
+# A wlroots-based Wayland desktop behind the wlshare VNC server says so with
+# `subtype = "wlshare"`, which makes the gateway list wlshare's extensions: its own
+# VP9 stream, passed to the browser untouched; its pixel density, so a `scale 2`
+# output is shown at 2x and a window it follows is asked for in points × scale; its
+# output list; its sound, in a session started with it; and, with the keys above,
+# the camera and the microphone.
+# Without the subtype the same server is a plain target, read as any VNC server
+# is. With a username and password, wlshare checks the account it runs as through
+# PAM over RSA-AES, encrypting the session; a password_file on the server is its
+# VNC password instead, which goes in vnc_password. See docs/wlshare-density.md.
+# [[targets]]
+# name = "workstation-wayland"
+# protocol = "vnc"
+# subtype = "wlshare"
+# host = "127.0.0.1"
+# username = "me"
+# password = "that-account's-password"
+
+# A Mac uses its built-in Screen Sharing service through this same path, with no
+# additional software — say so with a subtype, and give it an *account* rather than
+# the Screen Sharing password. Apple's DH authentication is the only way to tell a
+# Mac who is connecting, and macOS answers a viewer that names nobody by creating a
+# new login window on a virtual display instead of sharing its screen. So every
+# Apple subtype requires username and password (that account's) and takes no
+# vnc_password. Size is where they part: `ard` has none to set, because it shares
+# the Mac's physical displays, while "ard-high-performance" sizes the one
+# virtual display it makes, by `size` or by the window; the unofficial `virtual_display = true` gives `ard`
+# that display too, and the unofficial "ard-mirror" has none to set either. A
+# third-party VNC server that happens to run on a Mac is not
+# this: it is a plain "vnc" target.
+#
+# All speak the protocol revision Apple's own viewer answers every Mac with, and
+# nothing in it is documented by Apple: the revision, its record layer and its
+# control messages were all reverse engineered, and are only as correct as the
+# Macs they have been measured against. A macOS update is free to change any of it.
+#
+# `subtype = "ard"` is Standard screen sharing: the Mac's physical display list and
+# native pasteboard, with one framebuffer holding every attached display at once,
+# sent as ZRLE rectangles.
+# [[targets]]
+# name = "mac-screen-sharing"
+# protocol = "vnc"
+# subtype = "ard"
+# host = "10.0.0.3"
+# username = "andrew"
+# password = "the-account-password"
+
+# UNOFFICIAL: `virtual_display = true` opens that same Standard session on one
+# virtual display instead of the Mac's physical ones. The display is High
+# Performance's — created at the size the session keeps or at the client's screen,
+# at its density, the physical displays disabled meanwhile, and in a session
+# started with resize replaced from every viewport report — and everything else
+# is `ard`'s:
+# the ZRLE picture, the native pasteboard, no sound, no media stream offered and
+# no decoders needed, so it runs in every build. Apple's own viewer never offers
+# a virtual display without the media stream, so nothing but alumia has
+# exercised the Mac's side of this; it was tested against macOS 26 only, and a
+# macOS update is free to break it while leaving the two official modes alone.
+# Refused on "ard-high-performance", which always has the display.
+# [[targets]]
+# name = "mac-virtual-display"
+# protocol = "vnc"
+# subtype = "ard"
+# virtual_display = true
+# host = "10.0.0.3"
+# username = "andrew"
+# password = "the-account-password"
+
+# `subtype = "ard-high-performance"` is High Performance as Apple's own viewer has
+# it. Its virtual display handling and its media stream were reverse engineered
+# too.
+#
+# It requests one virtual display, or two with `virtual_displays = 2`, instead of
+# the Mac's physical displays. It opens
+# at the size the session keeps, or at the full resolution of the client's screen
+# where the window drives it, at that screen's density either way. Once connected, the
+# Mac's physical displays are disabled and all of its windows are placed on this
+# virtual display. Apple's official macOS Screen Sharing client can choose up to
+# two virtual displays; alumia requests one, or two with `virtual_displays = 2`
+# on the target (alpha, described with the key above). In a session started with
+# resize, viewport reports continuously replace the virtual display's mode as the
+# window changes.
+# Apple's fixed-resolution-preset control is not implemented.
+# The native Apple pasteboard is carried in both directions.
+#
+# The picture comes as HEVC and the sound as AAC-ELD, over the media stream the
+# Mac negotiates on the RFB connection and then sends over UDP with SRTP — the
+# picture at up to 30 frames a second, without zlib's deflate holding up the
+# Mac's reading of your input. Until the stream sends its first picture, at
+# connect and across display changes, the browser says the screen is not
+# available and holds your input back until the picture is there. A stream that
+# fails ends the session, as it does in Apple's viewer.
+# The Mac sends to this gateway's address on UDP 5900 and 5901, and 5902 for a
+# second display, so a firewall or NAT between them must let that through, or the
+# session ends 10 seconds after the stream is offered.
+#
+# The picture and the sound go together: the Mac refuses one without the other,
+# and mutes its own speakers while it streams. So a session always carries
+# sound and the picker has no choice of it, and an AirPlay speaker the Mac plays
+# to hears nothing. The sound goes to the browser as the Mac's own AAC-ELD,
+# which the browser tries to decode, and only while it has not muted it. A browser
+# that cannot decode the AAC-ELD still runs the session without sound and says why
+# from the session's bar. No encoder touches it, so the audio_* keys are refused here.
+#
+# EXPERIMENTAL. Decoding the picture here takes the host's FFmpeg (libavcodec 60
+# to 63), which the gateway loads when it is needed.
+# docs/high-performance-decoder.md says how to install it on Linux, macOS and
+# Windows. Without it the picture can only be passed: the picker passes it with
+# nothing asked and says why, and a browser that cannot decode the HEVC cannot
+# start the target, which its line says. See docs/apple-vnc-889.md, "The
+# media stream".
+#
+# The passthrough, asked for by the page's address, sends the Mac's picture to the browser as
+# the Mac sent it, for a LAN of 100 Mbit/s or more: its HEVC rather than VP9 encoded
+# here from decoded pictures. Every picture the
+# Mac sends goes, up to 30 a second, at the Mac's own quality. Its ZRLE rectangles
+# are never read or shown, so such a session builds no video encoder here.
+# The HEVC is
+# walked between 20 and 60 Mbit/s
+# by the Mac's own rate controller, from the delay this gateway reports as Apple's
+# viewer does, which ends at the gateway: the browser's link does not slow it. High
+# Performance has no Adaptive/Full choice, and the video keys below reach only the
+# whole VP9 picture of a session started without the passthrough. Chrome and
+# Safari's native decoders, desktop and mobile, were measured taking it where the
+# GPU decodes HEVC 4:4:4; Firefox's native decoder does not. Where the native
+# decoder refuses it, the optional software decoder above may supply the picture
+# path. A browser with neither is not sent it, and its sessions are sent VP9.
+# [[targets]]
+# name = "mac-high-performance"
+# protocol = "vnc"
+# subtype = "ard-high-performance"
+# host = "10.0.0.3"
+# username = "andrew"
+# password = "the-account-password"
+
+# UNOFFICIAL: `subtype = "ard-mirror"` is the Mac's physical displays, as `ard`
+# shares them, with the picture and the sound over High Performance's media
+# stream instead of ZRLE rectangles. The session asks for no virtual display: the
+# Mac's own screens stay lit and show what the viewer sees, and the Mac codes
+# them as the HEVC it codes a virtual display as. Apple's own viewer never makes
+# this combination, so nothing but alumia has exercised the Mac's side of it; it
+# was measured against macOS 27 only, on Macs with one display, and a macOS
+# update is free to break it while leaving the two official modes alone.
+#
+# The Mac mutes its own sound output for the length of the session, as it does
+# under High Performance: whoever sits at the Mac hears nothing, and the sound
+# goes to the browser. There is no way to keep the Mac's speakers playing.
+#
+# The Mac sends each screen at its own pixels, whatever is asked of it, so the
+# gateway reduces each decoded picture to what the viewer can use before encoding
+# it: in a session that follows the window, to the window's pixels, again at every
+# window change; in any other, to the video ceiling alone. A 5120×2880 screen
+# reaches a 4K window as 4K and a 1080p window as 1080p, never enlarged. The
+# pointer is sent back in the Mac's own pixels. `size` and `virtual_display` are
+# refused. With the passthrough the picture reaches the browser as the Mac sent
+# it, at the screen's size, and nothing is reduced.
+#
+# Everything "ard-high-performance" says about the stream, its UDP ports, its
+# decoder and its passthrough holds here.
+# [[targets]]
+# name = "mac-mirror"
+# protocol = "vnc"
+# subtype = "ard-mirror"
+# host = "10.0.0.3"
+# username = "andrew"
+# password = "the-account-password"
+
+# How this target's VP9 stream is configured. The gateway applies the plan when it
+# encodes a desktop, and wlshare applies the same plan to the VP9 it makes and the
+# gateway passes through. A passed Mac media stream or RDP graphics pipeline keeps
+# the remote's own quality; in a session started without the passthrough, the VP9
+# plan applies. Every key below is per target, so it belongs
+# *inside* a [[targets]] table and not in a section of their own — uncommented here
+# they would attach to whichever [[targets]] block precedes them, which is the
+# "example" one at the top of this file. There is no global render setting, and
+# every key has a default.
+#
+# video_quality is the dial, 1-100 and defaulting to 90. It is a *ceiling*: on a link
+# that can carry it you get exactly that quality, and a link that cannot makes the
+# picture coarser until it can, then sends fewer frames. Nothing ever goes finer than
+# what is set here, and a desktop that has gone quiet is sharpened back at it.
+#
+# It is decoded with WebCodecs, which is **secure-context only** — the same limit
+# remote audio has. A browser pointed at a gateway on a plain-HTTP LAN address shows
+# a banner saying so instead of a desktop, until it is behind TLS (localhost is
+# exempt).
+#video_quality = 90
+
+# How much colour the stream carries per pixel. Left out, it is "auto": the
+# browser's own decoder decides. The other two answers take that decision away from
+# it, for every browser alike.
+#
+#   "420"  — one colour sample per 2×2 pixels (VP9 profile 0). The one every decoder
+#            takes, hardware ones included, sent even to a decoder that would have
+#            taken the colour.
+#   "444"  — a colour sample per pixel (VP9 profile 1). This, not video_quality, is
+#            where a desktop stream's visible loss is: a one-pixel coloured glyph stem
+#            on a dark terminal shares its one 4:2:0 colour sample with three pixels of
+#            background and comes back at a quarter of its saturation, at any quality
+#            — measured, lossless 4:2:0 is no better than quality 100. 4:4:4 keeps it,
+#            for a keyframe about a third larger and inter frames no larger. In a
+#            browser it decodes in software: hardware that decodes profile 1 exists,
+#            but no browser's hardware VP9 path takes it. Chromium decodes it; iOS and
+#            iPadOS have no software VP9 at all and refuse it by name, and this setting
+#            sends it to them anyway.
+#   "auto" — 4:4:4 where the browser's decoder takes profile 1, 4:2:0 where it says it
+#            does not. The default. The page asks its own VideoDecoder once, at load,
+#            and states the answer on its session socket.
+#
+# Which to write down:
+#
+#   Watched from more than one kind of browser — a desktop and an iPad, say — leave
+#   the key out. "auto" is the whole reason this target need not be duplicated under
+#   two names, and every browser gets the best picture it can actually decode.
+#
+#   Set "444" only to hold a fleet to one bitstream or to pin one side of a measurement:
+#   it asks nobody, so any iOS or iPadOS client sees the decoder's refusal instead of a
+#   desktop. On the browsers that do take it the cost is client CPU — twice the chroma
+#   samples per frame, and no hardware path — which in this system's experience is the
+#   safer decoder anyway: the GPU-process one is what goes quiet under stream churn.
+#
+#   Set "420" for a fleet that must stay on a hardware decoder, or where the target is
+#   photographic rather than text and the extra colour buys nothing worth the bytes.
+#render_chroma = "auto"
+
+# `video_quality` tracks measured client queueing — on unless this turns it off. The
+# configured quality remains the ceiling; the stream adds the client's paint lag to its
+# existing send-pressure signal. There is no floor to set: like every adaptive
+# stream's, the point where a coarser picture gives way to fewer frames is built into
+# the encoder, and a desktop that has gone quiet is sharpened back at `video_quality`,
+# so a coarse walk is never a coarse screen for long.
+#
+# Turning it off walks on send pressure alone, which is worth having only to pin one
+# side of a measurement.
+#render_adaptive = true

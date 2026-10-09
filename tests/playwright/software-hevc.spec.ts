@@ -1,4 +1,4 @@
-// EXPERIMENTAL: the software HEVC decoder (frontend/src/hevcWasmDecoder.ts), which
+// BETA: the software HEVC decoder (frontend/src/hevcWasmDecoder.ts), which
 // a gateway that has its release archive serves at /hevc/ and which the page
 // takes, under `?hevc_decoder=software`, for a High Performance Mac's passed stream.
 //
@@ -18,25 +18,25 @@
 //
 //     cargo run --profile qa -- serve --config tmp/qa_hevc.toml
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52889/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=… \
-//     REMOTEX_PLAYWRIGHT_HEVC_TARGET=macvmhevc \
+//     ALUMIA_PLAYWRIGHT_BASE_URL=http://127.0.0.1:52889/ \
+//     ALUMIA_PLAYWRIGHT_USERNAME=admin \
+//     ALUMIA_PLAYWRIGHT_PASSWORD=… \
+//     ALUMIA_PLAYWRIGHT_HEVC_TARGET=macvmhevc \
 //     bun run test:hevc
 //
-// Against a gateway without the archive, set REMOTEX_PLAYWRIGHT_HEVC_WASM=0: the
+// Against a gateway without the archive, set ALUMIA_PLAYWRIGHT_HEVC_WASM=0: the
 // same page must then find no decoder and take VP9 and Opus.
 import { expect, type Page, test } from "@playwright/test";
 
 import { leaveSession, logInAndConnectTo } from "./support";
 
 /// The opt-in, and the target name in one, as the video spec's.
-const HEVC_TARGET = process.env.REMOTEX_PLAYWRIGHT_HEVC_TARGET;
+const HEVC_TARGET = process.env.ALUMIA_PLAYWRIGHT_HEVC_TARGET;
 
 /// Whether the gateway under test serves the decoder: said by whoever configured
 /// it, because asking the gateway would let one that lost its decoder pass as one
 /// configured without.
-const SERVES_DECODER = process.env.REMOTEX_PLAYWRIGHT_HEVC_WASM !== "0";
+const SERVES_DECODER = process.env.ALUMIA_PLAYWRIGHT_HEVC_WASM !== "0";
 
 const SOFTWARE = "?hevc_decoder=software";
 
@@ -60,7 +60,8 @@ interface Session {
   decoderFiles: string[];
 }
 
-/// Watch the session socket and the decoder's files. Registered before navigation.
+/// Watch the session socket, the display socket that carries its picture, and the
+/// decoder's files. Registered before navigation.
 function watchSession(page: Page): Session {
   const seen: Session = { formats: [], acks: [], refreshes: [], decoderFiles: [] };
   // The context's, not the page's: the decoder's files are fetched by the paint
@@ -75,10 +76,11 @@ function watchSession(page: Page): Session {
   });
   page.on("websocket", (ws) => {
     const url = new URL(ws.url());
-    if (url.pathname !== "/ws") {
+    if (url.pathname === "/ws") {
+      seen.appleMedia = url.searchParams.get("apple_media") ?? undefined;
+    } else if (url.pathname !== "/ws/display") {
       return;
     }
-    seen.appleMedia = url.searchParams.get("apple_media") ?? undefined;
     ws.on("framereceived", ({ payload }) => {
       if (typeof payload === "string") {
         const message = JSON.parse(payload);
@@ -122,7 +124,7 @@ function watchSession(page: Page): Session {
 test.describe("a High Performance target under ?hevc_decoder=software", () => {
   test.skip(
     !HEVC_TARGET,
-    "set REMOTEX_PLAYWRIGHT_HEVC_TARGET=<target> against a gateway with an ard-high-performance target",
+    "set ALUMIA_PLAYWRIGHT_HEVC_TARGET=<target> against a gateway with an ard-high-performance target",
   );
   test.afterEach(async ({ page }) => {
     await leaveSession(page);

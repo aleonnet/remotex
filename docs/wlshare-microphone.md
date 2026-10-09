@@ -31,7 +31,7 @@ microphone = true
 makes the gateway list the extension to it. The key is accepted on a `wlshare`
 target and refused on a plain `vnc` target and on both Apple subtypes. As on RDP
 it is capability only: the microphone is plugged when a browser enables it from the
-floating menu, per session and never remembered, and unplugged when that socket
+session bar's menu, per session and never remembered, and unplugged when that socket
 closes, the session changes hands, or the engine ends. wlshare's own `microphone`
 key (default `false`) is the server's side of the same switch.
 

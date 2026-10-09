@@ -11,6 +11,7 @@
 //! owed until a frame carries it, and the WebCodecs string the browser is configured
 //! with. When a round is taken is [`crate::encode`]'s business.
 
+use crate::cause::Caused as _;
 use anyhow::Context as _;
 
 use crate::config::Chroma;
@@ -57,6 +58,9 @@ pub struct Stream {
     /// encoder to say no.
     #[cfg(test)]
     refusals: u32,
+    /// How many encodes [`Self::encode`] still fails, for a test that needs one to.
+    #[cfg(test)]
+    failures: u32,
 }
 
 impl Stream {
@@ -71,7 +75,7 @@ impl Stream {
         // Every core but one for the one stream, which has nothing to overlap with. See
         // `video::threads`.
         let encoder = screen_vp9::Encoder::new(coded.0, coded.1, sampling, quality, crate::video::threads())
-            .with_context(|| format!("vp9 encoder for a {}x{} picture", coded.0, coded.1))?;
+            .with_context(|| format!("vp9 encoder for a {}x{} picture", coded.0, coded.1)).cause(|| crate::cause::Cause::new("AL-7722"))?;
         Ok(Self {
             encoder,
             picture,
@@ -80,6 +84,8 @@ impl Stream {
             decode: codec_string(coded.0, coded.1, chroma, ENCODED_FPS),
             #[cfg(test)]
             refusals: 0,
+            #[cfg(test)]
+            failures: 0,
         })
     }
 
@@ -108,6 +114,12 @@ impl Stream {
         self.refusals = count;
     }
 
+    /// Make the next `count` encodes fail, as a libvpx failure would.
+    #[cfg(test)]
+    pub fn fail_encodes(&mut self, count: u32) {
+        self.failures = count;
+    }
+
     /// Move the dial on the live encoder, without a keyframe.
     ///
     /// This is how a congested link gives up quality (the walk in `screen_vp9::walk`), and
@@ -120,7 +132,7 @@ impl Stream {
             self.refusals -= 1;
             anyhow::bail!("a retune refused on the test's orders");
         }
-        self.encoder.set_quality(quality).context("retuning the VP9 encoder")
+        self.encoder.set_quality(quality).context("retuning the VP9 encoder").cause(|| crate::cause::Cause::new("AL-7722"))
     }
 
     /// Encode `mirror` as it stands.
@@ -133,7 +145,12 @@ impl Stream {
     ///
     /// The mirror must have been padded ([`Mirror::pad_edges`]), which is the caller's job.
     pub fn encode(&mut self, mirror: &Mirror) -> anyhow::Result<Option<AccessUnit>> {
-        anyhow::ensure!(
+        #[cfg(test)]
+        if self.failures > 0 {
+            self.failures -= 1;
+            anyhow::bail!("an encode failed on the test's orders");
+        }
+        crate::ensure_known!("AL-7722"; 
             mirror.coded() == self.coded,
             "a {}x{} vp9 stream was handed a {}x{} mirror",
             self.coded.0,
@@ -143,7 +160,7 @@ impl Stream {
         );
         self.picture.read_rgb(mirror.picture())?;
         let mut data = Vec::new();
-        let keyframe = self.encoder.encode(&self.picture, self.keyframe_owed, &mut data).context("encoding a VP9 frame")?;
+        let keyframe = self.encoder.encode(&self.picture, self.keyframe_owed, &mut data).context("encoding a VP9 frame").cause(|| crate::cause::Cause::new("AL-7722"))?;
         // Cleared only when something came out: a frame that produced no bitstream still
         // owes its keyframe, and the caller's dirty flag is what brings it back.
         Ok(keyframe.map(|keyframe| {

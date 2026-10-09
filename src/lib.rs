@@ -1,13 +1,16 @@
-//! remotex — a browser-based RDP client.
+//! alumia — a browser-based RDP client.
 //!
 //! The library exposes the pieces the binary wires together and that the
 //! integration tests exercise at the protocol level. See docs/architecture.md.
 
 pub mod aac_eld;
+#[cfg(all(target_os = "macos", feature = "embedded-gateway"))]
+pub mod app;
 pub mod assets;
 pub mod audio;
 pub mod auth;
 pub mod camera;
+pub mod cause;
 pub mod cli;
 pub mod config;
 #[cfg(feature = "embedded-gateway")]
@@ -23,6 +26,7 @@ pub mod libav;
 pub mod mac_displays;
 pub mod mic;
 pub mod opus_stream;
+pub mod overuse;
 pub mod pcm48;
 pub mod protocol;
 pub mod rdp;
@@ -49,4 +53,5 @@ pub mod vnc_record;
 pub mod vnc_rsa_aes;
 pub mod vp9;
 pub mod wire;
+pub mod words;
 pub mod ws;

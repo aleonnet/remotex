@@ -5,7 +5,7 @@
 // It answers once, before it takes its seat: null when its instance is made, or
 // why it could not be. Taking the seat does not return, so nothing is heard from
 // it after.
-import init, { runPoolThread } from "../wasm/egfx/pkg/remotex_egfx.js";
+import init, { runPoolThread } from "../wasm/egfx/pkg/alumia_egfx.js";
 
 /** What the paint worker's instance is, for this one to be of the same. */
 export interface PoolSeat {

@@ -4,17 +4,19 @@ use std::collections::VecDeque;
 use std::panic::AssertUnwindSafe;
 use std::sync::Arc;
 
-use anyhow::{Result, anyhow, bail};
+use anyhow::{Result, anyhow};
 use log::{debug, info, warn};
 use tokio::io::{AsyncWriteExt as _, ReadHalf, WriteHalf};
 use tokio::sync::mpsc::error::TrySendError;
 use tokio::sync::{mpsc, watch};
 use tokio::time::Duration;
 
+use crate::config::Placement;
 use super::connect::{self, Connected, Joined};
 use super::error::Error;
-use remotex_rdp_graphics::framebuffer::{Framebuffer, Rect, affordable, stage};
-use remotex_rdp_graphics::gfx::{self, Graphics};
+use crate::cause::Cause;
+use alumia_rdp_graphics::framebuffer::{Framebuffer, Rect, affordable, stage};
+use alumia_rdp_graphics::gfx::{self, Graphics};
 use super::camera::{Camera, CameraCommand, CameraFeed, CameraInput, CameraQueues, CameraSink};
 use super::input::{Clipboard, Command, Input};
 use super::pointer::Cursor;
@@ -28,6 +30,7 @@ use super::proto::share::{self, Pdu};
 use super::microphone::{MicrophoneFeed, MicrophoneInput, MicrophoneQueue, MicrophoneSink};
 use super::proto::{bitmap, channel, cliprdr, desktop, display, dvc, input, mcs, rdpdr, rdpeai, rdpecam, rdpsnd, tls};
 use super::proto::gfx as gfx_proto;
+pub use alumia_rdp_graphics::proto::gfx::Placed;
 
 // ------------------------------------------------------------------ configuration
 
@@ -38,10 +41,21 @@ pub struct Connect {
     pub username: String,
     pub password: String,
     pub domain: Option<String>,
-    /// The desktop size to ask for. The server may answer with something else,
-    /// which arrives as [`Event::Connected`] and, later, as [`Event::Resize`].
+    /// The desktop size to ask for — one monitor's. The server may answer with
+    /// something else, which arrives as [`Event::Connected`] and, later, as
+    /// [`Event::Resize`].
     pub width: u32,
     pub height: u32,
+    /// How many monitors of that size to ask for, the first the primary: in the
+    /// connect-time monitor data, where the server reads it, and in every layout
+    /// [`Input::resize`] sends. One is the single desktop every server opens; more
+    /// is held to [`display::MAX_MONITORS`]. The desktop the server opens is their
+    /// union, and whether it laid them out is read off that size at connect and
+    /// off each [`Event::Resize`] after.
+    pub monitors: u32,
+    /// Where the second monitor sits against the first, in that data and in every
+    /// layout.
+    pub placement: Placement,
     /// The desktop scale factor to open at, as a percentage — 100 for an ordinary
     /// desktop, 200 for a 2x one — sent in the core data so the server logs on at
     /// it. Unlike a later [`Input::resize`] it needs no Display Control. Zero, or
@@ -176,7 +190,11 @@ pub enum Event {
     /// [`Input::resize`]. A server normally repaints afterwards but is not obliged
     /// to, and the framebuffer is blank until it does; a caller that cannot show a
     /// blank desktop should follow this with [`Input::refresh`].
-    Resize { width: u32, height: u32 },
+    ///
+    /// `monitors` is where each monitor the server laid the desktop out over is in
+    /// it, the primary first, from the graphics reset that redefined it: the ones
+    /// [`Connect::monitors`] asked for, each of its own size, or the one desktop.
+    Resize { width: u32, height: u32, monitors: Vec<Placed> },
     /// The server offered Display Control, so [`Input::resize`] now has somewhere
     /// to go. Only ever sent on a session configured with [`Connect::resize`], and
     /// not at all by a server that does not implement MS-RDPEDISP.
@@ -186,7 +204,7 @@ pub enum Event {
     /// [`Input::resize`].
     ///
     /// `max_area` is the largest total monitor area the server will accept, in
-    /// pixels; this client asks for one monitor, so it bounds `width * height`.
+    /// pixels, over every monitor of a layout together.
     ResizeReady { max_area: u64 },
     /// The server closed Display Control after [`Event::ResizeReady`]: a resize has
     /// nowhere to go until another `ResizeReady` arrives.
@@ -385,7 +403,7 @@ impl Session {
                 let runtime = match runtime {
                     Ok(runtime) => runtime,
                     Err(e) => {
-                        last_word.send(Event::Ended(Err(Error::new(format!(
+                        last_word.send(Event::Ended(Err(Error::internal(format!(
                             "could not start the RDP session runtime: {e}"
                         )))));
                         return;
@@ -398,7 +416,7 @@ impl Session {
                     runtime.block_on(thread_main(config, commands, feeds, &framebuffer, &events, stop))
                 }));
                 let result = outcome
-                    .unwrap_or_else(|_| Err(Error::new("the RDP session thread panicked")));
+                    .unwrap_or_else(|_| Err(Error::internal("the RDP session thread panicked")));
                 last_word.send(Event::Ended(result));
             }
         });
@@ -407,7 +425,7 @@ impl Session {
             Err(e) => {
                 // The closure never ran, so nothing else will end this session. Dropping
                 // it gave back the kept place, and nothing else is queued.
-                let _ = events.try_send(Event::Ended(Err(Error::new(format!(
+                let _ = events.try_send(Event::Ended(Err(Error::internal(format!(
                     "could not start the RDP session thread: {e}"
                 )))));
                 None
@@ -508,7 +526,7 @@ async fn run(
         // than finishing a handshake nobody is waiting for.
         biased;
         () = shutdown_requested(commands) => {
-            bail!("the session was ended before it connected");
+            crate::bail_known!("AL-7105"; "the session was ended before it connected");
         }
         connected = connect::connect(&config) => connected?,
     };
@@ -679,7 +697,7 @@ struct Active<'a> {
     /// The most recent size asked for before the channel was ready — only the most
     /// recent, since a resize supersedes every earlier one rather than queueing
     /// behind it.
-    pending_resize: Option<(u32, u32, u32)>,
+    pending_resize: Option<(Vec<(u32, u32)>, u32)>,
     /// Whether the server has sent Monitor Ready, which is what opens the clipboard:
     /// nothing may be said on that channel before this end's capabilities answer it.
     clip_ready: bool,
@@ -708,6 +726,8 @@ struct Active<'a> {
 struct Dynamics {
     /// Whether Display Control is wanted at all — [`Connect::resize`].
     resize: bool,
+    /// Where every layout puts the second monitor — [`Connect::placement`].
+    placement: Placement,
     /// Whether the Graphics channel is wanted at all — [`Connect::egfx`].
     egfx: bool,
     /// Whether the host is told it may draw with H.264 — [`Connect::h264`], on a
@@ -904,6 +924,7 @@ impl<'a> Active<'a> {
             device_chunks: channel::Reassembly::new(),
             dynamics: Dynamics {
                 resize: config.resize && config.egfx,
+                placement: config.placement,
                 egfx: config.egfx,
                 h264: config.pass_graphics && config.h264,
                 audio: wants_audio,
@@ -1009,7 +1030,8 @@ impl<'a> Active<'a> {
                 info!("rdp: the host left the conference: {reason}");
                 Ok(Some(match reason.is_orderly() {
                     true => Ok(()),
-                    false => Err(anyhow!("the host ended the session: {reason}")),
+                    false => Err(Cause::new("AL-7104")
+                        .of(anyhow!("the host ended the session: {reason}"))),
                 }))
             }
             mcs::Indication::Data(data) if data.channel == self.io_channel => {
@@ -1076,16 +1098,17 @@ impl<'a> Active<'a> {
             // the share, so a host that tears it down has ended what this session can
             // carry. The Deactivation-Reactivation Sequence (MS-RDPBCGR 1.3.1.3) is
             // left out on purpose: see "Bitmap updates" in docs/rdp-client.md.
-            Pdu::DeactivateAll => bail!("the host deactivated the share mid-session"),
+            Pdu::DeactivateAll => crate::bail_known!("AL-7106"; "the host deactivated the share mid-session"),
             Pdu::DemandActive { .. } => {
-                bail!("the host demanded a share this session already has")
+                crate::bail_known!("AL-7106"; "the host demanded a share this session already has")
             }
             Pdu::Data(data) if data.kind == share::SET_ERROR_INFO => {
                 match desktop::error_info(data.body) {
                     Ok(()) => Ok(None),
+                    // The host's own reason, with the cause the page says it by.
                     Err(reported) => {
                         info!("rdp: {reported}");
-                        Ok(Some(Err(reported.into())))
+                        Ok(Some(Err(desktop::caused(data.body, reported))))
                     }
                 }
             }
@@ -1125,7 +1148,7 @@ impl<'a> Active<'a> {
                 // reply's.
                 dvc::Message::Data { channel, data } if dynamics.graphics == Some(channel) => {
                     let Some(graphics) = graphics else {
-                        bail!("the host drew on a graphics channel this client never accepted");
+                        crate::bail_known!("AL-7106"; "the host drew on a graphics channel this client never accepted");
                     };
                     (Vec::new(), graphics.receive(data, framebuffer)?)
                 }
@@ -1146,7 +1169,7 @@ impl<'a> Active<'a> {
                 // reply the conversation earns goes back on the same channel.
                 dvc::Message::Data { channel, data } if dynamics.sound == Some(channel) => {
                     let Some(sound) = sound else {
-                        bail!("the host sent sound on a channel this client never accepted");
+                        crate::bail_known!("AL-7106"; "the host sent sound on a channel this client never accepted");
                     };
                     let mut replies = Vec::new();
                     for reply in sound.push(data)? {
@@ -1235,11 +1258,11 @@ impl<'a> Active<'a> {
                 // follows too: a Refresh Rect asked for later — and one is, after
                 // every resize — is in the coordinates of this desktop, not the one
                 // the Demand Active described.
-                gfx::Update::Reset { width, height } => {
-                    info!("rdp: graphics reset, desktop {width}x{height}");
+                gfx::Update::Reset { width, height, monitors } => {
+                    info!("rdp: graphics reset, desktop {width}x{height} over monitors {monitors:?}");
                     self.share.width = width;
                     self.share.height = height;
-                    self.announce_desktop(width, height).await;
+                    self.announce_desktop(width, height, monitors).await;
                 }
                 gfx::Update::Paint(rect) => self.paint(rect),
                 // Handed over, not finished: the frame a run ends is acknowledged
@@ -1403,7 +1426,7 @@ impl<'a> Active<'a> {
                 }
             };
             let Some(sound) = sound else {
-                bail!("the host sent sound on a channel this client never asked for");
+                crate::bail_known!("AL-7106"; "the host sent sound on a channel this client never asked for");
             };
             sound.push(pdu)?
         };
@@ -1495,11 +1518,13 @@ impl<'a> Active<'a> {
         }
         match tokio::time::timeout(WRITE_TIMEOUT, self.writer.write_all(frame)).await {
             Ok(Ok(())) => Ok(()),
-            Ok(Err(e)) => Err(anyhow!("the connection to the host failed: {e}")),
-            Err(_) => Err(anyhow!(
+            Ok(Err(e)) => {
+                Err(Cause::new("AL-7103").of(anyhow!("the connection to the host failed: {e}")))
+            }
+            Err(_) => Err(Cause::new("AL-7103").of(anyhow!(
                 "the connection to the host failed: it accepted nothing for {}s",
                 WRITE_TIMEOUT.as_secs()
-            )),
+            ))),
         }
     }
 
@@ -1521,11 +1546,13 @@ impl<'a> Active<'a> {
     }
 
     /// The framebuffer has been resized and cleared; tell the caller.
-    async fn announce_desktop(&mut self, width: u32, height: u32) {
+    async fn announce_desktop(&mut self, width: u32, height: u32, monitors: Vec<Placed>) {
         // Rectangles of the desktop that just went away name pixels that no longer
         // exist; the caller starts over from the resize anyway.
         self.damage.clear();
-        self.send(Event::Resize { width, height }).await;
+        let monitors =
+            if monitors.is_empty() { vec![Placed { x: 0, y: 0, w: width, h: height }] } else { monitors };
+        self.send(Event::Resize { width, height, monitors }).await;
     }
 
     /// Send the pending monitor layout, if there is one and a channel to carry it.
@@ -1538,11 +1565,33 @@ impl<'a> Active<'a> {
         let (Some(control), Some(dynamic)) = (self.dynamics.control, self.dynamic) else {
             return Ok(());
         };
-        let Some((width, height, scale)) = self.pending_resize.take() else {
+        let Some((sizes, scale)) = self.pending_resize.take() else {
             return Ok(());
         };
-        debug!("rdp: sending a {width}x{height} monitor layout at {scale}%");
-        let layout = display::monitor_layout(width, height, scale);
+        // Held to what the server said it lays out. A layout past either limit is
+        // one a conforming server ignores in silence, which from the caller's end
+        // is a resize that never comes, so it is not sent at all.
+        let caps = self.dynamics.caps.unwrap_or(display::Capabilities { monitors: 1, area: u64::MAX });
+        let Some(monitors) = monitors_within(&sizes, caps) else {
+            warn!(
+                "rdp: not sending a {sizes:?} monitor layout: the first monitor is past the \
+                 {} pixels the host lays out",
+                caps.area
+            );
+            return Ok(());
+        };
+        if monitors != sizes.len() {
+            info!(
+                "rdp: the host lays out {} monitor(s) over {} pixels, so {monitors} of the {} asked \
+                 for go in the layout",
+                caps.monitors,
+                caps.area,
+                sizes.len()
+            );
+        }
+        let sizes = &sizes[..monitors];
+        debug!("rdp: sending a monitor layout of {sizes:?} at {scale}%");
+        let layout = display::monitor_layout(sizes, self.dynamics.placement, scale);
         self.write_channel(dynamic, &dvc::data(control, &layout)?).await
     }
 
@@ -1566,8 +1615,8 @@ impl<'a> Active<'a> {
                     match other {
                         Command::Shutdown => return Ok(true),
                         Command::Refresh => self.refresh().await?,
-                        Command::Resize { width, height, scale_percent } => {
-                            self.pending_resize = Some((width, height, scale_percent));
+                        Command::Resize { sizes, scale_percent } => {
+                            self.pending_resize = Some((sizes, scale_percent));
                             self.send_layout().await?;
                         }
                         Command::Clipboard(what) => self.send_clipboard(what).await?,
@@ -1827,6 +1876,23 @@ fn answer(message: dvc::Message<'_>, dynamics: &mut Dynamics) -> Result<Vec<Vec<
 
 /// A desktop dimension as the `u16` the protocol counts in, saturating rather than
 /// wrapping: nothing real exceeds RDP's own 8192 a side.
+/// How many of the row of `sizes`, from the left, a layout may name under the
+/// server's Display Control capabilities: at most the monitors it lays out, and as
+/// many as together stay under its area. `None` when even the first does not fit,
+/// which is a layout no server would apply. The sizes are the ones the layout will
+/// carry, adjusted as [`display::monitor_layout`] adjusts them.
+fn monitors_within(sizes: &[(u32, u32)], caps: display::Capabilities) -> Option<usize> {
+    let areas: Vec<u64> = sizes
+        .iter()
+        .map(|&(width, height)| {
+            let (width, height) = display::adjust_size(width, height);
+            u64::from(width) * u64::from(height)
+        })
+        .collect();
+    let most = areas.len().clamp(1, caps.monitors.max(1) as usize).min(areas.len());
+    (1..=most).rev().find(|monitors| areas[..*monitors].iter().sum::<u64>() <= caps.area)
+}
+
 fn narrow(v: u32) -> u16 {
     u16::try_from(v).unwrap_or(u16::MAX)
 }
@@ -1984,6 +2050,31 @@ mod tests {
     /// would lay out was about a channel that no longer exists. The Close is echoed,
     /// which is the response the server waits for; one for a channel never held earns
     /// nothing.
+    /// A layout names no more monitors than the host lays out, and no more than
+    /// fit its area together; one that does not fit at all is not sent.
+    #[test]
+    fn a_layout_is_held_to_the_hosts_monitor_count_and_area() {
+        let roomy = display::Capabilities { monitors: 16, area: 8192 * 8192 * 16 };
+        let two = [(1280, 800), (1280, 800)];
+        assert_eq!(monitors_within(&two, roomy), Some(2));
+        assert_eq!(monitors_within(&two[..1], roomy), Some(1));
+        let one = display::Capabilities { monitors: 1, area: 8192 * 8192 };
+        assert_eq!(monitors_within(&two, one), Some(1), "a host that lays out one");
+        // Room for one of these, not two.
+        let tight = display::Capabilities { monitors: 16, area: 1280 * 800 + 1 };
+        assert_eq!(monitors_within(&two, tight), Some(1));
+        assert_eq!(monitors_within(&[(1281, 800), (1280, 800)], tight), Some(1), "at the size the layout carries");
+        // A smaller second monitor fits where an equal one would not.
+        let room = display::Capabilities { monitors: 16, area: 1280 * 800 + 640 * 400 };
+        assert_eq!(monitors_within(&[(1280, 800), (640, 400)], room), Some(2));
+        // Room for neither.
+        let none = display::Capabilities { monitors: 16, area: 1280 * 800 - 1 };
+        assert_eq!(monitors_within(&two, none), None);
+        // A zero monitor count from a host is read as one rather than as nothing.
+        let zero = display::Capabilities { monitors: 0, area: u64::MAX };
+        assert_eq!(monitors_within(&two, zero), Some(1));
+    }
+
     #[test]
     fn closing_display_control_forgets_what_it_said_it_would_do() {
         let said = display::Capabilities { monitors: 1, area: 4 };

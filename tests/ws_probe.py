@@ -6,19 +6,24 @@
 """Drive a local gateway WebSocket and print the control messages a browser sees.
 
 This is a manual probe for display selection and dynamic-resolution behavior. Start
-``remotex serve`` separately, then run, for example:
+``alumia serve`` separately, then run, for example:
 
-    REMOTEX_PROBE_PASSWORD=... uv run tests/ws_probe.py \
+    ALUMIA_PROBE_PASSWORD=... uv run tests/ws_probe.py \
         --port 52675 --target sandbox2highperf --user admin --resize \
         --viewport 1366x768 --viewport 1920x1080
 
-``--resize``, ``--sound`` and ``--passthrough`` are what the picker's Start would
-carry: the session is started with each one named, and with none otherwise. Without
+``--resize``, ``--sound``, ``--passthrough`` and ``--placement`` are what the picker's
+Start would carry: the session is started with each one named, and with none otherwise. Without
 ``--resize`` the desktop is kept at the target's size: its configured one, or the
 default.
 
 Use ``--burst`` to send every requested viewport without waiting for the preceding
 resize response.
+
+The probe opens the session socket and display 1's socket beside it, as a page does,
+and reads both. ``--tab`` also opens display 2's socket once the session lists it in a
+tab of its own (*All Displays* over two virtual displays, ``--select 0xffffffff``), the way
+the page at ``/display/2`` does: by the login cookie alone, with no session token.
 """
 
 import argparse
@@ -116,8 +121,8 @@ async def main() -> int:
     parser.add_argument("--user", required=True)
     parser.add_argument(
         "--password",
-        default=os.environ.get("REMOTEX_PROBE_PASSWORD"),
-        help="gateway password (prefer REMOTEX_PROBE_PASSWORD)",
+        default=os.environ.get("ALUMIA_PROBE_PASSWORD"),
+        help="gateway password (prefer ALUMIA_PROBE_PASSWORD)",
     )
     parser.add_argument("--seconds", type=float, default=25.0)
     parser.add_argument(
@@ -143,6 +148,13 @@ async def main() -> int:
         "--apple-media, an RDP host's graphics pipeline with --rdp-graphics",
     )
     parser.add_argument(
+        "--placement",
+        choices=("right", "left", "top", "bottom"),
+        default="right",
+        help="where the second virtual display sits against the first, on an rdp "
+        "target with virtual_displays = 2",
+    )
+    parser.add_argument(
         "--audio",
         action="store_true",
         help="open the session's audio socket and count format and binary frames",
@@ -161,6 +173,32 @@ async def main() -> int:
         default=[],
         help="display id to select once the list arrives (repeatable)",
     )
+    parser.add_argument(
+        "--tab",
+        action="store_true",
+        help="open display 2's socket once the session shows it in a tab of its own, "
+        "and report what arrives on it",
+    )
+    parser.add_argument(
+        "--tab-mouse",
+        type=coordinates,
+        default=None,
+        help="after display 2's first resize, move the pointer there, in its pixels",
+    )
+    parser.add_argument(
+        "--tab-viewport",
+        type=dimensions,
+        default=None,
+        help="after display 2's first resize, report its tab's window as this size, "
+        "which a session started with --resize lays the second monitor out at",
+    )
+    parser.add_argument(
+        "--tab-viewport-delay",
+        type=float,
+        default=0.0,
+        help="seconds to wait before --tab-viewport goes out, so it changes a "
+        "second display whose stream is already flowing",
+    )
     parser.add_argument("--mouse", type=coordinates, default=None)
     parser.add_argument(
         "--display",
@@ -168,7 +206,24 @@ async def main() -> int:
         default=None,
         help="client screen WIDTHxHEIGHT@SCALE[fit] carried on the connect (the opening size)",
     )
+    parser.add_argument(
+        "--wheel",
+        type=coordinates,
+        action="append",
+        default=[],
+        metavar="DX,DY",
+        help="a scroll of DX,DY pixels on display 1, sent a second after the --mouse "
+        "move, which it needs, and a second after each other (repeatable; DX and DY "
+        "are positive right and down)",
+    )
     parser.add_argument("--mouse-width", type=int, default=None)
+    parser.add_argument(
+        "--mouse-delay",
+        type=float,
+        default=0.0,
+        help="seconds to wait before a --mouse or --tab-mouse move goes out, for a "
+        "remote that is still laying its displays out when the resize arrives",
+    )
     parser.add_argument(
         "--sweep",
         type=duration,
@@ -280,6 +335,8 @@ async def main() -> int:
         help="print each screen batch's VIDEO records",
     )
     args = parser.parse_args()
+    if args.wheel and args.mouse is None:
+        parser.error("--wheel scrolls where --mouse put the pointer; give --mouse too")
 
     password = args.password or getpass.getpass("Gateway password: ")
     base = f"http://127.0.0.1:{args.port}"
@@ -290,7 +347,7 @@ async def main() -> int:
         timeout=10,
     )
     login.raise_for_status()
-    cookie = session.cookies.get("remotex_session")
+    cookie = session.cookies.get("alumia_session")
     claim = session.post(f"{base}/api/session", json={}, timeout=10)
     claim.raise_for_status()
     token = claim.json()["sessionId"]
@@ -310,12 +367,44 @@ async def main() -> int:
         "size": "window" if args.resize else "target",
         "audio": args.sound,
         "passthrough": args.passthrough,
+        "placement": args.placement,
     }
+    # A display socket carries no token: the login cookie is what lets it in.
+    headers = {"Cookie": f"alumia_session={cookie}"}
+
+    def display_url(display: int) -> str:
+        return f"ws://127.0.0.1:{args.port}/ws/display?display={display}"
+
     # No cap on a message, as a browser has none: a keyframe of a whole desktop is
     # one batch, which a 2x screen can put past the library's 1 MiB default.
-    async with websockets.connect(
-        url, additional_headers={"Cookie": f"remotex_session={cookie}"}, max_size=None
-    ) as socket:
+    async with (
+        websockets.connect(url, additional_headers=headers, max_size=None) as socket,
+        websockets.connect(
+            display_url(1), additional_headers=headers, max_size=None
+        ) as display_socket,
+    ):
+        # Every socket's messages in one queue, each with the display it came from:
+        # 0 for the session socket.
+        inbox: asyncio.Queue = asyncio.Queue()
+
+        async def feed(source: int, ws) -> None:
+            try:
+                async for message in ws:
+                    await inbox.put((source, ws, message))
+            except websockets.ConnectionClosed:
+                pass
+            finally:
+                close = ws.close_code, ws.close_reason
+                await inbox.put((source, ws, close))
+
+        feeders = [
+            asyncio.create_task(feed(0, socket)),
+            asyncio.create_task(feed(1, display_socket)),
+        ]
+        tab_socket = None
+        tab_frames = 0
+        tab_mouse_sent = False
+        tab_viewport_sent = False
         connect = {"type": "connect", "target": args.target, "choices": choices}
         if args.display is not None:
             connect["display"] = args.display
@@ -343,7 +432,7 @@ async def main() -> int:
             try:
                 async with websockets.connect(
                     audio_url,
-                    additional_headers={"Cookie": f"remotex_session={cookie}"},
+                    additional_headers={"Cookie": f"alumia_session={cookie}"},
                 ) as audio_socket:
                     async for message in audio_socket:
                         if isinstance(message, bytes):
@@ -486,12 +575,73 @@ async def main() -> int:
         keys_task = None
         chords_task = None
         sweep_task = None
+        move_tasks = []
+
+        async def move_later(to, prefix: str, position: tuple[int, int], wheels=()) -> None:
+            """Send one pointer move on `to`, after --mouse-delay, then `wheels`."""
+            await asyncio.sleep(args.mouse_delay)
+            x, y = position
+            print(f"  {prefix}-> mouseMove {x},{y}")
+            await to.send(json.dumps({"type": "mouseMove", "x": x, "y": y}))
+            for dx, dy in wheels:
+                await asyncio.sleep(1.0)
+                print(f"  {prefix}-> wheel {dx},{dy}")
+                await to.send(json.dumps({"type": "wheel", "dx": dx, "dy": dy, "unit": "pixel"}))
+
         page_task = None
         audio_task = None
         viewport_task = None
         try:
             async with asyncio.timeout(args.seconds):
-                async for message in socket:
+                while True:
+                    source, origin, message = await inbox.get()
+                    if isinstance(message, tuple):
+                        code, reason = message
+                        print(f"  [{source}] socket closed  code={code}  {reason}")
+                        if source in (0, 1):
+                            break
+                        continue
+                    if source == 2:
+                        if isinstance(message, bytes):
+                            tab_frames += 1
+                            if len(message) >= 8 and message[0] == 0x02:
+                                sequence = int.from_bytes(message[4:8], "little")
+                                await origin.send(
+                                    json.dumps(
+                                        {
+                                            "type": "paintAck",
+                                            "sequence": sequence,
+                                            "queuedMs": 0,
+                                            "drawMs": 0,
+                                        }
+                                    )
+                                )
+                            continue
+                        data = json.loads(message)
+                        if data.get("type") == "resize":
+                            print(
+                                f"  [2] resize  {data['w']}x{data['h']}  scale={data['scale']}"
+                            )
+                            if args.tab_viewport is not None and not tab_viewport_sent:
+                                tab_viewport_sent = True
+
+                                async def size_tab(tab=origin) -> None:
+                                    await asyncio.sleep(args.tab_viewport_delay)
+                                    w, h = args.tab_viewport
+                                    print(f"  [2] -> viewport {w}x{h}")
+                                    await tab.send(
+                                        json.dumps({"type": "viewport", "w": w, "h": h})
+                                    )
+
+                                move_tasks.append(asyncio.create_task(size_tab()))
+                            if args.tab_mouse is not None and not tab_mouse_sent:
+                                tab_mouse_sent = True
+                                move_tasks.append(
+                                    asyncio.create_task(move_later(origin, "[2] ", args.tab_mouse))
+                                )
+                        elif data.get("type") != "cursor":
+                            print(f"  [2] {data.get('type')}: {json.dumps(data)[:120]}")
+                        continue
                     if isinstance(message, bytes):
                         frames += 1
                         if args.records and len(message) >= 8 and message[0] == 0x02:
@@ -502,7 +652,7 @@ async def main() -> int:
                         # would stall the engine behind a window that never opens.
                         if len(message) >= 8 and message[0] == 0x02:
                             sequence = int.from_bytes(message[4:8], "little")
-                            await socket.send(
+                            await origin.send(
                                 json.dumps(
                                     {
                                         "type": "paintAck",
@@ -572,22 +722,26 @@ async def main() -> int:
                                 or data["w"] == args.mouse_width
                             )
                         ):
-                            x, y = args.mouse
-                            print(f"  -> mouseMove {x},{y}")
-                            await socket.send(
-                                json.dumps({"type": "mouseMove", "x": x, "y": y})
-                            )
+                            move_tasks.append(asyncio.create_task(move_later(socket, "", args.mouse, args.wheel)))
                             mouse_sent = True
                     elif kind == "displays":
                         print(f"  displays  active={data['active']:#x}")
                         for display in data["displays"]:
                             mark = "*" if display["id"] == data["active"] else " "
                             main_display = " (main)" if display["main"] else ""
+                            tab = f"  tab={display['tab']}" if display["tab"] else ""
                             print(
                                 f"    {mark} id={display['id']:#x}  "
                                 f"{display['label']!r}  {display['detail']!r}"
-                                f"{main_display}"
+                                f"{main_display}{tab}"
                             )
+                        tabbed = any(d["tab"] == 2 for d in data["displays"])
+                        if args.tab and tabbed and tab_socket is None:
+                            print("  [2] -> open display 2's socket")
+                            tab_socket = await websockets.connect(
+                                display_url(2), additional_headers=headers, max_size=None
+                            )
+                            feeders.append(asyncio.create_task(feed(2, tab_socket)))
                         if pending:
                             pick = pending.pop(0)
                             print(f"  -> selectDisplay {pick:#x}")
@@ -665,6 +819,8 @@ async def main() -> int:
                 chords_task.cancel()
             if sweep_task is not None and not sweep_task.done():
                 sweep_task.cancel()
+            for task in move_tasks:
+                task.cancel()
             if page_task is not None and not page_task.done():
                 page_task.cancel()
             if audio_task is not None and not audio_task.done():
@@ -677,7 +833,13 @@ async def main() -> int:
                 viewport_task.cancel()
             if gap_task is not None and not gap_task.done():
                 gap_task.cancel()
+        for feeder in feeders:
+            feeder.cancel()
+        if tab_socket is not None:
+            await tab_socket.close()
         print(f"\n  {frames} binary frames")
+        if args.tab:
+            print(f"  [2] {tab_frames} binary frames")
         if args.records:
             print(f"  {video_units} video records")
         if args.audio:

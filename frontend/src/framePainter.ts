@@ -1,10 +1,19 @@
 import {
+  createRelaySink,
+  createRelaySource,
+  openRelayPort,
+  type RelayPort,
+  type RelaySink,
+  type RelaySource,
+} from "./displayRelay.ts";
+import {
   type EgfxCompositor,
   type EgfxFactory,
   loadEgfx,
 } from "./egfxCompositor.ts";
-import type { GraphicsPicture } from "./egfxPicture.ts";
+import type { GraphicsPicture, PicturePart } from "./egfxPicture.ts";
 import { createEgfxVideo, type EgfxVideo } from "./egfxVideo.ts";
+import type { Fault } from "./fault.ts";
 import type { HevcPicture } from "./hevcPicture.ts";
 import { type DecodedPicture, isHevcPlanes } from "./hevcWasmDecoder.ts";
 import {
@@ -42,6 +51,15 @@ export interface FramePainter {
    */
   clear(): void;
   /**
+   * Drop the decoder and keep the stream: the page is back in sight, and the
+   * decoder it had may not be valid any more (iOS invalidates a VideoToolbox
+   * session of a page in the background, error -12903). The next unit builds a
+   * fresh one, which starts at nothing but a keyframe, so one is asked for. A
+   * tab painted from the session page's picture decodes no stream, and nothing
+   * is done.
+   */
+  restartVideo(): void;
+  /**
    * Adopt a `videoFormat`: the exact string to configure the decoder with. Always
    * arrives before the stream's first access unit.
    *
@@ -57,10 +75,22 @@ export interface FramePainter {
    */
   startGraphics(): void;
   /**
+   * Adopt a `graphicsView` on the page that composes the pipeline: the part of
+   * its picture this display is, shown from now, by this pipeline and the next.
+   */
+  setGraphicsView(part: PicturePart): void;
+  /**
+   * Adopt a `graphicsView` in a tab showing display `display` of its own: the
+   * part of the session page's picture the tab is painted from
+   * (displayRelay.ts). The tab composes nothing.
+   */
+  mirrorGraphics(display: number, part: PicturePart): void;
+  /**
    * The desktop's canvas was replaced at this size and filled black. A pipeline's
-   * picture is shown over that canvas, so it is blanked with it: the reset that
-   * draws the new desktop is in a run not composed yet. The software HEVC
-   * decoder's is no longer shown, until the stream's next picture.
+   * picture is shown over that canvas, so its canvas is blanked with it, and what
+   * it holds is kept for the `graphicsView` that follows: over a span, the resize
+   * is the picker's switch between displays. The software HEVC decoder's is no
+   * longer shown, until the stream's next picture.
    */
   blank(w: number, h: number): void;
 }
@@ -76,7 +106,7 @@ export function createFramePainter(options: {
    * cannot be swallowed: the stream is all a target sends, so the alternative to
    * saying it is a desktop that never paints and never explains itself.
    */
-  onVideoError: (reason: string | null) => void;
+  onVideoError: (fault: Fault | null) => void;
   /**
    * The stream's chain has been cut — its decoder went quiet, or it failed and was
    * thrown away — so the desktop cannot paint again until a keyframe only the gateway
@@ -85,6 +115,16 @@ export function createFramePainter(options: {
    * are answered in different places.
    */
   onVideoNeedsKeyframe: (reason: string) => void;
+  /**
+   * The keyframe `onVideoNeedsKeyframe` asked for is owed no more, which is what
+   * ends the asking it began (keyframeAsk.ts). Either the stream's picture is
+   * back, the first one painted from a unit that arrived after the chain was last
+   * cut, or the stream is done with: its attachment ended, or a pipeline or a
+   * tab's mirror took the picture. Said once for each debt. A picture decoded
+   * ahead of the cut and painted after it is not this: the chain is still cut
+   * behind it.
+   */
+  onVideoSettled?: () => void;
   /**
    * Where compositors come from: the WebAssembly module, loaded once. Injectable
    * for a test, which has the module's bytes and nothing to fetch them from.
@@ -96,13 +136,19 @@ export function createFramePainter(options: {
    */
   makePicture?: () => GraphicsPicture;
   /**
+   * The channel the second display's picture crosses the browser on
+   * (displayRelay.ts), opened by the page that composes it and by the tab that
+   * shows it. Injectable for a test, which has no BroadcastChannel to open.
+   */
+  makeRelay?: () => RelayPort;
+  /**
    * EXPERIMENTAL: what decodes the H.264 a pipeline may carry (egfxVideo.ts): the
    * browser's `VideoDecoder`, a stream for each surface. Injectable for a test,
    * which has no decoder.
    */
   makeGraphicsVideo?: () => EgfxVideo;
   /**
-   * EXPERIMENTAL: where the software HEVC decoder's pictures are drawn, the same
+   * BETA: where the software HEVC decoder's pictures are drawn, the same
    * canvas (hevcPicture.ts). A painter given none presents none.
    */
   makeHevcPicture?: () => HevcPicture;
@@ -113,7 +159,7 @@ export function createFramePainter(options: {
    * desktop's, and only the page can show or hide it.
    */
   onGraphicsShown?: (shown: boolean) => void;
-  /** EXPERIMENTAL: decode passed HEVC in software (see `createDesktopVideo`). */
+  /** BETA: decode passed HEVC in software (see `createDesktopVideo`). */
   softwareHevc?: boolean;
 }): FramePainter {
   // Which attachment the decoder belongs to. `clear()` is the attachment boundary and
@@ -147,6 +193,26 @@ export function createFramePainter(options: {
     (() => {
       throw new Error("the page gave no canvas for the pipeline's picture");
     });
+  const makeRelay = options.makeRelay ?? openRelayPort;
+
+  // The part of the picture this page's display is, from the gateway's last word:
+  // the whole of it until told, which is every pipeline the host draws over one
+  // display. Kept across pipelines, since the host's layout is not theirs.
+  let graphicsPart: PicturePart | null = null;
+  // The second display's end of displayRelay.ts on the page that composes: made
+  // with the first pipeline, told what every run paints, and kept for the page's
+  // life — the tab may open before a pipeline or outlive one.
+  let source: RelaySource | null = null;
+  // The other end, in a tab showing a display of its own: its picture, and
+  // whether the page has been told to show it.
+  interface Mirror {
+    /** The display it is of, for whoever is told it could not be shown. */
+    display: number;
+    sink: RelaySink;
+    picture: GraphicsPicture;
+    shown: boolean;
+  }
+  let mirror: Mirror | null = null;
 
   // A pipeline's compositor, given back; it composes nothing more. Its picture
   // stays where it is, showing what was last drawn.
@@ -176,6 +242,21 @@ export function createFramePainter(options: {
       finish(pipeline);
     }
     pipeline = null;
+    source?.reset();
+  };
+
+  // A tab's mirror, given back, and its picture no longer shown.
+  const releaseMirror = () => {
+    if (!mirror) {
+      return;
+    }
+    const done = mirror;
+    mirror = null;
+    done.sink.close();
+    done.picture.close();
+    if (done.shown) {
+      options.onGraphicsShown?.(false);
+    }
   };
 
   const describe = (error: unknown) =>
@@ -215,9 +296,29 @@ export function createFramePainter(options: {
   let videoComplained = false;
   // The configuration that was refused, or null.
   let refused: string | null = null;
+  // How many times the stream's chain has been cut. A unit is handed to the
+  // decoder under the count of that moment, and its picture is the stream's
+  // again only if nothing has cut the chain since: one decoded ahead of a cut
+  // still paints, with the chain cut behind it.
+  let cuts = 0;
+  // Whether a keyframe was asked for and no picture of it has been painted.
+  let owed = false;
+
+  const needKeyframe = (reason: string) => {
+    cuts += 1;
+    owed = true;
+    options.onVideoNeedsKeyframe(reason);
+  };
+
+  const settle = () => {
+    if (owed) {
+      owed = false;
+      options.onVideoSettled?.();
+    }
+  };
 
   const complainAboutVideo = (
-    reason: string,
+    fault: Fault,
     recoverable: boolean,
     decode: string,
   ) => {
@@ -229,16 +330,20 @@ export function createFramePainter(options: {
       refused = decode;
     }
     videoComplained = recoverable;
-    options.onVideoError(reason);
+    options.onVideoError(fault);
   };
 
   const releaseVideo = () => {
     releasePipeline();
+    releaseMirror();
     releaseHevc();
     video?.close();
     video = null;
     videoComplained = false;
     refused = null;
+    // No keyframe of this stream will be painted now: whoever is asking for one
+    // is told, where saying nothing left them asking until they gave up.
+    settle();
     // Retracted, and not merely forgotten. This is the attachment boundary: the
     // decoder that said it is gone, the next attachment may be a different target
     // through a different origin, and the page clears its own copy on the way back to
@@ -255,7 +360,7 @@ export function createFramePainter(options: {
     video = createDesktopVideo(
       {
         onError: complainAboutVideo,
-        onNeedsKeyframe: (reason) => options.onVideoNeedsKeyframe(reason),
+        onNeedsKeyframe: needKeyframe,
       },
       undefined,
       options.softwareHevc,
@@ -277,9 +382,7 @@ export function createFramePainter(options: {
     }
     stop(broken);
     videoComplained = false;
-    options.onVideoError(
-      `This browser could not compose the host's graphics (${why}). Reload the page to start the session over.`,
-    );
+    options.onVideoError({ code: "AL-4605", fill: { detail: why } });
   };
 
   // Every unit is part of one chain, so a dropped batch cuts it: the deltas after it
@@ -292,8 +395,13 @@ export function createFramePainter(options: {
       endPipeline(pipeline, "a batch of its commands arrived malformed");
       return;
     }
+    if (mirror) {
+      // A tab painted from the session page's picture decodes no stream: no
+      // keyframe would ever settle the ask.
+      return;
+    }
     video?.restart();
-    options.onVideoNeedsKeyframe("a malformed batch was dropped");
+    needKeyframe("a malformed batch was dropped");
   };
 
   // A run's H.264, where it has any, ahead of composing it: each access unit
@@ -361,6 +469,8 @@ export function createFramePainter(options: {
       endPipeline(current, describe(error));
       return;
     }
+    // And the tab's share of it, out of the same picture.
+    source?.painted(run);
     // Shown from its first drawn run, and not before: until then the picture's
     // canvas holds nothing of this pipeline's.
     if (!current.shown && run.width > 0 && run.height > 0) {
@@ -402,9 +512,10 @@ export function createFramePainter(options: {
       hevc.picture = null;
       hevc.broken = true;
       videoComplained = false;
-      options.onVideoError(
-        `This browser could not present the decoded picture (${describe(error)}). Reload the page to start the session over.`,
-      );
+      options.onVideoError({
+        code: "AL-4606",
+        fill: { detail: describe(error) },
+      });
       return false;
     }
     if (!hevc.shown) {
@@ -414,7 +525,9 @@ export function createFramePainter(options: {
     return true;
   };
 
-  const paint = (record: VideoMsg, image: DecodedPicture) => {
+  // `fresh` is whether nothing has cut the chain since this picture's unit was
+  // handed to its decoder.
+  const paint = (record: VideoMsg, image: DecodedPicture, fresh: boolean) => {
     const context = options.context();
     if (isHevcPlanes(image)) {
       if (!presentPlanes(image, record.w, record.h)) {
@@ -429,6 +542,9 @@ export function createFramePainter(options: {
       // The desktop's own canvas is the picture again.
       hideHevc();
     }
+    if (!fresh) {
+      return;
+    }
     if (videoComplained) {
       // Video is painting again, so whatever was said about it has stopped being
       // true. Said here rather than on a timer or behind a dismiss button: the
@@ -437,6 +553,7 @@ export function createFramePainter(options: {
       videoComplained = false;
       options.onVideoError(null);
     }
+    settle();
   };
 
   return {
@@ -451,14 +568,17 @@ export function createFramePainter(options: {
       // order — and each is drawn in wire order as it lands, so a picture is released
       // the moment it is drawn instead of the whole batch's worth staying alive until
       // the slowest.
-      const decodes = records.map(decode);
+      const decodes = records.map((record) => ({
+        cuts,
+        picture: decode(record),
+      }));
       for (let i = 0; i < records.length; i += 1) {
         const record = records[i];
         if (record.kind === "graphics") {
           await compose(record, born);
           continue;
         }
-        const image = await decodes[i];
+        const image = await decodes[i].picture;
         if (!image) {
           continue;
         }
@@ -469,7 +589,7 @@ export function createFramePainter(options: {
           continue;
         }
         try {
-          paint(record, image);
+          paint(record, image, decodes[i].cuts === cuts);
         } finally {
           // Whatever became of it: the software decoder waits on this.
           image.close();
@@ -479,6 +599,15 @@ export function createFramePainter(options: {
     clear() {
       generation += 1;
       releaseVideo();
+      // The next attachment names its own part, ahead of any run.
+      graphicsPart = null;
+    },
+    restartVideo() {
+      if (mirror) {
+        return;
+      }
+      video?.restart();
+      needKeyframe("the page was out of sight");
     },
     startGraphics() {
       releaseVideo();
@@ -490,26 +619,114 @@ export function createFramePainter(options: {
         broken: false,
         ready: Promise.resolve(),
       };
+      // The second display's end, reading the picture of whichever pipeline is
+      // current when an update goes out. A channel that cannot be opened leaves
+      // the tab unpainted, and this page's picture as it is.
+      if (!source) {
+        try {
+          source = createRelaySource(makeRelay(), () =>
+            pipeline?.compositor && !pipeline.broken
+              ? pipeline.compositor.picture()
+              : null,
+          );
+        } catch (error) {
+          console.warn("the second display's channel did not open:", error);
+        }
+      }
       starting.ready = loadCompositor()
         .then((make) => {
           // Replaced or cleared while the module loaded: nothing to make one for.
           if (!starting.broken) {
             starting.compositor = make();
             starting.picture = makePicture();
+            starting.picture.window(graphicsPart);
           }
         })
         .catch((error: unknown) => {
           if (!starting.broken) {
             finish(starting);
-            options.onVideoError(
-              `This browser could not load the graphics compositor (${describe(error)}).`,
-            );
+            options.onVideoError({
+              code: "AL-4607",
+              fill: { detail: describe(error) },
+            });
           }
         });
       pipeline = starting;
     },
+    setGraphicsView(part) {
+      graphicsPart = part;
+      const current = pipeline;
+      if (!current?.picture || current.broken) {
+        return;
+      }
+      try {
+        current.picture.window(part);
+      } catch (error) {
+        endPipeline(current, describe(error));
+      }
+    },
+    mirrorGraphics(display, part) {
+      if (!mirror) {
+        // A tab holds no pipeline and no stream: the picture is the whole of
+        // what it shows.
+        releaseVideo();
+        let picture: GraphicsPicture;
+        try {
+          picture = makePicture();
+        } catch (error) {
+          options.onVideoError({
+            code: "AL-4608",
+            fill: { n: display, detail: describe(error) },
+          });
+          return;
+        }
+        // Shown from its first painted update, and not before: until then the
+        // picture's canvas holds nothing of the display's.
+        const made: Mirror = {
+          display,
+          picture,
+          shown: false,
+          sink: createRelaySink(
+            makeRelay(),
+            picture,
+            () => {
+              if (mirror === made && !made.shown) {
+                made.shown = true;
+                options.onGraphicsShown?.(true);
+              }
+            },
+            (why) => {
+              if (mirror === made) {
+                releaseMirror();
+                videoComplained = false;
+                options.onVideoError({
+                  code: "AL-4608",
+                  fill: { n: display, detail: why },
+                });
+              }
+            },
+          ),
+        };
+        mirror = made;
+      }
+      mirror.sink.show(display, part);
+    },
     blank(w, h) {
       hideHevc();
+      if (mirror) {
+        try {
+          mirror.picture.blank(w, h);
+        } catch (error) {
+          const { display } = mirror;
+          const why = describe(error);
+          releaseMirror();
+          options.onVideoError({
+            code: "AL-4608",
+            fill: { n: display, detail: why },
+          });
+        }
+        return;
+      }
       const current = pipeline;
       if (!current?.picture || current.broken) {
         return;
@@ -522,8 +739,10 @@ export function createFramePainter(options: {
     },
     setVideoFormat(format) {
       // A stream takes the picture back from a pipeline: a host that draws with
-      // bitmap updates after all, which the gateway encodes.
+      // bitmap updates after all, which the gateway encodes. In a tab, from the
+      // mirror of the session page's picture, which shows the display no more.
       releasePipeline();
+      releaseMirror();
       if (refused !== null && format.decode !== refused) {
         // Not the configuration that was refused, so the refusal no longer stands —
         // but the banner stays until a frame paints, as any other complaint's does.

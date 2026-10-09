@@ -3,7 +3,7 @@
 //! In a session started with the pipeline passed the gateway passes its commands
 //! to the browser instead of composing them and encoding the picture. This is what
 //! composes them there: the gateway's own compositor and codecs, which are the
-//! `remotex-rdp-graphics` crate both are built with, behind the few calls the paint
+//! `alumia-rdp-graphics` crate both are built with, behind the few calls the paint
 //! worker makes (`frontend/src/egfxCompositor.ts`).
 //!
 //! The framebuffer stays in this module's memory, which is shared with the threads
@@ -25,8 +25,8 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Mutex, OnceLock};
 
 use rayon::{ThreadBuilder, ThreadPoolBuilder};
-use remotex_rdp_graphics::Compositor;
-use remotex_rdp_graphics::avc::{self, Picture, Plane, Samples, Scanned, Window};
+use alumia_rdp_graphics::Compositor;
+use alumia_rdp_graphics::avc::{self, Picture, Plane, Samples, Scanned, Window};
 use wasm_bindgen::prelude::*;
 
 /// The pool's threads on their way from the pool that makes them to the workers

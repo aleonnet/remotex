@@ -1,0 +1,2545 @@
+/* The page's screens, drawn from the design system (docs/design). Every colour,
+   size and time here is a token (design/tokens.css, written from
+   docs/design/alumia.tokens.json by tools/check-design.py), and that tool fails
+   on a colour written by hand. The rules are the mockup's (docs/mockups), where
+   they depend on the size of the device's frame; here they depend on the size of
+   the window.
+
+   The remote screen itself is index.css's: where its picture sits, how it
+   scrolls. Everything here hangs under `.al`, which is laid over it. */
+@import "./design/tokens.css";
+
+@font-face {
+  font-family: "Instrument Sans";
+  font-weight: 400 700;
+  font-stretch: 75% 100%;
+  font-display: block;
+  src: url("./design/InstrumentSans.woff2") format("woff2");
+}
+
+/* The theme is the document's (theme.ts); the browser's own controls follow it. */
+[data-al-theme="light"] .al {
+  color-scheme: light;
+}
+
+[data-al-theme="dark"] .al {
+  color-scheme: dark;
+}
+
+/* Over whatever lies under it: these screens own the window while they are up. */
+.al {
+  /* Where a phone's screen is not the page's to write on: its notch and its home
+     indicator. The page is given the whole screen (index.html), so what it says
+     keeps inside these; they are nothing on a device that has neither.
+     --al-safe-sides is what a thing centred on the page keeps clear of. */
+  --al-safe-top: env(safe-area-inset-top, 0px);
+  --al-safe-right: env(safe-area-inset-right, 0px);
+  --al-safe-bottom: env(safe-area-inset-bottom, 0px);
+  --al-safe-left: env(safe-area-inset-left, 0px);
+  --al-safe-sides: calc(2 * max(var(--al-safe-left), var(--al-safe-right)));
+  position: fixed;
+  inset: 0;
+  z-index: 1500;
+  overflow: hidden;
+  background: var(--al-surface-base);
+  color: var(--al-text-primary);
+  font-family: var(--al-font-family-web);
+  font-size: var(--al-font-size-body);
+  line-height: var(--al-font-line-height-normal);
+  font-stretch: 100%;
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+}
+
+.al [hidden] {
+  display: none;
+}
+
+.al h1,
+.al h2,
+.al h3,
+.al p,
+.al ul,
+.al dl,
+.al dd,
+.al figure {
+  margin: 0;
+  padding: 0;
+}
+
+.al ul {
+  list-style: none;
+}
+
+/* :where() keeps this reset at no weight, so a component's own colour is never
+   outranked by it. */
+.al :where(button, input, select, textarea) {
+  font: inherit;
+  color: inherit;
+}
+
+.al :focus-visible {
+  outline: var(--al-size-focus-ring) solid var(--al-focus);
+  outline-offset: 2px;
+}
+
+.al-i {
+  width: 20px;
+  height: 20px;
+  flex: none;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+}
+
+/* For a screen reader alone. */
+.al-sr {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+.al-dim {
+  color: var(--al-text-secondary);
+}
+
+.al-small {
+  font-size: var(--al-font-size-caption);
+}
+
+/* A name, set narrow: the label on a device. */
+.al-name {
+  font-stretch: 75%;
+  font-weight: var(--al-font-weight-semibold);
+  line-height: var(--al-font-line-height-tight);
+  letter-spacing: -0.01em;
+}
+
+/* The mark: a pixel seen up close, always on the unlit glass. */
+.al-mark {
+  display: inline-flex;
+  gap: 3px;
+  padding: 6px 7px;
+  border-radius: 7px;
+  background: var(--al-color-brand-glass);
+}
+
+.al-mark i {
+  width: 4px;
+  height: 14px;
+  border-radius: 2px;
+}
+
+.al-mark i:nth-child(1) {
+  background: var(--al-color-brand-red);
+}
+
+.al-mark i:nth-child(2) {
+  background: var(--al-color-brand-green);
+}
+
+.al-mark i:nth-child(3) {
+  background: var(--al-color-brand-blue);
+}
+
+@media (color-gamut: p3) {
+  .al-mark i:nth-child(1) {
+    background: var(--al-color-brand-p3-red);
+  }
+
+  .al-mark i:nth-child(2) {
+    background: var(--al-color-brand-p3-green);
+  }
+
+  .al-mark i:nth-child(3) {
+    background: var(--al-color-brand-p3-blue);
+  }
+}
+
+.al-brand {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--al-space-2);
+}
+
+.al-wordmark {
+  font-stretch: 75%;
+  font-weight: var(--al-font-weight-semibold);
+  font-size: var(--al-font-size-lead);
+  letter-spacing: 0.01em;
+}
+
+/* A screen: the top, the page, the foot, over the unlit glass. The glass goes
+   to the edges of the device; what is read keeps inside its safe area. */
+.al-scene {
+  position: absolute;
+  inset: var(--al-safe-top) var(--al-safe-right) var(--al-safe-bottom)
+    var(--al-safe-left);
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  overflow: auto;
+}
+
+.al-top {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--al-space-4);
+  padding: var(--al-space-4) var(--al-space-5);
+  position: relative;
+  z-index: 2;
+}
+
+.al-page {
+  position: relative;
+  z-index: 1;
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  padding: var(--al-space-5);
+  gap: var(--al-space-4);
+}
+
+.al-foot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--al-space-2) var(--al-space-4);
+  padding: var(--al-space-4) var(--al-space-5);
+  color: var(--al-text-secondary);
+  font-size: var(--al-font-size-caption);
+  position: relative;
+  z-index: 1;
+}
+
+.al-foot .al-push {
+  margin-inline-start: auto;
+}
+
+/* The unlit glass (glass.ts), and the still that stands in for it where there
+   is no WebGL 2. */
+.al-fx {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+}
+
+.al-fx canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+.al-still {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  pointer-events: none;
+  opacity: 0.5;
+  background: repeating-linear-gradient(
+    90deg,
+    color-mix(in oklab, var(--al-color-brand-red) 9%, transparent) 0 2px,
+    color-mix(in oklab, var(--al-color-brand-green) 9%, transparent) 2px 4px,
+    color-mix(in oklab, var(--al-color-brand-blue) 9%, transparent) 4px 6px,
+    transparent 6px 7px
+  );
+}
+
+/* Button: the main one filled, the common one outlined, the quiet one bare. */
+.al-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--al-space-2);
+  min-height: var(--al-size-target-pointer);
+  padding: var(--al-space-2) var(--al-space-4);
+  border: var(--al-size-hairline) solid var(--al-border-control);
+  border-radius: var(--al-radius-control);
+  background: transparent;
+  color: var(--al-text-primary);
+  font-weight: var(--al-font-weight-medium);
+  white-space: nowrap;
+  cursor: pointer;
+  transition:
+    background var(--al-duration-fast) var(--al-easing-standard),
+    border-color var(--al-duration-fast) var(--al-easing-standard);
+}
+
+.al-btn:hover {
+  border-color: var(--al-text-primary);
+}
+
+.al-btn--primary {
+  background: var(--al-action-default);
+  border-color: var(--al-action-default);
+  color: var(--al-text-on-action);
+}
+
+.al-btn--primary:hover,
+.al-btn--primary:active {
+  background: var(--al-action-hover);
+  border-color: var(--al-action-hover);
+}
+
+.al-btn--quiet {
+  border-color: transparent;
+  color: var(--al-action-default);
+  padding-inline: var(--al-space-2);
+}
+
+.al-btn--quiet:hover {
+  border-color: var(--al-border-subtle);
+}
+
+.al-btn[disabled] {
+  cursor: default;
+  color: var(--al-text-secondary);
+  border-color: var(--al-border-subtle);
+  background: var(--al-surface-sunken);
+}
+
+.al-btn--icon {
+  padding: var(--al-space-2);
+  min-width: var(--al-size-target-pointer);
+}
+
+/* Field: the label always above it. */
+.al-field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--al-space-1);
+}
+
+.al-field > label {
+  font-size: var(--al-font-size-caption);
+  font-weight: var(--al-font-weight-medium);
+  color: var(--al-text-secondary);
+}
+
+.al-input {
+  width: 100%;
+  min-height: 40px;
+  padding: var(--al-space-2) var(--al-space-3);
+  border: var(--al-size-hairline) solid var(--al-border-control);
+  border-radius: var(--al-radius-control);
+  background: var(--al-surface-sunken);
+  color: var(--al-text-primary);
+}
+
+/* A password and its eye: the eye is a button inside the field. */
+.al-pass {
+  position: relative;
+}
+
+.al-pass .al-input {
+  padding-inline-end: 48px;
+}
+
+/* One eye, the page's own. Edge draws a reveal button of its own inside every
+   password field, which would stand beside this one; the page's says what it did
+   to a screen reader and hides the password again as it is sent. Removed the way
+   Microsoft documents it:
+   https://learn.microsoft.com/en-us/microsoft-edge/web-platform/password-reveal */
+.al-pass .al-input::-ms-reveal {
+  display: none;
+}
+
+.al-eye {
+  position: absolute;
+  inset-block: 0;
+  inset-inline-end: 0;
+  width: 44px;
+  display: grid;
+  place-items: center;
+  border: 0;
+  background: transparent;
+  color: var(--al-text-secondary);
+  cursor: pointer;
+  border-radius: var(--al-radius-control);
+}
+
+.al-eye:hover {
+  color: var(--al-text-primary);
+}
+
+.al-check {
+  display: inline-flex;
+  align-items: flex-start;
+  gap: var(--al-space-2);
+  cursor: pointer;
+}
+
+.al-check input {
+  width: 18px;
+  height: 18px;
+  margin: 2px 0 0;
+  accent-color: var(--al-action-default);
+  flex: none;
+}
+
+/* A message: a glyph, the words, and the code to quote. */
+.al-msg {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--al-space-2);
+}
+
+.al-msg--danger {
+  color: var(--al-state-danger);
+}
+
+.al-code {
+  font-size: var(--al-font-size-caption);
+  color: var(--al-text-secondary);
+  letter-spacing: 0.02em;
+}
+
+/* A qualifier beside a name: "unofficial". */
+.al-tag {
+  display: inline-block;
+  padding: 0 var(--al-space-2);
+  border: var(--al-size-hairline) solid var(--al-border-control);
+  border-radius: var(--al-radius-pill);
+  font-size: var(--al-font-size-caption);
+  color: var(--al-text-secondary);
+  white-space: nowrap;
+}
+
+/* One of a few, side by side. */
+.al-seg {
+  display: inline-flex;
+  border: var(--al-size-hairline) solid var(--al-border-control);
+  border-radius: var(--al-radius-control);
+  overflow: hidden;
+}
+
+.al-seg button {
+  border: 0;
+  background: transparent;
+  padding: var(--al-space-2) var(--al-space-3);
+  cursor: pointer;
+  min-height: var(--al-size-target-pointer);
+  white-space: nowrap;
+}
+
+.al-seg button[aria-pressed="true"] {
+  background: var(--al-action-default);
+  color: var(--al-text-on-action);
+}
+
+/* Sign in: the destination is the title, and the form sits low and left. */
+.al-hero {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  gap: var(--al-space-4);
+  max-width: var(--al-size-measure);
+}
+
+.al-hero h1 {
+  font-size: var(--al-font-size-display);
+}
+
+.al-form {
+  display: flex;
+  flex-direction: column;
+  gap: var(--al-space-4);
+  max-width: 360px;
+}
+
+/* Actions side by side where the longest of them fits, and one under the other
+   on a phone: nothing here wraps by the length of a language's words. */
+.al-acts {
+  display: flex;
+  flex-wrap: nowrap;
+  align-items: center;
+  gap: var(--al-space-2);
+}
+
+/* The list: a line a computer, drawn on the glass, never a grid of cards. The
+   only plates of glass before a session are what comes over something else. */
+.al-listtitle {
+  font-size: var(--al-font-size-lead);
+  font-weight: var(--al-font-weight-medium);
+  color: var(--al-text-secondary);
+}
+
+.al-list {
+  /* The light of the three colours, each a little to its own side: what passes
+     behind a key to say it can be pressed. */
+  --al-fringe:
+    -3px 0 8px -1px
+    color-mix(in oklab, var(--al-color-brand-red) 75%, transparent),
+    0 0 8px -1px
+    color-mix(in oklab, var(--al-color-brand-green) 70%, transparent),
+    3px 0 8px -1px
+    color-mix(in oklab, var(--al-color-brand-blue) 80%, transparent);
+  display: flex;
+  flex-direction: column;
+}
+
+/* A line: the monitor, and beside it the name, level with its screen, over
+   Open, level with its keys and of their height: what is pressed on a line is
+   on one strip, and what the monitor says has the rest of the line, which is
+   never less than a tip can be read in. A name too long for what is left
+   wraps, and the line grows upwards from the strip: the monitor stays on it. */
+.al-row {
+  --al-mon-w: 116px;
+  --al-mon-key: 30px;
+  /* The room the monitor's base leaves around its keys. */
+  --al-mon-pad: 3px;
+  position: relative;
+  display: grid;
+  grid-template-columns: auto minmax(0, auto) minmax(220px, 1fr);
+  grid-template-rows: minmax(0, 1fr) auto;
+  grid-template-areas: "mon who tip" "mon act tip";
+  column-gap: var(--al-space-5);
+  row-gap: var(--al-space-2);
+  align-items: center;
+  padding: var(--al-space-3) 0;
+  border-top: var(--al-size-hairline) solid var(--al-border-subtle);
+}
+
+.al-who {
+  grid-area: who;
+  align-self: start;
+  min-width: 0;
+}
+
+.al-row h2 {
+  font-size: var(--al-font-size-headline);
+  overflow-wrap: anywhere;
+}
+
+.al-kind {
+  color: var(--al-text-secondary);
+  font-size: var(--al-font-size-caption);
+}
+
+.al-rowact {
+  grid-area: act;
+  justify-self: start;
+  margin-bottom: var(--al-mon-pad);
+}
+
+.al-rowact .al-btn {
+  min-height: var(--al-mon-key);
+  padding-block: 0;
+}
+
+/* Why a computer cannot be opened from here, under its line. */
+.al-rownote {
+  grid-column: 1 / -1;
+  font-size: var(--al-font-size-caption);
+}
+
+/* A line not there yet. */
+.al-skel {
+  height: 108px;
+  margin-block: var(--al-space-3);
+  border-radius: var(--al-radius-card);
+  background: var(--al-surface-sunken);
+}
+
+/* The monitor: this window, small. Its screen shows how the picture will
+   arrive, and its base holds the three places. A screen is the dark glass in
+   either theme, and what is lit on it is the light theme's (TargetPicker.tsx). */
+.al-mon {
+  grid-area: mon;
+  align-self: end;
+  width: var(--al-mon-w);
+  border-radius: 9px;
+  background: color-mix(
+    in oklab,
+    var(--al-text-primary) 9%,
+    var(--al-surface-base)
+  );
+  box-shadow:
+    0 0 0 1.5px color-mix(in oklab, var(--al-text-primary) 55%, transparent),
+    0 0 18px color-mix(in oklab, var(--al-color-brand-blue) 22%, transparent);
+}
+
+.al-monscreen {
+  position: relative;
+  display: block;
+  height: calc(var(--al-mon-w) * 0.625);
+  border-radius: 8px 8px 0 0;
+  overflow: hidden;
+  background: var(--al-color-brand-glass);
+}
+
+/* The picture: white light made of the three colours, with a desktop said in
+   two strokes over it, so that a fitted picture reads as the same picture,
+   smaller. Its cells are smaller than the page's own glass has, as a window in
+   small has: a colour is one pixel wide, the least that stays sharp. Whatever
+   moves the picture moves it by whole cells, or a colour would fall between
+   two pixels and tint the whole screen. */
+.al-px {
+  --al-cell: 4px;
+  position: absolute;
+  inset: 0;
+  background:
+    linear-gradient(
+      color-mix(in oklab, var(--al-surface-raised) 62%, transparent),
+      color-mix(in oklab, var(--al-surface-raised) 50%, transparent)
+    ),
+    repeating-linear-gradient(
+      90deg,
+      var(--al-color-brand-red) 0 25%,
+      var(--al-color-brand-green) 25% 50%,
+      var(--al-color-brand-blue) 50% 75%,
+      transparent 75% 100%
+    )
+    0 0 / var(--al-cell) var(--al-cell);
+  mask:
+    linear-gradient(
+      var(--al-color-brand-glass) 75%,
+      color-mix(in oklab, var(--al-color-brand-glass) 68%, transparent) 75%
+    )
+    0 0 / 100% var(--al-cell);
+  transition: inset var(--al-duration-off) var(--al-easing-standard);
+}
+
+.al-px::before,
+.al-px::after {
+  content: "";
+  position: absolute;
+}
+
+.al-px::before {
+  inset: 0 0 auto;
+  height: 14%;
+  background: color-mix(in oklab, var(--al-text-primary) 30%, transparent);
+}
+
+.al-px::after {
+  left: 14%;
+  top: 31%;
+  width: 44%;
+  height: 47%;
+  background: color-mix(in oklab, var(--al-surface-raised) 55%, transparent);
+}
+
+/* Fitted: the whole picture inside the window, with room left where the two
+   shapes differ, which is at the sides of a wide window and above and below in
+   a tall one. Over: larger than the window, with the bars it scrolls by. */
+.al-mon[data-al-here="fit"] .al-px {
+  inset: 0 calc(var(--al-cell) * 5);
+}
+
+@media (max-aspect-ratio: 16 / 10) {
+  .al-mon[data-al-here="fit"] .al-px {
+    inset: calc(var(--al-cell) * 3) 0;
+  }
+}
+
+.al-mon[data-al-here="over"] .al-px {
+  inset: 0 -50% -50% 0;
+}
+
+.al-bars {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity var(--al-duration-base);
+}
+
+.al-bars::before,
+.al-bars::after {
+  content: "";
+  position: absolute;
+  border-radius: 2px;
+  background: color-mix(in oklab, var(--al-text-primary) 60%, transparent);
+}
+
+.al-bars::before {
+  right: 2px;
+  top: 5px;
+  width: 3px;
+  height: 40%;
+}
+
+.al-bars::after {
+  bottom: 2px;
+  left: 5px;
+  height: 3px;
+  width: 34%;
+}
+
+.al-mon[data-al-here="over"] .al-bars {
+  opacity: 1;
+}
+
+/* The three places, always where they are. One that can be pressed is a key;
+   one that cannot is a mark, and one that does not apply keeps its room. */
+.al-monbase {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--al-mon-pad);
+  padding: var(--al-mon-pad);
+}
+
+.al-place {
+  display: grid;
+  place-items: center;
+  height: var(--al-mon-key);
+  padding: 0;
+  border: var(--al-size-hairline) solid transparent;
+  border-radius: 6px;
+  background: transparent;
+  color: var(--al-text-secondary);
+}
+
+.al-place:not(.al-place--key) .al-i {
+  opacity: 0.7;
+}
+
+.al .al-place--key {
+  color: var(--al-text-primary);
+  background: var(--al-surface-raised);
+  border-color: var(--al-border-control);
+  cursor: pointer;
+  transition:
+    border-color var(--al-duration-fast),
+    box-shadow var(--al-duration-base);
+}
+
+.al-place--key:hover {
+  border-color: var(--al-action-default);
+  box-shadow: var(--al-fringe);
+}
+
+.al-place--key .al-i {
+  transition: transform var(--al-duration-fast) var(--al-easing-standard);
+}
+
+.al-place--key:active .al-i {
+  transform: scale(0.86);
+}
+
+.al-place--key[disabled] {
+  cursor: default;
+}
+
+/* The invitation: the light passes once behind every key when the list
+   arrives, one after the other, and again on the line the pointer comes to. */
+@keyframes al-invite {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+
+  40% {
+    border-color: var(--al-action-default);
+    box-shadow: var(--al-fringe);
+  }
+}
+
+@keyframes al-invite-near {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 transparent;
+  }
+
+  40% {
+    border-color: var(--al-action-default);
+    box-shadow: var(--al-fringe);
+  }
+}
+
+.al-list[data-al-arrived] .al-place--key {
+  animation: al-invite calc(var(--al-duration-off) * 2)
+    var(--al-easing-standard) var(--al-duration-off) 1 both;
+}
+
+.al-list[data-al-arrived] .al-row:nth-child(even) .al-place--key {
+  animation-delay: calc(var(--al-duration-off) + var(--al-duration-fast));
+}
+
+@media (hover: hover) {
+  .al-list:not([data-al-arrived]) .al-row:hover .al-place--key {
+    animation: al-invite-near calc(var(--al-duration-off) * 2)
+      var(--al-easing-standard) 1;
+  }
+}
+
+/* What the monitor says: a line a glyph, in the line's own free room. Up while
+   the pointer rests on the monitor, while a key has the keyboard's focus, and
+   for a moment after a key is pressed, when the key's own line stands out. It
+   is laid over its room and takes none: a tip taller than the monitor does not
+   make the line taller, hidden or shown. */
+.al-says {
+  position: absolute;
+  grid-area: tip;
+  top: 50%;
+  left: 0;
+  translate: 0 -50%;
+  z-index: 5;
+  display: grid;
+  gap: var(--al-space-1);
+  max-width: min(340px, 100%);
+  padding: var(--al-space-2) var(--al-space-3);
+  border-radius: var(--al-radius-card);
+  font-size: var(--al-font-size-caption);
+  pointer-events: none;
+  opacity: 0;
+  visibility: hidden;
+  transform: translateX(-4px);
+  transition:
+    opacity var(--al-duration-base),
+    transform var(--al-duration-base) var(--al-easing-standard),
+    visibility 0s var(--al-duration-base);
+}
+
+.al-row:has(.al-place--key:focus-visible) .al-says,
+.al-row:has(a.al-btn:focus-visible) .al-says,
+.al-row[data-al-told] .al-says {
+  opacity: 1;
+  visibility: visible;
+  transform: none;
+  transition-delay: 0s;
+}
+
+/* A pointer rests; a finger does not, and what it touched would stay as if
+   under it. */
+@media (hover: hover) {
+  .al-row:has(.al-mon:hover) .al-says,
+  .al-row:has(a.al-btn:hover) .al-says {
+    opacity: 1;
+    visibility: visible;
+    transform: none;
+    transition-delay: 0s;
+  }
+}
+
+/* A line of another Mac with Alumia, after the computers, under a title of its
+   own. Its monitor is not lit, because its picture is not this gateway's to
+   bring, and its base keeps the room of the three places with nothing in them.
+   Its one act is a link, since it leaves this page: the same button, said as
+   what it is, and its tip is up while the link has the pointer or the focus,
+   which is where this line is acted on. */
+.al-listtitle--next {
+  margin-top: var(--al-space-5);
+}
+
+.al-mon--far {
+  box-shadow: 0 0 0 1.5px
+    color-mix(in oklab, var(--al-text-primary) 30%, transparent);
+}
+
+.al-mon--far .al-monbase {
+  height: calc(var(--al-mon-key) + 2 * var(--al-mon-pad));
+}
+
+a.al-btn {
+  text-decoration: none;
+}
+
+/* A device with no fine pointer has keys a finger can hit, whatever its size. */
+@media (pointer: coarse) {
+  .al-row {
+    --al-mon-w: 144px;
+    --al-mon-key: var(--al-size-target-touch);
+  }
+
+  /* A field under 16 px makes iOS zoom the page in when it takes the focus, and
+     the page does not zoom back out by itself (index.css, on the desktop's
+     surface): a finger's fields are 16 px, whatever the body is. */
+  .al-input,
+  .al-select {
+    font-size: max(16px, var(--al-font-size-body));
+  }
+}
+
+.al-says > p {
+  display: grid;
+  grid-template-columns: 18px minmax(0, 1fr);
+  gap: var(--al-space-2);
+  align-items: start;
+  transition: opacity var(--al-duration-fast);
+}
+
+.al-says .al-i {
+  width: 16px;
+  height: 16px;
+  margin-top: 1px;
+}
+
+.al-says small {
+  font-size: inherit;
+}
+
+.al-row:has([data-al-opt="mode"]:is(:hover, :focus-visible))
+  .al-says
+  > :not([data-al-for="mode"]),
+.al-row:has([data-al-opt="place"]:is(:hover, :focus-visible))
+  .al-says
+  > :not([data-al-for="place"]),
+.al-row:has([data-al-opt="size"]:is(:hover, :focus-visible))
+  .al-says
+  > :not([data-al-for="size"]),
+.al-row:has([data-al-opt="sound"]:is(:hover, :focus-visible))
+  .al-says
+  > :not([data-al-for="sound"]),
+.al-row[data-al-told="mode"] .al-says > :not([data-al-for="mode"]),
+.al-row[data-al-told="place"] .al-says > :not([data-al-for="place"]),
+.al-row[data-al-told="size"] .al-says > :not([data-al-for="size"]),
+.al-row[data-al-told="sound"] .al-says > :not([data-al-for="sound"]) {
+  opacity: 0.45;
+}
+
+/* Glass: what lies over something else. On it text is the primary colour,
+   whatever is behind, and a state is said by its glyph and its words. */
+.al-glass {
+  background: var(--al-glass);
+  color: var(--al-text-primary);
+  backdrop-filter: blur(22px) saturate(1.5);
+  border: var(--al-size-hairline) solid var(--al-border-subtle);
+  box-shadow: var(--al-shadow-overlay);
+}
+
+@media (prefers-reduced-transparency: reduce), (prefers-contrast: more) {
+  .al-glass {
+    background: var(--al-surface-raised);
+    backdrop-filter: none;
+  }
+}
+
+.al-glass :where(.al-msg, .al-btn--quiet) {
+  color: var(--al-text-primary);
+}
+
+.al-glass :where(.al-btn) {
+  border-color: currentColor;
+}
+
+.al-glass .al-msg--danger > .al-i {
+  color: var(--al-state-danger);
+}
+
+/* The app's notice: one strip pinned at the top, over what it interrupted. */
+.al-notice {
+  position: absolute;
+  z-index: 8;
+  top: var(--al-space-3);
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(720px, calc(100% - var(--al-space-5)));
+  border-radius: var(--al-radius-card);
+  padding: var(--al-space-3) var(--al-space-4);
+  display: grid;
+  gap: var(--al-space-2);
+}
+
+.al-noticerow {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--al-space-2) var(--al-space-3);
+}
+
+.al-details > summary {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--al-space-1);
+  min-height: var(--al-size-target-pointer);
+  font-size: var(--al-font-size-caption);
+  list-style: none;
+  cursor: pointer;
+}
+
+.al-details > summary::-webkit-details-marker {
+  display: none;
+}
+
+.al-details[open] > summary .al-i {
+  transform: rotate(90deg);
+}
+
+.al-detailbody {
+  display: grid;
+  gap: var(--al-space-1);
+  padding-top: var(--al-space-1);
+  font-size: var(--al-font-size-caption);
+  overflow-wrap: anywhere;
+}
+
+/* The preferences, under the gear. */
+.al-pop {
+  position: absolute;
+  z-index: 7;
+  top: 56px;
+  right: var(--al-space-4);
+  width: min(320px, calc(100% - var(--al-space-5)));
+  display: grid;
+  gap: var(--al-space-4);
+  padding: var(--al-space-4);
+  border: var(--al-size-hairline) solid var(--al-border-subtle);
+  border-radius: var(--al-radius-sheet);
+  background: var(--al-surface-raised);
+  box-shadow: var(--al-shadow-overlay);
+}
+
+.al-panelhead {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--al-space-3);
+}
+
+.al-panelhead h2 {
+  font-size: var(--al-font-size-lead);
+}
+
+/* A headline broken where the design breaks it, the same in either language. */
+.al-twolines > span {
+  display: block;
+  white-space: nowrap;
+}
+.al-hero--wide {
+  max-width: 680px;
+}
+.al-chip {
+  display: inline-block;
+  padding: 2px var(--al-space-2);
+  border-radius: 6px;
+  background: var(--al-surface-sunken);
+  color: var(--al-text-primary);
+  border: var(--al-size-hairline) solid var(--al-border-subtle);
+  font-size: var(--al-font-size-caption);
+  overflow-wrap: anywhere;
+}
+/* "Cannot start": each way out, and what to type for it. */
+.al-ways {
+  display: grid;
+  gap: 0;
+  border-top: var(--al-size-hairline) solid var(--al-border-subtle);
+}
+.al-ways li {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--al-space-2) var(--al-space-3);
+  padding: var(--al-space-3) 0;
+  border-bottom: var(--al-size-hairline) solid var(--al-border-subtle);
+}
+.al-ways .al-i {
+  color: var(--al-text-secondary);
+}
+
+/* The meter's three choices on one line, and under them the fields of a typed
+   period: two fields and the button that reads them. Columns of fixed share, so
+   no text moves one. */
+.al-trio {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--al-space-2);
+}
+.al-periodform {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--al-space-2);
+  align-items: end;
+}
+.al-periodform .al-select,
+.al-periodform .al-btn {
+  min-height: 40px;
+}
+.al-tab {
+  white-space: nowrap;
+}
+.al-seg--full {
+  display: flex;
+}
+.al-seg--full button {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  padding-inline: var(--al-space-1);
+}
+.al-btn--danger {
+  background: var(--al-state-danger);
+  border-color: var(--al-state-danger);
+  color: var(--al-surface-base);
+}
+.al-btn[aria-disabled="true"] {
+  cursor: default;
+  color: var(--al-text-secondary);
+  border-color: var(--al-border-subtle);
+  background: var(--al-surface-sunken);
+}
+.al-btn[aria-pressed="true"] {
+  background: var(--al-surface-sunken);
+  border-color: var(--al-text-primary);
+}
+.al-input::placeholder {
+  color: var(--al-text-secondary);
+}
+.al-input[aria-invalid="true"] {
+  border-color: var(--al-state-danger);
+}
+.al-msg--ok {
+  color: var(--al-state-ok);
+}
+.al-msg--warning {
+  color: var(--al-state-warning);
+}
+
+/* The screen lights, and whose session it is. The screen is the dark glass in
+   either theme, because it is a screen; the words sit on a plate of glass, low
+   and left, and the plate follows the theme like everything else laid over a
+   remote screen. */
+.al--screen {
+  background: transparent;
+}
+
+/* The glass of the screen. Opened from the list, it starts as the monitor of
+   the line that was pressed (Ignite.tsx sets what the clip leaves out) and
+   grows to the window, over the list's ground, which goes as it does. */
+.al-tube {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: var(--al-color-brand-glass);
+  clip-path: inset(0 round 0);
+  transition: clip-path var(--al-duration-off) var(--al-easing-standard);
+}
+
+.al-ground {
+  position: absolute;
+  inset: 0;
+  z-index: 0;
+  background: var(--al-surface-base);
+  transition: opacity var(--al-duration-off) var(--al-easing-standard);
+}
+
+.al-ground[data-al-gone] {
+  opacity: 0;
+}
+
+/* What is left of a screen that went off, for as long again as it took: the
+   glass as going off left it (RemoteDesktop.tsx), not lit and with the spot at
+   its centre, going, over the list that came back. It takes nothing: a press
+   goes through it. */
+.al-afterglow {
+  position: fixed;
+  inset: 0;
+  z-index: 1600;
+  pointer-events: none;
+  animation: al-afterglow var(--al-duration-off) var(--al-easing-exit) 1
+    forwards;
+}
+
+.al-afterglow canvas {
+  display: block;
+  width: 100%;
+  height: 100%;
+}
+
+@keyframes al-afterglow {
+  to {
+    opacity: 0;
+  }
+}
+.al-still--dark {
+  background-color: var(--al-color-brand-glass);
+  opacity: 1;
+}
+.al-lit {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  align-items: flex-start;
+  padding: var(--al-space-6);
+}
+.al-plate {
+  display: grid;
+  gap: var(--al-space-2);
+  padding: var(--al-space-5);
+  border-radius: var(--al-radius-sheet);
+  max-width: min(520px, 100%);
+}
+.al-plate h1 {
+  font-size: var(--al-font-size-display);
+  /* The name arrives from its line: put back where it stood (Ignite.tsx), and
+     let go. */
+  transform-origin: 0 0;
+  transition: transform var(--al-duration-off) var(--al-easing-standard);
+}
+
+.al-plate h1[data-al-placed] {
+  transition: none;
+}
+
+/* Cancel was pressed: the words go, and the screen goes off behind them. */
+.al-plate[data-al-leaving] {
+  opacity: 0;
+  transition: opacity var(--al-duration-fast);
+}
+
+/* In session. The remote screen edge to edge (index.css); over it, glass. This
+   layer takes nothing itself: what is on it does. Everything that opens in a
+   session hangs from the bar, centred, on the side of it that faces the screen,
+   and only the keyboard sits at the bottom, where hands are. On the glass text
+   is the primary colour, whatever lies behind: a state is said by its glyph and
+   its words. */
+.al--over {
+  background: transparent;
+  pointer-events: none;
+}
+.al--over > * {
+  pointer-events: auto;
+}
+.al--over > .al-fx {
+  pointer-events: none;
+  z-index: 7;
+}
+/* The screen is going off (Ignite.tsx): what lies over it goes first. */
+.al--over[data-al-off] > :not(.al-fx) {
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity var(--al-duration-fast);
+}
+/* A cover says something over the remote and takes nothing from it: a press on
+   it is the remote's, as before there was a cover. Only what it offers to press
+   is its own. */
+.al--over > .al-cover {
+  pointer-events: none;
+}
+.al-cover > [role="alert"] {
+  pointer-events: auto;
+}
+.al-glass :where(.al-dim, small, .al-tag, .al-code, dt) {
+  color: var(--al-text-primary);
+}
+.al-glass :where(.al-tag) {
+  border-color: currentColor;
+}
+.al-glass .al-field > label {
+  color: var(--al-text-primary);
+}
+.al-glass .al-end > .al-i {
+  color: var(--al-state-danger);
+}
+.al-glass .al-msg--warning > .al-i {
+  color: var(--al-state-warning);
+}
+.al-glass .al-live > .al-i {
+  color: var(--al-state-ok);
+}
+.al-chrome {
+  position: absolute;
+  z-index: 8;
+  top: calc(var(--al-space-2) + var(--al-safe-top));
+  left: 50%;
+  transform: translateX(-50%);
+}
+.al-handle {
+  display: flex;
+  align-items: center;
+  gap: var(--al-space-2);
+  min-width: 64px;
+  min-height: 32px;
+  padding: 0 var(--al-space-3);
+  justify-content: center;
+  border-radius: var(--al-radius-pill);
+  cursor: pointer;
+}
+.al-handle .al-i {
+  width: 18px;
+  height: 18px;
+  display: block;
+}
+.al-bar {
+  display: flex;
+  align-items: center;
+  gap: var(--al-space-1);
+  padding: var(--al-space-1);
+  border-radius: var(--al-radius-sheet);
+  max-width: calc(100vw - var(--al-space-4) - var(--al-safe-sides));
+}
+.al-bar .al-btn {
+  border-color: transparent;
+  flex-direction: column;
+  gap: 2px;
+  font-size: var(--al-font-size-caption);
+  white-space: nowrap;
+  min-width: 72px;
+  min-height: var(--al-size-target-touch);
+  padding: var(--al-space-1) var(--al-space-2);
+}
+.al-bar .al-btn:hover,
+.al-bar .al-btn[aria-expanded="true"] {
+  border-color: currentColor;
+}
+/* What a display's tab says of its display, among its bar's buttons. */
+.al-barnote {
+  padding: 0 var(--al-space-3);
+  font-size: var(--al-font-size-caption);
+  white-space: nowrap;
+}
+/* Where a sheet begins is the bar's own edge, as measured (--al-chrome, kept by
+   SessionBar.tsx), and one gap after it; --al-far is the room left at the other
+   edge for the view-only line, which is as tall as it was measured (--al-veil-h,
+   kept there too): one line in a wide window, two on a narrow phone. */
+.al-drop {
+  /* The device's own room at the bar's edge of the page, and at the other. */
+  --al-safe-near: var(--al-safe-top);
+  --al-safe-far: var(--al-safe-bottom);
+  --al-near: calc(
+    var(--al-space-2) +
+    var(--al-chrome, 56px) +
+    var(--al-space-1) +
+    var(--al-safe-near)
+  );
+  --al-far: calc(var(--al-veil-h, 28px) + 26px + var(--al-safe-far));
+  position: absolute;
+  z-index: 7;
+  top: var(--al-near);
+  /* The room a scroll bar takes is kept from the start, on both sides so the
+     content stays centred: a sheet that grows past its height (Details opened, a
+     table shown) then scrolls without anything above moving sideways. Where the
+     scroll bar is drawn over the content, as on a Mac or a phone, it keeps none. */
+  scrollbar-gutter: stable both-edges;
+  left: 50%;
+  transform: translateX(-50%);
+  width: min(
+    var(--al-drop, 400px),
+    calc(100% - var(--al-space-4) - var(--al-safe-sides))
+  );
+  max-height: calc(100% - var(--al-near) - var(--al-far));
+  overflow: auto;
+  border-radius: var(--al-radius-sheet);
+  padding: var(--al-space-4);
+  display: grid;
+  gap: var(--al-space-3);
+  align-content: start;
+}
+.al-drop--menu {
+  --al-drop: 360px;
+  /* A menu does not grow once it is open. */
+  scrollbar-gutter: auto;
+  padding: var(--al-space-2);
+  gap: 2px;
+}
+.al-drop--list {
+  --al-drop: 360px;
+}
+.al-drop--wide {
+  --al-drop: 820px;
+  padding: var(--al-space-5);
+  gap: var(--al-space-4);
+}
+.al-moreitem {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--al-space-3);
+  padding: var(--al-space-2) var(--al-space-3);
+  border: 0;
+  background: transparent;
+  text-align: start;
+  border-radius: var(--al-radius-control);
+  cursor: pointer;
+  min-height: var(--al-size-target-touch);
+  width: 100%;
+}
+.al-moreitem:hover {
+  background: color-mix(in oklab, var(--al-text-primary) 10%, transparent);
+}
+.al-moreitem[aria-disabled="true"] {
+  cursor: default;
+}
+.al-itemname {
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.al-itemstate {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--al-space-1);
+  font-size: var(--al-font-size-caption);
+  white-space: nowrap;
+}
+.al-itemstate .al-i {
+  width: 16px;
+  height: 16px;
+}
+.al-say {
+  padding: var(--al-space-3) var(--al-space-4);
+  gap: var(--al-space-3);
+}
+.al-veil {
+  position: absolute;
+  z-index: 6;
+  left: 50%;
+  bottom: calc(var(--al-space-4) + var(--al-safe-bottom));
+  transform: translateX(-50%);
+  width: max-content;
+  max-width: calc(100% - var(--al-space-4) - var(--al-safe-sides));
+  padding: var(--al-space-1) var(--al-space-3);
+  border-radius: var(--al-radius-card);
+  font-size: var(--al-font-size-caption);
+  text-align: center;
+}
+/* Under what is open, over the remote screen: it gives the browser's pointer
+   back, and a press on it closes what is open. */
+.al-catch {
+  position: absolute;
+  inset: 0;
+  z-index: 5;
+  cursor: default;
+}
+
+/* What hangs from the bar. */
+.al-drop--wide .al-panelhead h2 {
+  font-size: var(--al-font-size-headline);
+  font-stretch: 75%;
+  line-height: var(--al-font-line-height-tight);
+}
+.al-card {
+  background: var(--al-surface-sunken);
+  color: var(--al-text-primary);
+  border: var(--al-size-hairline) dashed var(--al-border-control);
+  border-radius: var(--al-radius-control);
+  padding: var(--al-space-4);
+  text-align: start;
+  width: 100%;
+  display: grid;
+  gap: var(--al-space-1);
+  cursor: pointer;
+}
+.al-textarea {
+  min-height: 96px;
+  resize: vertical;
+}
+/* The remote's text, as it is: a box that is no field, so nothing on a phone
+   brings the keyboard up, with its text to be selected and read whole. */
+.al-read {
+  margin: 0;
+  min-height: 72px;
+  max-height: 40vh;
+  overflow: auto;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  font: inherit;
+  user-select: text;
+  -webkit-user-select: text;
+  cursor: text;
+}
+/* What a field's heading says where there is no field under it yet. */
+.al-fieldname {
+  font-size: var(--al-font-size-caption);
+  font-weight: var(--al-font-weight-medium);
+  color: var(--al-text-secondary);
+}
+.al-glass .al-fieldname {
+  color: var(--al-text-primary);
+}
+/* The line between the sheet's two directions. */
+.al-rule {
+  border: 0;
+  height: var(--al-size-hairline);
+  margin: 0;
+  background: var(--al-border-control);
+}
+.al-pick {
+  display: grid;
+  gap: 2px;
+}
+.al-pick button {
+  display: grid;
+  grid-template-columns: 20px 1fr auto;
+  gap: var(--al-space-2);
+  align-items: center;
+  padding: var(--al-space-2) var(--al-space-3);
+  border: 0;
+  background: transparent;
+  border-radius: var(--al-radius-control);
+  text-align: start;
+  cursor: pointer;
+  min-height: var(--al-size-target-touch);
+}
+.al-pick button[disabled] {
+  cursor: default;
+  opacity: 0.5;
+}
+.al-pick button:hover {
+  background: color-mix(in oklab, var(--al-text-primary) 10%, transparent);
+}
+
+/* The keyboard on screen: every key a real keyboard has, in its rows. A cell is
+   the whole of what a finger can hit: cells meet edge to edge, so there is no
+   dead room between two keys, and the key is drawn inside its cell. The pointers
+   are heard on the key area and not on the keys (softKeyPress.ts), so a key has
+   no `:active` of its own: `data-al-held` is what the engine says is under a
+   finger. */
+.al-kbd {
+  /* A row's height, and what a cell keeps around its key: half the room between
+     two keys. */
+  --al-row-h: calc(36px + var(--al-space-1));
+  --al-cell-pad: calc(var(--al-space-1) / 2);
+  position: absolute;
+  z-index: 7;
+  left: 50%;
+  transform: translateX(-50%);
+  bottom: calc(var(--al-space-5) + var(--al-safe-bottom));
+  width: min(760px, calc(100% - var(--al-space-4) - var(--al-safe-sides)));
+  border-radius: var(--al-radius-sheet);
+  padding: var(--al-space-3);
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--al-space-1);
+}
+/* Carried somewhere: where it was put, and no longer centred on the bottom. */
+.al-kbd[data-al-moved] {
+  left: var(--al-kbd-x);
+  top: var(--al-kbd-y);
+  bottom: auto;
+  transform: none;
+}
+/* The grip the window is carried by. The browser must not take the gesture for a scroll. */
+.al-grip {
+  font-size: var(--al-font-size-caption);
+  cursor: grab;
+  touch-action: none;
+}
+.al-grip:active {
+  cursor: grabbing;
+}
+/* The key area: the one element the press engine listens on. No gesture of the
+   browser's may start here, for a pan or a pinch would take the finger from the
+   key: no callout, no selection, no highlight. `touch-action` does not inherit,
+   so the cells say it again. The cells' own room reaches past the keys by half a
+   gap, which the area takes back so the keys sit where the window's edge puts
+   them. */
+.al-kbdrows {
+  position: relative;
+  margin: calc(var(--al-space-1) / -2);
+  touch-action: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.al-keys {
+  display: flex;
+  min-width: 0;
+  height: var(--al-row-h);
+}
+/* A phone's two rows above its keys, lower than a row of keys. */
+.al-keys--low {
+  height: calc(var(--al-row-h) * 0.82);
+}
+/* A row longer than the keyboard slides, and fades at the edge it goes on from:
+   a key cut in half would read as a mistake. A slide along it is the one gesture
+   the browser may take from the keyboard. */
+.al-keys--scroll {
+  flex: 1;
+  height: auto;
+  overflow-x: auto;
+  scrollbar-width: none;
+  touch-action: pan-x;
+  padding-inline-end: var(--al-space-7);
+  mask-image: linear-gradient(
+    to right,
+    var(--al-text-primary) calc(100% - var(--al-space-7)),
+    transparent
+  );
+}
+/* A cell: as wide as its share of the row, the key inset in it. A button with
+   nothing of a button's look, so what is left is its name and its focus. */
+.al-cell {
+  appearance: none;
+  flex: var(--al-w, 1) 1 0;
+  min-width: 0;
+  display: flex;
+  margin: 0;
+  padding: var(--al-cell-pad);
+  border: 0;
+  background: none;
+  cursor: pointer;
+  touch-action: none;
+  -webkit-tap-highlight-color: transparent;
+}
+.al-keys--scroll .al-cell {
+  flex: none;
+  touch-action: pan-x;
+}
+/* What stays put at each end of the row that slides: the Sticky key, and the way out. */
+.al-cell--fixed {
+  flex: none;
+}
+/* The focus is the key's, as it is drawn, and not its cell's. */
+.al-cell:focus-visible {
+  outline: none;
+}
+.al-cell:focus-visible > .al-key {
+  outline: var(--al-size-focus-ring) solid var(--al-focus);
+  outline-offset: 2px;
+}
+.al-key {
+  position: relative;
+  flex: 1;
+  min-width: 0;
+  padding: 0 2px;
+  display: grid;
+  place-items: center;
+  border: var(--al-size-hairline) solid var(--al-border-control);
+  border-radius: var(--al-radius-control);
+  background: var(--al-surface-raised);
+  color: var(--al-text-primary);
+  font-size: var(--al-font-size-caption);
+  white-space: nowrap;
+}
+.al-keys--scroll .al-key {
+  padding: 0 var(--al-space-3);
+}
+.al-cell--fixed > .al-key {
+  padding: 0 10px;
+}
+/* The way out, drawn in a key: small enough for the lowest row. */
+.al-key > .al-i {
+  width: 16px;
+  height: 16px;
+}
+/* Held or on. The Sticky key is a switch and is drawn as its row is while it is
+   on, which is how the keyboard opens: it is off that it shows. */
+.al-cell[aria-pressed="true"]:not([data-al-switch]) > .al-key,
+.al-cell[data-al-held] > .al-key {
+  background: var(--al-action-default);
+  border-color: var(--al-action-default);
+  color: var(--al-text-on-action);
+}
+/* A key lights the instant it is pressed and goes out a moment after it is let
+   go: a tap is shorter than the eye, and the fading is what is seen of it. */
+.al-key {
+  transition:
+    background-color var(--al-duration-fast),
+    border-color var(--al-duration-fast),
+    color var(--al-duration-fast);
+}
+.al-cell[data-al-held] > .al-key {
+  transition: none;
+}
+.al-key--quiet {
+  background: var(--al-surface-sunken);
+  font-size: 12px;
+  letter-spacing: -0.01em;
+}
+/* A word on a key that is a share of its row wide, on a phone: smaller and to
+   the key's edges, so that none is cut where a key is one unit, and smaller
+   again on a phone narrower than the one it was drawn for (390 points). */
+.al-key--word {
+  padding: 0;
+  font-size: min(11.5px, 2.95vw);
+  letter-spacing: -0.02em;
+}
+/* Sent alone at a tap: the Sticky key while it is off, and every modifier with
+   it. Drawn open, apart from a key that waits for the next one. */
+.al-cell[data-al-bare] > .al-key {
+  border-style: dashed;
+}
+/* What Shift makes of a key, small in its corner. */
+.al-keyhint {
+  position: absolute;
+  top: 1px;
+  right: var(--al-space-1);
+  font-size: 9px;
+  line-height: var(--al-font-line-height-tight);
+  color: var(--al-text-secondary);
+}
+.al-cell[data-al-held] .al-keyhint {
+  color: inherit;
+}
+/* A modifier held with no key of its own on the page in view, named beside the way out. */
+.al-keybadges {
+  display: flex;
+  align-items: center;
+  gap: var(--al-space-1);
+  padding-inline: var(--al-space-1);
+}
+.al-keybadge {
+  padding: 2px var(--al-space-1);
+  border-radius: var(--al-space-1);
+  background: var(--al-action-default);
+  color: var(--al-text-on-action);
+  font-size: 11px;
+  font-weight: var(--al-font-weight-semibold);
+  white-space: nowrap;
+}
+/* The key a finger rests on, shown above it, where the finger does not cover
+   it. It takes no press: it must never be what a touch finds. */
+.al-keypreview {
+  position: absolute;
+  z-index: 1;
+  min-width: 46px;
+  height: 56px;
+  margin-top: -6px;
+  padding: 0 var(--al-space-2);
+  transform: translate(-50%, -100%);
+  display: grid;
+  place-items: center;
+  border: var(--al-size-hairline) solid var(--al-border-control);
+  border-radius: var(--al-radius-control);
+  background: var(--al-surface-raised);
+  color: var(--al-text-primary);
+  font-size: var(--al-font-size-title);
+  font-weight: var(--al-font-weight-medium);
+  white-space: nowrap;
+  box-shadow: var(--al-shadow-overlay);
+  pointer-events: none;
+}
+
+/* Information: tabs, and every row on the same two columns. A row that scrolls
+   sideways has no height of its own to insist on, and a sheet that is short of
+   room would squeeze it: so it says its height. */
+.al-tabs {
+  display: flex;
+  gap: var(--al-space-1);
+  border-bottom: var(--al-size-hairline) solid currentColor;
+  overflow-x: auto;
+  scrollbar-width: none;
+  min-height: 37px;
+}
+.al-tab {
+  flex: none;
+  border: 0;
+  background: transparent;
+  padding: var(--al-space-2) var(--al-space-3);
+  cursor: pointer;
+  height: 36px;
+  border-radius: var(--al-radius-control) var(--al-radius-control) 0 0;
+  font-weight: var(--al-font-weight-medium);
+}
+.al-tab[aria-selected="true"] {
+  background: var(--al-text-primary);
+  color: var(--al-surface-base);
+}
+.al-spec {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--al-space-4) var(--al-space-5);
+}
+/* The laboratory's panel (InfoSheet.tsx, lab.ts): what the page sees, as
+   instruments. The trace is the last minute of the picture drawn as the glass's
+   own grid, one column a second, three subpixels a column: lit as the picture
+   came, red whole where a whole picture was asked for, dark where the page was
+   out of sight. Under it, four gauges, one big number each, and their small
+   lines; a measure that asks for attention is in the colour of danger. */
+.al-lab {
+  display: grid;
+  gap: var(--al-space-4);
+  font-variant-numeric: tabular-nums;
+}
+.al-labhead {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--al-space-3);
+  align-items: baseline;
+}
+.al-labtrace {
+  display: grid;
+  grid-template-columns: repeat(60, minmax(0, 1fr));
+  gap: 1px;
+  height: 48px;
+  padding: var(--al-space-2);
+  border-radius: var(--al-radius-card);
+  background: var(--al-color-brand-glass);
+}
+.al-labtrace i {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 1px;
+}
+.al-labtrace b {
+  display: block;
+  border-radius: 1px;
+  opacity: 0.1;
+}
+.al-labtrace b:nth-child(1) {
+  background: var(--al-color-brand-red);
+}
+.al-labtrace b:nth-child(2) {
+  background: var(--al-color-brand-green);
+}
+.al-labtrace b:nth-child(3) {
+  background: var(--al-color-brand-blue);
+}
+.al-labtrace i[data-lit="1"] b {
+  opacity: 0.5;
+}
+.al-labtrace i[data-lit="2"] b {
+  opacity: 0.95;
+}
+.al-labtrace i[data-ask] b:nth-child(1) {
+  opacity: 1;
+}
+.al-labtrace i[data-away] b {
+  opacity: 0.03;
+}
+.al-labtrace i:last-child {
+  outline: 1px solid var(--al-text-primary);
+  outline-offset: 1px;
+  border-radius: 1px;
+}
+.al-labkey {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--al-space-2) var(--al-space-4);
+  font-size: var(--al-font-size-caption);
+  color: var(--al-text-secondary);
+}
+.al-labkey span::before {
+  content: "";
+  display: inline-block;
+  width: 8px;
+  height: 10px;
+  margin-inline-end: 6px;
+  vertical-align: -1px;
+  border-radius: 1px;
+  background: linear-gradient(
+    90deg,
+    var(--al-color-brand-red) 0 33%,
+    var(--al-color-brand-green) 33% 66%,
+    var(--al-color-brand-blue) 66%
+  );
+}
+.al-labkey span[data-key="ask"]::before {
+  background: var(--al-color-brand-red);
+}
+.al-labkey span[data-key="away"]::before {
+  opacity: 0.15;
+}
+.al-gauges {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--al-space-4) var(--al-space-5);
+}
+.al-gauge {
+  display: grid;
+  gap: 2px;
+  align-content: start;
+}
+.al-gauge dt {
+  font-size: var(--al-font-size-caption);
+  color: var(--al-text-secondary);
+}
+.al-gauge dd:first-of-type {
+  font-size: var(--al-font-size-headline);
+  font-stretch: 75%;
+  font-weight: var(--al-font-weight-semibold);
+  line-height: var(--al-font-line-height-tight);
+  letter-spacing: -0.01em;
+}
+.al-gauge dd + dd {
+  font-size: var(--al-font-size-caption);
+}
+.al-spec div {
+  display: grid;
+  gap: 2px;
+  align-content: start;
+}
+.al-spec dt {
+  font-size: var(--al-font-size-caption);
+}
+.al-spec dd {
+  font-size: var(--al-font-size-title);
+  font-stretch: 75%;
+  font-weight: var(--al-font-weight-semibold);
+  line-height: var(--al-font-line-height-tight);
+}
+/* The version, which takes taps: drawn as the value it is. */
+.al-spec-tap {
+  appearance: none;
+  background: none;
+  border: 0;
+  padding: 0;
+  margin: 0;
+  font: inherit;
+  color: inherit;
+  text-align: inherit;
+  cursor: default;
+  -webkit-tap-highlight-color: transparent;
+}
+.al-spec dd.al-small {
+  font-size: var(--al-font-size-caption);
+  font-stretch: 100%;
+  font-weight: var(--al-font-weight-regular);
+  line-height: var(--al-font-line-height-normal);
+  overflow-wrap: anywhere;
+}
+/* A table of two columns: what a person does, and what comes of it. Every row is
+   as tall as the tallest of its table, and none shorter than a row of keys, so the
+   eye goes down the table in even steps whatever each row holds; and both columns
+   sit in the middle of the row, so a pair reads as a pair. */
+.al-rows {
+  --al-row-min: calc(28px + 2 * var(--al-space-3));
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  grid-auto-rows: minmax(var(--al-row-min), 1fr);
+}
+.al-rows > * {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  align-content: center;
+  gap: var(--al-space-1) var(--al-space-2);
+  padding: var(--al-space-3) 0;
+  border-top: var(--al-size-hairline) solid
+    color-mix(in oklab, var(--al-text-primary) 22%, transparent);
+}
+.al-rows > dt {
+  padding-inline-end: var(--al-space-4);
+  font-weight: var(--al-font-weight-medium);
+  flex-wrap: nowrap;
+}
+.al-rows > :nth-child(-n + 2) {
+  border-top: 0;
+}
+.al-rowshead {
+  font-size: var(--al-font-size-caption);
+  font-weight: var(--al-font-weight-semibold);
+  margin-top: var(--al-space-2);
+}
+.al-cap {
+  display: inline-grid;
+  place-items: center;
+  min-width: 26px;
+  height: 26px;
+  padding: 0 6px;
+  margin: 1px;
+  border-radius: 6px;
+  font: inherit;
+  font-size: var(--al-font-size-caption);
+  background: var(--al-surface-raised);
+  color: var(--al-text-primary);
+  border: var(--al-size-hairline) solid var(--al-border-control);
+  box-shadow: 0 1px 0 var(--al-border-control);
+}
+.al-dl {
+  display: grid;
+  grid-template-columns: minmax(0, 5fr) minmax(0, 6fr);
+  gap: var(--al-space-2) var(--al-space-4);
+}
+
+/* Throughput. The trace is drawn in lit cells, like everything this glass shows. */
+.al-sheet {
+  background: var(--al-surface-raised);
+  border: var(--al-size-hairline) solid var(--al-border-subtle);
+  border-radius: var(--al-radius-card);
+  padding: var(--al-space-5);
+  display: grid;
+  gap: var(--al-space-4);
+  max-width: 880px;
+}
+.al-controls {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--al-space-2);
+  align-items: center;
+}
+.al-select {
+  min-height: var(--al-size-target-pointer);
+  padding: var(--al-space-1) var(--al-space-3);
+  border: var(--al-size-hairline) solid var(--al-border-control);
+  border-radius: var(--al-radius-control);
+  background: var(--al-surface-sunken);
+  color: var(--al-text-primary);
+  max-width: 100%;
+}
+.al-meter {
+  display: grid;
+  gap: var(--al-space-5);
+  position: relative;
+}
+.al-trace {
+  display: grid;
+  gap: var(--al-space-2);
+}
+.al-tracehead {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--al-space-1) var(--al-space-4);
+}
+.al-tracehead b {
+  font-size: var(--al-font-size-headline);
+  font-stretch: 75%;
+  font-weight: var(--al-font-weight-semibold);
+  line-height: 1;
+}
+.al-tracehead .al-push {
+  margin-inline-start: auto;
+}
+.al-received {
+  --al-series: var(--al-chart-received);
+}
+.al-sent {
+  --al-series: var(--al-chart-sent);
+}
+.al-swatch {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  border-radius: 2px;
+  margin-inline-end: var(--al-space-1);
+  background: var(--al-series);
+}
+.al-chart {
+  width: 100%;
+  height: 150px;
+  display: block;
+  overflow: visible;
+  touch-action: pan-y;
+}
+.al-chart text {
+  font-size: 11px;
+  fill: currentColor;
+}
+.al-chart .al-gridline {
+  stroke: currentColor;
+  stroke-opacity: 0.16;
+  stroke-width: 1;
+}
+.al-chart .al-cells {
+  fill: var(--al-series);
+}
+.al-chart .al-area {
+  fill-opacity: 0.55;
+}
+.al-chart .al-line {
+  stroke: var(--al-series);
+  stroke-width: 2;
+  fill: none;
+  stroke-linejoin: round;
+}
+.al-chart .al-avg {
+  stroke: currentColor;
+  stroke-width: 1;
+  stroke-dasharray: 2 4;
+}
+.al-chart .al-dot {
+  fill: var(--al-series);
+  stroke: var(--al-surface-raised);
+  stroke-width: 2;
+}
+.al-chart .al-cross {
+  stroke: currentColor;
+  stroke-width: 1;
+}
+.al-tip {
+  position: absolute;
+  z-index: 2;
+  bottom: 0;
+  pointer-events: none;
+  padding: 0 var(--al-space-2);
+  border-radius: var(--al-radius-pill);
+  background: var(--al-text-primary);
+  color: var(--al-surface-base);
+  font-size: var(--al-font-size-caption);
+  white-space: nowrap;
+  transform: translateX(-50%);
+}
+.al-plot {
+  position: relative;
+}
+.al-scale {
+  position: absolute;
+  top: 2px;
+  left: 0;
+}
+.al-axis {
+  display: flex;
+  justify-content: space-between;
+}
+.al-share {
+  display: flex;
+  height: 10px;
+  gap: 2px;
+  border-radius: var(--al-radius-pill);
+  overflow: hidden;
+}
+.al-share i {
+  display: block;
+  min-width: 3px;
+  background: var(--al-chart-received);
+}
+.al-share i:nth-child(2) {
+  opacity: 0.7;
+}
+.al-share i:nth-child(3) {
+  opacity: 0.45;
+}
+.al-share i:nth-child(4) {
+  opacity: 0.25;
+}
+.al-sharekey {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: var(--al-space-2);
+  font-size: var(--al-font-size-caption);
+}
+.al-sharekey > span {
+  display: grid;
+}
+
+/* The wait for a picture (Waiting.tsx): the screen that lights over the remote,
+   under the bar, with the plate of the opening. It takes nothing: a press goes
+   through it to the remote, which takes none while it is up either
+   (useRemoteDesktop.ts); only what the plate offers to press is its own. */
+.al-wait {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  overflow: hidden;
+}
+.al-wait > .al-lit {
+  z-index: 1;
+}
+.al--over > .al-wait {
+  pointer-events: none;
+}
+.al-wait .al-plate :where(button, summary) {
+  pointer-events: auto;
+}
+
+/* What covers the remote screen. */
+.al-cover {
+  position: absolute;
+  inset: 0;
+  z-index: 4;
+  display: grid;
+  place-items: center;
+  padding: calc(var(--al-space-5) + var(--al-safe-top))
+    calc(var(--al-space-5) + var(--al-safe-right))
+    calc(var(--al-space-5) + var(--al-safe-bottom))
+    calc(var(--al-space-5) + var(--al-safe-left));
+  background: var(--al-scrim);
+}
+.al-coverbox {
+  border-radius: var(--al-radius-sheet);
+  padding: var(--al-space-5);
+  display: grid;
+  gap: var(--al-space-3);
+  max-width: 440px;
+  justify-items: start;
+}
+.al-coverbox h2 {
+  font-size: var(--al-font-size-title);
+}
+.al-banner {
+  position: absolute;
+  z-index: 5;
+  left: calc(var(--al-space-4) + var(--al-safe-left));
+  right: calc(var(--al-space-4) + var(--al-safe-right));
+  bottom: calc(var(--al-space-4) + var(--al-safe-bottom));
+  border-radius: var(--al-radius-card);
+  padding: var(--al-space-3) var(--al-space-4);
+  flex-wrap: wrap;
+}
+/* What the browser said of it, on a line of its own under the sentence. */
+.al-banner > .al-details {
+  flex-basis: 100%;
+}
+
+/* A dialog: the browser's own, over a scrim, on everything. */
+.al-dialog {
+  background: var(--al-surface-raised);
+  color: var(--al-text-primary);
+  border: 0;
+  border-radius: var(--al-radius-sheet);
+  box-shadow: var(--al-shadow-overlay);
+  padding: var(--al-space-5);
+  width: min(440px, calc(100% - var(--al-space-5) - var(--al-safe-sides)));
+}
+.al-dialog[open] {
+  display: grid;
+  gap: var(--al-space-3);
+}
+.al-dialog::backdrop {
+  background: var(--al-scrim);
+}
+.al-dialog h2 {
+  font-size: var(--al-font-size-title);
+}
+.al-dialogacts {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: var(--al-space-2);
+  margin-top: var(--al-space-2);
+}
+
+/* A row of things side by side, which may wrap. */
+.al-formrow {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--al-space-3) var(--al-space-4);
+}
+
+/* On a phone the keyboard is docked at the bottom, edge to edge, whichever way
+   the phone is held and however wide it is on its side: the format is the
+   device's (softKeyboard.ts), not the window's. Its two pages have the same seven
+   rows, so the picture above it does not move when one gives way to the other.
+   A row's height follows the device: seven fit a phone held upright with room
+   for the picture above, and are lower on its side, where the keyboard would
+   otherwise be most of the screen. The last row sits above the home indicator.
+   The glass keeps its edge where it meets the picture and has none against the
+   device's own, and that edge is counted in the room above the first row. */
+.al-kbd[data-al-format="phone"] {
+  --al-row-h: clamp(34px, calc(40vh / 7), 44px);
+  --al-cell-pad: 3px 2px;
+
+  left: 0;
+  right: 0;
+  bottom: 0;
+  transform: none;
+  width: auto;
+  border-width: var(--al-size-hairline) 0 0;
+  border-radius: var(--al-radius-sheet) var(--al-radius-sheet) 0 0;
+  padding: calc(var(--al-space-1) - var(--al-size-hairline))
+    max(3px, var(--al-safe-right)) max(var(--al-safe-bottom), var(--al-space-2))
+    max(3px, var(--al-safe-left));
+}
+
+.al-kbd[data-al-format="phone"] > .al-kbdrows {
+  margin: 0;
+}
+
+@supports (height: 1dvh) {
+  .al-kbd[data-al-format="phone"] {
+    --al-row-h: clamp(34px, calc(40dvh / 7), 44px);
+  }
+}
+
+@media (orientation: landscape) and (max-height: 500px) {
+  .al-kbd[data-al-format="phone"] {
+    --al-row-h: clamp(26px, calc(55vh / 7), 34px);
+    padding-bottom: max(var(--al-safe-bottom), 6px);
+  }
+
+  @supports (height: 1dvh) {
+    .al-kbd[data-al-format="phone"] {
+      --al-row-h: clamp(26px, calc(55dvh / 7), 34px);
+    }
+  }
+}
+
+/* The information sheet: the computer's name over its grid, and each tab's rows. */
+.al-infoname,
+.al-metertitle {
+  font-size: var(--al-font-size-title);
+}
+
+.al-metertitle {
+  font-size: var(--al-font-size-headline);
+}
+
+.al-tabpanel {
+  display: grid;
+  gap: var(--al-space-4);
+}
+
+.al-tabpanel--tight {
+  gap: var(--al-space-2);
+}
+
+.al-sharefigure {
+  display: grid;
+  gap: var(--al-space-2);
+}
+
+/* A phone: one column, and targets a finger can hit. */
+@media (max-width: 600px) {
+  .al-top,
+  .al-page,
+  .al-foot {
+    padding-inline: var(--al-space-4);
+  }
+
+  .al-hero h1 {
+    font-size: var(--al-font-size-headline);
+  }
+
+  .al-btn,
+  .al-seg button,
+  .al-details > summary {
+    min-height: var(--al-size-target-touch);
+  }
+
+  .al-input {
+    min-height: 48px;
+  }
+
+  /* The monitor on the left, with keys a finger can hit; the name and Open
+     beside it; and the tip a plate under the monitor, over what is below. */
+  .al-row {
+    --al-mon-w: 144px;
+    --al-mon-key: var(--al-size-target-touch);
+    grid-template-columns: auto minmax(0, 1fr);
+    grid-template-areas: "mon who" "mon act";
+    column-gap: var(--al-space-4);
+    padding: var(--al-space-4) 0;
+  }
+
+  .al-row h2 {
+    font-size: var(--al-font-size-title);
+  }
+
+  .al-says {
+    grid-area: auto;
+    top: calc(100% - var(--al-space-3));
+    translate: none;
+    max-width: 100%;
+    transform: translateY(-4px);
+  }
+
+  .al-skel {
+    height: 134px;
+  }
+
+  .al-acts {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .al-form {
+    max-width: none;
+  }
+
+  .al-pop {
+    right: var(--al-space-2);
+    left: var(--al-space-2);
+    width: auto;
+  }
+  .al-lit {
+    padding: var(--al-space-5) var(--al-space-4);
+  }
+  /* The wait's plate (Waiting.tsx) keeps clear of the bar's handle at the foot. */
+  .al-wait > .al-lit {
+    padding-bottom: calc(
+      var(--al-space-2) +
+      var(--al-chrome, 56px) +
+      var(--al-space-2)
+    );
+  }
+  .al-select {
+    min-height: var(--al-size-target-touch);
+  }
+  .al-panelhead .al-acts {
+    flex-direction: row;
+  }
+  .al-trio,
+  .al-periodform {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .al-periodform .al-select,
+  .al-periodform .al-btn {
+    min-height: 48px;
+  }
+  .al-noticerow {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .al-noticerow .al-btn {
+    grid-column: 2;
+    justify-self: start;
+  }
+  .al-ways li {
+    grid-template-columns: auto minmax(0, 1fr);
+  }
+  .al-ways li .al-chip {
+    grid-column: 2;
+    justify-self: start;
+  }
+  .al-chrome {
+    top: auto;
+    bottom: calc(var(--al-space-2) + var(--al-safe-bottom));
+  }
+  .al-handle {
+    min-height: var(--al-size-target-touch);
+  }
+  .al-chrome[data-al-shows="bar"] {
+    width: calc(100% - var(--al-space-4) - var(--al-safe-sides));
+  }
+  .al-bar {
+    gap: 0;
+    width: 100%;
+    max-width: none;
+    justify-content: space-between;
+  }
+  .al-bar .al-btn {
+    min-width: 0;
+    flex: 1;
+    padding-inline: 0;
+    white-space: nowrap;
+  }
+  .al-drop {
+    --al-safe-near: var(--al-safe-bottom);
+    --al-safe-far: var(--al-safe-top);
+    --al-far: calc(var(--al-veil-h, 28px) + 24px + var(--al-safe-far));
+    top: auto;
+    bottom: var(--al-near);
+    width: calc(100% - var(--al-space-4) - var(--al-safe-sides));
+  }
+  .al-drop--wide {
+    padding: var(--al-space-4);
+  }
+  .al-veil {
+    bottom: auto;
+    top: calc(var(--al-space-3) + var(--al-safe-top));
+  }
+  .al-plate h1 {
+    font-size: var(--al-font-size-headline);
+  }
+  .al-spec {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .al-gauges {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .al-labtrace {
+    height: 40px;
+  }
+  /* One column: what is done sits over what comes of it, and each takes the
+     height it needs. */
+  .al-rows {
+    grid-template-columns: 1fr;
+    grid-auto-rows: auto;
+  }
+  .al-rows > dt {
+    padding-bottom: 0;
+  }
+  .al-rows > dd {
+    border-top: 0;
+    padding-top: var(--al-space-1);
+  }
+  .al-rows > :nth-child(2) {
+    border-top: 0;
+  }
+  .al-tracehead b {
+    font-size: var(--al-font-size-title);
+  }
+  .al-chart {
+    height: 120px;
+  }
+  .al-dl {
+    grid-template-columns: 1fr;
+    gap: 0 0;
+  }
+  .al-dl dd {
+    margin-bottom: var(--al-space-2);
+  }
+  .al-dialogacts .al-btn {
+    flex: 1 1 auto;
+  }
+}
+
+/* A phone on its side: wide, and too short for anything tall. The title and the
+   form sit side by side, and what opens keeps inside the height there is. */
+@media (max-height: 480px) {
+  .al-top {
+    padding-block: var(--al-space-2);
+  }
+
+  .al-page {
+    padding-block: var(--al-space-3);
+    gap: var(--al-space-3);
+  }
+
+  .al-foot {
+    padding-block: var(--al-space-2);
+  }
+
+  .al-hero {
+    display: grid;
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    column-gap: var(--al-space-6);
+    align-content: end;
+    align-items: end;
+    max-width: none;
+  }
+
+  .al-hero h1 {
+    font-size: var(--al-font-size-headline);
+  }
+
+  .al-hero > form {
+    grid-column: 2;
+    grid-row: 1 / span 4;
+    max-width: none;
+    gap: var(--al-space-2);
+  }
+
+  .al-hero > :not(form) {
+    grid-column: 1;
+  }
+
+  .al-btn,
+  .al-seg button {
+    min-height: var(--al-size-target-touch);
+  }
+
+  .al-row {
+    --al-mon-w: 144px;
+    --al-mon-key: var(--al-size-target-touch);
+  }
+
+  .al-pop {
+    top: 48px;
+    max-height: calc(100% - 56px);
+    overflow: auto;
+  }
+  .al-select {
+    min-height: var(--al-size-target-touch);
+  }
+  .al-lit {
+    padding: var(--al-space-4);
+  }
+  .al-plate {
+    padding: var(--al-space-4);
+  }
+  .al-plate h1 {
+    font-size: var(--al-font-size-headline);
+  }
+  .al-drop {
+    --al-far: calc(var(--al-veil-h, 28px) + 14px + var(--al-safe-far));
+  }
+  .al-veil {
+    bottom: calc(var(--al-space-2) + var(--al-safe-bottom));
+  }
+  .al-drop--wide {
+    padding: var(--al-space-4);
+    gap: var(--al-space-3);
+  }
+  .al-dialog {
+    max-height: calc(100% - var(--al-safe-top) - var(--al-safe-bottom));
+    overflow: auto;
+    padding: var(--al-space-4);
+  }
+  .al-chart {
+    height: 96px;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .al *,
+  .al *::before,
+  .al *::after {
+    transition: none;
+    animation: none;
+  }
+}

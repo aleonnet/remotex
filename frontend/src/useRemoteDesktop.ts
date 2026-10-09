@@ -8,17 +8,24 @@ import {
   decodeAudioHead,
 } from "./audioPlayer.ts";
 import { type CameraSender, startCameraSender } from "./cameraSender.ts";
-import { connectionLabel } from "./connectionLabel.ts";
+import { clipboardReadsOnFocus } from "./clipboardGesture.ts";
+import type { SessionKind } from "./connectionLabel.ts";
 import {
   applyCursorCss,
   cursorImage,
   MIN_POINTER_CSS_PX,
   type RemoteCursor,
+  unownedCursor,
 } from "./cursorCss.ts";
 import { desktopCanvasGeometry } from "./desktopCanvas.ts";
 import { desktopPainterFor } from "./desktopPainter.ts";
-import { gatewayFetch, gatewaySocketUrl } from "./gateway.ts";
-import { versionMismatch } from "./gatewayVersion.ts";
+import { type Fault, faultOf, type Told } from "./fault.ts";
+import {
+  gatewayDisplaySocketUrl,
+  gatewayFetch,
+  gatewaySocketUrl,
+} from "./gateway.ts";
+import { versionDifference } from "./gatewayVersion.ts";
 import { HeldModifiers, modifierFlags } from "./heldModifiers.ts";
 import { type MicSender, startMicSender } from "./micSender.ts";
 import "./keyboardLock.ts";
@@ -27,6 +34,8 @@ import {
   appleSoundProbed,
   decodesAppleMedia,
 } from "./appleMedia.ts";
+import { createKeyframeAsk } from "./keyframeAsk.ts";
+import { lab } from "./lab.ts";
 import {
   isMacHost,
   MacKeyboardTranslator,
@@ -61,6 +70,8 @@ import {
 } from "./protocol.ts";
 import { composesRdpGraphics } from "./rdpGraphics.ts";
 import { decodesRdpH264 } from "./rdpH264.ts";
+import { remotePoint } from "./remotePoint.ts";
+import { serverFault } from "./serverWords.ts";
 import { tabletGuestSize } from "./tabletGuestSize.ts";
 import type { Choices } from "./targetChoices.ts";
 import {
@@ -89,13 +100,24 @@ export type ConnectionStatus =
   | "connecting"
   | "connected"
   | "reconnecting"
-  | "busy" // another browser holds the session slot (claim answered 409)
-  | "takenOver" // this socket was evicted by a takeover (close code 4001)
+  // Another browser holds the session slot (claim answered 409), or, on a page
+  // showing a display in a tab of its own, another tab shows that display (4003).
+  | "busy"
+  // This socket was evicted by a takeover (close code 4001), or, on a page showing
+  // a display in a tab of its own, another tab took that display over (4004).
+  | "takenOver"
   // The session could not be opened for a reason waiting cannot change, so nothing
   // is in flight and nothing is scheduled. Its own state because the alternative was
   // leaving "Connecting…" up over a connection that had stopped being attempted,
   // with no way out but a reload; the overlay offers Retry on this one.
   | "failed"
+  // A page showing a display in a tab of its own (`/display/2`) whose display the
+  // session does not show there: All Displays is not chosen, the target has none,
+  // or there is no session in this browser. Nothing is attempted until Retry.
+  | "unavailable"
+  // A page showing a display in a tab of its own that was asked to stop, by its
+  // bar's Disconnect: nothing is attempted until Connect.
+  | "idle"
   // The gateway is another version than this page (gatewayVersion.ts). Apart from
   // "failed" because trying again cannot change it: the overlay offers Reload.
   | "stale";
@@ -117,25 +139,101 @@ export interface RemoteSize {
 // without the takeover prompt (sessionStorage is per-tab, so two tabs of the
 // same browser still contend like two browsers — as intended). Exported so
 // logout (App.tsx) can drop it.
-export const SESSION_KEY = "remotex.sessionId";
+export const SESSION_KEY = "alumia.sessionId";
+// This tab's name for itself on the sockets of a display it shows in a tab of
+// its own, per tab like the claim: a reload keeps it, so the gateway lets the
+// tab back in, and another tab has another.
+const TAB_KEY = "alumia.displayTab";
+
+// How long a page waits for the lock on a name it found in its storage: a
+// reload's last document may not have let go of it yet, and a duplicated tab's
+// original never will.
+const TAB_LOCK_WAIT_MS = 500;
+
+// Whether `id` is this page's alone: a duplicated tab starts with a copy of the
+// storage it was made from, the name included, and the page it was copied from
+// still holds the name's lock. Held for the page's life, so a reload, whose last
+// document lets go of it, gets it again. True only once the lock is this page's:
+// where there are no locks to ask (a page not served securely has none), or
+// asking fails, a name found in storage is not known to be this tab's, and the
+// page takes a new one.
+function tabIdIsFree(id: string): Promise<boolean> {
+  return new Promise((resolve) => {
+    try {
+      navigator.locks
+        .request(
+          `${TAB_KEY}.${id}`,
+          { signal: AbortSignal.timeout(TAB_LOCK_WAIT_MS) },
+          () => {
+            resolve(true);
+            // Never settles: the lock goes with the page.
+            return new Promise<void>(() => {});
+          },
+        )
+        // Still held when the wait ran out, so another page's, or not answered.
+        .catch(() => resolve(false));
+    } catch {
+      resolve(false);
+    }
+  });
+}
+
+function makeTabId(): string {
+  try {
+    return crypto.randomUUID();
+  } catch {
+    // No secure context: a name only has to differ from another tab's.
+    return `${Date.now().toString(36)}-${Math.random().toString(36).slice(2)}`;
+  }
+}
+
+async function nameTab(): Promise<string> {
+  let kept: string | null = null;
+  try {
+    kept = sessionStorage.getItem(TAB_KEY);
+  } catch {
+    // Storage blocked: a name for this page load, so a reload is another tab's.
+  }
+  if (kept && (await tabIdIsFree(kept))) {
+    return kept;
+  }
+  const made = makeTabId();
+  await tabIdIsFree(made);
+  try {
+    sessionStorage.setItem(TAB_KEY, made);
+  } catch {
+    // Storage blocked: kept in `tabName` for as long as this page is.
+  }
+  return made;
+}
+
+// Named once for the page, so every socket it opens presents the same name.
+let tabName: Promise<string> | null = null;
+
+function tabId(): Promise<string> {
+  tabName ??= nameTab();
+  return tabName;
+}
 // The Mac-host Command-to-Control preference, default on. localStorage rather
 // than sessionStorage: unlike the session identity this is a lasting choice about
 // how this machine's keyboard behaves, and it should survive a new tab.
-const MAC_KEYS_KEY = "remotex.macKeyboardOverrides";
+const MAC_KEYS_KEY = "alumia.macKeyboardOverrides";
 // Whether this tab muted the session it is on. Whether a session carries the
-// remote's sound is chosen at the picker and held by the gateway; this is only
-// whether this tab is listening to it, which the menu's Mute and Unmute change.
+// remote's sound is chosen at the list and held by the gateway; this is only
+// whether this tab is listening to it, which the bar's Mute changes. A session
+// comes up playing on every device: the press on Open is the gesture a browser
+// asks before it plays, a phone's as much as a desk's.
 // sessionStorage, like the session identity: it belongs to this tab's session, so
-// a reload or a dropped socket comes back as it was left, and every Start clears
-// it.
-const MUTED_KEY = "remotex.muted";
+// a reload or a dropped socket comes back as it was left, and every Open clears
+// it. Exported so a display's tab (App.tsx) can drop the copy it was opened with.
+export const MUTED_KEY = "alumia.muted";
 // The touchscreen preference: fingers forwarded to the remote as touch contacts
 // rather than read as trackpad gestures. Remembered like the Mac-keys one, and
 // for the same reason — it describes the device in hand, not a session — and
 // off unless set, since the trackpad gestures work against every target and a
 // touchscreen only against a host that has one to offer. Acted on only once
 // the host has said so (`touchReady`) and only on a device with a touchscreen.
-const TOUCHSCREEN_KEY = "remotex.touchscreen";
+const TOUCHSCREEN_KEY = "alumia.touchscreen";
 // Evaluated once: the host OS cannot change under a running tab, and the input
 // effect must not pay for it per keystroke.
 const IS_MAC_HOST = isMacHost();
@@ -185,6 +283,10 @@ function writeMuted(muted: boolean): void {
 }
 // Touch clients keep a fixed guest size and use fit-to-width plus pinch zoom.
 export const CAN_PINCH_ZOOM = (navigator.maxTouchPoints || 0) >= 2;
+// How long the view holds still after a pinch before the width it shows the
+// picture at is sent (`shown`): a pinch ends in no event of its own, and each
+// width sent is a picture encoded again from a keyframe.
+export const SHOWN_SETTLE_MS = 250;
 // Any finger at all — what the touchscreen passthrough needs, which is less
 // than the two a pinch needs: one contact is still a tap, a press-and-hold and
 // an edge swipe to the host, so a one-touch digitizer is offered the switch.
@@ -244,6 +346,20 @@ function overClipboardLimit(text: string): boolean {
 
 // Close code sent when another browser force-claims the slot.
 const CLOSE_EVICTED = 4001;
+// How long the session socket is given to say why a display socket was let go,
+// before the page takes that the display's was let go by itself. A takeover lets
+// both go at once, a few milliseconds apart.
+const DISPLAY_ALONE_GRACE_MS = 1_000;
+// Close codes a display socket opened in a tab of its own is refused or let go
+// with: not this browser's session (4000), or a display the session no longer
+// shows in a tab (4002), as well as 4001 above — or one another tab shows (4003)
+// or took over (4004).
+const CLOSE_INVALID = 4000;
+const CLOSE_UNSUPPORTED = 4002;
+const CLOSE_IN_USE = 4003;
+const CLOSE_TAKEN = 4004;
+// The display a page shows unless it is one opened in a tab of its own.
+const FIRST_DISPLAY = 1;
 const MAX_RETRY_DELAY_MS = 15_000;
 // How many failed attempts in a row are reported as nothing but "Reconnecting…"
 // before the reason is shown as well. Four, because the backoff above reaches its
@@ -354,12 +470,16 @@ function paintCursor(
   // density-independent pixmaps) follows the desktop's points, so it keeps its
   // size when the framebuffer goes Retina; a framebuffer-pixel image follows
   // the pixels it was cut from.
-  const imageView = image?.pointSized ? view * (size?.scale ?? 1) : view;
+  const points = view * (size?.scale ?? 1);
+  const imageView = image?.pointSized ? points : view;
   if (els.overlay) {
+    // The hardware pointer is never hidden: with no shape handed over it wears
+    // the X. The virtual pointer below is: it would sit on a pointer the
+    // remote drew itself.
     if (image) {
       applyCursorCss(els.overlay, image, imageView);
     } else {
-      els.overlay.style.cursor = "none";
+      applyCursorCss(els.overlay, unownedCursor(), points);
     }
   }
   const pointer = els.pointer;
@@ -401,7 +521,7 @@ function paintCursor(
 //
 // `stale` marks the one failure that is this page's own: the gateway answered, as
 // another version.
-type ClaimFailure = { reason: string; retryable: boolean; stale?: true };
+type ClaimFailure = { fault: Fault; retryable: boolean; stale?: true };
 
 // POST /api/session (the slot claim). A rejected fetch is the only retryable
 // outcome, and its own message says what happened far better than "network error"
@@ -424,17 +544,24 @@ async function postClaim(
     });
     // Before a 409 or a 401 is read: a stale page is offered neither a takeover
     // nor the login, only the reload.
-    const mismatch = versionMismatch(res);
-    return mismatch
-      ? { failure: { reason: mismatch, retryable: false, stale: true } }
-      : res;
-  } catch (cause) {
+    const difference = versionDifference(res);
+    if (!difference) {
+      return res;
+    }
+    const { page, gateway } = difference;
     return {
       failure: {
-        reason:
-          cause instanceof Error ? cause.message : "the server did not answer",
-        retryable: true,
+        fault:
+          gateway === null
+            ? { code: "AL-2202", fill: { page } }
+            : { code: "AL-2201", fill: { page, gateway } },
+        retryable: false,
+        stale: true,
       },
+    };
+  } catch (cause) {
+    return {
+      failure: { fault: faultOf(cause, "AL-3103"), retryable: true },
     };
   }
 }
@@ -493,6 +620,11 @@ export function useRemoteDesktop(
   overlayRef: React.RefObject<HTMLElement | null>,
   pointerRef: React.RefObject<HTMLImageElement | null>,
   onUnauthorized: () => void,
+  // The display this page shows in a tab of its own (`/display/N`), or null on the
+  // page that holds the session. Such a page claims nothing: it opens that
+  // display's socket, which carries its picture and the input made over it, and
+  // nothing else.
+  tabDisplay: number | null = null,
 ) {
   const [status, setStatus] = useState<ConnectionStatus>("connecting");
   const [size, setSize] = useState<RemoteSize | null>(null);
@@ -504,7 +636,13 @@ export function useRemoteDesktop(
   // Picker vs desktop. `connectError` holds the last engine error to show
   // against the picker after a failed connect.
   const [mode, setMode] = useState<SessionMode>("picker");
-  const [connectError, setConnectError] = useState<string | null>(null);
+  const [connectError, setConnectError] = useState<Told | null>(null);
+  // Whether the session whose error that is was on screen when it ended: a
+  // desktop somebody was looking at, as against an Open that never showed one.
+  // The page says the two apart.
+  const [sessionFell, setSessionFell] = useState(false);
+  // The computer the session is on, as the gateway names it in `connected`.
+  const [sessionName, setSessionName] = useState<string | null>(null);
   // The target a connect() is waiting on, so the picker can show progress
   // until the server answers with `connected` (or an error).
   const [pendingTarget, setPendingTarget] = useState<string | null>(null);
@@ -512,17 +650,17 @@ export function useRemoteDesktop(
   // without; this says nothing about activity.
   const [canAudio, setCanAudio] = useState(false);
   // Whether this browser is listening to it, per attachment. A session started
-  // with sound comes up unmuted and stays as the menu's Mute and Unmute leave it
-  // (`seedAudioForAttachment`), except that a browser that needs a click for every
-  // AudioContext comes back muted from anything but that Start.
+  // with sound comes up unmuted and stays as the bar's Mute leaves it
+  // (`seedAudioForAttachment`), except that a browser that needs a click for
+  // every AudioContext comes back muted from anything but the press on Open.
   const [audioEnabled, setAudioEnabled] = useState(false);
-  // Why there is no sound, when there should be. One string, and what is behind it is
+  // Why there is no sound, when there should be. One fault, and what is behind it is
   // a decoder that refused or failed — this browser having no WebCodecs at all is not
   // among the possibilities, because such a browser never got past preflight.ts. A
   // refusal is reported rather than worked around: the codec is the gateway's to
   // choose and there is no second representation to fall back to (audioPlayer.ts).
-  const [audioError, setAudioError] = useState<string | null>(null);
-  // What the sound actually is, from `audioFormat`, for the session card: which of
+  const [audioError, setAudioError] = useState<Fault | null>(null);
+  // What the sound actually is, from `audioFormat`, for the session's information: which of
   // the two audio paths this target chose and at what shape. Null whenever no
   // player is up, which is every state the card already words for itself. The
   // `OpusHead` is deliberately not kept — only a decoder wants it, and it is built
@@ -538,14 +676,14 @@ export function useRemoteDesktop(
   // Why the camera is off, when it was asked for: no permission, no H.264
   // encoder, the target refusing the socket. Named, never worked around — the
   // gateway passes H.264 through and there is no second codec to fall back to.
-  const [cameraError, setCameraError] = useState<string | null>(null);
+  const [cameraError, setCameraError] = useState<Fault | null>(null);
   // Whether the remote is consuming the camera right now — an application over
   // there has it open. UI feedback only; frames stop by themselves without it.
   const [cameraStreaming, setCameraStreaming] = useState(false);
   // The microphone: the camera's twin, capability and per-session enable alike.
   const [canMic, setCanMic] = useState(false);
   const [micEnabled, setMicEnabled] = useState(false);
-  const [micError, setMicError] = useState<string | null>(null);
+  const [micError, setMicError] = useState<Fault | null>(null);
   // Whether the remote is recording from the microphone right now.
   const [micStreaming, setMicStreaming] = useState(false);
   // Why this browser is showing nothing for a video target, or null.
@@ -555,7 +693,7 @@ export function useRemoteDesktop(
   // what it costs. No audio decoder means silence beside a working desktop; no video
   // decoder means no desktop at all, so this needs a surface that stays up while
   // `status` is "connected", which the status overlay does not.
-  const [videoError, setVideoError] = useState<string | null>(null);
+  const [videoError, setVideoError] = useState<Fault | null>(null);
   // The configuration string the video decoder this attachment holds was built
   // with, and whether the stream is the remote's own passed through or one the
   // gateway encoded — the card's Video row, and the counterpart of `audioStream`.
@@ -568,7 +706,7 @@ export function useRemoteDesktop(
   // The render dial this session resolved to, from `connected`. Empty in the picker.
   const [renderPlan, setRenderPlan] = useState("");
   // Why the desktop has no picture, from `oversize`: past what a video stream
-  // encodes, or All Displays over too many screens. Null in the picker and at
+  // encodes, or Combined Display over too many screens. Null in the picker and at
   // every `connected`, until the gateway says otherwise.
   const [oversize, setOversize] = useState<HoldCause | null>(null);
   // Whether it is held, which is what input and focus follow.
@@ -577,7 +715,7 @@ export function useRemoteDesktop(
   // subtype where it has one. Empty in the picker, and read only by the card — no
   // behaviour hangs off it, because every capability that varies by subtype already
   // arrives as its own flag on the same message. See connectionLabel.ts.
-  const [connection, setConnection] = useState("");
+  const [connection, setConnection] = useState<SessionKind | null>(null);
   // The remote's displays and which one it is sharing, as the remote last
   // reported them. Empty for every engine that cannot offer a choice, which is
   // what hides the picker rather than a separate capability flag: a list of one
@@ -588,6 +726,12 @@ export function useRemoteDesktop(
   // leaves the panel agreeing with what is on screen.
   const [displays, setDisplays] = useState<DisplayInfo[]>([]);
   const [activeDisplayId, setActiveDisplayId] = useState<number | null>(null);
+  // Whether another display is shown beside this page's, in a tab of its own
+  // (remotePoint.ts): a page showing the second display in a tab has the first
+  // beside it for as long as it is shown at all, and the session's page has the
+  // second while the remote lists it for a tab. A ref because the pointer
+  // handlers read it at pointer rate.
+  const besideRef = useRef(tabDisplay !== null);
   // Whether the remote reported itself as a Mac, which is the only thing that
   // decides whether a local Command chord stays Command or becomes remote
   // Control. Reset to false on every disconnect (see the "picker" case), because
@@ -605,6 +749,24 @@ export function useRemoteDesktop(
   // A High Performance resize is settling — the gateway's `resizing`. Reset on
   // every connect and disconnect: a reattach mid-resize is told again.
   const [remoteResizing, setRemoteResizing] = useState(false);
+  // A High Performance Mac's media stream has sent no picture of this display —
+  // the gateway's `screenUnavailable`. Reset as `remoteResizing` is.
+  const [screenUnavailable, setScreenUnavailable] = useState(false);
+  // The session's page is gone — the gateway's `sessionPage`, told to a display
+  // shown in a tab of its own. Reset as the notices are.
+  const [pageGone, setPageGone] = useState(false);
+  // The host laid out one display where two were asked for — the gateway's
+  // `secondDisplay`. Nothing is covered by it: it is said beside the picture.
+  const [secondMissing, setSecondMissing] = useState(false);
+  // Any of them is over the desktop, which is what input and focus follow: a
+  // key or a click sent to a Mac whose picture is not on screen lands wherever
+  // the display that comes back happens to put it, and one sent from a tab whose
+  // session nobody is at is sent unseen.
+  const covered = remoteResizing || screenUnavailable || pageGone;
+  const coveredRef = useRef(covered);
+  useEffect(() => {
+    coveredRef.current = covered;
+  }, [covered]);
   const [touchEnabled, setTouchEnabled] = useState(() =>
     readOnByKey(TOUCHSCREEN_KEY),
   );
@@ -613,8 +775,8 @@ export function useRemoteDesktop(
   // what a finger does; the other two decide whether the switch is shown.
   const touchOffered = HAS_TOUCH && canTouch;
   const touchActive = touchOffered && touchEnabled;
-  // The floating menu is over the desktop, which it reports here (see
-  // FloatingMenu). The desktop keeps painting and stops taking input: no
+  // Something of the session's bar is open over the desktop, which it reports
+  // here (see SessionBar.tsx). The desktop keeps painting and stops taking input: no
   // listener is attached at all, so the page keeps the keys — ⌘C and Ctrl+C
   // included — and the clipboard bridge lets go of the browser's own, which is
   // the only moment there is something on it that did not come from the remote.
@@ -733,6 +895,9 @@ export function useRemoteDesktop(
   // The touch pinch-zoom/pan state, shared by the repaint paths (connection
   // effect) and the gesture handlers (input effect). Inert on desktop.
   const viewRef = useRef<TouchViewState>({ zoom: 1, pan: { x: 0, y: 0 } });
+  // The connection's "send the width shown, once the view holds still", for the
+  // gesture layer, which is wired in another effect.
+  const shownSoonRef = useRef<() => void>(() => {});
   // CSS pixels of canvas covered along the bottom edge by the docked soft
   // keyboard (0 when it's closed or floating). Read by every applyCanvasCss
   // call and by the gesture layer's visible-bounds math. Only meaningful on
@@ -741,6 +906,8 @@ export function useRemoteDesktop(
   // Lets the takeOver/retry callbacks reach into the connection driver that
   // lives inside the effect below.
   const startRef = useRef<((force: boolean) => void) | null>(null);
+  // The same way in for a tab giving its display up.
+  const releaseTabRef = useRef<(() => void) | null>(null);
   // Whether this window drives the remote's size — the session's `resize`, off
   // on a pinch-zoom device whatever the target allows (see CAN_PINCH_ZOOM).
   // There is no client-side mode beside it: the gateway names the policy on
@@ -838,6 +1005,12 @@ export function useRemoteDesktop(
     });
   }, [canvasRef, overlayRef, pointerRef]);
 
+  // The overlay's pointer is set only from here, so the X of a session that
+  // has no shape yet needs one paint that no message prompts.
+  useEffect(() => {
+    syncCursor();
+  }, [syncCursor]);
+
   // The composition the canvas presents, while a Mac's mixed-density combined
   // view is on screen (mosaic.ts); null otherwise.
   const mosaicViewRef = useRef<MosaicView | null>(null);
@@ -884,7 +1057,14 @@ export function useRemoteDesktop(
   // The connection driver: claim -> WebSocket -> render, with auto-reconnect.
   useEffect(() => {
     let disposed = false;
+    // The session socket: the claim's, carrying everything but the picture. None
+    // on a page showing a display in a tab of its own.
     let ws: WebSocket | null = null;
+    // The display socket: the picture, its size and pointer, and the paint
+    // acknowledgments that pace it (src/ws.rs). Opened beside the session socket,
+    // and on a page showing a display in a tab of its own, alone — input then
+    // goes on it too.
+    let displayWs: WebSocket | null = null;
     // Sound has a socket of its own, so that it never queues behind a picture — see
     // src/ws.rs. Opening it *is* the subscription; there is no message for audio.
     let audioWs: WebSocket | null = null;
@@ -911,6 +1091,21 @@ export function useRemoteDesktop(
     // abandons whatever is pending so a late echo cannot resurrect a size the
     // attachment it belonged to has already left behind.
     let resizeSeq = 0;
+    // The gateway's latest word on `screenUnavailable`, numbered. The notice
+    // goes up on arrival, and comes down only when the paint worker has drawn
+    // the picture sent ahead of that word (`mark`, `onReached`): the picture
+    // is still in the worker's queue when the word arrives, and lifting the
+    // notice then would show the old display or an empty canvas. A later word
+    // or a new display socket takes a new number, so a late echo lifts nothing.
+    let unavailableSeq = 0;
+    const screenUnavailableSaid = (active: boolean) => {
+      unavailableSeq += 1;
+      if (active || !painter) {
+        setScreenUnavailable(active);
+      } else {
+        painter.mark(unavailableSeq);
+      }
+    };
     // Each queued resize with the composition it presents, so the two are
     // presented together.
     const pendingResizes = new Map<
@@ -930,21 +1125,95 @@ export function useRemoteDesktop(
     // the live socket. Batch sequences alone are insufficient because each new
     // attachment starts them over.
     let paintSocket: WebSocket | null = null;
-    painter?.bind({
-      onVideoError: setVideoError,
-      // A repaint is what re-announces the stream's format and arms a keyframe on
-      // it (`reset_render` in src/encode.rs). Logged rather than
-      // shown — the recovery is a frame away and nothing asked the person for it.
-      onVideoNeedsKeyframe: (reason) => {
+    // A repaint is what re-announces the stream's format and arms a keyframe on
+    // it (`reset_render` in src/encode.rs). Asked for again until a picture is
+    // painted (keyframeAsk.ts), and logged rather than shown while it is: the
+    // recovery is a frame away and nothing asked the person for it. Past the
+    // time it is given, the page says the picture is not coming back, with what
+    // the browser said of its decoder where it said anything.
+    const keyframeAsk = createKeyframeAsk({
+      ask: (reason) => {
         console.warn(`video: ${reason}; asking for a repaint`);
+        lab.note({ kind: "keyframe", what: "asked", reason });
         sendRef.current({ type: "refresh" });
       },
+      // What the browser said of its decoder stays behind the notice's Details.
+      // Where it said nothing there is nothing to keep: why the chain was cut is
+      // this page's own word, and is in the console with every ask.
+      gaveUp: (reason) => {
+        lab.note({ kind: "keyframe", what: "gaveUp", reason });
+        setVideoError((said) =>
+          said?.detail === undefined
+            ? { code: "AL-4609" }
+            : { code: "AL-4609", detail: said.detail },
+        );
+      },
+    });
+    // The page says whether it is in sight (`sight`): hidden, the gateway
+    // encodes and passes nothing for it, which a page that runs no script could
+    // only queue; back, the gateway starts the stream over at a keyframe. The
+    // decoder the page had goes on the way back, since iOS invalidates a
+    // VideoToolbox session of a page in the background (error -12903) and the
+    // one built next starts at the keyframe that is coming. And what is still
+    // owed is asked for as if it had just been cut: a browser may not have run
+    // the page at all while it was out of sight.
+    const sightChanged = () => {
+      const visible = !document.hidden;
+      lab.note({ kind: "sight", visible });
+      sendRef.current({ type: "sight", visible });
+      if (visible) {
+        if (painter) {
+          painter.restartVideo();
+          lab.note({ kind: "decoder", what: "restarted" });
+        }
+        keyframeAsk.again();
+      }
+    };
+    document.addEventListener("visibilitychange", sightChanged);
+    // What the page sees goes to the gateway's log while the laboratory is on
+    // (lab.ts), on the session socket.
+    lab.send((lines) => sendRef.current({ type: "lab", lines }));
+    // The sound's lead, restarts and trims since the last word, said every ten
+    // seconds while the laboratory is on.
+    const sound = { lead: 0, restarts: 0, trims: 0 };
+    const soundReport = setInterval(() => {
+      if (lab.on() && audioPlayerRef.current) {
+        lab.note({
+          kind: "sound",
+          leadMs: Math.round(sound.lead * 1000),
+          restarts: sound.restarts,
+          trims: sound.trims,
+        });
+        sound.restarts = 0;
+        sound.trims = 0;
+      }
+    }, 10_000);
+    painter?.bind({
+      onVideoError: (fault) => {
+        if (fault) {
+          lab.note({
+            kind: "decoder",
+            what: "error",
+            said: `${fault.code}${fault.detail === undefined ? "" : ` ${fault.detail}`}`,
+          });
+        }
+        setVideoError(fault);
+      },
+      onVideoNeedsKeyframe: keyframeAsk.need,
+      onVideoSettled: () => {
+        lab.note({ kind: "keyframe", what: "painted" });
+        keyframeAsk.painted();
+        // What the page itself said when it gave up; a decoder's own complaint
+        // is the painter's to take down.
+        setVideoError((said) => (said?.code === "AL-4609" ? null : said));
+      },
       onPainted: (sequence, generation, queuedMs, drawMs) => {
+        lab.note({ kind: "painted" });
         sendPaintAck(
           paintGenerationRef,
           generation,
           paintSocket,
-          ws,
+          displayWs,
           sequence,
           queuedMs,
           drawMs,
@@ -955,6 +1224,11 @@ export function useRemoteDesktop(
         if (applied) {
           pendingResizes.delete(seq);
           presentResize(applied.size, applied.view);
+        }
+      },
+      onReached: (seq) => {
+        if (seq === unavailableSeq) {
+          setScreenUnavailable(false);
         }
       },
     });
@@ -979,13 +1253,15 @@ export function useRemoteDesktop(
       // under the next one's overlay.
       pendingResizes.clear();
       // Pointer ownership is per-engine: the next target may well composite
-      // its own cursor, so drop back to hiding the browser's until it says
-      // otherwise. A reattach to the same engine gets the shape replayed.
+      // its own cursor, so drop back to the X until it says otherwise. A
+      // reattach to the same engine gets the shape replayed.
       cursorRef.current = null;
       touchCursorRef.current = null;
       // One message: the worker zeroes the canvas bitmap it owns and drops the
-      // decoder with it. The next attachment starts its stream from a keyframe.
+      // decoder with it. The next attachment starts its stream from a keyframe,
+      // which the gateway sends it unasked.
       painter?.clear();
+      keyframeAsk.clear();
       // The decoder went with it, so what the card says about it goes too. The
       // next attachment re-announces its stream.
       setVideoStream(null);
@@ -1007,11 +1283,12 @@ export function useRemoteDesktop(
     // wrong was never the retrying; it was that "Reconnecting…" was the only thing
     // anybody was ever told, so a server answering 502 and a slow network looked
     // identical for as long as you cared to watch.
-    const scheduleRetry = (reason?: string) => {
+    const scheduleRetry = (reason?: Fault) => {
       if (disposed) {
         return;
       }
       clearDesktop();
+      lab.note({ kind: "dropped" });
       setStatus("reconnecting");
       if (reason && attempts >= ATTEMPTS_BEFORE_REPORTING) {
         setConnectError(reason);
@@ -1042,7 +1319,7 @@ export function useRemoteDesktop(
       // code visible nowhere.
       if (!res.ok) {
         return {
-          reason: `the server answered ${res.status}`,
+          fault: { code: "AL-3101", fill: { status: res.status } },
           retryable: false,
         };
       }
@@ -1050,10 +1327,7 @@ export function useRemoteDesktop(
         const { sessionId } = (await res.json()) as { sessionId: string };
         return sessionId;
       } catch {
-        return {
-          reason: "the server's answer could not be read",
-          retryable: false,
-        };
+        return { fault: { code: "AL-3102" }, retryable: false };
       }
     };
 
@@ -1063,22 +1337,36 @@ export function useRemoteDesktop(
     // retrying that is what made a definite answer look like weather.
     const failed = (failure: ClaimFailure) => {
       if (failure.retryable) {
-        scheduleRetry(failure.reason);
+        scheduleRetry(failure.fault);
         return;
       }
       clearDesktop();
-      setConnectError(failure.reason);
+      setConnectError(failure.fault);
       // Not left as "connecting"/"reconnecting": nothing is, and saying so is the
       // whole point — the reason is shown beside a Retry button instead of under a
       // status that promises an attempt nobody is making.
       setStatus(failure.stale ? "stale" : "failed");
     };
 
-    // Claim the session slot, then open the WebSocket with the token.
+    // A page showing a display in a tab of its own claims nothing — a claim would
+    // take the session from the tab that holds it — and opens that display's
+    // socket. Every other page claims the session.
     const connect = async (force: boolean) => {
       if (disposed) {
         return;
       }
+      if (tabDisplay !== null) {
+        const tab = await tabId();
+        if (!disposed) {
+          openDisplay(tabDisplay, { id: tab, takeover: force });
+        }
+        return;
+      }
+      await claimAndOpen(force);
+    };
+
+    // Claim the session slot, then open the WebSocket with the token.
+    const claimAndOpen = async (force: boolean) => {
       const claimed = await claim(force);
       if (disposed) {
         return;
@@ -1127,6 +1415,38 @@ export function useRemoteDesktop(
       lastViewport = { w: msg.w, h: msg.h };
       sendRef.current(msg);
     };
+    // The width a client that fits the picture shows it at, in CSS pixels: the
+    // window's times the pinch zoom (`shown`), which is what a picture the
+    // gateway reduces is held to from then on (src/vnc.rs). Only from the
+    // pinch-zoom client, whose window never reaches the remote, and deduped per
+    // connection: a desk's window is its viewport.
+    let lastShown: number | null = null;
+    const sendShown = () => {
+      if (!CAN_PINCH_ZOOM || !ws || ws.readyState !== WebSocket.OPEN) {
+        return;
+      }
+      const w = Math.min(
+        65535,
+        Math.max(
+          1,
+          Math.round(
+            document.documentElement.clientWidth * viewRef.current.zoom,
+          ),
+        ),
+      );
+      if (lastShown === w) {
+        return;
+      }
+      lastShown = w;
+      lab.note({ kind: "shown", w });
+      sendRef.current({ type: "shown", w });
+    };
+    // Once the view has held still after a pinch — see SHOWN_SETTLE_MS.
+    let shownTimer: ReturnType<typeof setTimeout> | undefined;
+    shownSoonRef.current = () => {
+      clearTimeout(shownTimer);
+      shownTimer = setTimeout(sendShown, SHOWN_SETTLE_MS);
+    };
     // A tablet's one size request, sent once on `connected`; rotations do not
     // revise it. A phone sends nothing: the picker offers it only sizes the
     // desktop keeps (see `fit` in hostDisplayMsg).
@@ -1154,7 +1474,11 @@ export function useRemoteDesktop(
       // menu shows this number, and a density this screen has that the remote
       // does not is exactly what someone reading it is trying to see.
       setHostScale(msg.scale);
-      if (!ws || ws.readyState !== WebSocket.OPEN) {
+      // A tab of its own states its screen on its display's socket, the one
+      // socket it has: a display that is a connection of its own takes its
+      // density from the window it is shown in.
+      const socket = tabDisplay === null ? ws : displayWs;
+      if (!socket || socket.readyState !== WebSocket.OPEN) {
         return;
       }
       const key = `${msg.w}x${msg.h}@${msg.scale}`;
@@ -1163,6 +1487,214 @@ export function useRemoteDesktop(
       }
       lastHostDisplay = key;
       sendRef.current(msg);
+    };
+
+    const dispatchControl = (text: string) => {
+      let msg: ControlMsg;
+      try {
+        msg = JSON.parse(text) as ControlMsg;
+      } catch {
+        return;
+      }
+      handleControlMsg(msg);
+    };
+
+    let displayAloneTimer: ReturnType<typeof setTimeout> | undefined;
+    const closeDisplay = () => {
+      if (displayWs) {
+        const old = displayWs;
+        displayWs = null; // silence its onclose before closing
+        if (paintSocket === old) {
+          paintSocket = null;
+        }
+        if (tabDisplay !== null) {
+          wsRef.current = null;
+        }
+        old.close();
+      }
+    };
+
+    // A display socket closed.
+    const displayClosed = (socket: WebSocket, code: number) => {
+      if (disposed || displayWs !== socket) {
+        return; // superseded by a newer connection
+      }
+      displayWs = null;
+      if (paintSocket === socket) {
+        paintSocket = null;
+      }
+      if (tabDisplay !== null) {
+        tabClosed(tabDisplay, code);
+        return;
+      }
+      // The session's picture went with its socket, so the session socket goes
+      // too, and the reattach brings both back — the one path that rebuilds what
+      // a socket that held nothing needs. An eviction is the session socket's
+      // to report: a takeover lets both go, and that socket's own close says so.
+      if (code !== CLOSE_EVICTED) {
+        ws?.close();
+        return;
+      }
+      // Where the session socket says nothing, the display's was let go by
+      // itself. A page left with its session socket up and no socket for the
+      // picture has nothing a `resize` can arrive on, and every computer it
+      // opens stays under the plate for good: so the session socket goes then
+      // too, as after any other close.
+      const session = ws;
+      clearTimeout(displayAloneTimer);
+      displayAloneTimer = setTimeout(() => {
+        if (!disposed && session !== null && ws === session && !displayWs) {
+          session.close();
+        }
+      }, DISPLAY_ALONE_GRACE_MS);
+    };
+
+    // Why the display a tab of its own shows is not available, by the code its
+    // socket closed with; null for a close worth reconnecting after.
+    const unavailableReason = (display: number, code: number): Told | null => {
+      switch (code) {
+        case CLOSE_INVALID:
+          return { code: "AL-3502" };
+        case CLOSE_EVICTED:
+        case CLOSE_UNSUPPORTED:
+          return { code: "AL-3501", fill: { n: display } };
+        default:
+          return null;
+      }
+    };
+
+    // The socket of the display a tab of its own shows closed.
+    const tabClosed = (display: number, code: number) => {
+      wsRef.current = null;
+      // Another tab shows this display, or took it from this one, as a claim
+      // holds or takes the session: this tab takes it only when asked to.
+      if (code === CLOSE_IN_USE || code === CLOSE_TAKEN) {
+        clearDesktop();
+        setConnectError(null);
+        setStatus(code === CLOSE_IN_USE ? "busy" : "takenOver");
+        return;
+      }
+      const reason = unavailableReason(display, code);
+      if (reason === null) {
+        scheduleRetry();
+        return;
+      }
+      // Nothing to wait for: opening it again is the Retry.
+      clearDesktop();
+      setConnectError(reason);
+      setStatus("unavailable");
+    };
+
+    // The window a tab of its own shows its display in, deduped like the session's
+    // viewport: the display follows it on a session that follows the window, and
+    // the gateway drops it on one that does not. Not on a pinch-zoom client, which
+    // never lets its window reach the remote.
+    let lastTabViewport: { w: number; h: number } | null = null;
+    const sendTabViewport = () => {
+      if (
+        tabDisplay === null ||
+        CAN_PINCH_ZOOM ||
+        !displayWs ||
+        displayWs.readyState !== WebSocket.OPEN
+      ) {
+        return;
+      }
+      const el = document.documentElement;
+      const msg = viewportMsg({ w: el.clientWidth, h: el.clientHeight });
+      if (lastTabViewport?.w === msg.w && lastTabViewport.h === msg.h) {
+        return;
+      }
+      lastTabViewport = { w: msg.w, h: msg.h };
+      displayWs.send(JSON.stringify(msg));
+    };
+
+    // The display socket the gateway has said something on. A tab's display is
+    // up from then: a socket it refuses opens too, and closes straight after with
+    // the reason.
+    let attachedSocket: WebSocket | null = null;
+
+    // One message on display socket `socket`, whose batches carry `generation`.
+    const displayMessage = (
+      socket: WebSocket,
+      generation: number,
+      data: unknown,
+    ) => {
+      if (disposed || displayWs !== socket) {
+        return;
+      }
+      if (attachedSocket !== socket) {
+        attachedSocket = socket;
+        tabAttached();
+      }
+      if (typeof data === "string") {
+        dispatchControl(data);
+      } else if (data instanceof ArrayBuffer) {
+        // Sound is on its own socket, so this one carries batches and nothing
+        // else; the worker still reads the kind byte rather than assuming it.
+        painter?.draw(data, generation);
+      }
+    };
+
+    // The gateway let a tab's display socket in: the display is up, and told the
+    // window it is shown in.
+    const tabAttached = () => {
+      if (tabDisplay === null) {
+        return;
+      }
+      setStatus("connected");
+      setMode("desktop");
+      lastHostDisplay = null;
+      sendHostDisplay();
+      lastTabViewport = null;
+      sendTabViewport();
+    };
+
+    // A display's socket, which carries no claim: the gateway lets it in by the
+    // login cookie this browser carries (src/session.rs, `attach_display`).
+    const openDisplay = (
+      display: number,
+      tab: { id: string; takeover: boolean } | null = null,
+    ) => {
+      const socket = new WebSocket(gatewayDisplaySocketUrl(display, tab));
+      const generation = advancePaintGeneration(paintGenerationRef);
+      // What a display socket says of its picture starts over with the socket,
+      // here and not at the session socket's `connected`: the two sockets are
+      // not ordered against each other, and a reattach's replay of either word
+      // can arrive ahead of that `connected`.
+      unavailableSeq += 1;
+      setRemoteResizing(false);
+      setScreenUnavailable(false);
+      setPageGone(false);
+      setSecondMissing(false);
+      paintSocket = socket;
+      socket.binaryType = "arraybuffer";
+      displayWs = socket;
+      if (tabDisplay !== null) {
+        // The input made over this page goes on its one socket.
+        wsRef.current = socket;
+      }
+      socket.onclose = (ev) => displayClosed(socket, ev.code);
+      // Binary frames go straight to the paint worker, buffer transferred, in
+      // arrival order — postMessage order *is* the draw order, so the promise
+      // queue that used to hold draws and draw-ordered control messages in
+      // line on this thread lives in the worker now. The control messages
+      // whose effects touch what draws touch still keep their place there:
+      // `resize` and `videoFormat` post commands behind the frames already
+      // sent, and `picker` posts `clear` the same way (see
+      // desktopPainterWorker.ts for why the clear must hold its place too).
+      // Their *state* halves run on arrival now rather than behind the
+      // backlog, which is fine because every mode they switch to hides the
+      // canvas behind an overlay until the worker's queue has caught up.
+      // Everything else always ran on arrival: a cursor shape or a clipboard
+      // answer gains nothing by queueing behind the worker's draws.
+      //
+      // Ownership is checked at dispatch — a superseded socket keeps firing
+      // `onmessage` until its close lands, and its frames and control messages
+      // must not reach the new attachment's worker or state. That check is
+      // also what lets the worker run on order alone: a dead socket's frames
+      // stop being posted before `clearDesktop` posts the clear that ends
+      // their attachment, so nothing can arrive there out of place.
+      socket.onmessage = (ev) => displayMessage(socket, generation, ev.data);
     };
 
     const open = (sessionId: string) => {
@@ -1179,11 +1711,11 @@ export function useRemoteDesktop(
           rdpH264: decodesRdpH264(),
         }),
       );
-      const generation = advancePaintGeneration(paintGenerationRef);
-      paintSocket = socket;
-      socket.binaryType = "arraybuffer";
       ws = socket;
       wsRef.current = socket;
+      // Opened together; the gateway holds the picture for the display's socket
+      // when it is the slower of the two.
+      openDisplay(FIRST_DISPLAY);
 
       socket.onopen = () => {
         if (disposed || ws !== socket) {
@@ -1201,9 +1733,7 @@ export function useRemoteDesktop(
         }
         ws = null;
         wsRef.current = null;
-        if (paintSocket === socket) {
-          paintSocket = null;
-        }
+        closeDisplay();
         // Before either branch below: the link that owed us a clipboard reply
         // is gone, so fail any fetch now rather than leaving the button on
         // "Fetching…" until its timeout expires for an answer that cannot come.
@@ -1218,51 +1748,12 @@ export function useRemoteDesktop(
         // longer closes the socket; the server returns it to the picker.)
         scheduleRetry();
       };
-      // Binary frames go straight to the paint worker, buffer transferred, in
-      // arrival order — postMessage order *is* the draw order, so the promise
-      // queue that used to hold draws and draw-ordered control messages in
-      // line on this thread lives in the worker now. The control messages
-      // whose effects touch what draws touch still keep their place there:
-      // `resize` and `videoFormat` post commands behind the frames already
-      // sent, and `connected`/`picker` post `clear` the same way (see
-      // desktopPainterWorker.ts for why the clear must hold its place too).
-      // Their *state* halves run on arrival now rather than behind the
-      // backlog, which is fine because every mode they switch to hides the
-      // canvas behind an overlay until the worker's queue has caught up.
-      // Everything else always ran on arrival: a cursor shape or a clipboard
-      // answer gains nothing by queueing behind the worker's draws.
-      //
-      // `owned` is checked at dispatch — a superseded socket keeps firing
-      // `onmessage` until its close lands, and its frames and control messages
-      // must not reach the new attachment's worker or state. That check is
-      // also what lets the worker run on order alone: a dead socket's frames
-      // stop being posted before `clearDesktop` posts the clear that ends
-      // their attachment, so nothing can arrive there out of place.
-      const owned = () => !disposed && ws === socket;
-      const dispatchControl = (text: string) => {
-        let msg: ControlMsg;
-        try {
-          msg = JSON.parse(text) as ControlMsg;
-        } catch {
-          return;
-        }
-        handleControlMsg(msg);
-      };
+      // Text only: the picture is the display socket's.
       socket.onmessage = (ev) => {
-        if (!owned()) {
+        if (disposed || ws !== socket || typeof ev.data !== "string") {
           return;
         }
-        const data = ev.data;
-        if (typeof data !== "string") {
-          // Sound is on its own socket, so this one carries batches and
-          // nothing else; the worker still reads the kind byte rather than
-          // assuming it.
-          if (data instanceof ArrayBuffer) {
-            painter?.draw(data, generation);
-          }
-          return;
-        }
-        dispatchControl(data);
+        dispatchControl(ev.data);
       };
     };
 
@@ -1293,7 +1784,7 @@ export function useRemoteDesktop(
         audioPlayerRef.current?.gap();
       }
       if (frame && frame.packets.length > 0) {
-        audioPlayerRef.current?.push(frame.packets);
+        audioPlayerRef.current?.push(frame.packets, performance.now() / 1000);
       }
     };
 
@@ -1391,10 +1882,10 @@ export function useRemoteDesktop(
           },
           context,
           {
-            onError: (reason) => {
+            onError: (fault) => {
               releaseAudio();
               setAudioEnabled(false);
-              setAudioError(reason);
+              setAudioError(fault);
               // And stop the packets, which would otherwise keep arriving for a
               // decoder that has gone. Closing the socket is how that is said.
               closeAudioSocket();
@@ -1405,12 +1896,17 @@ export function useRemoteDesktop(
             // logging — it cannot leave the range the schedule defines (see
             // audioSchedule.ts), which is the point: if the sound is still late with
             // no trims recurring, the delay is upstream of this browser.
-            onLead: (lead, trimmed) => {
+            onLead: (lead, trimmed, restarted) => {
               if (trimmed > 0) {
                 console.warn(
                   `audio: trimmed ${trimmed.toFixed(3)}s to stay near live (lead ${lead.toFixed(3)}s)`,
                 );
+                sound.trims += 1;
               }
+              if (restarted) {
+                sound.restarts += 1;
+              }
+              sound.lead = lead;
             },
           },
         );
@@ -1429,11 +1925,7 @@ export function useRemoteDesktop(
       } catch (e) {
         releaseAudio();
         setAudioEnabled(false);
-        setAudioError(
-          e instanceof Error
-            ? e.message
-            : "this browser cannot play remote audio",
-        );
+        setAudioError(faultOf(e, "AL-5105"));
         closeAudioSocket();
       }
     };
@@ -1444,6 +1936,7 @@ export function useRemoteDesktop(
     // hides the canvas only while `size` is null, and the worker could still
     // be painting the old attachment's backlog onto the old bitmap.
     const presentResize = (s: RemoteSize, view: MosaicView | null) => {
+      lab.note({ kind: "presented", w: s.w, h: s.h, scale: s.scale });
       mosaicViewRef.current = view;
       applyCanvasCss(
         canvasRef.current,
@@ -1470,6 +1963,7 @@ export function useRemoteDesktop(
     };
 
     const handleResize = (msg: Extract<ControlMsg, { type: "resize" }>) => {
+      lab.note({ kind: "resize", w: msg.w, h: msg.h, scale: msg.scale });
       const s = { w: msg.w, h: msg.h, scale: msg.scale > 0 ? msg.scale : 1 };
       if (stagedMosaic !== undefined) {
         mosaicRegions = stagedMosaic;
@@ -1530,6 +2024,9 @@ export function useRemoteDesktop(
     const handleDisplays = (msg: Extract<ControlMsg, { type: "displays" }>) => {
       setDisplays(msg.displays);
       setActiveDisplayId(msg.active);
+      if (tabDisplay === null) {
+        besideRef.current = msg.displays.some((d) => d.tab !== null);
+      }
       const switched = sharedDisplay !== null && sharedDisplay !== msg.active;
       sharedDisplay = msg.active;
       if (switched) {
@@ -1540,13 +2037,14 @@ export function useRemoteDesktop(
 
     // Audio belongs to one attachment: whatever was playing was on a socket that
     // is gone, so a subscription has to be asked for again. A session that
-    // carries sound comes up unmuted — from the picker's Start, a reattach after a
-    // dropped socket and a reload alike — unless this tab muted it.
-    // Where `connect` primed a context inside the Start click, `startAudio` adopts
+    // carries sound comes up as this tab left it — from the list's Open, a
+    // reattach after a dropped socket and a reload alike — unless this tab
+    // muted it.
+    // Where `connect` primed a context inside the Open click, `startAudio` adopts
     // it; otherwise it builds one with no gesture, which a browser that needs a
     // gesture for every context (AUDIO_NEEDS_GESTURE) would leave suspended, so
-    // there anything but a Start comes up muted and Unmute is the click. A
-    // session without sound is silent.
+    // there every attachment comes up muted and Mute, pressed off, is the click. A session
+    // without sound is silent.
     const seedAudioForAttachment = (hasAudio: boolean) => {
       setAudioError(null);
       const playable = audioContextRef.current !== null || !AUDIO_NEEDS_GESTURE;
@@ -1566,10 +2064,19 @@ export function useRemoteDesktop(
       // A target session started (picker connect or reattach): switch to the
       // desktop.
       setConnectError(null);
+      setSessionFell(false);
       setPendingTarget(null);
+      setSessionName(msg.name);
+      lab.note({
+        kind: "connected",
+        how: [msg.protocol, msg.subtype].filter(Boolean).join(" "),
+      });
+      // Its sight, said anew on every connection: a `sight` said on a socket
+      // that died while the page was hidden reached nobody, and the engine a
+      // reattach resumes would stay blind to a page that is back.
+      sendRef.current({ type: "sight", visible: !document.hidden });
       setMode("desktop");
       setCanTouch(false);
-      setRemoteResizing(false);
       setCanAudio(msg.audio);
       seedAudioForAttachment(msg.audio);
       // Nothing here turns a camera on: unlike sound, the session is not started
@@ -1595,7 +2102,7 @@ export function useRemoteDesktop(
       // refusing it, once, with the configuration in hand.
       setRenderPlan(msg.render);
       setOversize(null);
-      setConnection(connectionLabel(msg.protocol, msg.subtype));
+      setConnection({ protocol: msg.protocol, subtype: msg.subtype });
       lastViewport = null;
       if (CAN_PINCH_ZOOM) {
         // Mobile has one rule and it does not vary by protocol: ask once, here,
@@ -1609,6 +2116,9 @@ export function useRemoteDesktop(
         if (msg.resize) {
           sendMobileSize();
         }
+        // And the width it shows the picture at, which every connection says anew.
+        lastShown = null;
+        sendShown();
       } else {
         // The session's one switch, chosen before it started: `resize` means
         // this window drives the remote's size, and there is nothing to toggle
@@ -1657,9 +2167,16 @@ export function useRemoteDesktop(
       // would silently stop translating Command for a Windows guest.
       setRemoteIsMac(false);
       setCanTouch(false);
+      unavailableSeq += 1;
       setRemoteResizing(false);
+      setScreenUnavailable(false);
+      setPageGone(false);
+      setSecondMissing(false);
       setDisplays([]);
       setActiveDisplayId(null);
+      if (tabDisplay === null) {
+        besideRef.current = false;
+      }
       sharedDisplay = null;
       setRemoteClipboard(null);
       lastFromRemoteRef.current = null;
@@ -1683,6 +2200,23 @@ export function useRemoteDesktop(
         return;
       }
       void navigator.clipboard.writeText(text).catch(() => {});
+    };
+
+    // The part of a passed pipeline's picture this display is. Queued in the
+    // worker behind the resize it came with. On the page that composes the
+    // pipeline, the part of its picture to show; in a tab showing a display of
+    // its own, the part of the session page's picture this tab is painted from,
+    // which is the only picture such a tab gets.
+    const handleGraphicsView = (
+      msg: Extract<ControlMsg, { type: "graphicsView" }>,
+    ) => {
+      const part = { x: msg.x, y: msg.y, w: msg.w, h: msg.h };
+      if (tabDisplay === null) {
+        painter?.setGraphicsView(part);
+        return;
+      }
+      painter?.mirrorGraphics(tabDisplay, part);
+      setVideoStream({ decode: "", passthrough: true, composed: true });
     };
 
     const handleControlMsg = (msg: ControlMsg) => {
@@ -1718,7 +2252,8 @@ export function useRemoteDesktop(
           // pending connect so the picker re-enables. An engine failure is
           // followed by `picker`; a refusal leaves the slot already there.
           console.error("remote session error:", msg.message);
-          setConnectError(msg.message);
+          setConnectError(serverFault(msg.message, msg.cause));
+          setSessionFell(sizeRef.current !== null);
           setPendingTarget(null);
           break;
         case "connected":
@@ -1744,6 +2279,9 @@ export function useRemoteDesktop(
           // the pipeline's first run must find a compositor with nothing in it.
           painter?.startGraphics();
           setVideoStream({ decode: "", passthrough: true, composed: true });
+          break;
+        case "graphicsView":
+          handleGraphicsView(msg);
           break;
         case "clipboard": {
           // Both paths update the panel, but only unsolicited pushes mirror
@@ -1791,6 +2329,15 @@ export function useRemoteDesktop(
         case "resizing":
           setRemoteResizing(msg.active);
           break;
+        case "screenUnavailable":
+          screenUnavailableSaid(msg.active);
+          break;
+        case "sessionPage":
+          setPageGone(!msg.attached);
+          break;
+        case "secondDisplay":
+          setSecondMissing(msg.missing);
+          break;
         case "oversize":
           setOversize(msg.cause);
           break;
@@ -1800,7 +2347,8 @@ export function useRemoteDesktop(
           // connect starts from a clean "waiting for the desktop" state.
           setPendingTarget(null);
           setMode("picker");
-          setConnection("");
+          setSessionName(null);
+          setConnection(null);
           endDesktop();
           break;
       }
@@ -1822,14 +2370,30 @@ export function useRemoteDesktop(
         wsRef.current = null;
         old.close();
       }
+      closeDisplay();
       void connect(force);
     };
     startRef.current = start;
+    // A tab stops showing its display: its socket closes, and nothing opens
+    // another until it is asked to.
+    releaseTabRef.current = () => {
+      if (tabDisplay === null) {
+        return;
+      }
+      clearTimeout(retryTimer);
+      closeDisplay();
+      clearDesktop();
+      setConnectError(null);
+      setStatus("idle");
+    };
     audioSocketRef.current = { open: openAudioSocket, close: closeAudioSocket };
     cameraUrlRef.current = () =>
       session ? gatewaySocketUrl("/ws/camera", session) : null;
     micUrlRef.current = () =>
       session ? gatewaySocketUrl("/ws/mic", session) : null;
+    // A display in a tab of its own opens on load, as the session's page claims:
+    // it is this tab's when no other shows it, and otherwise the gateway refuses
+    // and the page asks before taking it.
     start(false);
 
     // Window resizes re-report the viewport, debounced so a drag-resize sends
@@ -1848,6 +2412,9 @@ export function useRemoteDesktop(
         );
         syncCursor();
         sendViewport();
+        sendTabViewport();
+        // A phone turned shows the picture at another width.
+        sendShown();
         // A window that just resized may have been dragged to another display;
         // `window.screen` follows it and the dedupe makes an unchanged one free.
         sendHostDisplay();
@@ -1883,6 +2450,7 @@ export function useRemoteDesktop(
       advancePaintGeneration(paintGenerationRef);
       paintSocket = null;
       startRef.current = null;
+      releaseTabRef.current = null;
       audioSocketRef.current = null;
       audioWs?.close();
       cameraUrlRef.current = null;
@@ -1896,6 +2464,7 @@ export function useRemoteDesktop(
       dprQuery?.removeEventListener("change", onDprChange);
       clearTimeout(resizeTimer);
       ws?.close();
+      displayWs?.close();
       // The worker outlives this effect — its canvas element can only be
       // transferred once, and StrictMode reruns the effect on the same element
       // (see desktopPainter.ts) — but what it holds must not: that includes a
@@ -1903,6 +2472,13 @@ export function useRemoteDesktop(
       // *through* the session; this is the one that leaves.
       painter?.clear();
       painter?.unbind();
+      keyframeAsk.clear();
+      document.removeEventListener("visibilitychange", sightChanged);
+      clearInterval(soundReport);
+      lab.send(null);
+      clearTimeout(shownTimer);
+      shownSoonRef.current = () => {};
+      clearTimeout(displayAloneTimer);
       releaseAudio();
     };
   }, [
@@ -1914,6 +2490,7 @@ export function useRemoteDesktop(
     releaseAudio,
     stopCamera,
     stopMic,
+    tabDisplay,
   ]);
 
   // Force-claim the slot: the takeover confirmation (busy) and the take-back
@@ -1922,6 +2499,9 @@ export function useRemoteDesktop(
   /// Try again after a failure that stopped the retries. Unforced, unlike
   /// `takeOver`: nothing here is holding the slot, so there is nobody to evict.
   const retry = useCallback(() => startRef.current?.(false), []);
+  /// Stop showing the display this page shows in a tab of its own. Connecting
+  /// again is `retry`.
+  const releaseTab = useCallback(() => releaseTabRef.current?.(), []);
 
   // Start a target from the picker, with what was chosen under it: its session
   // is started over the live socket. The server answers `connected` (→ desktop)
@@ -1930,11 +2510,12 @@ export function useRemoteDesktop(
   const connect = useCallback(
     (target: string, choices: Choices, sound: boolean) => {
       setConnectError(null);
+      setSessionFell(false);
       setPendingTarget(target);
       // A new session starts unmuted: a mute was the last one's.
       writeMuted(false);
       // Where the session will carry sound, spend this click's gesture on an
-      // AudioContext now — the only moment one is playable (see setAudio). The
+      // AudioContext now, the only moment one is playable (see setAudio). The
       // `connected` that confirms it arrives a round trip later, long past any
       // gesture, so it cannot make one then: `handleConnected` adopts this primed
       // context. Primed without asking whether this browser can decode: that
@@ -1960,7 +2541,13 @@ export function useRemoteDesktop(
     [releaseAudio],
   );
 
-  // End session: tear the current session down and return to the picker. The
+  // Take down what the list says of the last session, once it has been read.
+  const dismissConnectError = useCallback(() => {
+    setConnectError(null);
+    setSessionFell(false);
+  }, []);
+
+  // End: tear the current session down and return to the picker. The
   // server answers `picker`, which flips `mode` back.
   const switchTarget = useCallback(() => {
     sendRef.current({ type: "disconnect" });
@@ -1974,7 +2561,7 @@ export function useRemoteDesktop(
     sendRef.current({ type: "selectDisplay", id });
   }, []);
 
-  // Mute or unmute the remote's sound (the floating menu's Audio button), in a
+  // Mute or unmute the remote's sound (the bar's Mute), in a
   // session that was started with it.
   //
   // **Must be called from a click**, and the AudioContext is why: a context created
@@ -2009,7 +2596,7 @@ export function useRemoteDesktop(
     [releaseAudio],
   );
 
-  // Start or stop offering this browser's camera (the floating menu's Camera
+  // Start or stop offering this browser's camera (the bar's menu, Camera
   // button).
   //
   // **Must be called from a click** — `getUserMedia`'s permission prompt is this
@@ -2041,7 +2628,7 @@ export function useRemoteDesktop(
       cameraPendingRef.current = generation;
       setCameraEnabled(true);
       void startCameraSender(url, {
-        onStopped: (reason) => {
+        onStopped: (fault) => {
           // A sender put down for being overtaken must not touch the live
           // state: the generation it belonged to is over, and whatever enable
           // is current has its own sender saying its own things.
@@ -2051,8 +2638,8 @@ export function useRemoteDesktop(
           // The sender is already stopped; what is left is the state saying so.
           // `stopCamera` is safe here — its `stop` finds nothing to do.
           stopCamera();
-          if (reason) {
-            setCameraError(reason);
+          if (fault) {
+            setCameraError(fault);
           }
         },
         onStreaming: (streaming) => {
@@ -2079,11 +2666,7 @@ export function useRemoteDesktop(
           }
           if (cameraGenerationRef.current === generation) {
             setCameraEnabled(false);
-            setCameraError(
-              e instanceof Error
-                ? e.message
-                : "this browser cannot offer a camera",
-            );
+            setCameraError(faultOf(e, "AL-5308"));
           }
         },
       );
@@ -2091,7 +2674,7 @@ export function useRemoteDesktop(
     [stopCamera],
   );
 
-  // Start or stop offering this browser's microphone (the floating menu's
+  // Start or stop offering this browser's microphone (the bar's menu,
   // Microphone button). The camera's twin, guard for guard, and like it
   // **must be called from a click** for `getUserMedia`'s permission prompt.
   const setMic = useCallback(
@@ -2109,13 +2692,13 @@ export function useRemoteDesktop(
       micPendingRef.current = generation;
       setMicEnabled(true);
       void startMicSender(url, {
-        onStopped: (reason) => {
+        onStopped: (fault) => {
           if (micGenerationRef.current !== generation) {
             return;
           }
           stopMic();
-          if (reason) {
-            setMicError(reason);
+          if (fault) {
+            setMicError(fault);
           }
         },
         onStreaming: (streaming) => {
@@ -2140,11 +2723,7 @@ export function useRemoteDesktop(
           }
           if (micGenerationRef.current === generation) {
             setMicEnabled(false);
-            setMicError(
-              e instanceof Error
-                ? e.message
-                : "this browser cannot offer a microphone",
-            );
+            setMicError(faultOf(e, "AL-5511"));
           }
         },
       );
@@ -2155,11 +2734,15 @@ export function useRemoteDesktop(
   // Inject a key chord from the floating toolbar — keys the browser swallows
   // (F5, Ctrl+W, Alt+F4…) or a bare modifier tap. Each DOM `code` is pressed in
   // order then released in reverse; transient, so nothing joins the held-key
-  // set the input effect tracks. A no-op while the socket is down.
+  // set the input effect tracks. A no-op while the socket is down, and while a
+  // notice covers the desktop, as every other key is.
   const sendKeyCombo = useCallback((codes: string[]) => {
+    if (coveredRef.current) {
+      return;
+    }
     const send = sendRef.current;
     // Synthetic sends have no CapsLock state; case is expressed by including an
-    // explicit Shift code in `codes` (the soft keyboard's sticky modifier).
+    // explicit Shift code in `codes` (the soft keyboard's one-shot modifier).
     for (const code of codes) {
       send({ type: "key", code, pressed: true, caps: false });
     }
@@ -2213,11 +2796,18 @@ export function useRemoteDesktop(
   }, []);
 
   // Best-effort clipboard push on focus, when reads are permitted. Oversized
-  // values are skipped locally; the explicit panel reports the limit.
+  // values are skipped locally; the explicit panel reports the limit. A display
+  // in a tab of its own pushes too, on its display socket: the browser lets only
+  // the focused page read the clipboard, and with two windows that is often the
+  // tab's. Only while connected: a desktop stays up through a reconnect, and a
+  // value sent then would be dropped yet still stamp `lastToRemoteRef`, which
+  // keeps it from going out once the socket is back.
   useEffect(() => {
-    if (mode !== "desktop") {
+    if (mode !== "desktop" || status !== "connected") {
       return;
     }
+    // Cleared when the connection changes, which a read can outlast.
+    let live = true;
     const pushBrowserClipboardOnFocus = () => {
       // The menu check is the ref rather than the dependency it looks like: a
       // re-run calls this once itself, so gating the effect would push the
@@ -2238,7 +2828,9 @@ export function useRemoteDesktop(
           // have opened: the read sits on a permission prompt for as long as the
           // user takes to answer it, and what it then resolves with may be what was
           // copied off a panel. Sending it would also stamp `lastToRemoteRef` with
-          // it, which is the mirror's echo guard.
+          // it, which is the mirror's echo guard. The connection is asked again
+          // for the same reason.
+          !live ||
           viewOnlyRef.current ||
           text === "" ||
           overClipboardLimit(text) ||
@@ -2252,18 +2844,35 @@ export function useRemoteDesktop(
         sendRef.current({ type: "clipboard", text });
       })();
     };
-    window.addEventListener("focus", pushBrowserClipboardOnFocus);
-    document.addEventListener("visibilitychange", pushBrowserClipboardOnFocus);
-    // Also once now: the tab may already be focused when the session starts.
-    pushBrowserClipboardOnFocus();
-    return () => {
-      window.removeEventListener("focus", pushBrowserClipboardOnFocus);
-      document.removeEventListener(
+    // Only where the browser reads on a permission, in silence
+    // (clipboardGesture.ts): where a read needs a gesture and shows the
+    // system's "Paste" callout, the clipboard sheet's Paste button reads,
+    // inside the tap that asks.
+    let listening = false;
+    void clipboardReadsOnFocus().then((reads) => {
+      if (!live || !reads) {
+        return;
+      }
+      listening = true;
+      window.addEventListener("focus", pushBrowserClipboardOnFocus);
+      document.addEventListener(
         "visibilitychange",
         pushBrowserClipboardOnFocus,
       );
+      // Also once now: the tab may already be focused when the session starts.
+      pushBrowserClipboardOnFocus();
+    });
+    return () => {
+      live = false;
+      if (listening) {
+        window.removeEventListener("focus", pushBrowserClipboardOnFocus);
+        document.removeEventListener(
+          "visibilitychange",
+          pushBrowserClipboardOnFocus,
+        );
+      }
     };
-  }, [mode]);
+  }, [mode, status]);
 
   // Report the height (CSS px) of chrome docked over the bottom of the canvas
   // — the on-screen keyboard. Re-clamps the touch view so the covered strip is
@@ -2298,8 +2907,10 @@ export function useRemoteDesktop(
     // of them tests, so there is no path left that could forward a key or a
     // click while the menu has the screen. A held desktop is the same: the
     // remote is not on screen to see what a key does to it, and the notice over
-    // it wants Tab for its own buttons.
-    if (!el || viewOnly || held) {
+    // it wants Tab for its own buttons. So is one a High Performance notice
+    // covers, and the teardown that takes the listeners away lets go of what
+    // was held when the notice went up.
+    if (!el || viewOnly || held || covered) {
       return;
     }
 
@@ -2320,23 +2931,16 @@ export function useRemoteDesktop(
     // released on the next event that reports it up (see heldModifiers.ts).
     const heldModifiers = new HeldModifiers();
 
-    // Client point to remote pixels. Map through the canvas rect (not the
-    // overlay): it reflects the displayed framebuffer under the current touch
-    // zoom/pan, and on desktop it coincides with the overlay anyway.
-    const toRemotePoint = (clientX: number, clientY: number) => {
-      const rect = pointerRectCache.read(canvasRef.current ?? el);
-      const remote = sizeRef.current;
-      const scaleX = remote && rect.width > 0 ? remote.w / rect.width : 1;
-      const scaleY = remote && rect.height > 0 ? remote.h / rect.height : 1;
-      let x = Math.round((clientX - rect.left) * scaleX);
-      let y = Math.round((clientY - rect.top) * scaleY);
-      // Clamp to the framebuffer bounds so a drag past the edge stays in range.
-      if (remote) {
-        x = Math.min(Math.max(x, 0), remote.w - 1);
-        y = Math.min(Math.max(y, 0), remote.h - 1);
-      }
-      return { x, y };
-    };
+    // Client point to remote pixels, through the canvas rect and clamped to the
+    // framebuffer unless a display is shown beside this one (remotePoint.ts).
+    const toRemotePoint = (clientX: number, clientY: number) =>
+      remotePoint(
+        clientX,
+        clientY,
+        pointerRectCache.read(canvasRef.current ?? el),
+        sizeRef.current,
+        besideRef.current,
+      );
 
     // Touchscreen mode: fingers go to the remote as contacts and the guest
     // reads the gestures, so the trackpad layer below is not attached. The
@@ -2390,6 +2994,7 @@ export function useRemoteDesktop(
                 bottomInsetRef.current,
               );
               syncCursor();
+              shownSoonRef.current();
             },
             bottomInset: () => bottomInsetRef.current,
             // The virtual pointer moved: redraw it at its new spot. A hardware
@@ -2398,6 +3003,23 @@ export function useRemoteDesktop(
             onCursor: (x, y, real) => {
               touchCursorRef.current = real ? null : { x, y };
               syncCursor();
+            },
+            // The cursor held at an edge with the view at its limit, with the
+            // window as the page measures it and the browser's own visual
+            // viewport beside it: what a phone's browser is asked for when the
+            // cursor stops short of the picture's edge (lab.ts).
+            onEdge: (edge) => {
+              const visual = window.visualViewport;
+              lab.note({
+                kind: "edge",
+                ...edge,
+                clientH: document.documentElement.clientHeight,
+                visualH: visual ? Math.round(visual.height) : null,
+                visualTop: visual ? Math.round(visual.offsetTop) : null,
+                visualScale: visual
+                  ? Math.round(visual.scale * 100) / 100
+                  : null,
+              });
             },
           })
         : null;
@@ -2436,7 +3058,16 @@ export function useRemoteDesktop(
       }
     };
 
+    // On the window, for a held drag: a browser hit-tests every mousemove — a
+    // mouse gets no implicit capture, as a touch does — so a drag that leaves
+    // the overlay, over the toolbar or past the window onto the next screen, is
+    // delivered to whatever is under it, and only the window sees them all. A
+    // move with nothing held is the overlay's own: a hover elsewhere on the page
+    // is not the remote's.
     const onMouseMove = (e: MouseEvent) => {
+      if (pressedButtons.size === 0 && !el.contains(e.target as Node | null)) {
+        return;
+      }
       releaseLiftedButtons(e);
       releaseLapsedPointer(e);
       moveTo(e);
@@ -2594,7 +3225,7 @@ export function useRemoteDesktop(
     releaseKeysRef.current = releaseKeys;
     localShortcutRef.current = () => macKeys.noteCommandUsedLocally();
 
-    el.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mousemove", onMouseMove);
     el.addEventListener("mousedown", onMouseDown);
     window.addEventListener("mouseup", onMouseUp);
     window.addEventListener("scroll", invalidatePointerRect, {
@@ -2622,8 +3253,13 @@ export function useRemoteDesktop(
     el.addEventListener("keydown", onKeyDown);
     el.addEventListener("keyup", onKeyUp);
     el.addEventListener("blur", onBlur);
+    // The surface says for itself that it takes input, for as long as these
+    // listeners are on it: what opens over the remote is drawn a step before the
+    // listeners come off, so nothing else on the page says when they have.
+    el.setAttribute("data-al-live", "");
 
     return () => {
+      el.removeAttribute("data-al-live");
       // Let go of whatever the remote is holding while the listeners that would
       // have released it are still here: opening the menu is one of the ways
       // this teardown runs, and a key held into it would stick on the guest.
@@ -2632,7 +3268,7 @@ export function useRemoteDesktop(
       passthrough?.detach();
       releaseKeysRef.current = null;
       localShortcutRef.current = null;
-      el.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mousemove", onMouseMove);
       el.removeEventListener("mousedown", onMouseDown);
       window.removeEventListener("mouseup", onMouseUp);
       window.removeEventListener("scroll", invalidatePointerRect, {
@@ -2660,6 +3296,7 @@ export function useRemoteDesktop(
     touchActive,
     viewOnly,
     held,
+    covered,
   ]);
 
   // The desktop takes the keyboard as soon as it is on screen, so the first
@@ -2676,16 +3313,19 @@ export function useRemoteDesktop(
   // opens only once its fetch has answered, which is a later commit than the one
   // that closed the drawer, so its own focus lands after this.
   useEffect(() => {
-    if (mode !== "desktop" || viewOnly || held) {
+    if (mode !== "desktop" || viewOnly || held || covered) {
       return;
     }
     overlayRef.current?.focus({ preventScroll: true });
-  }, [mode, viewOnly, held, overlayRef]);
+  }, [mode, viewOnly, held, covered, overlayRef]);
 
   return {
     status,
     mode,
     connectError,
+    sessionFell,
+    dismissConnectError,
+    sessionName,
     pendingTarget,
     size,
     hostScale,
@@ -2727,11 +3367,15 @@ export function useRemoteDesktop(
     setTouchEnabled,
     // The cover over a settling High Performance resize.
     remoteResizing,
+    screenUnavailable,
+    pageGone,
+    secondMissing,
     viewOnly,
     setViewOnly,
     onLocalShortcut,
     takeOver,
     retry,
+    releaseTab,
     connect,
     switchTarget,
     selectDisplay,

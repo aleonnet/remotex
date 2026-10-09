@@ -15,14 +15,19 @@
 //
 // then, against the address it prints:
 //
-//     REMOTEX_PLAYWRIGHT_BASE_URL=http://127.0.0.1:PORT/ \
-//     REMOTEX_PLAYWRIGHT_USERNAME=admin \
-//     REMOTEX_PLAYWRIGHT_PASSWORD=hunter2 \
-//     REMOTEX_PLAYWRIGHT_AUDIO_TARGET=test-tone \
+//     ALUMIA_PLAYWRIGHT_BASE_URL=http://127.0.0.1:PORT/ \
+//     ALUMIA_PLAYWRIGHT_USERNAME=admin \
+//     ALUMIA_PLAYWRIGHT_PASSWORD=hunter2 \
+//     ALUMIA_PLAYWRIGHT_AUDIO_TARGET=test-tone \
 //     npx playwright test audio-socket
 import { expect, type Page, test } from "@playwright/test";
 
-import { leaveSession, logInAndConnectTo } from "./support";
+import {
+  handle,
+  leaveSession,
+  logInAndConnectTo,
+  openBar,
+} from "./support";
 
 /// The binary frame kinds, copied rather than imported: this spec is the independent
 /// check that the gateway put audio where it said it did, and reading the SPA's own
@@ -33,7 +38,7 @@ const AUDIO_FRAME_KIND = 0x03;
 /// The opt-in, and the target name in one. Its presence is the claim that this
 /// gateway has a target which produces sound; without one the spec would be asserting
 /// against silence and would pass for the wrong reason.
-const AUDIO_TARGET = process.env.REMOTEX_PLAYWRIGHT_AUDIO_TARGET;
+const AUDIO_TARGET = process.env.ALUMIA_PLAYWRIGHT_AUDIO_TARGET;
 
 interface Traffic {
   url: string;
@@ -77,10 +82,17 @@ const only = (traffic: Traffic[], path: string): Traffic => {
   return matches[0];
 };
 
+// What a poll reads of a socket that may not be open yet. `only` asserts, and a
+// poll whose function throws ends there instead of asking again: the runner
+// retries the matcher, not the function. A poll that began before the page had
+// opened the socket would fail at once with twenty seconds still to wait.
+const sofar = (traffic: Traffic[], path: string): Traffic | undefined =>
+  traffic.find((t) => t.url === path && !t.closed);
+
 test.describe("the audio socket", () => {
   test.skip(
     !AUDIO_TARGET,
-    "set REMOTEX_PLAYWRIGHT_AUDIO_TARGET=<target> against a gateway that serves audio",
+    "set ALUMIA_PLAYWRIGHT_AUDIO_TARGET=<target> against a gateway that serves audio",
   );
 
   // Cleanup, so it runs even when an assertion above threw: see `leaveSession`.
@@ -98,10 +110,10 @@ test.describe("the audio socket", () => {
     const traffic = watchSockets(page);
     await start(page, false);
 
-    await page.getByRole("button", { name: "Open menu" }).click();
-    await expect(page.getByRole("button", { name: "End session" })).toBeVisible();
-    await expect(page.getByRole("button", { name: /^(Mute|Unmute)$/ })).toHaveCount(0);
-    expect(traffic.map((t) => t.url)).toEqual(["/ws"]);
+    const bar = await openBar(page);
+    await expect(bar.getByRole("button", { name: "End", exact: true })).toBeVisible();
+    await expect(bar.getByRole("button", { name: "Mute" })).toHaveCount(0);
+    expect(traffic.map((t) => t.url).sort()).toEqual(["/ws", "/ws/display"]);
   });
 
   test("carries sound, and the session socket carries none", async ({
@@ -110,18 +122,20 @@ test.describe("the audio socket", () => {
     const traffic = watchSockets(page);
     await start(page, true);
 
-    // A session started with sound comes up unmuted: Start's click is the gesture,
+    // A session started with sound comes up unmuted: Open's click is the gesture,
     // and opening the audio socket *is* the subscription — there is no message for
-    // it.
-    await page.getByRole("button", { name: "Open menu" }).click();
+    // it. Mute is pressed while this browser is not listening.
+    const bar = await openBar(page);
     await expect(
-      page.getByRole("button", { name: "Mute", exact: true }),
-    ).toHaveAttribute("aria-pressed", "true");
+      bar.getByRole("button", { name: "Mute", exact: true }),
+    ).toHaveAttribute("aria-pressed", "false");
 
     // The format is what configures a decoder, and it must arrive on the socket that
     // will carry the packets — not on the one that carries pixels.
     await expect
-      .poll(() => only(traffic, "/ws/audio").controlTypes, { timeout: 20_000 })
+      .poll(() => sofar(traffic, "/ws/audio")?.controlTypes ?? [], {
+        timeout: 20_000,
+      })
       .toContain("audioFormat");
     expect(
       only(traffic, "/ws").controlTypes,
@@ -132,7 +146,7 @@ test.describe("the audio socket", () => {
     // harness alternates playing and quiet phases, so *when* the first packet lands
     // is the remote's business. That it lands here and nowhere else is not.
     await expect
-      .poll(() => only(traffic, "/ws/audio").binaryKinds.length, {
+      .poll(() => sofar(traffic, "/ws/audio")?.binaryKinds.length ?? 0, {
         timeout: 20_000,
       })
       .toBeGreaterThan(0);
@@ -141,8 +155,14 @@ test.describe("the audio socket", () => {
       "the audio socket carries audio frames and nothing else",
     ).toEqual(new Set([AUDIO_FRAME_KIND]));
     expect(
-      only(traffic, "/ws").binaryKinds.filter((k) => k !== BATCH_FRAME_KIND),
-      "the session socket must carry batches only",
+      only(traffic, "/ws").binaryKinds,
+      "the session socket carries no binary frames",
+    ).toEqual([]);
+    expect(
+      only(traffic, "/ws/display").binaryKinds.filter(
+        (k) => k !== BATCH_FRAME_KIND,
+      ),
+      "the display socket must carry batches only",
     ).toEqual([]);
   });
 
@@ -157,8 +177,11 @@ test.describe("the audio socket", () => {
       })
       .toBe(1);
 
-    await page.getByRole("button", { name: "Open menu" }).click();
-    await page.getByRole("button", { name: "Mute", exact: true }).click();
+    const mute = (await openBar(page)).getByRole("button", {
+      name: "Mute",
+      exact: true,
+    });
+    await mute.click();
 
     // Closing the socket is the whole of unsubscribing, so this is the assertion
     // that the button does anything at all.
@@ -170,25 +193,27 @@ test.describe("the audio socket", () => {
       .toBe(true);
     // And the desktop is untouched: a session must survive its sound ending.
     expect(only(traffic, "/ws").closed).toBe(false);
-    await expect(
-      page.getByRole("button", { name: "Unmute", exact: true }),
-    ).toBeVisible();
+    expect(only(traffic, "/ws/display").closed).toBe(false);
+    await expect(mute).toHaveAttribute("aria-pressed", "true");
 
     // The mute is this tab's, for this session: a reload reattaches to the session
     // and must not start playing what was muted.
     await page.reload();
-    await page
-      .getByRole("button", { name: "Open menu" })
-      .click({ timeout: 20_000 });
+    await expect(handle(page)).toBeVisible({ timeout: 20_000 });
     await expect(
-      page.getByRole("button", { name: "Unmute", exact: true }),
-    ).toBeVisible();
+      (await openBar(page)).getByRole("button", { name: "Mute", exact: true }),
+    ).toHaveAttribute("aria-pressed", "true");
   });
 
-  // Headless Chromium is not WebKit, so a reload — which reattaches this tab to its
-  // session with no click at all — must ask for the sound again by itself rather
-  // than come back silent.
-  test("stays on across a reload", async ({ page }) => {
+  // A reload reattaches this tab to its session with no click at all. Where a
+  // browser starts sound without one, it must ask for the sound again by itself
+  // rather than come back silent. Apple's engine starts sound only inside a
+  // press, so there the session comes back muted, and says so with the bar
+  // closed: nobody muted it, and until it said so nothing told them.
+  test("stays on across a reload, and where sound starts only at a press comes back muted and says so", async ({
+    page,
+    browserName,
+  }) => {
     const traffic = watchSockets(page);
     await start(page, true);
     await expect
@@ -198,9 +223,30 @@ test.describe("the audio socket", () => {
       .toBe(1);
 
     await page.reload();
-    await expect(page.getByRole("button", { name: "Open menu" })).toBeVisible({
-      timeout: 20_000,
-    });
+    await expect(handle(page)).toBeVisible({ timeout: 20_000 });
+
+    if (browserName === "webkit") {
+      await expect(handle(page)).toHaveAccessibleName(
+        "Open the session bar. The sound is muted here.",
+      );
+      const mute = (await openBar(page)).getByRole("button", {
+        name: "Mute",
+        exact: true,
+      });
+      await expect(mute).toHaveAttribute("aria-pressed", "true");
+      // No socket was asked for on the way back: the press on Mute is what asks.
+      expect(traffic.filter((t) => t.url === "/ws/audio")).toHaveLength(1);
+      await mute.click();
+      await expect(mute).toHaveAttribute("aria-pressed", "false");
+      await expect
+        .poll(
+          () =>
+            traffic.filter((t) => t.url === "/ws/audio")[1]?.controlTypes ?? [],
+          { timeout: 20_000 },
+        )
+        .toContain("audioFormat");
+      return;
+    }
 
     // The reattach opens a second audio socket, and the format arriving on it is
     // the gateway's answer to that subscription. The second one by position: the
@@ -214,9 +260,36 @@ test.describe("the audio socket", () => {
       )
       .toContain("audioFormat");
     expect(traffic.filter((t) => t.url === "/ws/audio")).toHaveLength(2);
-    await page.getByRole("button", { name: "Open menu" }).click();
     await expect(
-      page.getByRole("button", { name: "Mute", exact: true }),
-    ).toHaveAttribute("aria-pressed", "true");
+      (await openBar(page)).getByRole("button", { name: "Mute", exact: true }),
+    ).toHaveAttribute("aria-pressed", "false");
+  });
+
+  test.describe("on a touch client", () => {
+    // A touch client as the page tells one: the two touch points a pinch needs.
+    test.use({ hasTouch: true });
+
+    test("comes up playing, as on any other: the press on Open is its gesture", async ({ page }) => {
+      await page.addInitScript(() => {
+        Object.defineProperty(Navigator.prototype, "maxTouchPoints", {
+          get: () => 5,
+        });
+      });
+      const traffic = watchSockets(page);
+      await start(page, true);
+
+      // The session carries sound and nobody muted it: the socket is asked for
+      // with no other press than the one that opened the computer.
+      await expect
+        .poll(() => sofar(traffic, "/ws/audio")?.controlTypes ?? [], {
+          timeout: 20_000,
+        })
+        .toContain("audioFormat");
+      await expect(
+        (await openBar(page)).getByRole("button", { name: "Mute", exact: true }),
+      ).toHaveAttribute("aria-pressed", "false");
+      // One socket, and none more for the bar being opened.
+      only(traffic, "/ws/audio");
+    });
   });
 });
